@@ -256,6 +256,26 @@ class AnalysisResult(BaseModel):
     )
 
 
+class MetricCard(BaseModel):
+    """单值指标卡片（由后端采集数据生成，LLM 不参与）。"""
+
+    label: str = Field(..., description="指标中文名，如「工单解决率」")
+    value: str = Field(..., description="格式化后的指标值，如「85.0」")
+    unit: str | None = Field(default=None, description="单位，如 %；无单位时为空")
+    kind: str = Field(
+        default="metric",
+        description="卡片类型：metric（百分比类指标，大号强调色） / count（计数类）",
+    )
+
+
+class ChartSpec(BaseModel):
+    """图表规格：完整 ECharts option，前端直接消费渲染。"""
+
+    chart_type: str = Field(..., description="图表类型：pie / bar / line")
+    title: str = Field(..., description="图表中文标题")
+    option: dict[str, Any] = Field(..., description="完整 ECharts option")
+
+
 class ChatResponse(BaseModel):
     """对话响应。"""
 
@@ -281,6 +301,14 @@ class ChatResponse(BaseModel):
     conversation_id: str | None = Field(
         default=None,
         description="会话ID；clarify 时返回，客户端后续轮次需原样带上以关联澄清上下文",
+    )
+    charts: list[ChartSpec] | None = Field(
+        default=None,
+        description="图表列表（analysis 模式，由后端采集数据生成；chat/clarify 模式为 null）",
+    )
+    cards: list[MetricCard] | None = Field(
+        default=None,
+        description="单值指标卡片列表（analysis 模式，由后端采集数据生成；chat/clarify 模式为 null）",
     )
 
 

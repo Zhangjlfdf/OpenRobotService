@@ -19,7 +19,8 @@ import { useLocation } from 'react-router-dom';
 import { Popup, Button, Toast } from 'tdesign-mobile-react';
 import { Bot, Calendar, Hash, History, MessageSquarePlus, RotateCcw, Send, Sparkles, Target, Trash2, X } from 'lucide-react';
 import MarkdownRenderer from '@/shared/components/MarkdownRenderer';
-import { analysisChat, type AnalysisPlan } from '@/api/analysis';
+import ReactECharts from '@/shared/components/ReactECharts';
+import { analysisChat, type AnalysisCard, type AnalysisChart, type AnalysisPlan } from '@/api/analysis';
 import {
   createConversation,
   listMyConversations,
@@ -51,6 +52,10 @@ interface AdaMessage {
   plan?: AnalysisPlan | null;
   /** clarify 模式下的候选选项，前端渲染为可点按钮 */
   suggestions?: string[];
+  /** 图表列表（analysis 模式，后端采集数据生成） */
+  charts?: AnalysisChart[] | null;
+  /** 单值指标卡片（analysis 模式，后端采集数据生成） */
+  cards?: AnalysisCard[] | null;
 }
 
 /** 空态推荐问题 */
@@ -232,10 +237,17 @@ export default function AdminDataAssistant() {
         .filter((m) => (m.role === 'user' || m.role === 'assistant') && m.content.trim())
         .map((m) => {
           let mode: string | undefined;
+          let charts: AnalysisChart[] | null = null;
+          let cards: AnalysisCard[] | null = null;
           if (m.metadata_) {
-            try { const meta = JSON.parse(m.metadata_); mode = meta.mode; } catch { /* 元数据损坏忽略 */ }
+            try {
+              const meta = JSON.parse(m.metadata_);
+              mode = meta.mode;
+              if (Array.isArray(meta.charts)) charts = meta.charts;
+              if (Array.isArray(meta.cards)) cards = meta.cards;
+            } catch { /* 元数据损坏忽略 */ }
           }
-          return { id: uid(), role: (m.role === 'user' ? 'user' : 'assistant') as 'user' | 'assistant', content: m.content, mode };
+          return { id: uid(), role: (m.role === 'user' ? 'user' : 'assistant') as 'user' | 'assistant', content: m.content, mode, charts, cards };
         });
       setConvId(id);
       convIdRef.current = id;
@@ -356,9 +368,17 @@ export default function AdminDataAssistant() {
           mode: result.mode,
           plan: result.plan ?? null,
           suggestions: result.suggestions,
+          charts: result.charts ?? null,
+          cards: result.cards ?? null,
         } : m));
       if (cid !== null) {
-        try { await appendMessage(cid, 'assistant', result.answer, JSON.stringify({ mode: result.mode })); } catch { /* 落库失败不阻断问答 */ }
+        try {
+          await appendMessage(cid, 'assistant', result.answer, JSON.stringify({
+            mode: result.mode,
+            charts: result.charts ?? null,
+            cards: result.cards ?? null,
+          }));
+        } catch { /* 落库失败不阻断问答 */ }
       }
       if (isNewConv) void refreshList();
     } catch (err) {
@@ -576,6 +596,35 @@ export default function AdminDataAssistant() {
                       {/* 分析模式兜底标签：无 plan 时（如 data 场景）也给出模式提示 */}
                       {m.mode === 'analysis' && !(m.plan && m.plan.metric_keys.length > 0) && (
                         <div className="ada-bubble__tag">📊 数据分析</div>
+                      )}
+                      {/* 指标卡片：单值指标（解决率/总数等）大号数字展示 */}
+                      {m.mode === 'analysis' && m.cards && m.cards.length > 0 && (
+                        <div className="ada-cards">
+                          {m.cards.map((c, i) => (
+                            <div key={`${c.label}-${i}`} className="ada-card">
+                              <div className="ada-card__label">{c.label}</div>
+                              <div className={`ada-card__value${c.kind === 'metric' ? ' is-metric' : ''}`}>
+                                {c.value}
+                                {c.unit ? <span className="ada-card__unit">{c.unit}</span> : null}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      {/* 图表：分布（饼/柱）与趋势（折线），由后端采集数据生成 */}
+                      {m.mode === 'analysis' && m.charts && m.charts.length > 0 && (
+                        <div className="ada-charts">
+                          {m.charts.map((c, i) => (
+                            <div key={`${c.title}-${i}`} className="ada-chart">
+                              <div className="ada-chart__title">{c.title}</div>
+                              <ReactECharts
+                                option={c.option}
+                                notMerge
+                                style={{ height: c.chart_type === 'pie' ? 180 : 200 }}
+                              />
+                            </div>
+                          ))}
+                        </div>
                       )}
                       <MarkdownRenderer content={m.content} compact />
                       {/* clarify 候选按钮：clarify 模式且有 suggestions 时显示 */}

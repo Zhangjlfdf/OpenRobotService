@@ -12,6 +12,7 @@ from typing import AsyncIterator
 from uuid import uuid4
 
 from .analyzer import DataAnalyzer
+from .chart_builder import build_charts, localize_collected_data, sanitize_field_names
 from .config import AnalysisConfig
 from .llm_client import LLMClient
 from .logging_config import get_logger
@@ -24,13 +25,22 @@ from .schemas import (
     AnalysisPlan,
     AnalysisResult,
     AnalysisType,
+    ChartSpec,
     ChatResponse,
     DataSource,
     HealthResponse,
+    MetricCard,
     ScopeSpec,
 )
 
 logger = get_logger("Agent")
+
+# 统计范围类型 → 中文（喂 LLM 的上下文去技术化用）
+_SCOPE_TYPE_CN = {
+    "global": "全部项目",
+    "single_project": "指定项目",
+    "user_projects": "用户关联项目",
+}
 
 _COURTESY_PATTERNS = (
     r"^(你好|您好|hi|hello|在吗|在不在)[!！。,. ]*$",
@@ -314,26 +324,32 @@ class DataAnalysisAgent:
 
         # plan 完整 → 按指标采集并分析
         try:
-            result = await self._analyze_by_plan(plan, question, context)
+            result, charts, cards = await self._analyze_by_plan(plan, question, context)
         except Exception:
             logger.exception("按计划分析失败")
             raise
 
         self._plan_cache.delete(conversation_id)
         return ChatResponse(
-            answer=result.raw_response or result.summary,
+            answer=sanitize_field_names(result.raw_response or result.summary),
             mode="analysis",
             model=result.model,
             usage=result.usage,
             analysis=result,
             plan=plan,
             conversation_id=conversation_id,
+            charts=charts,
+            cards=cards,
         )
 
     async def _analyze_by_plan(
         self, plan: AnalysisPlan, question: str, context: str | None
-    ) -> AnalysisResult:
-        """按 AnalysisPlan 采集数据并调用分析引擎。"""
+    ) -> tuple[AnalysisResult, list[ChartSpec], list[MetricCard]]:
+        """按 AnalysisPlan 采集数据并调用分析引擎。
+
+        Returns:
+            (分析结果, 图表列表, 指标卡片列表)；图表/卡片由采集结果直接生成。
+        """
         tr = plan.time_range
         range_type = (
             TimeRangeType(tr.type)
@@ -358,25 +374,34 @@ class DataAnalysisAgent:
         collected = collector.collect_by_plan(
             plan.metric_keys, start, end, label
         )
+        # 图表/卡片由采集结果直接生成；喂 LLM 的数据转为中文 key（根除字段名泄漏）
+        charts, cards = build_charts(plan.metric_keys, collected)
         collected_data = json.dumps(
-            collected, ensure_ascii=False, indent=2, default=str
+            localize_collected_data(collected), ensure_ascii=False, indent=2, default=str
         )
+        scope_cn = _SCOPE_TYPE_CN.get(plan.scope.type, plan.scope.type)
         collected_context = (
-            f"数据来源：OpenRobotService MySQL 实时采集；"
+            f"数据来源：平台实时统计；"
             f"统计周期：{label}；"
-            f"统计范围：{plan.scope.type}。"
+            f"统计范围：{scope_cn}。"
         )
         merged_context = (
             f"{context}\n\n{collected_context}" if context else collected_context
         )
 
-        return await self._analyzer.analyze(
+        result = await self._analyzer.analyze(
             data=collected_data,
             data_source=DataSource.JSON,
             analysis_type=AnalysisType.CUSTOM,
             question=question,
             context=merged_context,
         )
+        return result, charts, cards
+
+    @staticmethod
+    def _sanitize_field_names(text: str) -> str:
+        """兜底替换 LLM 回答中残留的英文字段名（复用 chart_builder 映射表）。"""
+        return sanitize_field_names(text)
 
     @staticmethod
     def _resolve_plan_project_ids(plan: AnalysisPlan) -> list[str] | None:
