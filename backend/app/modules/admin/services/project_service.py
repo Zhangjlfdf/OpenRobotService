@@ -1,5 +1,10 @@
 from typing import List, Optional, Dict
 import json
+import copy
+import uuid
+from pathlib import Path
+from datetime import datetime
+import yaml
 import requests
 from sqlalchemy import create_engine, text, inspect, bindparam
 from sqlalchemy.exc import IntegrityError
@@ -10,10 +15,53 @@ from app.modules.admin.schemas_das.request_models import ProjectBase, ProjectCre
 from app.modules.admin.models_das.models import Project
 from app.modules.admin.utils_das.config import DATABASE_URL, AUTH_SERVICE_BASE_URL
 
+# ext_info 默认模板目录：backend/app/config/project_templates/
+# 按 project_type 选 {type}.yaml，找不到回退 default.yaml；增加模板只需加文件
+_TPL_DIR = Path(__file__).resolve().parent.parent.parent.parent / "config" / "project_templates"
+_tpl_cache: Dict[str, dict] = {}
+
+
+def _get_ext_info_template(project_type: Optional[str] = None) -> dict:
+    """按 project_type 读取模板，返回深拷贝。
+
+    模板含 overview / activity / info_nodes 三部分：
+    - overview + activity → project.ext_info
+    - info_nodes → project_info_node 表（由 _init_info_nodes 实例化）
+    """
+    key = (project_type or "default").strip()
+    if key not in _tpl_cache:
+        path = _TPL_DIR / f"{key}.yaml"
+        if not path.exists():
+            path = _TPL_DIR / "default.yaml"
+        _tpl_cache[key] = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    return copy.deepcopy(_tpl_cache[key])
+
+
+def _split_template(project_type: Optional[str] = None) -> tuple[dict, list]:
+    """拆分模板：返回 (ext_info dict, info_nodes list)。
+
+    ext_info 含 overview + activity；info_nodes 是树结构定义，
+    节点无 id/value（实例化时生成 UUID）。
+    """
+    tpl = _get_ext_info_template(project_type)
+    ext_info = {
+        "overview": tpl.get("overview", {}),
+        "activity": tpl.get("activity", {"version_changes": [], "stage_changes": []}),
+    }
+    info_nodes = tpl.get("info_nodes", [])
+    return ext_info, info_nodes
+
+
+_PROJECT_COLUMNS = {c.key for c in inspect(Project).mapper.column_attrs}
+
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 _PROJECT_COLUMNS = {c.key for c in inspect(Project).mapper.column_attrs}
+
+
+class ProjectConflictError(Exception):
+    """乐观锁冲突：客户端提交的 version 与库中当前值不一致（HTTP 409）。"""
 
 def _filter_project_fields(data: Dict) -> Dict:
     return {k: v for k, v in data.items() if k in _PROJECT_COLUMNS}
@@ -233,6 +281,12 @@ class ProjectService:
             "server_deployment_status": project.server_deployment_status,
             "settlement_period": project.settlement_period,
             "undertake_status": project.undertake_status,
+            # 递归嵌套扩展信息（JSON 列 ORM 已反序列化为 dict）与乐观锁版本号。
+            # ext_info 为空时按模板 lazy 初始化：迁移前创建的老项目无 ext_info，
+            # 读取时自动填充默认结构，避免前端渲染拿到 null 无从展开。
+            # 只取 overview+activity 部分；info_nodes 走独立表，不在 ext_info 里。
+            "ext_info": project.ext_info or _split_template(project.project_type)[0],
+            "version": project.version or 1,
         }
         return project_dict
     
@@ -350,6 +404,31 @@ class ProjectService:
         finally:
             db.close()
 
+    def _init_info_nodes(self, db_session, project_id: str, nodes_tpl: list,
+                         parent_id: str = None):
+        """从模板递归创建 info_node 行：为每个节点生成新 UUID（避免多项目冲突），
+        保持模板定义的 title / sort_order / 层级关系。value 留空。
+        """
+        from app.modules.admin.models_das.models import ProjectInfoNode
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        for n in nodes_tpl:
+            node_id = str(uuid.uuid4())
+            node = ProjectInfoNode(
+                id=node_id,
+                project_id=project_id,
+                parent_id=parent_id,
+                title=n.get("title", "未命名节点"),
+                content_type=n.get("content_type", "text"),
+                value=None,
+                sort_order=n.get("sort_order", 0),
+                created_at=now,
+                updated_at=now,
+            )
+            db_session.add(node)
+            if n.get("children"):
+                self._init_info_nodes(db_session, project_id, n["children"],
+                                     parent_id=node_id)
+
     def create_project(self, project_data: Dict) -> Dict:
         db = SessionLocal()
         try:
@@ -373,23 +452,55 @@ class ProjectService:
 
             project_data = _filter_project_fields(project_data)
 
+            # 按模板初始化 ext_info（overview+activity）与 info_nodes 树。
+            # 若调用方已传入 ext_info 则以传入值为准；info_nodes 树总是从模板生成。
+            project_type = project_data.get("project_type")
+            ext_info_tpl, info_nodes_tpl = _split_template(project_type)
+            if not project_data.get("ext_info"):
+                project_data["ext_info"] = ext_info_tpl
+
             db_project = Project(**project_data)
             db.add(db_project)
             db.commit()
             db.refresh(db_project)
+
+            # 从模板初始化信息树：递归生成 UUID 写入 project_info_node 表
+            if info_nodes_tpl:
+                self._init_info_nodes(db_session=db, project_id=db_project.id,
+                                      nodes_tpl=info_nodes_tpl)
+                db.commit()
+
             return self._convert_to_dict(db_project)
         finally:
             db.close()
     
     def update_project(self, project_id: int, update_data: Dict) -> Optional[Dict]:
+        """更新项目。
+
+        乐观锁：update_data 中带 version（前端从详情接口拿到后随提交带回）时，
+        与库中当前 version 不一致则抛 ProjectConflictError（API 层转 409），
+        防止 ext_info 整文档读改写模式下并发编辑互相覆盖。
+        不带 version 的内部调用（如企业微信同步）保持原行为，不做校验。
+
+        成功后 version 自增 1。
+        """
         db = SessionLocal()
         try:
+            client_version = update_data.pop("version", None)
+
+            # with_for_update 行锁：读到 commit 前锁定该行，串行化同项目的并发更新
             project = db.query(Project).filter(
                 Project.id == project_id,
                 Project.status != PROJECT_DELETED,
-            ).first()
+            ).with_for_update().first()
             if not project:
                 return None
+
+            if client_version is not None and (project.version or 1) != client_version:
+                db.rollback()  # 释放行锁
+                raise ProjectConflictError(
+                    f"项目已被他人修改（当前版本 {project.version or 1}，提交版本 {client_version}），请刷新后重试"
+                )
 
             if "project_code" in update_data:
                 update_data["code"] = update_data.pop("project_code")
@@ -422,7 +533,9 @@ class ProjectService:
 
             for field, value in update_data.items():
                 setattr(project, field, value)
-            
+
+            project.version = (project.version or 1) + 1
+
             db.commit()
             db.refresh(project)
             return self._convert_to_dict(project)

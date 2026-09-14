@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, Query, HTTPException, Request
 from sqlalchemy.exc import IntegrityError
 from typing import Optional, Dict, List, Any
 from app.modules.admin.schemas_das.request_models import ProjectCreate, ProjectUpdate, ProjectResponse
-from app.modules.admin.services.project_service import project_service
+from app.modules.admin.services.project_service import project_service, ProjectConflictError
 from app.modules.admin.services.risk_service import risk_service
 from app.modules.admin.services.permission_service import PermissionService
 from app.modules.admin.utils_das.config import security, DEBUG_MODE
@@ -517,7 +517,11 @@ async def update_project(
 
     update_dict = {k: v for k, v in update_data.model_dump().items() if v is not None}
 
-    project = project_service.update_project(project_id, update_dict)
+    try:
+        project = project_service.update_project(project_id, update_dict)
+    except ProjectConflictError as e:
+        # 乐观锁冲突：他人已先更新该项目，前端应刷新后重试
+        raise HTTPException(status_code=409, detail=str(e))
     if not project:
         raise HTTPException(status_code=404, detail="项目不存在")
     return project
