@@ -551,7 +551,7 @@ export default function TicketDetailPage() {
   const [editForm, setEditForm] = useState<{ title: string; description: string; priority: string; ticket_type: string; project_id: string; project_name: string; curr_step_endtime?: string }>({ title: '', description: '', priority: '中', ticket_type: 'problem', project_id: '', project_name: '' });
   // 当前阶段截止时间区间：基准 = 工单创建时间（ticket.created_at），而非用户操作时刻
   const editDeadlineRange = getDeadlineRange(editForm.priority, ticket?.created_at);
-  // 优先级仅在「尚未派单」（新建/待派单）可修改；已派单及后续状态禁止（置灰不可点）
+  // 优先级仅在「尚未派单」（待处理/待派单）可修改；已派单及后续状态禁止（置灰不可点）
   const priorityDisabled = !canEditPriority(ticket?.status);
   const [savingEdit, setSavingEdit] = useState(false);
   // 所属项目下拉（当前用户名下项目，GET /api/admin/projects/me；支持关键词模糊搜索）
@@ -1071,15 +1071,15 @@ export default function TicketDetailPage() {
         />
 
         {/* 操作：与历史工单列表页完全一致 —— 终态（已解决/已取消/已关闭）整组不显示；
-            新建/待处理可催办、撤回；处理中仅可上报；不可用按钮禁用；
+            待处理/已挂起可催办、撤回；处理中仅可上报；不可用按钮禁用；
             正在操作的按钮单独禁用（acting 标记当前动作） */}
         {!isTerminalTicketStatus(ticket.status) && (
           <div className="detail-actions__btns">
             <AppButton
               tone="primary" size="small" icon={<Bell size={13} strokeWidth={2} />}
               disabled={!canUrgeTicket(ticket.status) || acting === 'urge'}
-              title={canUrgeTicket(ticket.status) ? undefined : '仅新建/待处理工单可催办'}
-              aria-label={canUrgeTicket(ticket.status) ? undefined : '催办（仅新建/待处理工单可催办）'}
+              title={canUrgeTicket(ticket.status) ? undefined : '仅待处理/已挂起工单可催办'}
+              aria-label={canUrgeTicket(ticket.status) ? undefined : '催办（仅待处理/已挂起工单可催办）'}
               onClick={() => openActionPopup('urge')}
             >催办</AppButton>
             <AppButton
@@ -1161,8 +1161,8 @@ export default function TicketDetailPage() {
                     key={label}
                     type="button"
                     disabled={priorityDisabled}
-                    title={priorityDisabled ? '仅新建工单可修改优先级' : undefined}
-                    aria-label={priorityDisabled ? `优先级${label}（仅新建工单可修改优先级）` : `优先级${label}`}
+                    title={priorityDisabled ? '仅待处理工单可修改优先级' : undefined}
+                    aria-label={priorityDisabled ? `优先级${label}（仅待处理工单可修改优先级）` : `优先级${label}`}
                     className={`tasks-create-modal__radio-btn ${editForm.priority === PRIORITY_EN[label] ? 'is-active' : ''} ${priorityDisabled ? 'is-disabled' : ''}`}
                     onClick={() => {
                       const v = PRIORITY_EN[label];
