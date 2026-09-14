@@ -50,6 +50,7 @@ class MetricDimension(str, Enum):
     TICKET = "ticket"
     PROJECT = "project"
     RISK = "risk"
+    COLLECTION = "collection"  # collection_data 采集数据表（搬运效率等）
 
 
 # ── 输出形态 ──────────────────────────────────────────────────
@@ -148,7 +149,7 @@ _TICKET_METRICS: list[MetricDef] = [
         key="ticket.by_status",
         dimension=MetricDimension.TICKET,
         label="工单状态分布",
-        desc="按状态（新建/处理中/待处理/已解决/已关闭/已取消）统计的工单数量分布",
+        desc="按状态（待处理/处理中/已挂起/已解决/已关闭/已取消）统计的工单数量分布",
         requires_time_range=False,
         output_type=MetricOutputType.DISTRIBUTION,
         collect_fn="_ticket_by_status_metric",
@@ -253,6 +254,15 @@ _PROJECT_METRICS: list[MetricDef] = [
         output_type=MetricOutputType.LIST,
         collect_fn="_project_items_metric",
     ),
+    MetricDef(
+        key="project.no_data_items",
+        dimension=MetricDimension.PROJECT,
+        label="无数据项目",
+        desc="指定时间范围内没有上报采集数据（collection_data）的项目清单",
+        requires_time_range=True,
+        output_type=MetricOutputType.LIST,
+        collect_fn="_project_no_data_metric",
+    ),
 ]
 
 _RISK_METRICS: list[MetricDef] = [
@@ -319,6 +329,107 @@ _RISK_METRICS: list[MetricDef] = [
     ),
 ]
 
+# collection_data 采集数据表（搬运效率指标，字段口径与搬运效率分析页面一致：
+# backend transport_efficiency_service._metrics_to_summary_and_robots）。
+_COLLECTION_METRICS: list[MetricDef] = [
+    MetricDef(
+        key="collection.total_tasks",
+        dimension=MetricDimension.COLLECTION,
+        label="总任务数",
+        desc="指定时间范围内总任务数（taskNumber.totalTasks）",
+        output_type=MetricOutputType.SCALAR,
+        collect_fn="_collection_total_tasks_metric",
+    ),
+    MetricDef(
+        key="collection.carry_task_count",
+        dimension=MetricDimension.COLLECTION,
+        label="搬运任务数量",
+        desc="指定时间范围内搬运任务数量（taskNumber.carry）",
+        output_type=MetricOutputType.SCALAR,
+        collect_fn="_collection_carry_task_count_metric",
+    ),
+    MetricDef(
+        key="collection.effective_work_hours",
+        dimension=MetricDimension.COLLECTION,
+        label="有效工作时长",
+        desc="有效工作时长(小时，按机器人组平均)",
+        output_type=MetricOutputType.SCALAR,
+        collect_fn="_collection_effective_work_hours_metric",
+    ),
+    MetricDef(
+        key="collection.fault_hours",
+        dimension=MetricDimension.COLLECTION,
+        label="机器人故障时长",
+        desc="机器人故障时长(小时，按机器人组平均)",
+        output_type=MetricOutputType.SCALAR,
+        collect_fn="_collection_fault_hours_metric",
+    ),
+    MetricDef(
+        key="collection.idle_hours",
+        dimension=MetricDimension.COLLECTION,
+        label="空闲无任务时间",
+        desc="空闲无任务时间(小时，按机器人组平均)",
+        output_type=MetricOutputType.SCALAR,
+        collect_fn="_collection_idle_hours_metric",
+    ),
+    MetricDef(
+        key="collection.avg_error_count",
+        dimension=MetricDimension.COLLECTION,
+        label="平均错误次数",
+        desc="平均错误次数（按机器人组平均）",
+        output_type=MetricOutputType.SCALAR,
+        collect_fn="_collection_avg_error_count_metric",
+    ),
+    MetricDef(
+        key="collection.avg_fault_duration_minutes",
+        dimension=MetricDimension.COLLECTION,
+        label="平均单次故障时间",
+        desc="平均单次故障时间(分钟)",
+        output_type=MetricOutputType.SCALAR,
+        collect_fn="_collection_avg_fault_duration_minutes_metric",
+    ),
+    MetricDef(
+        key="collection.avg_carry_duration_minutes",
+        dimension=MetricDimension.COLLECTION,
+        label="平均单次搬运任务时间",
+        desc="平均单次搬运任务时间(分钟)",
+        output_type=MetricOutputType.SCALAR,
+        collect_fn="_collection_avg_carry_duration_minutes_metric",
+    ),
+    MetricDef(
+        key="collection.avg_manual_switch_count",
+        dimension=MetricDimension.COLLECTION,
+        label="平均切手动次数",
+        desc="平均切手动次数（averageManualCount.averageManualCount）",
+        output_type=MetricOutputType.SCALAR,
+        collect_fn="_collection_avg_manual_switch_count_metric",
+    ),
+    MetricDef(
+        key="collection.manual_intervention_rate",
+        dimension=MetricDimension.COLLECTION,
+        label="人工干预率",
+        desc="人工干预率(百分比)",
+        output_type=MetricOutputType.SCALAR,
+        collect_fn="_collection_manual_intervention_rate_metric",
+    ),
+    MetricDef(
+        key="collection.robot_group_compare",
+        dimension=MetricDimension.COLLECTION,
+        label="各组数据对比",
+        desc="各机器人组数据对比（搬运任务总数、有效工作效率、故障/无工作时间等）",
+        output_type=MetricOutputType.LIST,
+        collect_fn="_collection_robot_group_compare_metric",
+    ),
+    MetricDef(
+        key="collection.items",
+        dimension=MetricDimension.COLLECTION,
+        label="采集数据明细",
+        desc="指定时间范围内每日/每项目的搬运效率汇总明细",
+        output_type=MetricOutputType.LIST,
+        collect_fn="_collection_items_metric",
+    ),
+]
+
 # ── 维度分组 ──────────────────────────────────────────────────
 
 DIMENSION_GROUPS: dict[str, _DimensionGroup] = {
@@ -336,6 +447,11 @@ DIMENSION_GROUPS: dict[str, _DimensionGroup] = {
         label="风险",
         table_name="risk",
         metrics=_RISK_METRICS,
+    ),
+    "collection": _DimensionGroup(
+        label="搬运效率",
+        table_name="collection_data",
+        metrics=_COLLECTION_METRICS,
     ),
 }
 

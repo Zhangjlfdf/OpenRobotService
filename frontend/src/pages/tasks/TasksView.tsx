@@ -56,7 +56,7 @@ type AvatarMap = Map<string, number>;
 
 const pageSize = 20;
 
-// 默认选中的任务状态：新建 / 进行中 / 已挂起 / 已解决（排除 已取消 / 已关闭）
+// 默认选中的任务状态：待处理 / 进行中 / 已挂起 / 已解决（排除 已取消 / 已关闭）
 const DEFAULT_STATUS_VALUES: string[] = ['new', 'in_progress', 'pending', 'resolved'];
 const ALL_STATUS_VALUES: string[] = Object.keys(STATUS_DISPLAY_MAP);
 // 优先级默认全选（low / medium / high / urgent）
@@ -1211,7 +1211,7 @@ export default function TasksView() {
     }
     return { ...d, type: [...d.type, value] };
   });
-  // 清空草稿（弹窗内「清空选择」）：相关性回默认、状态回默认集（新建/进行中/已挂起/已解决）、
+  // 清空草稿（弹窗内「清空选择」）：相关性回默认、状态回默认集（待处理/进行中/已挂起/已解决）、
   // 优先级回「全部」、项目/处理人回「全部」、创建时间清空。仅作用于草稿，未点「确定」前不生效。
   const draftClear = () => setDraft({
     relevance: 'mine',

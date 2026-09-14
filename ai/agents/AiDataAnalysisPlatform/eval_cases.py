@@ -24,8 +24,24 @@
 
 from __future__ import annotations
 
-# ── 快路径用例（12 条）─────────────────────────────────────────
+# ── 快路径用例（16 条）─────────────────────────────────────────
 # 期望与 metric_planner._fast_path_parse 当前实现严格对齐，作为回归基准。
+
+# 搬运效率（collection_data 表）维度默认指标集
+_COLLECTION_DEFAULT_KEYS = [
+    "collection.total_tasks",
+    "collection.carry_task_count",
+    "collection.effective_work_hours",
+    "collection.fault_hours",
+    "collection.idle_hours",
+    "collection.avg_error_count",
+    "collection.avg_fault_duration_minutes",
+    "collection.avg_carry_duration_minutes",
+    "collection.avg_manual_switch_count",
+    "collection.manual_intervention_rate",
+    "collection.robot_group_compare",
+    "collection.items",
+]
 
 FAST_PATH_CASES: list[dict] = [
     # 时间词 + 指标词
@@ -135,6 +151,118 @@ FAST_PATH_CASES: list[dict] = [
         "action": "distribution",
         "scope_type": "global",
     },
+    # 搬运效率维度（collection_data 表）
+    {
+        "question": "近7天搬运效率怎么样？",
+        "metric_keys": _COLLECTION_DEFAULT_KEYS,
+        "time_type": "recent_days",
+        "time_explicit": True,
+        "action": "summary",
+        "scope_type": "global",
+    },
+    {
+        "question": "今天机器人故障情况",
+        "metric_keys": [
+            "collection.fault_hours",
+            "collection.avg_fault_duration_minutes",
+            "collection.items",
+        ],
+        "time_type": "today",
+        "time_explicit": True,
+        "action": "summary",
+        "scope_type": "global",
+    },
+    {
+        # 回归：含「任务」也须命中 collection（collection 规则排在 ticket 之前）；
+        # 「任务数」子规则命中总任务数 + 搬运任务数量
+        "question": "本周搬运任务数量",
+        "metric_keys": [
+            "collection.total_tasks",
+            "collection.carry_task_count",
+        ],
+        "time_type": "this_week",
+        "time_explicit": True,
+        "action": "summary",
+        "scope_type": "global",
+    },
+    {
+        # 回归：「总任务数」属搬运效率口径（taskNumber.totalTasks），不得命中工单
+        "question": "湖州项目的总任务数",
+        "metric_keys": [
+            "collection.total_tasks",
+            "collection.carry_task_count",
+        ],
+        "time_type": "recent_days",
+        "time_explicit": False,
+        "action": "summary",
+        "scope_type": "global",
+    },
+    {
+        # 回归：所有任务类问法归搬运效率维度，不再命中工单
+        "question": "本周任务情况",
+        "metric_keys": _COLLECTION_DEFAULT_KEYS,
+        "time_type": "this_week",
+        "time_explicit": True,
+        "action": "summary",
+        "scope_type": "global",
+    },
+    {
+        # 回归：任务类问法即使带「新增」也不命中工单新增
+        "question": "任务新增了多少",
+        "metric_keys": _COLLECTION_DEFAULT_KEYS,
+        "time_type": "recent_days",
+        "time_explicit": False,
+        "action": "summary",
+        "scope_type": "global",
+    },
+    {
+        "question": "机器人各组数据对比",
+        "metric_keys": [
+            "collection.robot_group_compare",
+            "collection.items",
+        ],
+        "time_type": "recent_days",
+        "time_explicit": False,
+        "action": "compare",
+        "scope_type": "global",
+    },
+    {
+        # 绝对日期 + 「以后」→ custom 时间范围；「没有数据」→ 无数据项目清单
+        "question": "从9月7号以后哪些项目没有数据",
+        "metric_keys": ["project.no_data_items"],
+        "time_type": "custom",
+        "time_explicit": True,
+        "action": "summary",
+        "scope_type": "global",
+    },
+    {
+        # 转投：含「搬运」的无数据问法 → 全局无数据项目清单（不触发单项目澄清）
+        "question": "近7天哪些项目的搬运效率为空",
+        "metric_keys": ["project.no_data_items"],
+        "time_type": "recent_days",
+        "time_explicit": True,
+        "action": "summary",
+        "scope_type": "global",
+    },
+    {
+        # 转投：同义问法「没有搬运数据」
+        "question": "近7天有哪些项目没有搬运数据",
+        "metric_keys": ["project.no_data_items"],
+        "time_type": "recent_days",
+        "time_explicit": True,
+        "action": "summary",
+        "scope_type": "global",
+    },
+    {
+        # 负向：「不为空」（问有数据的项目）不转投，仍按 collection 全量
+        # （单项目口径，后续由 agent 层 clarify 项目）
+        "question": "近7天哪些项目的搬运数据不为空",
+        "metric_keys": _COLLECTION_DEFAULT_KEYS,
+        "time_type": "recent_days",
+        "time_explicit": True,
+        "action": "summary",
+        "scope_type": "global",
+    },
 ]
 
 # ── LLM 慢路径用例（6 条）───────────────────────────────────────
@@ -170,7 +298,7 @@ SLOW_PATH_CASES: list[dict] = [
     },
 ]
 
-# ── 澄清用例（4 条）────────────────────────────────────────────
+# ── 澄清用例（6 条）────────────────────────────────────────────
 # 解析出指标但缺必要字段（如时间范围），期望 missing_fields 非空。
 
 CLARIFY_CASES: list[dict] = [
@@ -195,9 +323,37 @@ CLARIFY_CASES: list[dict] = [
         "metric_keys": ["ticket.resolve_rate"],
         "missing": [],
     },
+    {
+        # 搬运效率全部指标要求时间范围，且必须明确单个项目 → 缺两项须澄清
+        "question": "搬运效率怎么样",
+        "metric_keys": _COLLECTION_DEFAULT_KEYS,
+        "missing": ["time_range", "project_code"],
+    },
+    {
+        # 「工单任务数」含「任务」→ 任务口径归搬运效率（任务数子规则）
+        # 且搬运效率要求明确单个项目与时间 → 缺两项须澄清
+        "question": "工单任务数",
+        "metric_keys": [
+            "collection.total_tasks",
+            "collection.carry_task_count",
+        ],
+        "missing": ["time_range", "project_code"],
+    },
+    {
+        # 「没有数据」要求时间范围（无时间词）→ 澄清时间；不要求单项目（全量清单）
+        "question": "哪些项目没有数据",
+        "metric_keys": ["project.no_data_items"],
+        "missing": ["time_range"],
+    },
+    {
+        # 转投问法缺时间 → 同样澄清时间（不要求单项目）
+        "question": "哪些项目的搬运效率为空",
+        "metric_keys": ["project.no_data_items"],
+        "missing": ["time_range"],
+    },
 ]
 
-# ── 多轮澄清用例（2 条）────────────────────────────────────────
+# ── 多轮澄清用例（5 条）────────────────────────────────────────
 # rounds: [(问题, 期望 mode, 期望 missing), ...]
 # 最后一轮的 plan 必须合并出前几轮已确认的字段。
 
@@ -226,6 +382,62 @@ MULTI_ROUND_CASES: list[dict] = [
             "time_type": "this_week",
             "time_explicit": True,
             "action": "summary",
+        },
+    },
+    {
+        "name": "搬运效率缺项目缺时间 → 补充项目+近7天",
+        "rounds": [
+            ("搬运效率怎么样", "clarify", ["time_range", "project_code"]),
+            ("湖州项目近7天", "analysis", []),
+        ],
+        "final": {
+            "metric_keys": _COLLECTION_DEFAULT_KEYS,
+            "time_type": "recent_days",
+            "time_explicit": True,
+            "action": "summary",
+            "scope_type": "single_project",
+        },
+    },
+    {
+        "name": "无数据项目缺时间 → 补充绝对日期",
+        "rounds": [
+            ("哪些项目没有数据", "clarify", ["time_range"]),
+            ("9月7号以后", "analysis", []),
+        ],
+        "final": {
+            "metric_keys": ["project.no_data_items"],
+            "time_type": "custom",
+            "time_explicit": True,
+            "action": "summary",
+            "scope_type": "global",
+        },
+    },
+    {
+        "name": "搬运效率缺项目缺时间 → 单补项目名（回归：supplement 不被 None 规则误杀）",
+        "rounds": [
+            ("搬运效率怎么样", "clarify", ["time_range", "project_code"]),
+            ("泰国项目", "clarify", ["time_range"]),
+        ],
+        "final": {
+            "metric_keys": _COLLECTION_DEFAULT_KEYS,
+            "time_type": "recent_days",
+            "time_explicit": False,
+            "action": "summary",
+            "scope_type": "single_project",
+        },
+    },
+    {
+        "name": "缺项目 → 补无「项目」后缀名称（消歧候选按钮发送，如 LST-CAT）",
+        "rounds": [
+            ("搬运效率怎么样", "clarify", ["time_range", "project_code"]),
+            ("LST-CAT", "clarify", ["time_range"]),
+        ],
+        "final": {
+            "metric_keys": _COLLECTION_DEFAULT_KEYS,
+            "time_type": "recent_days",
+            "time_explicit": False,
+            "action": "summary",
+            "scope_type": "single_project",
         },
     },
 ]

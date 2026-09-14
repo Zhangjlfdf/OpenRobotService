@@ -155,6 +155,32 @@ class Risk(Base):
     )
 
 
+class CollectionData(Base):
+    """采集数据表（仅查询，字段对齐 backend/app/models/delivery.py CollectionData）。
+
+    存储各项目指标采集数据：project 为项目ID，indicator 为指标标签
+    （如 GroupEfficiency 搬运效率），start_time_int / end_time_int 为采集
+    窗口的秒级时间戳（与 backend iso_to_timestamp_ms 的落库口径一致），
+    data 为各指标 JSON 数据。
+    """
+    __tablename__ = "collection_data"
+
+    id = Column(Integer, primary_key=True)
+    project = Column(String(50), nullable=False)
+    indicator = Column(String(100), nullable=False)
+    start_time_int = Column(BigInteger, nullable=False, comment="数据采集开始时间戳用于查询")
+    end_time_int = Column(BigInteger, nullable=False, comment="数据采集结束时间戳用于查询")
+    data = Column(Text, nullable=False)
+    collection_time = Column(String(50), nullable=False)
+    record_time = Column(String(50), nullable=False)
+    time_str = Column(String(100), nullable=False)
+
+    __table_args__ = (
+        Index("idx_coll_unique_key", "project", "indicator", "start_time_int", "end_time_int"),
+        Index("idx_coll_time", "start_time_int"),
+    )
+
+
 class UserProjectRole(Base):
     """用户-项目-角色关联表（仅查询，字段对齐 backend/app/models/identity.py）"""
     __tablename__ = "user_project_roles"

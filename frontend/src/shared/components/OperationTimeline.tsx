@@ -12,9 +12,9 @@ interface OperationTimelineProps {
 
 // 状态中文映射
 const STATUS_MAP: Record<string, string> = {
-  new: '新建',
+  new: '待处理',
   in_progress: '处理中',
-  pending: '待处理',
+  pending: '已挂起',
   resolved: '已解决',
   canceled: '已取消',
   closed: '已关闭',
@@ -23,9 +23,9 @@ const STATUS_MAP: Record<string, string> = {
 
 // 状态颜色映射
 const STATUS_COLOR: Record<string, string> = {
-  new: '#3b82f6',        // 蓝色 - 新建
+  new: '#3b82f6',        // 蓝色 - 待处理
   in_progress: '#f59e0b', // 橙色 - 处理中
-  pending: '#6b7280',     // 灰色 - 待处理
+  pending: '#6b7280',     // 灰色 - 已挂起
   resolved: '#10b981',    // 绿色 - 已解决
   canceled: '#ef4444',    // 红色 - 已取消
   closed: '#4b5563',      // 深灰 - 已关闭

@@ -55,9 +55,9 @@ logger_task = logging.getLogger(__name__)
 
 # 状态中文映射（用于操作日志描述）
 STATUS_LABEL = {
-    "new": "新建",
+    "new": "待处理",
     "in_progress": "处理中",
-    "pending": "待处理",
+    "pending": "已挂起",
     "resolved": "已解决",
     "canceled": "已取消",
     "closed": "已关闭",
@@ -1163,7 +1163,7 @@ def _maybe_notify_mentions(
             try:
                 # 取工单真实状态的中文名
                 status_text_map = {
-                    "new": "新建", "in_progress": "处理中", "pending": "待处理",
+                    "new": "待处理", "in_progress": "处理中", "pending": "已挂起",
                     "resolved": "已解决", "closed": "已关闭", "canceled": "已取消",
                 }
                 raw_status = (ticket.status.value if hasattr(ticket.status, 'value')
