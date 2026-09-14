@@ -436,7 +436,7 @@ export default function HistoryTickets({ showHeader = true }: { showHeader?: boo
                     <AppButton tone="blue" size="extra-small" disabled={!canUrgeTicket(t.status) || (acting?.id === t.id && acting?.action === 'urge')} title={canUrgeTicket(t.status) ? undefined : '仅待处理/已挂起工单可催办'} aria-label={canUrgeTicket(t.status) ? undefined : '催办（仅待处理/已挂起工单可催办）'} onClick={(e) => openActionPopup(e, t, 'urge')}>催办</AppButton>
                     <AppButton tone="blue" size="extra-small" disabled={!canReportTicket(t.status) || (acting?.id === t.id && acting?.action === 'report')} title={canReportTicket(t.status) ? undefined : '仅处理中工单可上报'} aria-label={canReportTicket(t.status) ? undefined : '上报（仅处理中工单可上报）'} onClick={(e) => openActionPopup(e, t, 'report')}>上报</AppButton>
                     {(t.source === 'ai' || !t.source) && !!t.assigned_to && (
-                    <AppButton tone="blue-deep" size="extra-small" loading={redispatching && redispatchTicket?.id === t.id} onClick={(e) => openRedispatchPopup(e, t)}>重新派单</AppButton>
+                    <AppButton tone="blue" size="extra-small" loading={redispatching && redispatchTicket?.id === t.id} onClick={(e) => openRedispatchPopup(e, t)}>重新派单</AppButton>
                     )}
                     {canShowCancelButton(t.status) && canCancelTicketByUser(t.created_by, username, isAdmin, userId) && (
                     <AppButton tone="blue" size="extra-small" loading={acting?.id === t.id && acting?.action === 'cancel'} disabled={acting?.id === t.id && acting?.action === 'cancel'} onClick={(e) => handleCancel(e, t)}>撤回</AppButton>

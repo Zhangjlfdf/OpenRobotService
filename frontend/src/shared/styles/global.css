@@ -989,8 +989,8 @@ html, body, #root {
 .chat-ticket-overview__redispatch {
   margin-left: auto;
   flex-shrink: 0;
-  border: 1px solid var(--blue-1);
-  background: var(--blue-1);
+  border: 1px solid var(--blue-2);
+  background: var(--blue-2);
   color: #fff;
   font-size: 12px;
   font-weight: 500;
@@ -998,7 +998,7 @@ html, body, #root {
   padding: 4px 10px;
   cursor: pointer;
 }
-.chat-ticket-overview__redispatch:active { background: var(--blue-2); border-color: var(--blue-2); }
+.chat-ticket-overview__redispatch:active { background: var(--blue-1); border-color: var(--blue-1); }
 /* 派单提醒单行：标签蓝、正文灰，与详情 DispatchFold 同口径 */
 .chat-ticket-overview__tip {
   display: flex;
