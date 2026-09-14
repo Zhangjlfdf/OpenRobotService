@@ -1080,7 +1080,7 @@ class TicketService:
         if not ticket:
             return None
 
-        # 派单只写 assigned_to，不改状态——工单保持「新建」，由处理人「首次响应」后才进入「处理中」
+        # 派单只写 assigned_to，不改状态——工单保持「待处理」，由处理人「首次响应」后才进入「处理中」
         ticket.assigned_to = to_user_id(user_id) or user_id
 
         await db.commit()
@@ -1234,7 +1234,7 @@ class TicketService:
                 ai_assigned_id = reverse_user_map.get(ai_assigned_name)
                 
                 if ai_assigned_id:
-                    # 派单只写 assigned_to，不改状态——工单保持「新建」，由处理人「首次响应」后才进入「处理中」
+                    # 派单只写 assigned_to，不改状态——工单保持「待处理」，由处理人「首次响应」后才进入「处理中」
                     ticket.assigned_to = ai_assigned_id
                     await db.commit()
                     operator = user_map.get(ticket.created_by, ticket.created_by)

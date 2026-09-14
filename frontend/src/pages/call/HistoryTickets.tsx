@@ -46,17 +46,17 @@ const TYPE_TONE: Record<string, string> = {
 // 列表仅展示「除已关闭外」的工单；countKey 对应列表接口返回 by_status 的键（'__active__' 表示除已关闭外总数）
 const STATUS_TABS = [
   { value: '', label: '全部', countKey: '__active__' },
-  { value: 'new', label: '新建', countKey: 'new' },
+  { value: 'new', label: '待处理', countKey: 'new' },
   { value: 'in_progress', label: '处理中', countKey: 'in_progress' },
-  { value: 'pending', label: '待处理', countKey: 'pending' },
+  { value: 'pending', label: '已挂起', countKey: 'pending' },
   { value: 'resolved', label: '已解决', countKey: 'resolved' },
   { value: 'canceled', label: '已取消', countKey: 'canceled' },
   { value: 'closed', label: '已关闭', countKey: 'closed' },
 ];
 // 状态徽标：浅灰底 + 蓝阶文字（设计稿 statusStyles 映射）
 const STATUS_META: Record<string, { label: string; color: string; bg: string }> = {
-  new:         { label: '新建',   color: 'var(--blue-3)', bg: 'var(--secondary)' },
-  pending:     { label: '待处理', color: 'var(--blue-2)', bg: 'var(--secondary)' },
+  new:         { label: '待处理', color: 'var(--blue-3)', bg: 'var(--secondary)' },
+  pending:     { label: '已挂起', color: 'var(--blue-2)', bg: 'var(--secondary)' },
   dispatched:  { label: '已派单', color: 'var(--blue-3)', bg: 'var(--secondary)' },
   in_progress: { label: '处理中', color: 'var(--blue-2)', bg: 'var(--secondary)' },
   resolved:    { label: '已解决', color: 'var(--blue-1)', bg: 'var(--secondary)' },
@@ -430,10 +430,10 @@ export default function HistoryTickets({ showHeader = true }: { showHeader?: boo
                   {t.priority && <span className="history-row__priority-tag">{t.priority}</span>}
                 </div>
                 {/* 操作按钮：已解决/已取消/已关闭（终态）整组不显示；
-                    新建/待处理可催办、撤回；处理中仅可上报；不可用按钮禁用 */}
+                    待处理/已挂起可催办、撤回；处理中仅可上报；不可用按钮禁用 */}
                 {!isTerminalTicketStatus(t.status) && (
                   <div className="history-row__actions" onClick={(e) => e.stopPropagation()}>
-                    <AppButton tone="blue" size="extra-small" disabled={!canUrgeTicket(t.status) || (acting?.id === t.id && acting?.action === 'urge')} title={canUrgeTicket(t.status) ? undefined : '仅新建/待处理工单可催办'} aria-label={canUrgeTicket(t.status) ? undefined : '催办（仅新建/待处理工单可催办）'} onClick={(e) => openActionPopup(e, t, 'urge')}>催办</AppButton>
+                    <AppButton tone="blue" size="extra-small" disabled={!canUrgeTicket(t.status) || (acting?.id === t.id && acting?.action === 'urge')} title={canUrgeTicket(t.status) ? undefined : '仅待处理/已挂起工单可催办'} aria-label={canUrgeTicket(t.status) ? undefined : '催办（仅待处理/已挂起工单可催办）'} onClick={(e) => openActionPopup(e, t, 'urge')}>催办</AppButton>
                     <AppButton tone="blue" size="extra-small" disabled={!canReportTicket(t.status) || (acting?.id === t.id && acting?.action === 'report')} title={canReportTicket(t.status) ? undefined : '仅处理中工单可上报'} aria-label={canReportTicket(t.status) ? undefined : '上报（仅处理中工单可上报）'} onClick={(e) => openActionPopup(e, t, 'report')}>上报</AppButton>
                     {(t.source === 'ai' || !t.source) && !!t.assigned_to && (
                     <AppButton tone="blue-deep" size="extra-small" loading={redispatching && redispatchTicket?.id === t.id} onClick={(e) => openRedispatchPopup(e, t)}>重新派单</AppButton>

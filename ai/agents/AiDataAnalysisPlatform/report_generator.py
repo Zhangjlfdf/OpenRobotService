@@ -48,9 +48,9 @@ logger = get_logger("ReportGenerator")
 # 避免 LLM 在报告正文中透出 IN_PROGRESS / CLOSED 等原始枚举。
 
 _TICKET_STATUS_CN = {
-    "new": "新建",
+    "new": "待处理",
     "in_progress": "处理中",
-    "pending": "待处理",
+    "pending": "已挂起",
     "resolved": "已解决",
     "canceled": "已取消",
     "cancelled": "已取消",
