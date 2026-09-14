@@ -111,11 +111,11 @@ export default function StepNegotiationCard({
   const myTurn = (!lastStepBy && isAssignee)
     || (lastStepBy === 'assigned' && isReporter)
     || (lastStepBy === 'creator' && isAssignee);
-  let pillBg = 'rgba(100,116,139,0.15)';
+  let pillBg = 'var(--muted)';
   let pillColor = 'var(--muted-foreground)';
-  if (round >= maxRound) { pillBg = 'rgba(220,38,38,0.15)'; pillColor = '#b91c1c'; }
-  else if (round === maxRound - 1) { pillBg = 'rgba(234,179,8,0.2)'; pillColor = '#8a6400'; }
-  else if (myTurn) { pillBg = 'rgba(37,99,235,0.15)'; pillColor = 'var(--blue-2)'; }
+  if (round >= maxRound) { pillBg = 'var(--rose-soft)'; pillColor = 'var(--danger)'; }
+  else if (round === maxRound - 1) { pillBg = 'var(--apricot-soft)'; pillColor = 'var(--apricot)'; }
+  else if (myTurn) { pillBg = 'var(--blue-soft)'; pillColor = 'var(--blue-2)'; }
   const respondBtnDisabled = !canRespond || reachedMax;
   const negotiateDisabled = !canNegotiate || reachedMax;
   const completeDisabled = !hasNext;
@@ -132,14 +132,14 @@ export default function StepNegotiationCard({
               </span>
             )}
             {reachedMax && !stepAgreed && (
-              <span style={{ fontSize: 12, color: '#b91c1c', fontWeight: 500 }}>
+              <span style={{ fontSize: 12, color: 'var(--danger)', fontWeight: 500 }}>
                 {myTurn
                   ? '● 已达最大回合。'
                   : '● 已达最大回合，待你确认/升级'}
               </span>
             )}
             {isEscalated && (
-              <span style={{ fontSize: 12, color: '#92400e', fontWeight: 500 }}>
+              <span style={{ fontSize: 12, color: 'var(--apricot)', fontWeight: 500 }}>
                 ● 已升级上报（第{escalateCount}次），协商不受回合限制
               </span>
             )}
@@ -149,7 +149,7 @@ export default function StepNegotiationCard({
               title={isEscalated ? `已升级上报（第${escalateCount}次），协商不受回合限制` : "协商回合：接单人↔提单人来回应答计数"}
               style={{
                 display: 'inline-block', padding: '3px 10px', borderRadius: 999,
-                background: isEscalated ? '#fef3c7' : pillBg, color: isEscalated ? '#92400e' : pillColor, fontSize: 12, fontWeight: 500, lineHeight: 1.4,
+                background: isEscalated ? 'var(--apricot-soft)' : pillBg, color: isEscalated ? 'var(--apricot)' : pillColor, fontSize: 12, fontWeight: 500, lineHeight: 1.4,
               }}
             >
               {isEscalated ? `已升级×${escalateCount} · 不受回合限制` : `交涉回合 ${round} / ${maxRound}`}
@@ -165,15 +165,15 @@ export default function StepNegotiationCard({
             {total > 0 && (
               <span style={{
                 fontSize: 11, color: 'var(--muted-foreground)',
-                padding: '1px 8px', borderRadius: 999, background: 'rgba(100,116,139,0.12)',
+                padding: '1px 8px', borderRadius: 999, background: 'var(--muted)',
               }}>
                 第 {currIdx >= 0 ? currIdx + 1 : '-'} / {total} 步
               </span>
             )}
             <span style={{
               fontSize: 11, fontWeight: 500, padding: '1px 8px', borderRadius: 999,
-              background: stepAgreed ? 'rgba(22,163,74,0.12)' : 'rgba(234,179,8,0.18)',
-              color: stepAgreed ? '#15803d' : '#8a6400',
+              background: stepAgreed ? 'var(--sky-soft)' : 'var(--apricot-soft)',
+              color: stepAgreed ? 'var(--sky)' : 'var(--apricot)',
             }}>
               {stepAgreed ? '已达成一致' : (myTurn ? '待你确认' : '待对方确认')}
             </span>
@@ -207,8 +207,8 @@ export default function StepNegotiationCard({
           return (
             <div style={{
               fontSize: 12, color: 'var(--foreground)', marginBottom: 12, lineHeight: 1.7,
-              padding: '8px 12px', background: 'rgba(100,116,139,0.08)',
-              borderRadius: 6, borderLeft: '3px solid #94a3b8',
+              padding: '8px 12px', background: 'var(--muted)',
+              borderRadius: 'var(--radius-sm)', borderLeft: '3px solid var(--border)',
             }}>
               <div style={{ color: 'var(--muted-foreground)', marginBottom: 2 }}>
                 {proposerIsMe ? '你的提议理由' : '对方提议理由'}
@@ -338,20 +338,20 @@ export default function StepNegotiationCard({
       >
         <div className="ticket-edit">
           <h4 className="ticket-edit__title">协商节点时间</h4>
-          <p style={{ color: '#666', fontSize: '13px', marginBottom: '12px', lineHeight: 1.6 }}>
+          <p style={{ color: 'var(--muted-foreground)', fontSize: '13px', marginBottom: '12px', lineHeight: 1.6 }}>
             可将节点调整为当前或之后的任一节点，并设置节点结束时间（SLA），协商理由必填。
           </p>
           <div style={{ marginBottom: 12 }}>
-            <label style={{ display: 'block', fontSize: 13, color: '#666', marginBottom: 4 }}>
-              协商节点<span style={{ color: '#e34d59' }}>*</span>
+            <label style={{ display: 'block', fontSize: 13, color: 'var(--muted-foreground)', marginBottom: 4 }}>
+              协商节点<span style={{ color: 'var(--danger)' }}>*</span>
             </label>
             <select
               value={negotiateStepId ?? ''}
               onChange={(e) => setNegotiateStepId(e.target.value ? Number(e.target.value) : null)}
               style={{
                 width: '100%', padding: '8px 10px', fontSize: 14,
-                border: '1px solid var(--component-border, #dcdcdc)', borderRadius: 6,
-                background: '#fff',
+                border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)',
+                background: 'var(--card)', color: 'var(--foreground)',
               }}
             >
               {(() => {
@@ -427,20 +427,20 @@ export default function StepNegotiationCard({
           >
             <div className="ticket-edit">
               <h4 className="ticket-edit__title">请选择下一阶段</h4>
-              <p style={{ color: '#666', fontSize: '13px', marginBottom: '12px', lineHeight: 1.6 }}>
+              <p style={{ color: 'var(--muted-foreground)', fontSize: '13px', marginBottom: '12px', lineHeight: 1.6 }}>
                 完成当前阶段后，工单将进入"未一致"状态，回合交给创建人确认。
               </p>
               <div style={{ marginBottom: 12 }}>
-                <label style={{ display: 'block', fontSize: 13, color: '#666', marginBottom: 4 }}>
-                  下一阶段<span style={{ color: '#e34d59' }}>*</span>
+                <label style={{ display: 'block', fontSize: 13, color: 'var(--muted-foreground)', marginBottom: 4 }}>
+                  下一阶段<span style={{ color: 'var(--danger)' }}>*</span>
                 </label>
                 <select
                   value={completeNextStepId ?? ''}
                   onChange={(e) => setCompleteNextStepId(e.target.value ? Number(e.target.value) : null)}
                   style={{
                     width: '100%', padding: '8px 10px', fontSize: 14,
-                    border: '1px solid var(--component-border, #dcdcdc)', borderRadius: 6,
-                    background: '#fff',
+                    border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)',
+                    background: 'var(--card)', color: 'var(--foreground)',
                   }}
                 >
                   {nextStepOptions.length === 0 && (
@@ -490,7 +490,7 @@ export default function StepNegotiationCard({
           >
             <div className="ticket-edit">
               <h4 className="ticket-edit__title">设置节点时间</h4>
-              <p style={{ color: '#666', fontSize: '13px', marginBottom: '12px', lineHeight: 1.6 }}>
+              <p style={{ color: 'var(--muted-foreground)', fontSize: '13px', marginBottom: '12px', lineHeight: 1.6 }}>
                 升级上报后的工单，处理人可直接设置节点时间，无需协商（一锤定音）。
               </p>
               <DatePicker

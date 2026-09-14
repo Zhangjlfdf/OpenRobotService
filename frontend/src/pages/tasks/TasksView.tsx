@@ -56,7 +56,7 @@ type AvatarMap = Map<string, number>;
 
 const pageSize = 20;
 
-// 默认选中的任务状态：新建 / 进行中 / 已挂起 / 已解决（排除 已取消 / 已关闭）
+// 默认选中的任务状态：待处理 / 进行中 / 已挂起 / 已解决（排除 已取消 / 已关闭）
 const DEFAULT_STATUS_VALUES: string[] = ['new', 'in_progress', 'pending', 'resolved'];
 const ALL_STATUS_VALUES: string[] = Object.keys(STATUS_DISPLAY_MAP);
 // 优先级默认全选（low / medium / high / urgent）
@@ -297,13 +297,13 @@ const TicketCard = memo(function TicketCard({ t, onOpen, avatarMap, currentUserI
               style={{
                 display: 'inline-flex', alignItems: 'center', gap: 4,
                 padding: '2px 8px', borderRadius: 999, fontSize: 12, fontWeight: 600,
-                color: '#b45309', background: 'rgba(245,158,11,0.14)',
-                border: '1px solid rgba(245,158,11,0.45)',
+                color: 'var(--apricot)', background: 'var(--apricot-soft)',
+                border: '1px solid var(--border)',
               }}
             >
               <span
                 style={{
-                  width: 6, height: 6, borderRadius: '50%', background: '#f59e0b',
+                  width: 6, height: 6, borderRadius: '50%', background: 'var(--apricot)',
                   animation: 'task-card2-pulse 1.2s ease-in-out infinite',
                 }}
               />
@@ -1211,7 +1211,7 @@ export default function TasksView() {
     }
     return { ...d, type: [...d.type, value] };
   });
-  // 清空草稿（弹窗内「清空选择」）：相关性回默认、状态回默认集（新建/进行中/已挂起/已解决）、
+  // 清空草稿（弹窗内「清空选择」）：相关性回默认、状态回默认集（待处理/进行中/已挂起/已解决）、
   // 优先级回「全部」、项目/处理人回「全部」、创建时间清空。仅作用于草稿，未点「确定」前不生效。
   const draftClear = () => setDraft({
     relevance: 'mine',

@@ -551,7 +551,7 @@ export default function TicketDetailPage() {
   const [editForm, setEditForm] = useState<{ title: string; description: string; priority: string; ticket_type: string; project_id: string; project_name: string; curr_step_endtime?: string }>({ title: '', description: '', priority: '中', ticket_type: 'problem', project_id: '', project_name: '' });
   // 当前阶段截止时间区间：基准 = 工单创建时间（ticket.created_at），而非用户操作时刻
   const editDeadlineRange = getDeadlineRange(editForm.priority, ticket?.created_at);
-  // 优先级仅在「尚未派单」（新建/待派单）可修改；已派单及后续状态禁止（置灰不可点）
+  // 优先级仅在「尚未派单」（待处理/待派单）可修改；已派单及后续状态禁止（置灰不可点）
   const priorityDisabled = !canEditPriority(ticket?.status);
   const [savingEdit, setSavingEdit] = useState(false);
   // 所属项目下拉（当前用户名下项目，GET /api/admin/projects/me；支持关键词模糊搜索）
@@ -1071,15 +1071,15 @@ export default function TicketDetailPage() {
         />
 
         {/* 操作：与历史工单列表页完全一致 —— 终态（已解决/已取消/已关闭）整组不显示；
-            新建/待处理可催办、撤回；处理中仅可上报；不可用按钮禁用；
+            待处理/已挂起可催办、撤回；处理中仅可上报；不可用按钮禁用；
             正在操作的按钮单独禁用（acting 标记当前动作） */}
         {!isTerminalTicketStatus(ticket.status) && (
           <div className="detail-actions__btns">
             <AppButton
               tone="primary" size="small" icon={<Bell size={13} strokeWidth={2} />}
               disabled={!canUrgeTicket(ticket.status) || acting === 'urge'}
-              title={canUrgeTicket(ticket.status) ? undefined : '仅新建/待处理工单可催办'}
-              aria-label={canUrgeTicket(ticket.status) ? undefined : '催办（仅新建/待处理工单可催办）'}
+              title={canUrgeTicket(ticket.status) ? undefined : '仅待处理/已挂起工单可催办'}
+              aria-label={canUrgeTicket(ticket.status) ? undefined : '催办（仅待处理/已挂起工单可催办）'}
               onClick={() => openActionPopup('urge')}
             >催办</AppButton>
             <AppButton
@@ -1161,8 +1161,8 @@ export default function TicketDetailPage() {
                     key={label}
                     type="button"
                     disabled={priorityDisabled}
-                    title={priorityDisabled ? '仅新建工单可修改优先级' : undefined}
-                    aria-label={priorityDisabled ? `优先级${label}（仅新建工单可修改优先级）` : `优先级${label}`}
+                    title={priorityDisabled ? '仅待处理工单可修改优先级' : undefined}
+                    aria-label={priorityDisabled ? `优先级${label}（仅待处理工单可修改优先级）` : `优先级${label}`}
                     className={`tasks-create-modal__radio-btn ${editForm.priority === PRIORITY_EN[label] ? 'is-active' : ''} ${priorityDisabled ? 'is-disabled' : ''}`}
                     onClick={() => {
                       const v = PRIORITY_EN[label];
@@ -1266,7 +1266,7 @@ export default function TicketDetailPage() {
       <Popup visible={showEscalatePopup} onClose={() => { setShowEscalatePopup(false); setEscalateReason(''); }} placement="bottom" showOverlay destroyOnClose>
         <div className="ticket-edit">
           <h4 className="ticket-edit__title">升级上报</h4>
-          <p style={{ color: '#999', fontSize: '13px', marginBottom: '12px' }}>请选择升级对象</p>
+          <p style={{ color: 'var(--muted-foreground)', fontSize: '13px', marginBottom: '12px' }}>请选择升级对象</p>
           <UserSelect value={escalateUser?.id ?? null} onChange={setEscalateUser} title="选择升级对象" />
           <Form initialData={{}}>
             <FormItem label="变更原因" name="escalateReason" labelAlign="top" requiredMark>
@@ -1290,9 +1290,9 @@ export default function TicketDetailPage() {
       <Popup visible={showReassignPopup} onClose={() => { setShowReassignPopup(false); setReassignUser(null); setReassignReason(''); setReassignKind(''); }} placement="bottom" showOverlay destroyOnClose>
         <div className="ticket-edit">
           <h4 className="ticket-edit__title">重新指派</h4>
-          <p style={{ color: '#999', fontSize: '13px', marginBottom: '12px' }}>选择新的处理人</p>
+          <p style={{ color: 'var(--muted-foreground)', fontSize: '13px', marginBottom: '12px' }}>选择新的处理人</p>
           <UserSelect value={reassignUser?.id ?? null} onChange={setReassignUser} placeholder="请选择处理人" title="选择处理人" />
-          <div style={{ margin: '12px 0 8px', fontSize: '14px', color: '#333' }}>转派类型<span style={{ color: '#d54941' }}> *</span></div>
+          <div style={{ margin: '12px 0 8px', fontSize: '14px', color: 'var(--foreground)' }}>转派类型<span style={{ color: 'var(--danger)' }}> *</span></div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginBottom: '12px' }}>
             {([
               { id: 'misassign' as const, label: '派错了', hint: '不该派给当前处理人，同类单会学习' },
@@ -1308,14 +1308,14 @@ export default function TicketDetailPage() {
                   style={{
                     textAlign: 'left',
                     padding: '10px 12px',
-                    borderRadius: '8px',
-                    border: on ? '1px solid #0052d9' : '1px solid #e7e7e7',
-                    background: on ? '#f2f3ff' : '#fff',
+                    borderRadius: 'var(--radius-md)',
+                    border: on ? '1px solid var(--primary)' : '1px solid var(--border)',
+                    background: on ? 'var(--primary-soft)' : 'var(--card)',
                     cursor: 'pointer',
                   }}
                 >
-                  <div style={{ fontSize: '14px', fontWeight: 600, color: '#222' }}>{opt.label}</div>
-                  <div style={{ fontSize: '12px', color: '#888', marginTop: '2px' }}>{opt.hint}</div>
+                  <div style={{ fontSize: '14px', fontWeight: 600, color: 'var(--foreground)' }}>{opt.label}</div>
+                  <div style={{ fontSize: '12px', color: 'var(--muted-foreground)', marginTop: '2px' }}>{opt.hint}</div>
                 </button>
               );
             })}
@@ -1348,23 +1348,23 @@ export default function TicketDetailPage() {
           <div className="ticket-edit-form__body">
             <div className="ticket-edit-form__field">
               <span className="ticket-edit-form__label">📌 工单问题</span>
-              <div style={{ fontSize: '14px', fontWeight: 600, color: '#1a1a1a', marginBottom: '4px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{ticket?.title}</div>
+              <div style={{ fontSize: '14px', fontWeight: 600, color: 'var(--foreground)', marginBottom: '4px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{ticket?.title}</div>
               <div style={{
-                fontSize: '13px', color: '#888', lineHeight: 1.6, whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+                fontSize: '13px', color: 'var(--muted-foreground)', lineHeight: 1.6, whiteSpace: 'pre-wrap', wordBreak: 'break-word',
                 display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden',
               }}>
-                {ticket?.description || <span style={{ color: '#bbb' }}>（无描述）</span>}
+                {ticket?.description || <span style={{ color: 'var(--gray-light)' }}>（无描述）</span>}
               </div>
             </div>
             <div className="ticket-edit-form__field">
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
                 <span className="ticket-edit-form__label" style={{ marginBottom: 0 }}>✅ 工单解决方式</span>
                 {resolve.resolutionFailed && (
-                  <span style={{ color: '#faad14', fontSize: '12px' }}>自动总结出错，请手动补充</span>
+                  <span style={{ color: 'var(--apricot)', fontSize: '12px' }}>自动总结出错，请手动补充</span>
                 )}
               </div>
               {resolve.resolutionLoading || resolve.resolutionPolling ? (
-                <div style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '20px 0', color: '#666', fontSize: '13px', justifyContent: 'center' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '20px 0', color: 'var(--muted-foreground)', fontSize: '13px', justifyContent: 'center' }}>
                   <Loading size="20px" /> 正在生成解决方式…
                 </div>
               ) : (
