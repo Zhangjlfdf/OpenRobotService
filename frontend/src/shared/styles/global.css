@@ -996,15 +996,31 @@ html, body, #root {
   cursor: pointer;
 }
 .chat-ticket-overview__redispatch:active { background: var(--blue-2); border-color: var(--blue-2); }
-/* 二次派单感知增强（M3）：派单结果提醒单行（警示色、单行省略，整卡点击进详情） */
+/* 派单提醒单行：标签蓝、正文灰，与详情 DispatchFold 同口径 */
 .chat-ticket-overview__tip {
+  display: flex;
+  align-items: baseline;
+  gap: 0;
   margin-top: 8px;
   font-size: 11.5px;
-  color: #B45309;
-  background: rgba(255, 171, 0, 0.10);
+  color: var(--muted-foreground);
+  background: var(--blue-soft);
+  border: 1px solid color-mix(in oklab, var(--blue-3) 28%, transparent);
   border-radius: 4px;
   padding: 3px 8px;
   max-width: 100%;
+  overflow: hidden;
+}
+.chat-ticket-overview__tip-label {
+  flex-shrink: 0;
+  color: var(--blue-2);
+  font-weight: 600;
+}
+.chat-ticket-overview__tip-text {
+  min-width: 0;
+  flex: 1;
+  color: var(--muted-foreground);
+  font-weight: 400;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1470,6 +1486,10 @@ html, body, #root {
   overflow-y: auto;
   overflow-x: hidden;
   padding: 16px;
+  /* 禁微信原生长按菜单（iOS 放大镜/callout、文本选择）；复制走每条消息操作钮 */
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
   /* 注：不加 overscroll-behavior——iOS/微信 WKWebView 对 contain 支持有缺陷，
      会导致容器滚到顶被卡住（顶部反弹失效）。滚动链透传已由 JS 侧（scrollTop 赋值
      替代 scrollIntoView）+ 外层重置根治，无需 CSS 阻断 */
@@ -1877,34 +1897,43 @@ html, body, #root {
   color: var(--muted-foreground);
   margin-top: 2px;
 }
-/* 二次派单感知增强（M3）：派单结果提醒行（警示色、单行省略） */
+/* 派单提醒行：标签蓝、正文灰 */
 .history-row__tip {
+  display: flex;
+  align-items: baseline;
+  gap: 0;
   font-size: 11.5px;
-  color: #B45309;
-  background: rgba(255, 171, 0, 0.10);
+  color: var(--muted-foreground);
+  background: var(--blue-soft);
+  border: 1px solid color-mix(in oklab, var(--blue-3) 28%, transparent);
   border-radius: 4px;
   padding: 2px 8px;
   margin-top: 4px;
   max-width: 100%;
+  overflow: hidden;
+}
+.history-row__tip-label {
+  flex-shrink: 0;
+  color: var(--blue-2);
+  font-weight: 600;
+}
+.history-row__tip-text {
+  min-width: 0;
+  flex: 1;
+  color: var(--muted-foreground);
+  font-weight: 400;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-/* 派单说明 / 派单理由：默认折叠成一行标题，点开再看全文 */
+/* 派单提醒 / 派单原因：标签蓝、正文灰，点开再看全文 */
 .dispatch-fold {
   margin-top: 10px;
   border-radius: 6px;
   overflow: hidden;
-}
-.dispatch-fold--tip {
-  color: #92400E;
-  background: rgba(255, 171, 0, 0.06);
-  border: 1px solid rgba(255, 171, 0, 0.22);
-}
-.dispatch-fold--reason {
-  color: #1D4ED8;
-  background: rgba(59, 130, 246, 0.06);
-  border: 1px solid rgba(59, 130, 246, 0.16);
+  background: var(--blue-soft);
+  border: 1px solid color-mix(in oklab, var(--blue-3) 28%, transparent);
+  color: var(--muted-foreground);
 }
 .dispatch-fold__header {
   display: flex;
@@ -1931,13 +1960,11 @@ html, body, #root {
   overflow: hidden;
   white-space: nowrap;
 }
-.dispatch-fold__label {
-  flex-shrink: 0;
-  font-weight: 600;
-}
+.dispatch-fold__label,
 .dispatch-fold__sep {
   flex-shrink: 0;
   font-weight: 600;
+  color: var(--blue-2);
 }
 .dispatch-fold__clip {
   min-width: 0;
@@ -1946,21 +1973,22 @@ html, body, #root {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-weight: 400;
+  color: var(--muted-foreground);
 }
-.dispatch-fold--tip .dispatch-fold__label,
-.dispatch-fold--tip .dispatch-fold__sep { color: #92400E; }
-.dispatch-fold--tip .dispatch-fold__clip { color: #92400E; }
-.dispatch-fold--reason .dispatch-fold__label,
-.dispatch-fold--reason .dispatch-fold__sep { color: #1E40AF; }
-.dispatch-fold--reason .dispatch-fold__clip { color: #1E3A8A; }
 .dispatch-fold__chevron {
   flex-shrink: 0;
-  color: inherit;
-  opacity: 0.7;
+  color: var(--muted-foreground);
+  opacity: 0.75;
   transition: transform 0.2s ease;
 }
 .dispatch-fold.is-open > .dispatch-fold__header .dispatch-fold__chevron {
   transform: rotate(180deg);
+}
+.dispatch-fold.is-open .dispatch-fold__clip {
+  display: none;
+}
+.dispatch-fold:not(.is-foldable) > .dispatch-fold__header {
+  cursor: default;
 }
 .dispatch-fold__bodywrap {
   display: grid;
@@ -1977,12 +2005,12 @@ html, body, #root {
   font-size: 12.5px;
   line-height: 20px;
   font-weight: 400;
+  white-space: pre-wrap;
+  color: var(--muted-foreground);
 }
 .dispatch-fold.is-open .dispatch-fold__body {
   padding-bottom: 8px;
 }
-.dispatch-fold--tip .dispatch-fold__body { color: #92400E; }
-.dispatch-fold--reason .dispatch-fold__body { color: #1E3A8A; }
 /* 编辑弹窗-所属项目选择（仿下拉，点击弹出搜索层） */
 .ticket-edit-form__select {
   display: flex;
@@ -5135,9 +5163,9 @@ html, body, #root {
 .mac-meta-row__value.is-empty { color: var(--mac-muted-fg); }
 .mac-meta-row__pencil { flex-shrink: 0; color: var(--mac-muted-fg); margin-left: 6px; display: inline-flex; }
 /* 概要卡内嵌的字段行（项目编号）：无边框、弱前景，随概要卡副标题文字显示 */
-.mac-meta-row--plain { border-bottom: none; padding: 0; }
+.mac-meta-row--plain { justify-content: flex-start; gap: 4px; border-bottom: none; padding: 0; }
 .mac-meta-row--plain .mac-meta-row__value { font-size: 11.5px; color: var(--mac-muted-fg); }
-.mac-meta-row--plain .mac-meta-row__pencil { margin-left: 4px; }
+.mac-meta-row--plain .mac-meta-row__pencil { margin-left: 0; }
 
 /* FieldRow（对照原型 FieldRow：标签在上 + 可点行） */
 .mac-field-stack { margin-top: 10px; }
@@ -5169,6 +5197,95 @@ html, body, #root {
 .mac-dates__label { font-size: 11px; color: var(--mac-muted-fg); }
 .mac-dates__value { margin-top: 2px; font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; color: var(--mac-fg); }
 .mac-task-exec { margin-top: 12px; padding-top: 12px; border-top: 1px solid rgba(232, 234, 234, 0.6); font-size: 12px; color: var(--mac-muted-fg); }
+
+/* 项目概况卡（对照原型 ProjectOverviewCard：客户信息行 / 项目经理·对接人双列 / 分隔区块 / AGV·USP + 入口按钮 / AI 摘要） */
+.mac-ov-block { margin-top: 12px; }
+.mac-ov-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 40px;
+  padding: 8px 0;
+  border-bottom: 1px solid rgba(232, 234, 234, 0.6);
+}
+.mac-ov-row__label { flex-shrink: 0; display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--mac-muted-fg); }
+.mac-ov-row__value {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  border: none;
+  background: none;
+  padding: 0;
+  font-family: inherit;
+  font-size: 12.5px;
+  color: var(--mac-fg);
+  cursor: pointer;
+  text-align: right;
+}
+.mac-ov-row__value.is-empty { color: var(--mac-muted-fg); }
+.mac-ov-row__value > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.mac-ov-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; padding: 10px 0; }
+.mac-ov-cell { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.mac-ov-cell__label { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--mac-muted-fg); }
+.mac-ov-cell__value {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  min-width: 0;
+  border: none;
+  background: none;
+  padding: 0;
+  font-family: inherit;
+  font-size: 12.5px;
+  color: var(--mac-fg);
+  cursor: pointer;
+  text-align: left;
+}
+.mac-ov-cell__value.is-empty { color: var(--mac-muted-fg); }
+.mac-ov-cell__value > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mac-ov-pencil { flex-shrink: 0; color: var(--mac-muted-fg); display: inline-flex; }
+/* 暂无后端列/接口的字段标记：控件可编辑，但明确标注尚未接入 */
+.mac-ov-pending { flex-shrink: 0; padding: 1px 6px; border-radius: 999px; background: var(--mac-secondary); color: var(--mac-muted-fg); font-size: 10px; font-weight: 500; }
+
+/* 概况卡内的分隔区块（三列日期 / AGV·USP + 搬运效率分析行） */
+.mac-ov-divider { margin-top: 14px; padding-top: 14px; border-top: 1px solid rgba(232, 234, 234, 0.7); }
+.mac-ov-divider .mac-dates { margin-top: 0; }
+.mac-ov-actions {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+  align-items: end;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid rgba(232, 234, 234, 0.7);
+}
+.mac-ov-cta { display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 8px 10px; font-size: 11.5px; }
+
+/* 概况卡底部 AI 项目摘要（先置空占位，保留展开/收起交互与展示空间） */
+.mac-ai { margin-top: 14px; padding: 12px; background: var(--mac-blue-soft); border-radius: 14px; }
+.mac-ai__head { display: flex; align-items: center; gap: 6px; }
+.mac-ai__icon { flex-shrink: 0; display: inline-flex; color: var(--mac-blue-2); }
+.mac-ai__title { font-size: 12px; font-weight: 600; color: var(--mac-fg); }
+.mac-ai__toggle {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: none;
+  background: none;
+  padding: 2px 0;
+  font-family: inherit;
+  font-size: 11px;
+  color: var(--mac-muted-fg);
+  cursor: pointer;
+}
+.mac-ai__body { margin: 6px 0 0; min-height: 32px; font-size: 12px; line-height: 1.65; color: var(--mac-fg); white-space: pre-wrap; }
+.mac-ai__body.is-collapsed { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
+.mac-ai__body.is-empty { color: var(--mac-muted-fg); }
 
 /* 生命周期时间线（对照原型：26px 圆点 + 竖线 + 阶段/状态/补充说明） */
 .mac-timeline { position: relative; margin-top: 16px; }
@@ -7814,11 +7931,67 @@ html, body, #root {
 .dispatch-dev__rates {
   display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 12px;
 }
-.dispatch-dev__rates div {
-  background: #f7fbfc; border-radius: 10px; padding: 10px 8px; text-align: center;
+.dispatch-dev__rate-btn {
+  display: block;
+  width: 100%;
+  border: 1px solid transparent;
+  background: #f7fbfc;
+  border-radius: 10px;
+  padding: 10px 8px;
+  text-align: center;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
 }
-.dispatch-dev__rates strong { display: block; font-size: 18px; color: #227197; }
-.dispatch-dev__rates span { display: block; margin-top: 4px; font-size: 11px; color: #888d8f; line-height: 1.35; }
+.dispatch-dev__rate-btn.is-active,
+.dispatch-dev__stat-btn.is-active {
+  border-color: color-mix(in oklab, var(--mac-blue-2, #3697c3) 45%, transparent);
+  background: #eaf7fd;
+}
+.dispatch-dev__rates strong,
+.dispatch-dev__rate-btn strong { display: block; font-size: 18px; color: #227197; }
+.dispatch-dev__rates span,
+.dispatch-dev__rate-btn span { display: block; margin-top: 4px; font-size: 11px; color: #888d8f; line-height: 1.35; }
+.dispatch-dev__rate-btn em {
+  display: block;
+  margin-top: 4px;
+  font-style: normal;
+  font-size: 10px;
+  color: var(--mac-blue-2, #3697c3);
+}
+.dispatch-dev__stat-btn {
+  border: 1px solid transparent;
+  background: #f7fbfc;
+  border-radius: 8px;
+  padding: 4px 8px;
+  font: inherit;
+  font-size: 12px;
+  color: #303435;
+  cursor: pointer;
+}
+.dispatch-dev__ticket-link {
+  color: var(--mac-blue-2, #3697c3);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  font-weight: 600;
+}
+.dispatch-dev__ticket-link:hover { color: #227197; }
+.dispatch-dev__drill {
+  margin-top: 10px;
+  border: 1px solid #eef3f5;
+  border-radius: 10px;
+  padding: 8px 10px 4px;
+  background: #fafcfd;
+}
+.dispatch-dev__drill-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  color: #303435;
+  font-weight: 600;
+}
 @media (max-width: 640px) {
   .dispatch-dev__rates { grid-template-columns: 1fr; }
 }
@@ -7854,5 +8027,127 @@ html, body, #root {
   width: 88px; border: 1px solid #e8eaea; border-radius: 8px; padding: 6px 8px; font-size: 13px; color: #303435;
 }
 .dispatch-dev__review-btns { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.dispatch-dev__hops { list-style: none; margin: 8px 0 0; padding: 0; }
+.dispatch-dev__hop {
+  padding: 8px 0 8px 10px;
+  border-left: 2px solid #e8eaea;
+  margin-top: 6px;
+}
+.dispatch-dev__hop-tag {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 0 6px;
+  border-radius: 8px;
+  background: #f4f6f6;
+  color: #888d8f;
+  font-size: 11px;
+}
+.dispatch-dev__hop-reason {
+  margin: 4px 0 0;
+  color: #303435;
+  font-size: 13px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
+.dispatch-dev__hop-reason--empty {
+  color: #888d8f;
+  font-size: 12px;
+}
 .dispatch-dev__btn--ghost { background: #f4f6f6; color: #888d8f; }
 
+
+/* ══ 聊天记录转发（0911）：长按多选 + 品牌化转发长图 ══ */
+/* 多选模式：气泡内部禁交互（点击整条=勾选），勾选圈随侧显示 */
+.chat-bubble-wrap.is-selecting { cursor: pointer; position: relative; border-radius: 12px; }
+.chat-bubble-wrap.is-selecting .chat-bubble,
+.chat-bubble-wrap.is-selecting .chat-actions,
+.chat-bubble-wrap.is-selecting .chat-attachment-bar,
+.chat-bubble-wrap.is-selecting .chat-project-choices { pointer-events: none; user-select: none; }
+.chat-bubble-wrap.is-selecting.is-checked .chat-bubble { outline: 1.5px solid #4f6ef7; outline-offset: 2px; }
+.chat-select-check {
+  position: absolute; top: 8px; width: 22px; height: 22px; border-radius: 50%;
+  border: 1.5px solid #c4c9d4; background: #fff; display: flex; align-items: center;
+  justify-content: center; color: #fff; z-index: 2; box-sizing: border-box;
+}
+.chat-bubble-wrap.is-left .chat-select-check { left: -2px; }
+.chat-bubble-wrap.is-right .chat-select-check { right: -2px; }
+.chat-select-check.is-on { background: #4f6ef7; border-color: #4f6ef7; }
+/* 顶部选择工具条 */
+.chat-select-bar {
+  position: sticky; top: 0; z-index: 5; display: flex; align-items: center;
+  justify-content: space-between; gap: 8px; padding: 8px 12px; margin-bottom: 6px;
+  background: rgba(255, 255, 255, .96); backdrop-filter: blur(6px);
+  border-radius: 10px; box-shadow: 0 1px 6px rgba(15, 23, 42, .08);
+}
+.chat-select-bar__info { font-size: 12.5px; color: #6b7280; }
+.chat-select-bar__btn { all: unset; font-size: 13px; color: #4f6ef7; cursor: pointer; padding: 4px 8px; border-radius: 6px; }
+.chat-select-bar__btn:active { background: rgba(79, 110, 247, .1); }
+/* 底部转发操作条（多选时出现在输入栏上方） */
+.chat-forward-bar { display: flex; gap: 10px; padding: 10px 12px; }
+.chat-forward-bar__btn {
+  flex: 1; border: 1px solid #d7dbe4; background: #fff; color: #374151;
+  border-radius: 10px; padding: 11px 0; font-size: 14px; cursor: pointer;
+}
+.chat-forward-bar__btn:disabled { opacity: .45; cursor: not-allowed; }
+.chat-forward-bar__btn.is-primary {
+  flex: 1.6; background: #3d9be6; border: none; color: #fff; font-weight: 600;
+}
+.chat-input-bar.is-select-disabled { opacity: .45; pointer-events: none; }
+/* 转发图预览弹层（min-height:0 是关键：flex 子项默认 min-height:auto，
+   长图把 panel 顶出屏幕、overflow 滚不动——0911 实锤上半截在屏幕下端） */
+.chat-forward-preview {
+  position: fixed; top: 0; left: 0; right: 0; bottom: 0; z-index: 60; background: rgba(10, 12, 20, .72);
+  display: flex; align-items: center; justify-content: center; padding: 16px;
+}
+.chat-forward-preview__panel {
+  background: #fff; border-radius: 14px; max-width: 420px; width: 100%;
+  max-height: 86vh; display: flex; flex-direction: column; overflow: hidden;
+}
+.chat-forward-preview__hint { padding: 10px 14px 6px; font-size: 12.5px; color: #6b7280; text-align: center; flex-shrink: 0; }
+.chat-forward-preview__img-wrap { flex: 1; min-height: 0; overflow-y: auto; padding: 0 12px; }
+.chat-forward-preview__img-wrap img { width: 100%; display: block; border-radius: 8px; }
+.chat-forward-preview__ops { display: flex; gap: 10px; padding: 12px; flex-shrink: 0; }
+/* 品牌化截图容器（挂在 body 下 off-screen，html2canvas 截图目标）。
+   整树统一短字体栈：html2canvas 解析页面全局长栈（SF Pro 等十余候选）时中英文
+   会落到不同字体导致基线错位；统一后中英文数字同字体必齐。code/pre 等宽不受影响 */
+.forward-snapshot {
+  position: fixed; left: -10000px; top: 0; width: 375px; box-sizing: border-box;
+  background: #eef1f6;
+  font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+}
+.forward-snapshot__head {
+  display: flex; align-items: center; gap: 10px; padding: 18px 16px 14px;
+  background: #3d9be6; color: #fff;
+}
+.forward-snapshot__logo {
+  width: 42px; height: 42px; border-radius: 12px; object-fit: cover;
+  background: rgba(255, 255, 255, .18); border: 1px solid rgba(255, 255, 255, .35);
+  flex-shrink: 0;
+}
+.forward-snapshot__logo-txt {
+  width: 42px; height: 42px; border-radius: 12px; background: rgba(255, 255, 255, .18);
+  border: 1px solid rgba(255, 255, 255, .35); display: flex; align-items: center;
+  justify-content: center; font-size: 22px; font-weight: 700; flex-shrink: 0;
+  font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+}
+.forward-snapshot__titles { min-width: 0; }
+.forward-snapshot__name {
+  font-size: 15.5px; font-weight: 700; letter-spacing: .3px; line-height: 1.35;
+  font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+}
+.forward-snapshot__sub {
+  font-size: 11.5px; opacity: .9; margin-top: 3px; line-height: 1.4;
+  font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+}
+.forward-snapshot__body { padding: 12px 12px 4px; display: flex; flex-direction: column; gap: 10px; }
+.forward-snapshot__foot { padding: 4px 16px 16px; text-align: center; }
+.forward-snapshot__foot-line { width: 56px; height: 3px; border-radius: 2px; background: #3d9be6; margin: 0 auto 8px; opacity: .55; }
+.forward-snapshot__foot-text {
+  font-size: 12px; color: #5d6572; line-height: 1.5;
+  font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+}
+/* 截图里隐藏气泡操作按钮/多选残留/项目按钮等一切交互件 */
+.forward-snapshot .chat-actions,
+.forward-snapshot .chat-select-check { display: none !important; }
+.forward-snapshot button { display: none !important; }
+.forward-snapshot .chat-bubble-wrap { margin: 0 !important; }

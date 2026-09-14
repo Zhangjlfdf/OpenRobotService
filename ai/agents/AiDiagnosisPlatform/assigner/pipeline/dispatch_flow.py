@@ -7,13 +7,17 @@
     【Step 0 提单人指定】(强信号"[指定处理人:X]" / LLM检测"转给张三" → 直接指派 + tip)
         │ (未指定 / 指定人找不到：写 tip 后继续)
         ▼
+    倾向人（连续两次同 ID → 直派；首次画像完整才准入）
+        │
+        ▼
     【Step 1 候选收紧】部门(R2 LLM + R3 历史融合 + R-Audit) → 产品(项目标记>部门映射>默认)
         │
         ▼
-    【Step 2 打标】(提单人 / 项目对接人 / 倾向接单人 / 原用户不满意的接单人；不踢自提人)
+    【Step 2 打标】提单人 / 对接人 / 倾向接单人 / 原不满意（只打标，不踢人）
+        │ dispatch_hint=severe → 跳过 Step3–6，进 Step7
         ▼
-    【Step 2.5/2.6 强制保留】(对接人 / 用户倾向处理人 被过滤则补回候选)
-        │
+    【Step 2.5–2.6 强制加回】对接人（≠提单人）/ 倾向人；原不满意只打标不加回
+        │ 项目经理不进此步（只做 Step7 兜底）
         ▼
     【Step 3 三路召回】
         ├── 画像召回：看职责卡片推断谁能接
@@ -21,7 +25,7 @@
         └── 问题簇：这类问题堆里的常客（可空）
         │
         ▼
-    【Step 4 精排】三路各自归一；空路权重摊给有人的路；职级折扣 × 部门soft_prior；倾向人保底；对接人只打标
+    【Step 4 精排】三路绝对 0～1 取最高；职级折扣 × 部门soft_prior；倾向人保底；对接/原不满意只打标
         │
         ▼
     【Step 6 LLM 最终决策】铁律 + 产品附录；失败/很难决策/名单外 → None，不回精排#1
@@ -87,11 +91,25 @@ def _engineer_profile_dict(eng: "EngineerProfile") -> Dict:
     }
 
 
-def _step0_winner_profile(eng: "EngineerProfile", collision_random: bool = False) -> Dict:
-    """Step0 落库画像：缺项进 missing；同名随机选中再打 collision_random，供 tip 提醒补画像。"""
+def _step0_winner_profile(
+    eng: "EngineerProfile",
+    collision_random: bool = False,
+    specified_name: Optional[str] = None,
+    specified_multi: bool = False,
+) -> Dict:
+    """Step0 落库画像：缺项进 missing；同名随机选中再打 collision_random，供 tip 提醒补画像。
+
+    拼音命中时把用户原文（如「加双」）写入 specified_name，和工程师名（如「贾爽」）对照。
+    强信号里写了多个人时打 specified_multi；按顺序派上第一个找得到的人。
+    """
     prof = _engineer_profile_dict(eng)
     if collision_random:
         prof["collision_random"] = True
+    if specified_multi:
+        prof["specified_multi"] = True
+    query = (specified_name or "").strip()
+    if query and query != (eng.name or "").strip():
+        prof["specified_name"] = query
     return prof
 
 
@@ -239,23 +257,50 @@ class DispatchFlow:
         if contact_assignee_id:
             logger.info(f"{ltag} 项目对接人: {contact_name}({contact_assignee_id})（只打标，不加分）")
 
-        # ── 用户倾向处理人（预留：前端传 ticket.preferred_assignee 即启用；未传返回 None 不生效）──
+        # ── 用户倾向处理人（前端传 ticket.preferred_assignee=users.id；未传不生效）──
+        # 连续两次同一倾向人 ID → 无条件直派（不问画像全不全）。
+        # 首次：画像完整 → 精排保底/可强制加回；画像不全 → 不准入 + tip，请再重派一次。
         preferred_assignee_id = None
         pref_name = None
+        pref_incomplete_first_guard = False
         if self._config.preferred_assignee_enabled:
-            preferred_assignee_id = self._resolve_preferred_assignee(
-                ticket_context, engineer_profiles,
-            )
-            if preferred_assignee_id:
-                pref_name = next(
-                    (e.name for e in engineer_profiles if e.id == preferred_assignee_id),
-                    preferred_assignee_id,
+            pref_raw = self._normalize_preferred_id(ticket_context)
+            if pref_raw:
+                prev_pref = self._prev_dispatch_preferred_id(ticket_context.id)
+                if prev_pref and prev_pref == pref_raw:
+                    # 产品保证：重派倾向人来自用户表，ID 一定存在；此处失败只可能是查库异常。
+                    direct = self._assign_preferred_confirmed(
+                        ticket_context, pref_raw, ltag,
+                    )
+                    if direct is not None:
+                        self._log_assignment_result(
+                            ticket=ticket_context, result=direct,
+                            candidates=engineer_profiles, ranked_scores={},
+                            source="倾向人连续两次确认", ltag=ltag,
+                        )
+                        return direct
+                    logger.error(
+                        f"{ltag} 倾向人连续两次确认直派失败（查库异常）{pref_raw}，降级智能派单"
+                    )
+                in_pool = next(
+                    (e for e in engineer_profiles if e.id == pref_raw), None,
                 )
-                logger.info(
-                    f"{ltag} 用户倾向处理人: {pref_name}"
-                    f"（精排保底 {getattr(self._config, 'preferred_floor', 0.9):.1f}"
-                    f"{'，强制保留进候选' if self._config.preferred_assignee_force_keep else ''}）"
-                )
+                if in_pool is not None:
+                    preferred_assignee_id = pref_raw
+                    pref_name = in_pool.name
+                    logger.info(
+                        f"{ltag} 用户倾向处理人: {pref_name}({pref_raw})"
+                        f"（精排保底 {getattr(self._config, 'preferred_floor', 0.9):.1f}"
+                        f"{'，强制保留进候选' if self._config.preferred_assignee_force_keep else ''}）"
+                    )
+                else:
+                    pref_incomplete_first_guard = True
+                    logger.info(
+                        f"{ltag} 用户倾向处理人 {pref_raw} 画像不完整/不在准入池："
+                        f"首次护栏不准入，智能派单结束后 tip 提醒；"
+                        f"若再次选择同一人将无条件直派"
+                        f"（上次 preferred_id={prev_pref or '-'}）"
+                    )
 
         # ── Step 1: 候选收紧（部门 → 产品 → 模块）──
         tighten: TightenResult = await self._tightener.tighten(
@@ -272,16 +317,16 @@ class DispatchFlow:
             f"产品={tighten.product.product or '-'} | 模块层=已移除(不收紧)"
         )
 
-        # ── Step 2: 打标（不踢自提人；标签一路传到仲裁）──
+        # ── Step 2: 解析身份 ID（打标在 Step4 Ranker；此处只解析 + 模糊截断）──
         creator_id = self._resolve_creator_id(ticket_context)
         prev_assignee_id = self._resolve_prev_assignee_id(ticket_context)
         if creator_id:
-            logger.info(f"{ltag} Step2 提单人={creator_id} 保留在候选（标记提单人，交由LLM判断能否接单）")
+            logger.info(f"{ltag} Step2 提单人={creator_id}（打标，不踢人）")
         if prev_assignee_id:
-            logger.info(f"{ltag} Step2 原接单人={prev_assignee_id}（标记原用户不满意的接单人）")
+            logger.info(f"{ltag} Step2 原接单人={prev_assignee_id}（在候选则打标避开，不加回）")
         skip_recall = match_vague_strong_signal(ticket_context, self._config)
         if skip_recall:
-            logger.info(f"{ltag} Step2 模糊强信号命中 → 跳过 Step3–6，进 Step7")
+            logger.info(f"{ltag} Step2 模糊强信号(dispatch_hint=severe) → 跳过 Step3–6，进 Step7")
             result = self._run_step7(
                 ticket_context, contact_assignee_id, contact_name,
                 engineer_profiles, REASON_VAGUE, ltag,
@@ -289,50 +334,34 @@ class DispatchFlow:
             return self._finalize_assignment(
                 ticket_context, result, candidates, {},
                 "Step7兜底", ltag, specified_unresolved, engineer_profiles,
+                pref_incomplete_first_guard=pref_incomplete_first_guard,
             )
 
-        # ── Step 2.5: 强制保留项目对接人（即使被部门/产品/排除提单人过滤掉也加回候选）──
-        # 例外：对接人 == 提单人（自提单）时**不**强制保留，交由 Step2 正常排除（自提不自接）。
-        if contact_assignee_id:
-            creator_raw = (ticket_context.creator or "").strip()
-            try:
-                from app.core.user_identity import to_user_id
-                creator_id = to_user_id(creator_raw) or creator_raw
-            except Exception:
-                creator_id = creator_raw
-            if contact_assignee_id == creator_id:
-                creator_raw_name = next(
-                    (e.name for e in engineer_profiles if e.id == creator_id),
-                    creator_id,
-                )
-                logger.info(
-                    f"{ltag} Step2.5 对接人==提单人({creator_raw_name}({creator_id}))，不强制保留（自提不自接）"
-                )
-            elif not any(e.id == contact_assignee_id for e in candidates):
-                # 对接人可能仍在全量工程师里但被过滤掉 → 强制补回
-                contact_eng = next(
-                    (e for e in engineer_profiles if e.id == contact_assignee_id), None
-                )
-                if contact_eng is not None:
-                    candidates.append(contact_eng)
-                    logger.info(
-                        f"{ltag} Step2.5 强制保留项目对接人 {contact_name}({contact_assignee_id})"
-                        f" -> 候选 {len(candidates)}人"
-                    )
-
-        # ── Step 2.6: 强制保留用户倾向处理人（预留：即使被部门/产品/排除提单人过滤也加回候选）──
-        if (
-            preferred_assignee_id
-            and self._config.preferred_assignee_force_keep
-            and not any(e.id == preferred_assignee_id for e in candidates)
-        ):
-            pref_eng = next(
-                (e for e in engineer_profiles if e.id == preferred_assignee_id), None
+        # ── Step 2.5–2.6: 被 Step1 滤掉但身份仍需进窗口 → 从准入池加回 ──
+        # 对接人：仅当 ≠ 提单人时加回。倾向人：force_keep。
+        # 原不满意：只打标、不加回（不在收紧后候选里则 Step6 看不到该标签）。
+        # 项目经理：不加回、不打标（仅 Step7 兜底）。
+        if contact_assignee_id and contact_assignee_id != creator_id:
+            kept = self._force_keep_engineer(
+                candidates, engineer_profiles, contact_assignee_id,
             )
-            if pref_eng is not None:
-                candidates.append(pref_eng)
+            if kept is not None:
                 logger.info(
-                    f"{ltag} Step2.6 强制保留用户倾向处理人 {pref_name}({preferred_assignee_id})"
+                    f"{ltag} Step2.5 强制加回对接人 {contact_name}({contact_assignee_id})"
+                    f" -> 候选 {len(candidates)}人"
+                )
+        elif contact_assignee_id and contact_assignee_id == creator_id:
+            logger.info(
+                f"{ltag} Step2.5 对接人==提单人({contact_assignee_id})，不加回对接人身份"
+            )
+
+        if preferred_assignee_id and self._config.preferred_assignee_force_keep:
+            kept = self._force_keep_engineer(
+                candidates, engineer_profiles, preferred_assignee_id,
+            )
+            if kept is not None:
+                logger.info(
+                    f"{ltag} Step2.6 强制加回倾向接单人 {pref_name}({preferred_assignee_id})"
                     f" -> 候选 {len(candidates)}人"
                 )
 
@@ -353,9 +382,11 @@ class DispatchFlow:
         if isinstance(l1_fut, Exception):
             logger.warning(f"{ltag} Step3 画像召回异常: {l1_fut}")
             recall_result.llm_recall = {}
+            recall_result.llm_reasons = {}
         else:
-            recall_result.llm_recall = l1_fut or {}
-            recall_result.llm_reasons = dict(getattr(self._llm_recall, "last_reasons", {}) or {})
+            scores, reasons = LlmRecall.unpack_arecall(l1_fut)
+            recall_result.llm_recall = scores
+            recall_result.llm_reasons = reasons
             self._log_recall_top(
                 ltag, "画像", recall_result.llm_recall, candidates, "画像召回(逐人置信)", count=8,
             )
@@ -445,12 +476,16 @@ class DispatchFlow:
         return self._finalize_assignment(
             ticket_context, result, candidates, ranked_scores,
             decision_source, ltag, specified_unresolved, engineer_profiles,
+            pref_incomplete_first_guard=pref_incomplete_first_guard,
         )
 
     def _run_step7(
         self, ticket, contact_id, contact_name, engineers, reason, ltag,
     ) -> AssignmentResult:
-        """对接人 → 本单项目经理 → 配置项目经理。都空则返回未指派结果（写 tip，不编精排 #1）。"""
+        """对接人 → 本单项目经理 → 配置项目经理。都空则返回未指派结果（写 tip，不编精排 #1）。
+
+        这三人都是配置的兜底人，不看智能派单准入门槛（画像可以不完整）。
+        """
         row = self._load_project_row(ticket)
         project_pm_id, project_pm_name = self._pm_from_row(row, engineers)
         cfg_pm = self._config_project_manager()
@@ -483,6 +518,7 @@ class DispatchFlow:
     def _finalize_assignment(
         self, ticket, result, candidates, ranked_scores, source, ltag,
         specified_unresolved, engineer_profiles,
+        pref_incomplete_first_guard: bool = False,
     ):
         self._log_assignment_result(
             ticket=ticket, result=result, candidates=candidates,
@@ -510,6 +546,10 @@ class DispatchFlow:
         if specified_unresolved:
             prof = dict(result.profile or {})
             prof["specified_name"] = specified_unresolved
+            result.profile = prof
+        if pref_incomplete_first_guard:
+            prof = dict(result.profile or {})
+            prof["pref_incomplete_first_guard"] = True
             result.profile = prof
         if getattr(self._config, "dept_profiles_missing", False):
             prof = dict(result.profile or {})
@@ -631,18 +671,20 @@ class DispatchFlow:
         else:
             logger.info(f"{ltag} 排名: 无候选排名数据")
 
-    # ── Step 2 实现: 识别提单人 users.id（不再排除，仅标记"提单人"，交由 LLM 判断可否接单）──
+    @staticmethod
+    def _force_keep_engineer(candidates, pool, eid):
+        """若 eid 不在 candidates 且在准入池，则 append 并返回该人；否则 None。"""
+        if not eid or any(e.id == eid for e in candidates):
+            return None
+        hit = next((e for e in pool if e.id == eid), None)
+        if hit is None:
+            return None
+        candidates.append(hit)
+        return hit
+
     @staticmethod
     def _resolve_creator_id(ticket: TicketContext) -> Optional[str]:
-        """识别提单人 users.id。
-
-        原"自提不自接"硬排除已改为"保留 + 标记"：提单人仍留在候选，精排/决策时打上
-        is_creator 标识（[提单人]），由 Step6 LLM 判断该提单人是否恰当接单
-        （如"派单算法 bug"由派单引擎负责人自提时可合理接回给自己）。
-        - 提单人 = TicketContext.creator（存 users.id 或 username）
-        - 匹配不到（如提单人不是工程师）→ 返回 None，不启用自提标识
-        - Step 0（提单人指定）在 Step 1 之前已直接返回，不受本逻辑影响
-        """
+        """识别提单人 users.id；保留在候选并打 [提单人]，由 Step6 判断可否接。"""
         creator = (ticket.creator or "").strip()
         if not creator:
             return None
@@ -738,7 +780,93 @@ class DispatchFlow:
             nm = pm_id
         return str(pm_id), nm
 
-    # ── 用户倾向处理人解析（预留功能，Step 4 加权 / 强制保留用）──
+    # ── 用户倾向处理人（preferred_assignee）──
+    @staticmethod
+    def _normalize_preferred_id(ticket: TicketContext) -> Optional[str]:
+        """取出 ticket.preferred_assignee 并归一成 users.id；空则 None。不校验准入池。"""
+        preferred = (getattr(ticket, "preferred_assignee", None) or "").strip()
+        if not preferred:
+            return None
+        try:
+            from app.core.user_identity import to_user_id
+            return (to_user_id(preferred) or preferred).strip() or None
+        except Exception:
+            return preferred
+
+    @staticmethod
+    def _prev_dispatch_preferred_id(task_id) -> Optional[str]:
+        """上一轮派单日志里的 preferred_id（同一工单最近一条非空）。"""
+        try:
+            from sqlalchemy import select
+            from app.core.db import SessionLocal
+            from app.models.task_dispatch_log import TaskDispatchLog
+
+            tid = int(task_id) if str(task_id).isdigit() else task_id
+            db = SessionLocal()
+            try:
+                row = db.execute(
+                    select(TaskDispatchLog.preferred_id)
+                    .where(TaskDispatchLog.task_id == tid)
+                    .where(TaskDispatchLog.preferred_id.isnot(None))
+                    .where(TaskDispatchLog.preferred_id != "")
+                    .order_by(TaskDispatchLog.dispatch_round.desc())
+                    .limit(1)
+                ).scalar_one_or_none()
+                return (str(row).strip() if row else None) or None
+            finally:
+                db.close()
+        except Exception as e:
+            logger.warning(f"[派单:{task_id}] 读取上一轮 preferred_id 失败: {e}")
+            return None
+
+    def _assign_preferred_confirmed(
+        self,
+        ticket: TicketContext,
+        pref_id: str,
+        ltag: str,
+    ) -> Optional[AssignmentResult]:
+        """连续两次同一倾向人 → 无条件直派（全量 users，不问画像全不全）。
+
+        重派名单来自用户表，pref_id 产品上必然存在；返回 None 仅表示查库/组装异常。
+        """
+        try:
+            from ai.agents.AiDiagnosisPlatform.assigner.sync.engineers_sync import (
+                _fetch_from_users_table,
+            )
+            rows = _fetch_from_users_table()
+        except Exception as e:
+            logger.error(f"{ltag} 倾向人连续确认查库失败: {e}")
+            return None
+        hit = next((r for r in (rows or []) if (r.get("id") or "") == pref_id), None)
+        if not hit:
+            logger.error(
+                f"{ltag} 倾向人 {pref_id} 在用户表未命中（违背重派选人来自用户表的约定）"
+            )
+            return None
+        stubs = self._everyone_stubs([hit])
+        if not stubs:
+            logger.error(f"{ltag} 倾向人 {pref_id} 用户行无法组装 EngineerProfile")
+            return None
+        winner = stubs[0]
+        missing = _engineer_profile_dict(winner).get("missing") or []
+        logger.info(
+            f"{ltag} 倾向人连续两次确认 → 无条件直派 {winner.name}({winner.id})"
+            f"{'[画像不完整]' if missing else ''}"
+        )
+        return AssignmentResult(
+            engineer_id=winner.id,
+            engineer_name=winner.name,
+            confidence_score=0.95,
+            reasoning=(
+                f"用户连续两次选择倾向处理人 {winner.name}，按指定无条件指派"
+                + ("（接单人画像不完整）" if missing else "")
+            ),
+            decision_type="auto",
+            preferred_id=winner.id,
+            matched_pref=True,
+            profile=_step0_winner_profile(winner, collision_random=False),
+        )
+
     @staticmethod
     def _resolve_preferred_assignee(
         ticket: TicketContext, engineers: List[EngineerProfile],
@@ -766,7 +894,7 @@ class DispatchFlow:
         return matched.id
 
     def _resolve_prev_assignee_id(self, ticket: TicketContext) -> Optional[str]:
-        """原接单人 users.id（重派时前端传 ticket.prev_assignee）。只打标，不强制入候选。"""
+        """原接单人 users.id（重派时 ticket.prev_assignee）。在候选则打标避开，不强制加回。"""
         prev = (getattr(ticket, "prev_assignee", None) or "").strip()
         if not prev:
             return None
@@ -780,23 +908,104 @@ class DispatchFlow:
     # 强信号：提单 Agent 结构化输出的"[指定处理人：贾爽]"等格式
     _PREFERRED_STRONG_RE = None
 
+    @staticmethod
+    def _loads_llm_json(raw: Optional[str]) -> Optional[dict]:
+        """解析 Step0 LLM 输出。中文引号、第一段扁平 JSON 都能认。"""
+        if not isinstance(raw, str) or not raw.strip():
+            return None
+        txt = (
+            raw.replace("\u201c", '"').replace("\u201d", '"')
+            .replace("\u2018", "'").replace("\u2019", "'")
+        )
+        m = re.search(r"\{[^{}]*\}", txt)
+        if not m:
+            m = re.search(r"\{.*\}", txt, re.DOTALL)
+        if not m:
+            return None
+        try:
+            data = json.loads(m.group())
+        except json.JSONDecodeError:
+            return None
+        return data if isinstance(data, dict) else None
+
+    @staticmethod
+    def _split_preferred_names(raw: str) -> List[str]:
+        """把「张三、李四」拆成多个人名；每人仍按 2～6 字。"""
+        parts = [p.strip() for p in re.split(r"[、，,；;]+", raw or "") if p.strip()]
+        return [p for p in parts if 2 <= len(p) <= 6]
+
+    @classmethod
+    def _parse_strong_preferred_names(cls, text: str) -> List[str]:
+        """强信号抽出全部人名，按书写顺序。无人则空列表。"""
+        if not text:
+            return []
+        if cls._PREFERRED_STRONG_RE is None:
+            # 捕获到 ] / 空白 / 冒号为止；顿号逗号留在组内再拆
+            cls._PREFERRED_STRONG_RE = re.compile(
+                r"指定(?:处理人|人|人员)[:：]\s*([^\]\s:：）)】]{2,40})"
+            )
+        m = cls._PREFERRED_STRONG_RE.search(text)
+        if not m:
+            return []
+        return cls._split_preferred_names(m.group(1).strip())
+
+    @classmethod
+    def _parse_strong_preferred(cls, text: str) -> Tuple[Optional[str], bool]:
+        """强信号抽人名：返回 (第一个人, 是否写了多个)。"""
+        names = cls._parse_strong_preferred_names(text)
+        if not names:
+            return None, False
+        return names[0], len(names) >= 2
+
     @classmethod
     def _extract_strong_preferred(cls, text: str) -> Optional[str]:
         """从结构化"指定处理人：XXX"强信号中提取人名（不调 LLM）。
 
         例如 "指定处理人：贾爽" / "[指定处理人：贾爽]" / "指定处理人:张三"。
-        命中返回人名，未命中返回 None（走弱信号兜底）。
+        多人返回名单里的第一个（匹配时按顺序往后试）。未命中返回 None。
         """
-        if not text:
-            return None
-        if cls._PREFERRED_STRONG_RE is None:
-            import re
-            # 匹配 指定处理人/指定人[:：]后跟 2~6 个非分隔字符（排除 ] 空白 标点 冒号）
-            cls._PREFERRED_STRONG_RE = re.compile(
-                r"指定(?:处理人|人|人员)[:：]\s*([^\]\s，,；;:：）)】]{2,6})"
+        first, _ = cls._parse_strong_preferred(text)
+        return first
+
+    async def _resolve_preferred_name(
+        self,
+        ticket: TicketContext,
+        name: str,
+        engineers: List[EngineerProfile],
+        reason_prefix: str,
+    ):
+        """匹配一个指定名：精确 → 拼音 → 全量用户兜底。找不到返回 None。"""
+        matches, pinyin_hit = self._match_engineer_with_pinyin(name, engineers)
+        if matches:
+            winner, llm_reason, collision_random = await self._pick_collision(
+                ticket, name, matches,
             )
-        m = cls._PREFERRED_STRONG_RE.search(text or "")
-        return m.group(1).strip() if m else None
+            collision = len(matches) > 1
+            reason = f"{reason_prefix}{name} → 匹配 {winner.name}"
+            if pinyin_hit:
+                reason += "（按拼音匹配）"
+            if llm_reason:
+                reason += f"（{llm_reason}）"
+            return winner, pinyin_hit, collision, collision_random, reason, matches
+        _m = self._match_preferred_everyone(name)
+        if not _m:
+            return None
+        stubs, everyone_py = _m
+        if not stubs:
+            return None
+        winner, llm_reason, collision_random = await self._pick_collision(
+            ticket, name, stubs,
+        )
+        collision = len(stubs) > 1
+        reason = (
+            f"{reason_prefix}{name} → 匹配 {winner.name}"
+            "（无完整画像，按指定直接指派）"
+        )
+        if everyone_py:
+            reason += "（按拼音匹配）"
+        if llm_reason:
+            reason += f"（{llm_reason}）"
+        return winner, everyone_py, collision, collision_random, reason, stubs
 
     async def _detect_preferred_assignee(
         self, ticket: TicketContext, engineers: List[EngineerProfile],
@@ -816,50 +1025,30 @@ class DispatchFlow:
         text = f"标题: {ticket.title or ''}\n描述: {ticket.problem_description or ''}"
 
         # ── 1. 强信号：结构化"指定处理人：XXX"（提单 Agent 标准输出，直接匹配，不调 LLM）──
-        strong_name = self._extract_strong_preferred(text)
-        if strong_name:
-            # 二次派单感知增强（M5/M6）：精确全等 → 拼音全拼兜底；同名/同音多人走画像完整度/单轮 LLM
-            matches, pinyin_hit = self._match_engineer_with_pinyin(strong_name, engineers)
-            winner = None
-            if matches:
-                winner, llm_reason, collision_random = await self._pick_collision(
-                    ticket, strong_name, matches,
+        strong_names = self._parse_strong_preferred_names(text)
+        if strong_names:
+            specified_multi = len(strong_names) >= 2
+            for idx, strong_name in enumerate(strong_names):
+                resolved = await self._resolve_preferred_name(
+                    ticket, strong_name, engineers, "提单人指定: ",
                 )
-                collision = len(matches) > 1
-                reason = f"提单Agent指定接单人: {strong_name} → 匹配 {winner.name}"
-                if pinyin_hit:
-                    reason += "（按拼音匹配）"
-                if llm_reason:
-                    reason += f"（{llm_reason}）"
-            else:
-                # 指定的人在准入工程师池匹配不到（可能缺画像）→ 全量 active 用户兜底，
-                # 只要确有其人就直接派过去（用户指定优先，不再要求满足工程师画像）。
-                _m = self._match_preferred_everyone(strong_name)
-                if _m:
-                    _everyone_id, _everyone_name, _everyone_py = _m
-                    from ai.agents.AiDiagnosisPlatform.assigner.schemas import EngineerProfile as _EP
-                    winner = _EP(id=_everyone_id, name=_everyone_name)
-                    pinyin_hit = _everyone_py
-                    collision = False
-                    collision_random = False
-                    reason = f"提单Agent指定接单人: {strong_name} → 匹配 {winner.name}（无完整画像，按指定直接指派）"
-                    if pinyin_hit:
-                        reason += "（按拼音匹配）"
-                    llm_reason = ""
-            if winner is not None:
-                # 排单强信号匹配过程：保留 INFO，便于看日志了解"为何派给此人"。
-                # 行首整齐由 logging.ReadableFormatter 解决（[派单:N] 前的定位信息移至行尾）。
+                if resolved is None:
+                    continue
+                winner, pinyin_hit, collision, collision_random, reason, matches = resolved
+                skip_note = ""
+                if specified_multi:
+                    skip_note = f"（多人第{idx + 1}人）" if idx else "（多人只派一人）"
                 logger.info(
-                    f"[派单:{ticket.id}] Step0 [提单人指定-强信号] '{strong_name}' "
-                    f"→ {winner.name}{'(' + winner.id + ')' if collision else ''}"
+                    f"[派单:{ticket.id}] Step0 [提单人指定-强信号] '{strong_name}'"
+                    f"{skip_note}"
+                    f" → {winner.name}{'(' + winner.id + ')' if collision else ''}"
                     f"{' 同名=' + str(len(matches)) if collision else ''}"
                     f"{'[拼音]' if pinyin_hit else ''}"
-                    f"{'[全量兜底/无画像]' if not matches else ''}"
+                    f"{'[全量兜底/无画像]' if '无完整画像' in reason else ''}"
                 )
                 return AssignmentResult(
                     engineer_id=winner.id,
                     engineer_name=winner.name,
-                    # 拼音命中 confidence 降为 0.85（D7）；精确/同名评估维持 0.95
                     confidence_score=0.85 if pinyin_hit else 0.95,
                     reasoning=reason,
                     decision_type="auto",
@@ -867,12 +1056,16 @@ class DispatchFlow:
                     pinyin_match=pinyin_hit,
                     preferred_id=winner.id,
                     matched_pref=True,
-                    profile=_step0_winner_profile(winner, collision_random),
+                    profile=_step0_winner_profile(
+                        winner, collision_random,
+                        specified_name=strong_name,
+                        specified_multi=specified_multi,
+                    ),
                 ), None
             logger.info(
-                f"[派单:{ticket.id}] Step0 强信号指定 '{strong_name}' 未匹配到工程师，走正常派单"
+                f"[派单:{ticket.id}] Step0 强信号指定 {strong_names!r} 均未匹配，走正常派单"
             )
-            return None, strong_name
+            return None, strong_names[0]
 
         # ── 2. 弱信号兜底：自由文本预判命中才走 LLM（避免每单白跑一次 LLM）──
         if not self._maybe_has_preferred(text):
@@ -889,14 +1082,9 @@ class DispatchFlow:
             logger.warning(f"[派单:{ticket.id}] Step0 LLM 识别失败: {e}")
             return None, None
 
-        m = re.search(r"\{.*\}", response, re.DOTALL)
-        if not m:
-            logger.debug(f"[派单:{ticket.id}] Step0 无 JSON，raw: {response[:150]}")
-            return None, None
-        try:
-            data = json.loads(m.group())
-        except json.JSONDecodeError:
-            logger.debug(f"[派单:{ticket.id}] Step0 JSON 解析失败，raw: {response[:200]}")
+        data = self._loads_llm_json(response)
+        if not data:
+            logger.debug(f"[派单:{ticket.id}] Step0 无 JSON，raw: {(response or '')[:150]}")
             return None, None
 
         if not data.get("has_preference"):
@@ -906,46 +1094,21 @@ class DispatchFlow:
         if not preferred_name:
             return None, None
 
-        # 匹配工程师名（二次派单感知增强 M5/M6：精确→拼音；同名/同音多人走画像完整度/单轮 LLM）
-        matches, pinyin_hit = self._match_engineer_with_pinyin(preferred_name, engineers)
-        winner = None
-        if matches:
-            winner, llm_reason, collision_random = await self._pick_collision(
-                ticket, preferred_name, matches,
-            )
-            collision = len(matches) > 1
-            reason = f"提单人指定接单人: {preferred_name} → 匹配 {winner.name}"
-            if pinyin_hit:
-                reason += "（按拼音匹配）"
-            if llm_reason:
-                reason += f"（{llm_reason}）"
-        else:
-            # 指定的处理人在准入工程师池匹配不到（可能缺画像）→ 全量 active 用户兜底，
-            # 只要确有其人就直接派过去（用户指定优先，不再要求满足工程师画像）。
-            _m = self._match_preferred_everyone(preferred_name)
-            if _m:
-                _everyone_id, _everyone_name, _everyone_py = _m
-                from ai.agents.AiDiagnosisPlatform.assigner.schemas import EngineerProfile as _EP
-                winner = _EP(id=_everyone_id, name=_everyone_name)
-                pinyin_hit = _everyone_py
-                collision = False
-                collision_random = False
-                reason = f"提单人指定接单人: {preferred_name} → 匹配 {winner.name}（无完整画像，按指定直接指派）"
-                if pinyin_hit:
-                    reason += "（按拼音匹配）"
-                llm_reason = ""
-        if winner is not None:
+        resolved = await self._resolve_preferred_name(
+            ticket, preferred_name, engineers, "提单人指定接单人: ",
+        )
+        if resolved is not None:
+            winner, pinyin_hit, collision, collision_random, reason, matches = resolved
             logger.info(
                 f"[派单:{ticket.id}] Step0 [提单人指定] '{preferred_name}'"
                 f" → {winner.name}{'(' + winner.id + ')' if collision else ''}"
                 f"{' 同名=' + str(len(matches)) if collision else ''}"
                 f"{'[拼音]' if pinyin_hit else ''}"
-                f"{'[全量兜底/无画像]' if not matches else ''}"
+                f"{'[全量兜底/无画像]' if '无完整画像' in reason else ''}"
             )
             return AssignmentResult(
                 engineer_id=winner.id,
                 engineer_name=winner.name,
-                # 拼音命中 confidence 降为 0.85（D7）；精确/同名评估维持默认
                 confidence_score=0.85 if pinyin_hit else 0.95,
                 reasoning=reason,
                 decision_type="auto",
@@ -953,8 +1116,10 @@ class DispatchFlow:
                 pinyin_match=pinyin_hit,
                 preferred_id=winner.id,
                 matched_pref=True,
-                    profile=_step0_winner_profile(winner, collision_random),
-                ), None
+                profile=_step0_winner_profile(
+                    winner, collision_random, specified_name=preferred_name,
+                ),
+            ), None
 
         logger.info(
             f"[派单:{ticket.id}] Step0 提单人指定 '{preferred_name}'，"
@@ -1006,9 +1171,9 @@ class DispatchFlow:
     def _match_engineer_names(
         cls, name: str, engineers: List[EngineerProfile],
     ) -> List[EngineerProfile]:
-        """按姓名匹配工程师：返回**全部命中的同名集合**（精确 + 包含并集）。
+        """按姓名匹配工程师：返回**姓名严格全等**的全部命中（即同名集合，不含"包含/被包含"）。
 
-        二次派单感知增强（M5/D6b）：匹配到多人即视为同名（name_collision），
+        二次派单感知增强（M5/D6b）：匹配到多个姓名完全相同的人即视为同名（name_collision），
         并按画像完整度排序（`missing` 少者优先，即 department/job_level/
         responsibility_modules 命中数多者靠前），供上层做同名抉择。
         """
@@ -1077,12 +1242,30 @@ class DispatchFlow:
             pass
         return py_hits, True
 
-    def _match_preferred_everyone(self, name: str) -> Optional[tuple]:
-        """全量 active 用户兜底匹配（含无画像者）：精确全等 → 拼音全拼；返回 (uid, uname, pinyin_hit)。
+    @staticmethod
+    def _everyone_stubs(rows: list) -> List[EngineerProfile]:
+        stubs: List[EngineerProfile] = []
+        for r in rows or []:
+            if not r or not r.get("id"):
+                continue
+            mods = r.get("responsibility_modules") or {}
+            if not isinstance(mods, dict):
+                mods = {}
+            jl = r.get("job_level")
+            stubs.append(EngineerProfile(
+                id=r["id"],
+                name=(r.get("name") or "").strip() or r["id"],
+                department=(r.get("department") or "").strip() or None,
+                job_level=jl if jl else 0,
+                responsibility_modules=mods,
+            ))
+        return stubs
 
-        用途：当指定的处理人在「准入画像工程师列表」里匹配不到（例如 TA 缺部门/责任模块，没进派单候选池），
-        只要该人确实存在于 users（status='active'），仍按用户意愿直接指派——即「指定了就直接派过去」。
-        返回 None 表示全量 active 用户里也没有该人（只能走正常派单）。
+    def _match_preferred_everyone(self, name: str) -> Optional[tuple]:
+        """全量 active 用户兜底：精确全等 → 拼音全拼。返回 (stubs, pinyin_hit)。
+
+        准入池没有此人（缺部门/职级/责任模块）时，只要在职名单里有，仍按指定派。
+        同名/同音多人交给 _pick_collision，不再取表里第一个。
         """
         if not name:
             return None
@@ -1095,16 +1278,16 @@ class DispatchFlow:
         if not rows:
             return None
         name = name.strip()
-        # 精确全等
         exact = [r for r in rows if (r.get("name") or "").strip() == name]
         if exact:
-            return exact[0]["id"], exact[0]["name"], False
-        # 拼音全拼兜底
+            stubs = self._everyone_stubs(exact)
+            return (stubs, False) if stubs else None
         name_py = self._to_pinyin(name)
         if name_py:
             py = [r for r in rows if self._to_pinyin((r.get("name") or "").strip()) == name_py]
             if py:
-                return py[0]["id"], py[0]["name"], True
+                stubs = self._everyone_stubs(py)
+                return (stubs, True) if stubs else None
         return None
 
     async def _pick_collision(
@@ -1113,54 +1296,54 @@ class DispatchFlow:
         """二次派单感知增强（M5/D6b）：同名多人抉择。
 
         前提：matches 已按画像完整度排序（_match_engineer_names 结果）。
-        - 完整度不同（第一个最完整）→ 取 matches[0]。
-        - 完整度相同 → 单轮 LLM 抉择（JSON {selected_id, reason} / {can_determine:false}）；
-          分辨不出 → 随机选（画像多半两边都不完整，tip 提醒补画像）；LLM 失败 → 取第一个。
-        返回 (winner, llm_reason, collision_random)。异常安全：任何失败都回退到 matches[0]。
+        只让「最完整那一档」参与：缺项数 = 第一名的人进 LLM / 随机，残缺更差的不争。
+        该档仅一人 → 直接取；多人 → 单轮 LLM；分辨不出 / id 不在档内 → 在该档随机；
+        LLM 失败 → 该档第一个。异常安全：任何失败都回退到 pool[0]。
+        返回 (winner, llm_reason, collision_random)。
         """
         if not matches:
             return None, "", False
         if len(matches) == 1:
             return matches[0], "", False
-        # 画像完整度是否相同（前两名 missing 数是否相等）
+
         def _missing(e: EngineerProfile) -> int:
             return len((_engineer_profile_dict(e).get("missing")) or [])
-        try:
-            _same = _missing(matches[0]) == _missing(matches[1])
-        except Exception:
-            _same = False
-        if not _same:
-            # 完整度不同 → 取最完整者
-            return matches[0], "", False
 
-        # 完整度相同 → 单轮 LLM 抉择
-        cand_list = "、".join(llm_person_label(eng=e) for e in matches)
+        try:
+            best = _missing(matches[0])
+            # matches[0] 自己就满足 _missing(e)==best，故 pool 一定非空（无需 or 兜底）
+            pool = [e for e in matches if _missing(e) == best]
+        except Exception:
+            pool = list(matches)
+        if len(pool) == 1:
+            return pool[0], "", False
+
+        cand_list = "、".join(llm_person_label(eng=e) for e in pool)
         try:
             from ai.core import get_llm_client
             llm = await get_llm_client()
             from ai.agents.AiDiagnosisPlatform.assigner.prompts.step0 import build_collision
             prompt = build_collision(ticket, cand_list)
             resp = await llm.complete(prompt, max_tokens=200, temperature=0.2)
-            m = re.search(r"\{.*\}", resp or "", re.DOTALL)
-            if m:
-                data = json.loads(m.group())
-                # prompt 约定无法区分时输出 can_determine:false；以前误写成 is True，这条出口等于睡着。
+            data = self._loads_llm_json(resp)
+            if data:
+                # prompt 约定无法区分时输出 can_determine:false
                 if data.get("can_determine") is False:
                     logger.info(
                         f"[派单:{ticket.id}] 同名 '{pref_name}' LLM 无法区分，随机选择一个"
                     )
-                    return random.choice(matches), "同名无法区分，随机选择", True
+                    return random.choice(pool), "同名无法区分，随机选择", True
                 sel = data.get("selected_id") or ""
                 reason = (data.get("reason") or "").strip()
-                if any(e.id == sel for e in matches):
-                    return next(e for e in matches if e.id == sel), reason, False
+                if any(e.id == sel for e in pool):
+                    return next(e for e in pool if e.id == sel), reason, False
                 logger.info(
-                    f"[派单:{ticket.id}] 同名 '{pref_name}' LLM 返回 id 不在候选内({sel})，随机选择"
+                    f"[派单:{ticket.id}] 同名 '{pref_name}' LLM 返回 id 不在最完整档({sel})，随机选择"
                 )
-                return random.choice(matches), "同名未能区分，随机选择", True
+                return random.choice(pool), "同名未能区分，随机选择", True
         except Exception as e:
             logger.warning(f"[派单:{ticket.id}] 同名 '{pref_name}' 单轮 LLM 抉择失败，兜底取第一个: {e}")
-        return matches[0], "同名评估失败，已按默认选择", False
+        return pool[0], "同名评估失败，已按默认选择", False
 
     def reload_config(self):
         self._config.reload()

@@ -1,6 +1,7 @@
 // 可复用 AI 对话面板 — 提单 Agent（/api/ai/qa/ask/stream）
 // 用于「我要摇人」页面：诊断+提单。系统任务页面不再使用 ChatPanel。
 import { memo, useState, useEffect, useRef, useCallback, useMemo, type ReactNode, type CSSProperties } from 'react';
+import { createPortal } from 'react-dom';
 import { useNavigate } from 'react-router-dom';
 
 import { Textarea, Toast, Popup, Tag, Loading } from 'tdesign-mobile-react';
@@ -25,12 +26,13 @@ const REMOTE_TYPE_OPTIONS: { value: string; label: string }[] = [
   { value: 'sunflower', label: '向日葵' },
   { value: 'other', label: '其他' },
 ];
-import { parseBackendDayjs } from '@/shared/utils/time';
+import { parseBackendDayjs, formatBackendTime } from '@/shared/utils/time';
 import type { UserItem } from '@/api/users';
 import { createConversation, getConversation, appendMessage, readAiSessionId, updateMessageContent } from '@/api/conversation';
 import { createRequest } from '@/api/client';
 import { kickToLogin, isKickingToLogin } from '@/shared/utils/session';
 import { compressImage } from '@/shared/utils/imageCompress';
+import shareThumbUrl from '@/shared/assets/share-thumb.png?inline';
 import { dedupeFileNames } from '@/shared/utils/uniqueFileNames';
 import { useInertiaScroll } from '@/shared/hooks/useInertiaScroll';
 import MarkdownRenderer from '@/shared/components/MarkdownRenderer';
@@ -108,37 +110,9 @@ interface Message {
   };
 }
 
-// 二次派单感知增强（M3）：按详情 redispatch.result 生成派单结果提醒（与后端 _redispatch_tip 同一四分支口径）
-function redispatchTipFromResult(result?: {
-  matched_pref?: boolean | null;
-  name_collision?: boolean | null;
-  pinyin_match?: boolean | null;
-  assigned_name?: string | null;
-  preferred_name?: string | null;
-  profile?: { missing?: string[] | null } | null;
-}): string | undefined {
-  if (!result) return undefined;
-  const assignedName = result.assigned_name || '';
-  const prefName = result.preferred_name || '';
-  let tip: string | undefined;
-  // ② 未派到指定人（仅当确实存在用户指定的倾向人时才算「未派到指定人」；
-  //    首次派单无倾向处理人时 matched_pref 默认为 false，但此时并无「指定的 X」，不应显示该提醒）
-  if (result.matched_pref === false && prefName) {
-    tip = `未派给您指定的【${prefName}】，已派给【${assignedName}】`;
-  } else if (result.pinyin_match) {
-    // ④ 拼音/近似名命中
-    tip = `按拼音匹配到【${assignedName}】（与输入【${prefName || assignedName}】不同字），如非此人请更正`;
-  } else if (result.name_collision) {
-    // ③ 同名命中
-    tip = `指派人存在同名，已按评估选择【${assignedName}】`;
-  }
-  // ① 画像不完整（可叠加追加）
-  const missing = result.profile?.missing || [];
-  if (missing.length) {
-    const suffix = '；该接单人画像不完整，待补充';
-    tip = tip ? tip + suffix : '该接单人画像不完整，待补充';
-  }
-  return tip || undefined;
+function tipFromRedispatchResult(result?: { tip_detail?: string | null } | null): string | undefined {
+  const t = (result?.tip_detail || '').trim();
+  return t || undefined;
 }
 
 const uid = () => Date.now().toString() + Math.random().toString(36).slice(2, 6);
@@ -338,6 +312,7 @@ const mergeDbMessages = (prev: Message[], fresh: Message[]): Message[] => {
 // 单条消息气泡（React.memo）：流式期间仅最后一条 content/streaming 变化，历史消息跳过整列表重渲染，消除抖动
 const MessageBubble = memo(function MessageBubble({
   msg, editingId, compact, expandedDesc, onToggleDesc, onToggleReaction, onCopy, onEditStart, onEditChange, onEditSave,   onEditCancel, onImageClick, onOpenTicket, onRedispatch, onProjectChoice, answered, selectedChoice,
+  selectMode, checked, onCheck, onEnterSelect,
 }: {
   msg: Message;
   editingId: string | null;
@@ -358,9 +333,50 @@ const MessageBubble = memo(function MessageBubble({
   // 禁用防重复发序号）；selectedChoice=答复序号对应按钮（加深显示）
   answered?: boolean;
   selectedChoice?: number;
+  // 转发多选（0911）：长按消息进入多选；多选模式下点击整条切换勾选
+  selectMode?: boolean;
+  checked?: boolean;
+  onCheck?: (id: string) => void;
+  onEnterSelect?: (id: string) => void;
 }) {
+  // 长按 500ms 进入多选（转发记录）。编辑中/流式中不触发；语音长按在输入区不冲突。
+  const pressTimerRef = useRef<number | null>(null);
+  const clearPress = () => {
+    if (pressTimerRef.current !== null) {
+      clearTimeout(pressTimerRef.current);
+      pressTimerRef.current = null;
+    }
+  };
+  // 长按触发后置真，抑制紧随的 click（防多选刚开就误触气泡内部交互）
+  const suppressClickRef = useRef(false);
+  const canLongPress = !!onEnterSelect && editingId !== msg.id && !msg.streaming && !msg.uploading && !msg.phase;
   return (
-    <div className={`chat-bubble-wrap ${msg.role === 'user' ? 'is-right' : 'is-left'}`}>
+    <div
+      className={`chat-bubble-wrap ${msg.role === 'user' ? 'is-right' : 'is-left'}${selectMode ? ' is-selecting' : ''}${selectMode && checked ? ' is-checked' : ''}`}
+      data-msg-id={msg.id}
+      onPointerDown={canLongPress && !selectMode ? (e) => {
+        // 仅主键/触摸；移动指针滑出取消
+        if (e.button !== 0) return;
+        clearPress();
+        pressTimerRef.current = window.setTimeout(() => {
+          suppressClickRef.current = true;
+          onEnterSelect?.(msg.id);
+          if (navigator.vibrate) navigator.vibrate(15);
+        }, 500);
+      } : undefined}
+      onPointerUp={clearPress}
+      onPointerLeave={clearPress}
+      onPointerCancel={clearPress}
+      onClick={selectMode ? () => {
+        if (suppressClickRef.current) { suppressClickRef.current = false; return; }
+        onCheck?.(msg.id);
+      } : undefined}
+    >
+      {selectMode && (
+        <div className={`chat-select-check${checked ? ' is-on' : ''}`} aria-hidden>
+          {checked && <Check size={14} strokeWidth={3} />}
+        </div>
+      )}
       <div className={`chat-bubble ${msg.role === 'user' ? 'is-user' : 'is-ai'}`}>
         {msg.imageUrl && (
           <div className="chat-bubble__media">
@@ -497,9 +513,12 @@ const MessageBubble = memo(function MessageBubble({
                   </span>
                 )}
               </div>
-              {/* 二次派单感知增强（M3）：派单结果提醒单行（警示色，整卡点击进详情） */}
+              {/* 派单提醒单行：标签蓝、正文灰，整卡点击进详情 */}
               {msg.ticket_overview.redispatch_tip && (
-                <div className="chat-ticket-overview__tip">派单结果提醒：{msg.ticket_overview.redispatch_tip}</div>
+                <div className="chat-ticket-overview__tip">
+                  <span className="chat-ticket-overview__tip-label">派单提醒：</span>
+                  <span className="chat-ticket-overview__tip-text">{msg.ticket_overview.redispatch_tip}</span>
+                </div>
               )}
             </div>
           ) : msg.content ? (
@@ -666,6 +685,20 @@ const TICKET_TYPE_LABEL: Record<string, string> = {
   problem: '报障', bug: '缺陷', feature: '需求', support: '支持', other: '其他',
 };
 
+// AI 诊断输入框轮播提示（复刻 DiscussionPanel 讨论区小技巧轮播）。两个目的：
+// ①行为纠正——先描述问题再转工单（有用户上来就说转工单，没描述没法提准）；
+// ②功能引导——查工单/查项目/描述现象/指定处理人。仅 call 场景轮播，其他场景静态文案。
+// 文案须 ≤12 个全角字宽（iPhone 输入框单行实容量）：Textarea autosize 跟 placeholder
+// 行数走，超一行会把输入框撑到两三行并在轮换间跳动（0911 手机实测）。
+export const AI_INPUT_PLACEHOLDER_TIPS = [
+  '先描述问题，再说「提单」',
+  '指定处理人：提单给张三',
+  '有问题？直接描述现象',
+  '试试：我有哪些工单？',
+  '我的xxx工单处理得如何？',
+  '试试：我名下有哪些项目？',
+];
+
 // 按会话 id 的内存消息缓存（模块级）：切走前把当前会话最新 messages（含未落库的乐观消息）存入，
 // 切回时优先从此同步恢复。提升到模块级以跨 ChatPanel 卸载/重挂载（切 Tab）存活——
 // 否则切 Tab 卸载后 ref 丢失，切回只能落库重拉（且 appendMessage 落库竞态会丢新消息）。
@@ -683,6 +716,228 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
   // 图片预览：点击用户气泡图片 → 全屏遮罩放大查看
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [input, setInput] = useState('');
+  // 输入框 placeholder 轮播（仅 AI 诊断场景）：3s 一换，输入有内容时 placeholder
+  // 本身不显示，无需暂停逻辑
+  const [inputTipIndex, setInputTipIndex] = useState(0);
+  useEffect(() => {
+    if (!isCall) return;
+    const timer = setInterval(
+      () => setInputTipIndex((i) => (i + 1) % AI_INPUT_PLACEHOLDER_TIPS.length), 3000);
+    return () => clearInterval(timer);
+  }, [isCall]);
+  const rotatingPlaceholder = isCall ? AI_INPUT_PLACEHOLDER_TIPS[inputTipIndex] : '发消息…';
+
+  // ── 聊天记录转发（0911）：长按消息进入多选 → 生成品牌化长图（宣传引流场景：
+  // 把「我问 AI 答」的记录转给同事/客户，证明摇人吧能解决问题）。仅 call 场景。
+  const [selectMode, setSelectMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [forwardImage, setForwardImage] = useState<string | null>(null);
+  const [forwardBusy, setForwardBusy] = useState(false);
+
+  const enterSelect = useCallback((id: string) => {
+    setSelectMode(true);
+    setSelectedIds(new Set([id]));
+  }, []);
+  const exitSelect = useCallback(() => {
+    setSelectMode(false);
+    setSelectedIds(new Set());
+  }, []);
+  const toggleCheck = useCallback((id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
+  const selectAllVisible = useCallback(() => {
+    setSelectedIds(new Set(messages
+      .filter((m) => m.role === 'user' || (!m.streaming && !m.phase))
+      .map((m) => m.id)));
+  }, [messages]);
+
+  const pickedMsgs = useMemo(
+    () => messages.filter((m) => selectedIds.has(m.id)), [messages, selectedIds]);
+
+  const copyForwardText = useCallback(async () => {
+    if (!pickedMsgs.length) return;
+    const text = [
+      '【摇人吧 · 与 AI 助手的对话记录】',
+      ...pickedMsgs.map((m) => `${m.role === 'user' ? '问' : '答'}：${(m.content || '').trim()}`),
+      '—— 来自「摇人吧」服务号 · AGV/AMR 现场问题，问 AI 就行',
+    ].join('\n\n');
+    try {
+      await navigator.clipboard.writeText(text);
+      Toast({ message: '已复制为文本', theme: 'success' });
+    } catch {
+      Toast({ message: '复制失败，请重试', theme: 'error' });
+    }
+  }, [pickedMsgs]);
+
+  const fmtTs = (ts: string) => formatBackendTime(ts);
+  const makeForwardImage = useCallback(async () => {
+    if (!pickedMsgs.length || forwardBusy) return;
+    setForwardBusy(true);
+    try {
+      const root = document.createElement('div');
+      root.className = 'forward-snapshot';
+      const who = name || username || '用户';
+      const head = document.createElement('div');
+      head.className = 'forward-snapshot__head';
+      // 头像 base64 内联：html2canvas useCORS 会让外链图带跨域标记加载，
+      // 静态服务无 CORS 头则图挂掉落回「摇」字兜底（0911 微信实锤）——dataURL 无请求绝不失败
+      head.innerHTML =
+        `<img class="forward-snapshot__logo" src="${shareThumbUrl}" alt="摇人吧">` +
+        `<div class="forward-snapshot__titles">` +
+        `<div class="forward-snapshot__name">摇人吧 · AI 助手 U老师</div>` +
+        `<div class="forward-snapshot__sub">${who} 的提问记录 · ${fmtTs(pickedMsgs[0].timestamp)} 起</div>` +
+        `</div>`;
+      root.appendChild(head);
+      const bodyEl = document.createElement('div');
+      bodyEl.className = 'forward-snapshot__body';
+      for (const m of pickedMsgs) {
+        const node = messagesContainerRef.current?.querySelector(
+          `[data-msg-id="${CSS.escape(m.id)}"]`);
+        if (!node) continue;
+        const clone = node.cloneNode(true) as HTMLElement;
+        clone.classList.remove('is-selecting', 'is-checked');
+        const chk = clone.querySelector('.chat-select-check');
+        if (chk) chk.remove();
+        bodyEl.appendChild(clone);
+      }
+      root.appendChild(bodyEl);
+      const foot = document.createElement('div');
+      foot.className = 'forward-snapshot__foot';
+      foot.innerHTML =
+        `<div class="forward-snapshot__foot-line"></div>` +
+        `<div class="forward-snapshot__foot-text">来自「摇人吧」服务号 · AGV/AMR 现场问题，问 AI 就行</div>`;
+      root.appendChild(foot);
+      // html2canvas 在微信 WebView 里克隆渲染不吃样式表（0911 实锤：产物无任何
+      // CSS 颜色，头部蓝/气泡蓝全丢）——整树把 computedStyle 逐元素内联进 style
+      // 属性，截图引擎只依赖 inline 样式，与样式表应用兼容性解耦
+      const INLINE_PROPS = [
+        'display', 'position', 'flex-direction', 'flex', 'flex-shrink', 'align-items',
+        'justify-content', 'background', 'background-color', 'color', 'border',
+        'border-radius', 'padding', 'margin', 'font-family', 'font-size', 'font-weight',
+        'line-height', 'text-align', 'width', 'height', 'max-width', 'min-height',
+        'box-shadow', 'opacity', 'overflow', 'box-sizing', 'letter-spacing',
+        'white-space', 'word-break', 'text-decoration', 'list-style',
+      ];
+      const inlineComputed = (el: Element) => {
+        if (!(el instanceof HTMLElement)) return;
+        const cs = getComputedStyle(el);
+        const parts: string[] = [];
+        for (const p of INLINE_PROPS) {
+          const v = cs.getPropertyValue(p);
+          if (v && v !== 'none' && v !== 'normal') parts.push(`${p}:${v};`);
+        }
+        el.style.cssText += parts.join('');
+        for (const child of el.children) inlineComputed(child);
+      };
+      // html2canvas 按字符 fallback 切字体 run，一行内多基线（英文/数字画沉 6~7px）；
+      // 单物理字体无切分必齐：iOS 用 PingFang SC（自带拉丁字形），其余用微软雅黑
+      const isIOS = /iPhone|iPad|iPod/i.test(navigator.userAgent);
+      root.style.fontFamily = isIOS ? '"PingFang SC", sans-serif' : '"Microsoft YaHei", sans-serif';
+      // 必须先挂载再内联：detached 元素的 getComputedStyle 返回空
+      document.body.appendChild(root);
+      inlineComputed(root);
+      try {
+        // 文本预栅格化：html2canvas 按 CJK/拉丁分 baseline 画文本（英文数字画沉 6~7px，
+        // 三平台实锤、字体/行高均治不了）——把文本节点替换成 canvas 亲手画的 img
+        // （fillText 中英混排天然同基线），html2canvas 只画图片+色块，平台无关
+        const rasterizeTexts = (rootEl: HTMLElement) => {
+          const walker = document.createTreeWalker(rootEl, NodeFilter.SHOW_TEXT);
+          const texts: Text[] = [];
+          while (walker.nextNode()) {
+            const n = walker.currentNode as Text;
+            if (n.textContent && n.textContent.trim()) texts.push(n);
+          }
+          for (const node of texts) {
+            const el = node.parentElement;
+            if (!el) continue;
+            const cs = getComputedStyle(el);
+            if (cs.display === 'none' || cs.visibility === 'hidden') continue;
+            const raw = node.textContent ?? '';
+            const fontSize = parseFloat(cs.fontSize) || 13;
+            const font = `${cs.fontStyle} ${cs.fontWeight} ${fontSize}px ${cs.fontFamily}`;
+            const meas = document.createElement('canvas').getContext('2d');
+            if (!meas) continue;
+            meas.font = font;
+            const elW = el.getBoundingClientRect().width;
+            const availW = Math.max(elW - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight), 40) || 300;
+            const lines: string[] = [];
+            for (const seg of raw.split('\n')) {
+              let cur = '';
+              for (const ch of seg) {
+                if (meas.measureText(cur + ch).width > availW && cur) {
+                  lines.push(cur);
+                  cur = ch;
+                } else cur += ch;
+              }
+              lines.push(cur);
+            }
+            const lh = parseFloat(cs.lineHeight) || fontSize * 1.5;
+            const dpr = 2;
+            const w = Math.ceil(Math.max(...lines.map((l) => meas.measureText(l).width), 1)) + 2;
+            const h = Math.ceil(lines.length * lh) + 2;
+            const c = document.createElement('canvas');
+            c.width = Math.ceil(w * dpr);
+            c.height = Math.ceil(h * dpr);
+            const g = c.getContext('2d');
+            if (!g) continue;
+            g.scale(dpr, dpr);
+            g.font = font;
+            g.fillStyle = cs.color;
+            g.textBaseline = 'alphabetic';
+            lines.forEach((l, i) => g.fillText(l, 1, i * lh + (lh + fontSize * 0.72) / 2));
+            const img = document.createElement('img');
+            img.src = c.toDataURL('image/png');
+            img.style.cssText = `display:inline-block;vertical-align:top;width:${w}px;height:${h}px;`;
+            node.replaceWith(img);
+          }
+        };
+        rasterizeTexts(root);
+        const { default: html2canvas } = await import('html2canvas-pro');
+        const canvas = await html2canvas(root, {
+          scale: 2, useCORS: true, backgroundColor: '#eef1f6', logging: false,
+        });
+        let dataUrl = canvas.toDataURL('image/png');
+        // 上传换同域真实 URL：微信对 data:/blob: 图无法长按保存/转发（下载按钮
+        // 也只会在查看器里再展示一遍）。失败落回内存图，不比现状差
+        try {
+          const blob = await (await fetch(dataUrl)).blob();
+          const fd = new FormData();
+          fd.append('file', new File([blob], 'forward.png', { type: 'image/png' }));
+          await useAuthStore.getState().ensureFreshToken();
+          const tok = useAuthStore.getState().token;
+          const resp = await fetch(`${API_CONFIG.AI.BASE_URL}/qa/forward_image`, {
+            method: 'POST', body: fd,
+            headers: tok ? { Authorization: `Bearer ${tok}` } : undefined,
+          });
+          if (resp.ok) {
+            const j = (await resp.json()) as { url?: string };
+            // 后端返回 /api/ai/media/...（media_url_prefix），但测试环境 nginx 前缀是
+            // /t/api/ai——按前端 BASE 重写前缀，否则 img 404 出问号图
+            if (j.url) dataUrl = j.url.replace(/^\/api\/ai/, API_CONFIG.AI.BASE_URL);
+          } else {
+            console.warn('[forward] 上传转发图失败', resp.status);
+          }
+        } catch (e) {
+          console.warn('[forward] 上传转发图失败，用内存图兜底', e);
+        }
+        setForwardImage(dataUrl);
+        exitSelect();
+      } finally {
+        document.body.removeChild(root);
+      }
+    } catch (e) {
+      console.error('[forward] 生成转发图失败', e);
+      const why = e instanceof Error ? e.message : String(e);
+      Toast({ message: `生成失败：${why.slice(0, 60)}`, theme: 'error' });
+    } finally {
+      setForwardBusy(false);
+    }
+  }, [pickedMsgs, forwardBusy, exitSelect, name, username]);
   const [loading, setLoading] = useState(false);
   const [sessionId, setSessionId] = useState<string>('');
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -2136,7 +2391,7 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
     return raw ? Number(raw) : undefined;
   })();
 
-  /** 弹窗打开/类型确定后：拉取该类型的处理阶段列表（默认不选，仅回填默认阶段完成时间 +7 天） */
+  /** 弹窗打开/类型确定后：拉取该类型的处理阶段列表（默认选中第一个步骤，并回填阶段完成时间 +7 天） */
   const loadTicketSteps = useCallback(async (ticketType: string) => {
     if (!ticketType) return;
     setStepsLoading(true);
@@ -2144,11 +2399,16 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
       const res = await qaGetTicketSteps(ticketType);
       const steps = res?.data?.steps ?? [];
       setTicketSteps(steps);
-      // 阶段完成时间默认 +7 天；已有则不动（处理阶段默认不选，由用户手动选择）
+      // 阶段完成时间默认 +7 天；已有则不动。
+      // 处理阶段默认选中第一个步骤：下拉已删空占位项，若不回填 state，浏览器会显示首个
+      // 步骤但 curr_step_id 仍为空，提交时被「请选择处理阶段」误拦（视觉有默认值却提交不了）。
       setTicketConfirm((s) => {
         const overrides = { ...s.overrides };
         if (!overrides.curr_step_endtime) {
           overrides.curr_step_endtime = dayjs().add(7, 'day').toISOString();
+        }
+        if (!overrides.curr_step_id && steps.length > 0) {
+          overrides.curr_step_id = Number(steps[0].id);
         }
         return { ...s, overrides };
       });
@@ -2170,7 +2430,7 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
     try {
       // 必须 skipCache：createRequest 的 GET 默认缓存 5 分钟，否则第二次轮询起命中缓存返回旧 assigned_to，
       // 控制台看不到请求、气泡永远显示"派单中"（只有刷新清空模块级 requestCache 后才真正请求）。
-      const task = await tasksReq<{ assigned_to?: string; assigned_to_name?: string; redispatch?: { result?: Parameters<typeof redispatchTipFromResult>[0] } }>(`/${dbId}`, { skipCache: true });
+      const task = await tasksReq<{ assigned_to?: string; assigned_to_name?: string; redispatch?: { result?: { tip_detail?: string | null } } }>(`/${dbId}`, { skipCache: true });
       if (task.assigned_to) {
         // 只接受后端解析出的真实名字 assigned_to_name，绝不用 assigned_to（裸 id）兜底显示。
         // 若瞬时无法解析（后端 user_map 缓存缺该用户，assigned_to_name 为空/仍等于 id），
@@ -2179,7 +2439,7 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
         if (nameResolved) {
           const assignedName = task.assigned_to_name as string;
           // 二次派单感知增强（M3）：派单完成时从 redispatch.result 生成提醒文案
-          const newOv = { ...ov, assigned_to_name: assignedName, redispatch_tip: redispatchTipFromResult(task.redispatch?.result) };
+          const newOv = { ...ov, assigned_to_name: assignedName, redispatch_tip: tipFromRedispatchResult(task.redispatch?.result) };
           // 注意：不能用 cancelledRef 判断是否更新内存——在 <React.StrictMode> 下，开发模式的
           // effect 双调用会先触发 cleanup（cancelledRef.current=true）再 remount，且 useRef 不重置，
           // 导致该标记永久为 true，setMessages 被跳过 → 气泡永远停在「派单中」（DB 却能回写）。
@@ -2300,7 +2560,7 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
         const latestName = task.assigned_to_name;
         if (latestName && latestName !== ov.assigned_to_name) {
           // 二次派单感知增强（M3）：同步时也刷新派单结果提醒文案
-          const newOv = { ...ov, assigned_to_name: latestName, redispatch_tip: redispatchTipFromResult((task as any)?.redispatch?.result) };
+          const newOv = { ...ov, assigned_to_name: latestName, redispatch_tip: tipFromRedispatchResult((task as { redispatch?: { result?: { tip_detail?: string | null } } }).redispatch?.result) };
           setMessages((prev) => prev.map((x) =>
             x.id === m.id && x.ticket_overview ? { ...x, ticket_overview: newOv } : x
           ));
@@ -2356,6 +2616,13 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
     const projectIdVal = draftField('project_id').trim();
     const projectNameVal = draftField('project').trim();
     const isDual = ticketConfirm.dualTicket;
+
+    // 工单类型必填：下拉已删空占位项，但 AI 草稿 type 缺失/不在枚举内时浏览器会默认
+    // 选中第一项（报障）作为显示文本，state 仍为空 → 此处拦下避免提交生成空类型工单。
+    if (!draftField('type').trim()) {
+      Toast({ message: '请选择工单类型', theme: 'warning' });
+      return;
+    }
 
     // 校验：非双工单要求 project_id；双工单要求项目负责人
     if (!isDual && !projectIdVal) {
@@ -2594,7 +2861,19 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
   return (
     <div className={`chat-panel${compact ? ' is-compact' : ''}`}>
 
-      <div className="chat-view__messages" ref={messagesContainerRef}>
+      {/* 长按消息区禁微信原生菜单（iOS callout/文本选择、安卓 contextmenu），复制走每条消息的复制钮 */}
+      <div
+        className="chat-view__messages"
+        ref={messagesContainerRef}
+        onContextMenu={(e) => e.preventDefault()}
+      >
+        {selectMode && (
+          <div className="chat-select-bar">
+            <button className="chat-select-bar__btn" onClick={exitSelect}>取消</button>
+            <span className="chat-select-bar__info">已选 {selectedIds.size} 条 · 点消息勾选</span>
+            <button className="chat-select-bar__btn" onClick={selectAllVisible}>全选</button>
+          </div>
+        )}
         {messages.length === 0 && (
           <div className="chat-view__empty">
             {!isCall && <div className="chat-view__empty-emoji">{cfg.emptyEmoji}</div>}
@@ -2646,6 +2925,10 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
             selectedChoice={selectedChoice}
             expandedDesc={expandedMsgIds.has(msg.id)}
             onToggleDesc={toggleMsgExpanded}
+            selectMode={isCall && selectMode}
+            checked={selectedIds.has(msg.id)}
+            onCheck={toggleCheck}
+            onEnterSelect={enterSelect}
           />
           );
         })}
@@ -2728,8 +3011,23 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
       )}
 
       {/* 输入区（设计稿单行横排：上传 + 输入框 + 发送 + 新建会话） */}
+      {/* 多选模式：输入区上方出现转发操作条，输入栏本体禁用（防误触） */}
+      {selectMode && (
+        <div className="chat-forward-bar">
+          <button className="chat-forward-bar__btn" onClick={copyForwardText} disabled={!selectedIds.size}>
+            复制文本
+          </button>
+          <button
+            className="chat-forward-bar__btn is-primary"
+            onClick={makeForwardImage}
+            disabled={!selectedIds.size || forwardBusy}
+          >
+            {forwardBusy ? '生成中…' : `生成转发图（${selectedIds.size} 条）`}
+          </button>
+        </div>
+      )}
       <div
-        className="chat-input-bar"
+        className={`chat-input-bar${selectMode ? ' is-select-disabled' : ''}`}
         onKeyDown={(e) => {
           if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(input); }
         }}
@@ -2794,7 +3092,7 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
               <Textarea
                 value={input}
                 onChange={(v) => setInput(String(v))}
-                placeholder="发消息…"
+                placeholder={rotatingPlaceholder}
                 autosize={{ minRows: 1, maxRows: 6 }}
               />
               {textareaMaxed && !textareaFullscreen && (
@@ -2855,7 +3153,7 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 onPaste={handlePaste}
-                placeholder="发消息..."
+                placeholder={rotatingPlaceholder}
                 autoFocus
               />
               <div className="chat-input-bar__fullscreen-footer">
@@ -2903,7 +3201,9 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
                     void loadTicketSteps(t);
                   }}
                 >
-                  <option value="">请选择工单类型</option>
+                  {/* 不展示空占位项：用户误选「请选择工单类型」会提交生成空类型工单。
+                      AI 草稿 type 缺失时 select 显示第一项（报障），但 state 仍为空，
+                      由 handleConfirmTicket 的非空校验兜底拦截。 */}
                   {Object.entries(TICKET_TYPE_LABEL).map(([value, label]) => (
                     <option key={value} value={value}>{label}</option>
                   ))}
@@ -2944,9 +3244,7 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
                   value={selectedStepId ?? ''}
                   onChange={(e) => setDraftField('curr_step_id', e.target.value)}
                 >
-                  {stepsLoading
-                    ? <option value="">加载中…</option>
-                    : <option value="">请选择本工单预期的处理阶段</option>}
+                  {stepsLoading && <option value="">加载中…</option>}
                   {ticketSteps.map((s) => (
                     <option key={s.id} value={s.id}>{s.step_name}</option>
                   ))}
@@ -3122,6 +3420,74 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
           open={!!previewUrl}
           onClose={() => setPreviewUrl(null)}
         />
+
+        {/* 转发图预览：小框居中+图片区可滚动+长按提示。
+            必须 createPortal 挂 body——渲染在面板树内会被带 transform 的祖先
+            劫持 fixed 定位基准（iOS 微信贴下半屏的根因）；样式 inline 绕开
+            旧内核 CSS 兼容与样式缓存 */}
+        {forwardImage && createPortal(
+          <div
+            onClick={() => setForwardImage(null)}
+            style={{
+              position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, zIndex: 1200,
+              background: 'rgba(10, 12, 20, .72)', display: 'flex',
+              alignItems: 'center', justifyContent: 'center', padding: 16, boxSizing: 'border-box',
+            }}
+          >
+            <div
+              onClick={(e) => e.stopPropagation()}
+              style={{
+                background: '#fff', borderRadius: 14, maxWidth: 420, width: '100%',
+                maxHeight: '80vh', display: 'flex', flexDirection: 'column',
+                overflow: 'hidden', boxSizing: 'border-box',
+              }}
+            >
+              <div
+                onContextMenu={(e) => e.preventDefault()}
+                style={{
+                  padding: '10px 14px 6px', fontSize: '12.5px', color: '#6b7280', textAlign: 'center', flexShrink: 0,
+                  // 禁长按弹原生菜单（只设在文本上，不设在容器——安卓长按图片的
+                  // 保存/转发菜单走 contextmenu，容器级拦截会杀掉它）
+                  WebkitTouchCallout: 'none', userSelect: 'none', WebkitUserSelect: 'none',
+                }}
+              >
+                长按图片可直接发送给朋友，或保存图片
+              </div>
+              <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '0 12px', WebkitOverflowScrolling: 'touch' }}>
+                <img src={forwardImage} alt="转发图" style={{ width: '100%', display: 'block', borderRadius: 8 }} />
+              </div>
+              <div
+                style={{ display: 'flex', gap: 10, padding: 12, flexShrink: 0, WebkitTouchCallout: 'none', userSelect: 'none', WebkitUserSelect: 'none' }}
+                onContextMenu={(e) => e.preventDefault()}
+              >
+                <button
+                  style={{
+                    flex: 1.6, background: '#3d9be6', border: 'none', color: '#fff',
+                    fontWeight: 600, borderRadius: 10, padding: '11px 0', fontSize: 14, cursor: 'pointer',
+                  }}
+                  onClick={() => {
+                    const a = document.createElement('a');
+                    a.href = forwardImage;
+                    a.download = `摇人吧对话记录_${Date.now()}.png`;
+                    a.click();
+                  }}
+                >
+                  下载图片
+                </button>
+                <button
+                  style={{
+                    flex: 1, background: '#fff', border: '1px solid #d7dbe4', color: '#374151',
+                    borderRadius: 10, padding: '11px 0', fontSize: 14, cursor: 'pointer',
+                  }}
+                  onClick={() => setForwardImage(null)}
+                >
+                  关闭
+                </button>
+              </div>
+            </div>
+          </div>,
+          document.body,
+        )}
       </div>
     </div>
   );
