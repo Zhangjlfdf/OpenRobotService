@@ -26,7 +26,7 @@ FRONTEND_STATUS_MAP: Dict[str, TaskStatus] = {
     "cancelled": TaskStatus.CANCELED,
 }
 
-# 仪表盘「工单状态监测」监控的六种状态（含 new：新建工单计入工单总数与解决率分母，
+# 仪表盘「工单状态监测」监控的六种状态（含 new：待处理工单计入工单总数与解决率分母，
 # 与前端 TICKET_STATUS_LIST 保持一致；超时/待处理口径不含 new，见 OPEN_STATUSES）
 MONITORED_STATUS_KEYS = ["new", "in_progress", "paused", "resolved", "closed", "cancelled"]
 
