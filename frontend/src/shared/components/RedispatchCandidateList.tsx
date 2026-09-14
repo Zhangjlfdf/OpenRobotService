@@ -5,8 +5,11 @@
 //   ② 同部门：与工单当前接单人部门（refDept）相同的候选择
 //   ③ 其他部门：有画像但非同部门的候选
 //   ④ 待补充：无职责画像的候选（department/modules/duty 全空）——排最后
-// 交互：单选（可取消），选中项以高亮 + ✓ 表示。
+// 交互：单选（可取消），选中项以品牌浅底 + ✓ 表示。
+// 配色：一律使用全局设计 token（蒂芙尼蓝 --primary / --blue-*），与
+//       UserSelect / chip-dropdown 等既有选中态保持一致，禁止硬编码色值。
 import { useEffect, useMemo, useState } from 'react';
+import type { CSSProperties } from 'react';
 import { Toast } from 'tdesign-mobile-react';
 import type { RedispatchCandidate } from '@/api/ticket';
 import { getUsers } from '@/api/users';
@@ -42,8 +45,8 @@ function GroupLabel({ label }: { label: string }) {
       style={{
         padding: '4px 12px',
         fontSize: 12,
-        color: 'var(--td-text-color-secondary, #999)',
-        background: 'var(--td-bg-color-container-hover, #f5f5f5)',
+        color: 'var(--muted-foreground)',
+        background: 'var(--muted)',
       }}
     >
       {label}
@@ -54,7 +57,7 @@ function GroupLabel({ label }: { label: string }) {
 /** 候选搜索框：输入关键词即在全部可指派用户中模糊搜索（找不到精排推荐的人时用） */
 function SearchBox({ keyword, setKeyword }: { keyword: string; setKeyword: (v: string) => void }) {
   return (
-    <div style={{ padding: '8px 12px', borderBottom: '1px solid var(--td-bg-color-component, #eee)' }}>
+    <div style={{ padding: '8px 12px', borderBottom: '1px solid var(--border)' }}>
       <input
         type="text"
         placeholder="搜索全部用户（姓名/账号）"
@@ -62,11 +65,25 @@ function SearchBox({ keyword, setKeyword }: { keyword: string; setKeyword: (v: s
         onChange={(e) => setKeyword(e.target.value)}
         style={{
           width: '100%', boxSizing: 'border-box', padding: '7px 10px', fontSize: 13,
-          border: '1px solid var(--td-component-border, #dcdcdc)', borderRadius: 6, outline: 'none',
+          border: '1px solid var(--border)', borderRadius: 'var(--radius-md)', outline: 'none',
+          background: 'var(--card)', color: 'var(--foreground)',
         }}
       />
     </div>
   );
+}
+
+/** 候选行选中态统一样式：品牌浅底 + ✓，与全局 UserSelect 选中态同口径 */
+function itemStyle(selected: boolean): CSSProperties {
+  return {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 10,
+    padding: '10px 12px',
+    borderBottom: '1px solid var(--border)',
+    cursor: 'pointer',
+    background: selected ? 'var(--primary-soft)' : undefined,
+  };
 }
 
 export default function RedispatchCandidateList({
@@ -131,7 +148,7 @@ export default function RedispatchCandidateList({
       <div className="redispatch-cand" style={{ maxHeight: 320, overflowY: 'auto' }}>
         <SearchBox keyword={keyword} setKeyword={setKeyword} />
         {searchResults.length === 0 ? (
-          <div className="redispatch-cand__empty" style={{ textAlign: 'center', padding: '18px 0', color: '#999' }}>
+          <div className="redispatch-cand__empty" style={{ textAlign: 'center', padding: '18px 0', color: 'var(--muted-foreground)' }}>
             未找到匹配用户
           </div>
         ) : (
@@ -141,26 +158,22 @@ export default function RedispatchCandidateList({
               <div
                 key={`search-${c.engineer_id}`}
                 className={`redispatch-cand__item${selected ? ' redispatch-cand__item--selected' : ''}`}
-                style={{
-                  display: 'flex', alignItems: 'center', gap: 10, padding: '10px 12px',
-                  borderBottom: '1px solid var(--td-bg-color-component, #eee)', cursor: 'pointer',
-                  background: selected ? 'rgba(0, 82, 217, 0.08)' : undefined,
-                }}
+                style={itemStyle(selected)}
                 onClick={() => picked(c)}
               >
                 <div
                   style={{
-                    width: 36, height: 36, borderRadius: '50%', background: '#e8eef7', color: '#0052d9',
+                    width: 36, height: 36, borderRadius: '50%', background: 'var(--blue-soft)', color: 'var(--blue-2)',
                     display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 600, flexShrink: 0,
                   }}
                 >
                   {(c.name || '?').slice(0, 1)}
                 </div>
                 <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontWeight: 600, fontSize: 14 }}>{c.name}</div>
-                  <div style={{ fontSize: 11, color: '#888', marginTop: 2 }}>全部用户</div>
+                  <div style={{ fontWeight: 600, fontSize: 14, color: 'var(--foreground)' }}>{c.name}</div>
+                  <div style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 2 }}>全部用户</div>
                 </div>
-                <div style={{ color: '#0052d9', fontWeight: 700 }}>{selected ? '✓' : '○'}</div>
+                <div style={{ color: selected ? 'var(--primary)' : 'var(--gray-light)', fontWeight: 700 }}>{selected ? '✓' : '○'}</div>
               </div>
             );
           })
@@ -221,15 +234,7 @@ export default function RedispatchCandidateList({
                   <div
                     key={c.engineer_id}
                     className={`redispatch-cand__item${selected ? ' redispatch-cand__item--selected' : ''}`}
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: 10,
-                      padding: '10px 12px',
-                      borderBottom: '1px solid var(--td-bg-color-component, #eee)',
-                      cursor: 'pointer',
-                      background: selected ? 'rgba(0, 82, 217, 0.08)' : undefined,
-                    }}
+                    style={itemStyle(selected)}
                     onClick={() => onPick(c)}
                   >
                     <div
@@ -237,8 +242,8 @@ export default function RedispatchCandidateList({
                         width: 36,
                         height: 36,
                         borderRadius: '50%',
-                        background: selected ? 'var(--td-brand-color, #0052d9)' : '#e8eef7',
-                        color: selected ? '#fff' : '#0052d9',
+                        background: selected ? 'var(--primary)' : 'var(--blue-soft)',
+                        color: selected ? 'var(--primary-foreground)' : 'var(--blue-2)',
                         display: 'flex',
                         alignItems: 'center',
                         justifyContent: 'center',
@@ -250,8 +255,8 @@ export default function RedispatchCandidateList({
                     </div>
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div style={{ display: 'flex', gap: 8, alignItems: 'baseline', flexWrap: 'wrap' }}>
-                        <span style={{ fontWeight: 600, fontSize: 14 }}>{c.name}</span>
-                        <span style={{ fontSize: 11, color: '#888' }}>{dept}{level ? `（${level}）` : ''}</span>
+                        <span style={{ fontWeight: 600, fontSize: 14, color: 'var(--foreground)' }}>{c.name}</span>
+                        <span style={{ fontSize: 11, color: 'var(--muted-foreground)' }}>{dept}{level ? `（${level}）` : ''}</span>
                         {/* 二次派单感知增强（M4）：候选标记（如「项目负责人」），帮用户快速识别 */}
                         {(c.tags || []).map((tag) => (
                           <span
@@ -261,8 +266,8 @@ export default function RedispatchCandidateList({
                               lineHeight: '16px',
                               padding: '0 6px',
                               borderRadius: 3,
-                              color: '#0052d9',
-                              background: 'rgba(0, 82, 217, 0.10)',
+                              color: 'var(--blue-2)',
+                              background: 'var(--blue-soft)',
                               whiteSpace: 'nowrap',
                             }}
                           >
@@ -271,16 +276,16 @@ export default function RedispatchCandidateList({
                         ))}
                       </div>
                       {modules || c.duty ? (
-                        <div style={{ fontSize: 11, color: '#666', marginTop: 2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                        <div style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                           {modules || c.duty}
                         </div>
                       ) : c.department ? (
-                        <div style={{ fontSize: 11, color: '#666', marginTop: 2 }}>{c.department}</div>
+                        <div style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 2 }}>{c.department}</div>
                       ) : (
-                        <div style={{ fontSize: 11, color: '#b45309', marginTop: 2 }}>画像待补充</div>
+                        <div style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 2 }}>画像待补充</div>
                       )}
                     </div>
-                    <div style={{ color: '#0052d9', fontWeight: 700 }}>
+                    <div style={{ color: selected ? 'var(--primary)' : 'var(--gray-light)', fontWeight: 700 }}>
                       {selected ? '✓' : '○'}
                     </div>
                   </div>

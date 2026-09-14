@@ -96,13 +96,13 @@
 
 .op-segment__time {
   font-size: 12px;
-  color: #6b7280;
+  color: var(--muted-foreground);
   font-variant-numeric: tabular-nums;
 }
 
 .op-segment__operator {
   font-size: 12px;
-  color: #9ca3af;
+  color: var(--gray-light);
   margin-top: 2px;
 }
 
@@ -119,20 +119,20 @@
   display: flex;
   align-items: flex-start;
   gap: 10px;
-  background: #f9fafb;
-  border-radius: 8px;
+  background: var(--muted);
+  border-radius: var(--radius-md);
   padding: 8px 10px;
-  border: 1px solid #f3f4f6;
+  border: 1px solid var(--border);
 }
 
-/* 重新指派记录：突出流转类操作，浅青底 + 强调色文字 */
+/* 重新指派记录：突出流转类操作，品牌浅底 + 强调色文字 */
 .op-segment__sub--reassign {
-  background: #ecfeff;
-  border-color: #a5f3fc;
+  background: var(--primary-soft);
+  border-color: var(--border);
 }
 
 .op-segment__sub--reassign .op-segment__action {
-  color: #0e7490;
+  color: var(--sky);
   font-weight: 700;
 }
 
@@ -141,7 +141,7 @@
   width: 22px;
   height: 22px;
   border-radius: 50%;
-  background: #fff;
+  background: var(--card);
   border: 2px solid;
   display: flex;
   align-items: center;
@@ -161,7 +161,7 @@
 
 .op-segment__action {
   font-size: 13px;
-  color: #374151;
+  color: var(--foreground);
   line-height: 1.5;
   word-break: break-all;
   display: flex;
@@ -178,9 +178,9 @@
   line-height: 1.6;
   flex-shrink: 0;
 }
-.op-segment__kind--misassign { color: #b91c1c; background: rgba(239, 68, 68, 0.12); }
-.op-segment__kind--stage { color: #1d4ed8; background: rgba(59, 130, 246, 0.12); }
-.op-segment__kind--other { color: #6b7280; background: #f3f4f6; }
+.op-segment__kind--misassign { color: var(--danger); background: var(--rose-soft); }
+.op-segment__kind--stage { color: var(--blue-2); background: var(--blue-soft); }
+.op-segment__kind--other { color: var(--muted-foreground); background: var(--muted); }
 
 .op-segment__sub-meta {
   display: flex;
@@ -192,7 +192,7 @@
 
 .op-segment__sub-operator {
   font-size: 12px;
-  color: #6b7280;
+  color: var(--muted-foreground);
 }
 
 /* 二级节点：阶段段（step） */
@@ -200,19 +200,19 @@
   position: relative;
   margin: 4px 0;
   padding: 8px 10px 8px 12px;
-  background: linear-gradient(90deg, rgba(99, 102, 241, 0.05), rgba(99, 102, 241, 0.01) 60%, transparent);
-  border-left: 3px solid #a5b4fc;
-  border-radius: 0 8px 8px 0;
+  background: linear-gradient(90deg, var(--lilac-soft), transparent 60%);
+  border-left: 3px solid var(--lilac);
+  border-radius: 0 var(--radius-md) var(--radius-md) 0;
 }
 
 /* 已结束阶段：视觉降饱和，与进行中的阶段区分 */
 .op-segment__step--ended {
-  background: linear-gradient(90deg, rgba(156, 163, 175, 0.1), rgba(156, 163, 175, 0.02) 60%, transparent);
-  border-left-color: #d1d5db;
+  background: linear-gradient(90deg, var(--gray-soft), transparent 60%);
+  border-left-color: var(--gray-light);
 }
 
 .op-segment__step--ended .op-segment__step-name {
-  color: #6b7280;
+  color: var(--muted-foreground);
 }
 
 .op-segment__step-head {
@@ -231,7 +231,7 @@
 .op-segment__step-name {
   font-size: 13.5px;
   font-weight: 700;
-  color: #3730a3;
+  color: var(--lilac);
 }
 
 .op-segment__step-tag {
@@ -243,29 +243,29 @@
 }
 
 .op-segment__step-tag--agreed {
-  color: #047857;
-  background: rgba(16, 185, 129, 0.12);
+  color: var(--sky);
+  background: var(--sky-soft);
 }
 
 .op-segment__step-tag--negotiating {
-  color: #b45309;
-  background: rgba(245, 158, 11, 0.14);
+  color: var(--apricot);
+  background: var(--apricot-soft);
 }
 
 .op-segment__step-tag--escalated {
-  color: #b91c1c;
-  background: rgba(239, 68, 68, 0.12);
+  color: var(--danger);
+  background: var(--rose-soft);
 }
 
 .op-segment__step-tag--started {
-  color: #1d4ed8;
-  background: rgba(59, 130, 246, 0.1);
+  color: var(--blue-2);
+  background: var(--blue-soft);
 }
 
 .op-segment__step-round {
   font-size: 11px;
-  color: #6b7280;
-  background: #f3f4f6;
+  color: var(--muted-foreground);
+  background: var(--muted);
   padding: 1px 8px;
   border-radius: 999px;
 }
@@ -284,9 +284,9 @@
   flex-wrap: wrap;
   margin-top: 8px;
   padding-top: 6px;
-  border-top: 1px dashed #e5e7eb;
+  border-top: 1px dashed var(--border);
   font-size: 12.5px;
-  color: #4b5563;
+  color: var(--muted-foreground);
 }
 
 .op-segment__step-enter {
@@ -295,12 +295,12 @@
 
 /* 「确认同意 / 协商一致」记录高亮 */
 .op-segment__sub--agreed {
-  background: #ecfdf5;
-  border-color: #a7f3d0;
+  background: var(--sky-soft);
+  border-color: var(--border);
 }
 
 .op-segment__sub--agreed .op-segment__action {
-  color: #047857;
+  color: var(--sky);
   font-weight: 700;
 }
 
@@ -308,22 +308,22 @@
 .op-segment__end {
   margin-top: 6px;
   padding-top: 6px;
-  border-top: 1px dashed #e5e7eb;
+  border-top: 1px dashed var(--border);
 }
 
 .op-segment__end-current {
   font-size: 13px;
-  color: #10b981;
+  color: var(--sky);
   font-weight: 500;
 }
 
 .op-segment__end-next {
   font-size: 13px;
-  color: #9ca3af;
+  color: var(--gray-light);
 }
 
 .op-segment__end-time {
-  color: #6b7280;
+  color: var(--muted-foreground);
   font-variant-numeric: tabular-nums;
 }
 
