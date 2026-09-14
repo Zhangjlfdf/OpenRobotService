@@ -316,6 +316,8 @@ def upsert_task(ticket: dict, created_by: str = "") -> Task:
                 existing.created_by = to_user_id(created_by) or created_by
             db.commit()
             db.refresh(existing)
+            # 问题文档：不存在则创建（已存在不覆盖，保护接单人的补充）
+            _create_spec_doc_if_absent(db, existing.id, ticket.get("spec_doc"), created_by)
             db.expunge(existing)  # 脱离 session，避免返回后 DetachedInstanceError
             return existing
         rec = Task(**fields)
@@ -324,6 +326,8 @@ def upsert_task(ticket: dict, created_by: str = "") -> Task:
         db.refresh(rec)
         # 写入操作日志：创建工单 + 初始状态变更（source='ai' 的工单也补日志）
         _log_task_creation(db, rec, created_by)
+        # 问题文档落库（提单时上传/在线编写的完整问题文档）
+        _create_spec_doc_if_absent(db, rec.id, ticket.get("spec_doc"), created_by)
         # _log_task_creation 内部的 commit 会过期 rec 的属性，需先 refresh 再 expunge，
         # 否则返回后调用方访问 record.id 会触发 DetachedInstanceError（首次提单报错、二次成功）
         db.refresh(rec)
@@ -361,6 +365,44 @@ def rename_chat_record_attachments(task_id: int) -> bool:
             db.close()
     except Exception:
         return False
+
+
+def _create_spec_doc_if_absent(db, task_id, spec_doc, created_by: str = "") -> None:
+    """提单时若带「问题文档」，落 task_spec_doc（仅当不存在）。
+
+    已存在则跳过：重复提单/接单人已编辑时绝不覆盖协作内容（详见设计评审结论）。
+    失败不阻塞主流程（任务已入库），仅记日志。
+    """
+    if not spec_doc or not isinstance(spec_doc, dict):
+        return
+    content = (spec_doc.get("content") or "").strip()
+    if not content:
+        return
+    try:
+        from app.models.task import TaskSpecDoc
+        existing = db.query(TaskSpecDoc).filter(TaskSpecDoc.task_id == task_id).first()
+        if existing:
+            return
+        db.add(TaskSpecDoc(
+            task_id=task_id,
+            content=content,
+            content_type="markdown",
+            source=spec_doc.get("source") or "inline",
+            source_files=spec_doc.get("source_files") or [],
+            revision=1,
+            created_by=created_by or "",
+            updated_by=created_by or "",
+        ))
+        db.commit()
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(
+            f"[task_adapter] 写入问题文档失败 task={task_id}: {e}"
+        )
+        try:
+            db.rollback()
+        except Exception:
+            pass
 
 
 def _log_task_creation(db, task: Task, created_by: str) -> None:

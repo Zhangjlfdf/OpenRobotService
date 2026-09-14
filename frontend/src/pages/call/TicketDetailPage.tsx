@@ -30,6 +30,7 @@ import { readStored } from '@/stores/authStorage';
 import DiscussionPanel from '@/shared/components/DiscussionPanel';
 import TicketDynamicsCard from '@/shared/components/TicketDynamicsCard';
 import StepNegotiationCard from '@/shared/components/StepNegotiationCard';
+import SpecDocCard from '@/shared/components/SpecDocCard';
 import { useStepNegotiation } from '@/shared/hooks/useStepNegotiation';
 import { useResolveTicket } from '@/shared/hooks/useResolveTicket';
 import UserSelect from '@/shared/components/UserSelect';
@@ -919,6 +920,9 @@ export default function TicketDetailPage() {
             <div style={{ whiteSpace: 'pre-wrap', color: 'var(--muted-foreground)', fontSize: 12.5, lineHeight: '24px' }}>{ticket.description}</div>
           </div>
         )}
+
+        {/* 问题文档：提单人结构化描述 + 接单人补充（md 在线编辑） */}
+        {ticket.id && <SpecDocCard taskId={ticket.id} canEdit={canEdit} />}
 
         {/* 工单阶段性处理（协商节点）：与系统任务详情页同源，抽到共享组件 StepNegotiationCard */}
         <StepNegotiationCard

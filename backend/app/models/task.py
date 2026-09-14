@@ -16,6 +16,7 @@ from sqlalchemy import (
     Column, Integer, String, DateTime, Text, Enum as SQLEnum,
     BigInteger, Boolean, JSON, ForeignKey, desc, UniqueConstraint,
 )
+from sqlalchemy.dialects.mysql import LONGTEXT
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship, mapped_column, Mapped
 from sqlalchemy.ext.hybrid import hybrid_property
@@ -301,3 +302,39 @@ class TaskStep(Base):
 
     def __repr__(self):
         return f"<TaskStep(id={self.id}, task_type={self.task_type}, sequence={self.sequence}, step_name='{self.step_name}')>"
+
+
+class TaskSpecDoc(Base):
+    """工单「完整问题文档」：提单人结构化描述问题 + 接单人补充，md 在线编辑。
+
+    独立于 tasks 表：AI 侧 upsert_task 会整体替换 metadata_info，文档若存
+    metadata_info/description 会被反复覆盖（设计评审结论），故单列一张表。
+    一工单一文档：UNIQUE(task_id)。
+    """
+    __tablename__ = "task_spec_doc"
+
+    id = Column(BigInteger, primary_key=True, index=True, comment="文档ID")
+    task_id = Column(BigInteger, ForeignKey("tasks.id", ondelete="CASCADE"),
+                     nullable=False, index=True, comment="任务ID")
+    content = Column(Text().with_variant(LONGTEXT, "mysql"), nullable=False, default="",
+                     comment="文档正文（markdown）")
+    content_type = Column(String(16), nullable=False, default="markdown",
+                          comment="正文格式，固定 markdown")
+    source = Column(String(16), nullable=False, default="inline",
+                    comment="来源：inline=在线编写 / upload=上传解析 / ai_summary=AI 生成")
+    source_files = Column(JSON, nullable=True,
+                          comment="原始上传文件引用：[{object_path, filename, size}]")
+    created_by = Column(String(50), nullable=True, comment="创建者ID")
+    updated_by = Column(String(50), nullable=True, comment="最近编辑者ID")
+    revision = Column(Integer, nullable=False, server_default="1", default=1,
+                      comment="修订号（乐观锁：保存时比对，不一致说明被他人改过）")
+    created_at = Column(DateTime, server_default=func.now(), nullable=False, comment="创建时间")
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(),
+                        nullable=False, comment="更新时间")
+
+    __table_args__ = (
+        UniqueConstraint("task_id", name="uq_task_spec_doc_task"),
+    )
+
+    def __repr__(self):
+        return f"<TaskSpecDoc(id={self.id}, task_id={self.task_id}, revision={self.revision})>"
