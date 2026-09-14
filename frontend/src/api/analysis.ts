@@ -65,6 +65,24 @@ export interface AnalysisChatResult {
   plan?: AnalysisPlan | null;
   suggestions?: string[];
   conversation_id?: string | null;
+  charts?: AnalysisChart[] | null;
+  cards?: AnalysisCard[] | null;
+}
+
+/** 图表规格（后端采集数据生成，LLM 不参与）；option 为完整 ECharts option */
+export interface AnalysisChart {
+  chart_type: 'pie' | 'bar' | 'line';
+  title: string;
+  option: Record<string, unknown>;
+}
+
+/** 单值指标卡片（后端采集数据生成） */
+export interface AnalysisCard {
+  label: string;
+  value: string;
+  unit?: string | null;
+  /** metric（百分比类，大号强调色） / count（计数类） */
+  kind?: string;
 }
 
 /** POST /api/ai/analysis/chat —— 返回完整 ChatResponse（含 mode / plan / suggestions / conversation_id） */

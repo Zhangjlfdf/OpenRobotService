@@ -514,6 +514,73 @@
   text-overflow: ellipsis;
 }
 
+/* ── 指标卡片（单值指标：解决率/总数等）── */
+.ada-cards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.ada-card {
+  flex: 1 1 auto;
+  min-width: 86px;
+  max-width: calc(50% - 4px);
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: color-mix(in oklab, var(--ada-iris) 8%, var(--card));
+  border: 1px solid color-mix(in oklab, var(--ada-iris) 18%, var(--border));
+}
+
+.ada-card__label {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--gray-40);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ada-card__value {
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 1.3;
+  color: var(--foreground);
+  font-variant-numeric: tabular-nums;
+}
+
+.ada-card__value.is-metric {
+  color: var(--ada-iris-deep);
+}
+
+.ada-card__unit {
+  margin-left: 2px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+/* ── 图表（分布/趋势，后端采集数据生成）── */
+.ada-charts {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.ada-chart {
+  padding: 8px 6px 2px;
+  border-radius: 10px;
+  background: color-mix(in oklab, var(--ada-iris) 6%, var(--card));
+  border: 1px solid color-mix(in oklab, var(--ada-iris) 16%, var(--border));
+}
+
+.ada-chart__title {
+  padding: 0 4px 4px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--gray-40);
+}
+
 /* ── clarify 澄清追问 ── */
 .ada-clarify {
   margin-top: 8px;
