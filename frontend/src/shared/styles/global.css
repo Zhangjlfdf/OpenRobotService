@@ -2682,7 +2682,7 @@ html, body, #root {
   --mac-blue-soft: #dff8ff; /* 原型 blue-soft: oklch(0.965 0.03 226)，底部导航选中底色 */
   /* 工单状态监测专用蓝阶（同 hue/sat，由深到浅六档）。
      status-1..5 沿用原五档亮度序列，status-6 补最浅一档；
-     tone 按处理流程分配：新建 status-1(最深) → 处理中 2 → 暂停挂起 3 →
+     tone 按处理流程分配：待处理 status-1(最深) → 处理中 2 → 暂停挂起 3 →
      已解决 4 → 已关闭 5 → 已取消 status-6(最浅) */
   --mac-status-1: #155979;
   --mac-status-2: #2088b9;

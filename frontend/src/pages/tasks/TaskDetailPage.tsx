@@ -170,7 +170,7 @@ export default function TaskDetailPage() {
   const [editForm, setEditForm] = useState<{ title: string; description: string; priority: string; ticket_type: string; curr_step_endtime?: string }>({ title: '', description: '', priority: 'medium', ticket_type: 'problem' });
   // 当前阶段截止时间区间：基准 = 工单创建时间（detail.created_at），而非用户操作时刻
   const editDeadlineRange = getDeadlineRange(editForm.priority, detail?.created_at);
-  // 优先级仅在「尚未派单」（新建/待派单）可修改；已派单及后续状态禁止（置灰不可点）
+  // 优先级仅在「尚未派单」（待处理/待派单）可修改；已派单及后续状态禁止（置灰不可点）
   const priorityDisabled = !canEditPriority(detail?.status);
   const [escalateUser, setEscalateUser] = useState<UserItem | null>(null);
   const [showEscalatePopup, setShowEscalatePopup] = useState(false);
@@ -1556,8 +1556,8 @@ export default function TaskDetailPage() {
                     key={value}
                     type="button"
                     disabled={priorityDisabled}
-                    title={priorityDisabled ? '仅新建工单可修改优先级' : undefined}
-                    aria-label={priorityDisabled ? `优先级${label}（仅新建工单可修改优先级）` : `优先级${label}`}
+                    title={priorityDisabled ? '仅待处理工单可修改优先级' : undefined}
+                    aria-label={priorityDisabled ? `优先级${label}（仅待处理工单可修改优先级）` : `优先级${label}`}
                     className={`tasks-create-modal__radio-btn ${editForm.priority === value ? 'is-active' : ''} ${priorityDisabled ? 'is-disabled' : ''}`}
                     onClick={() => {
                       const r = getDeadlineRange(value, detail?.created_at);

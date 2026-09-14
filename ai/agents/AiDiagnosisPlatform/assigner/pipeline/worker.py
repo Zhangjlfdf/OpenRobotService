@@ -456,7 +456,7 @@ class AssignmentWorker:
                     return False
 
                 engineer_id = result.engineer_id or None
-                # 注意：派单成功只写 assigned_to，不改状态——工单保持「新建」，
+                # 注意：派单成功只写 assigned_to，不改状态——工单保持「待处理」，
                 # 由处理人「首次响应」（POST /{task_id}/respond）后才进入「处理中」。
                 if engineer_id:
                     claimed = AssignmentWorker._claim_unassigned(db, task_id, engineer_id)
