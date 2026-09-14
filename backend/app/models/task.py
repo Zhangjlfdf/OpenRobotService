@@ -226,6 +226,29 @@ class TaskCommentReadRecord(Base):
         return f"<TaskCommentReadRecord(comment_id={self.comment_id}, username='{self.username}', read_at={self.read_at})>"
 
 
+class TaskFollower(Base):
+    """任务关注表：用户主动关注（卡片星标）的工单。
+
+    与 TaskCommentRead 同构：task_id + username 唯一键保证幂等，
+    重复关注只刷新 created_at，不产生脏数据。username 口径与
+    task_comment_read.username 一致（当前登录用户）。
+    """
+    __tablename__ = "task_followers"
+
+    id = Column(BigInteger, primary_key=True, index=True, comment="关注记录ID")
+    task_id = Column(BigInteger, ForeignKey("tasks.id", ondelete="CASCADE"),
+                     nullable=False, index=True, comment="任务ID")
+    username = Column(String(50), nullable=False, index=True, comment="关注人username")
+    created_at = Column(DateTime, server_default=func.now(), nullable=False, comment="关注时间")
+
+    __table_args__ = (
+        UniqueConstraint("task_id", "username", name="uq_task_followers"),
+    )
+
+    def __repr__(self):
+        return f"<TaskFollower(task_id={self.task_id}, username='{self.username}')>"
+
+
 class TaskUserMapping(Base):
     """外部任务源账号 → 本平台 user_id 的映射（跨源通用，见 INTEGRATION_DESIGN.md §4.3）。
 

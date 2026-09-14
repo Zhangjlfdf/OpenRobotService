@@ -2738,6 +2738,8 @@ html, body, #root {
   align-items: center;
   gap: 6px;
   min-width: 0;
+  /* 占满头部剩余空间，把「类型 + 关注星标」推到右侧 */
+  flex: 1;
 }
 /* 「待你确认」标识的呼吸圆点：阶段性协商轮到我且未达成一致 */
 @keyframes task-card2-pulse {
@@ -2763,6 +2765,34 @@ html, body, #root {
   flex-shrink: 0;
   font-size: 11.5px;
   color: var(--muted-foreground);
+}
+/* 关注星标：头部最右侧；未关注描边灰，已关注金色实心（内联 lucide Star 用 fill=currentColor） */
+.task-card2__star {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  margin-left: 2px;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: #c0c4cc;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+  -webkit-tap-highlight-color: transparent;
+}
+.task-card2__star:hover {
+  background: rgba(245, 166, 35, 0.14);
+  color: #f5a623;
+}
+.task-card2__star:active {
+  background: rgba(245, 166, 35, 0.22);
+}
+.task-card2__star.is-followed {
+  color: #f5a623;
 }
 /* 优先级：蓝阶色块 */
 .task-card2__priority {

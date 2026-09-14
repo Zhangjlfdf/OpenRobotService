@@ -9,7 +9,8 @@ import logging
 
 from fastapi import APIRouter, HTTPException, Depends, Query, Request, UploadFile, File, Form, Body
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
+from sqlalchemy import select, func, delete
+from sqlalchemy.dialects.mysql import insert as mysql_insert
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timedelta
 
@@ -29,7 +30,7 @@ from app.modules.tasks.schemas.ticket import (
 from app.modules.tasks.models.ticket import TicketStatus, TicketPriority, TicketType
 from app.modules.tasks.services.ticket_service import TicketService, convert_to_shanghai_time
 from app.modules.tasks.services.operation_log_service import OperationLogService, get_role_prefix
-from app.models.task import OperationType, TaskStep
+from app.models.task import OperationType, TaskStep, TaskFollower, Task
 from app.modules.tasks.api.ws import (
     ws_broadcast_comment,
     ws_broadcast_comment_deleted,
@@ -449,18 +450,22 @@ async def get_tasks(
 async def filter_tasks(
     filter_request: TicketFilterRequest,
     request: Request,
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_active_user_from_token),
 ):
     import logging
     logger = logging.getLogger(__name__)
-    
+
     try:
         logger.debug(f"开始复合过滤查询任务列表, filters_count={len(filter_request.filters) if filter_request.filters else 0}, page={filter_request.page}, size={filter_request.size}")
 
         auth_header = request.headers.get("Authorization")
         token = auth_header[7:] if auth_header and auth_header.startswith("Bearer ") else None
 
-        result = await TicketService.filter_tickets(db, filter_request, token)
+        # 当前用户 username：供「我关注的」(followedBy) 过滤与列表 is_followed 回填
+        current_username = actor_username(current_user)
+
+        result = await TicketService.filter_tickets(db, filter_request, token, current_username)
         logger.debug(f"复合过滤查询任务列表成功, total={result.get('total', 0)}")
         return result
     except Exception as e:
@@ -472,25 +477,72 @@ async def filter_tasks(
 async def filter_tasks_counts(
     batch_request: TicketBatchCountRequest,
     request: Request,
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_active_user_from_token),
 ):
     """批量计数：每组 queries 独立统计 total，一次网络往返返回多组角标数。
 
-    供系统任务页「全部/项目相关/待我处理/与我相关」分类角标使用，
+    供系统任务页「全部/项目相关/待我处理/与我相关/我关注的」分类角标使用，
     替代前端并发多次 POST /filter（减少认证/中间件开销与连接占用）。
     """
     try:
         auth_header = request.headers.get("Authorization")
         token = auth_header[7:] if auth_header and auth_header.startswith("Bearer ") else None
 
+        # 当前用户 username：供「我关注的」(followedBy) 角标计数
+        current_username = actor_username(current_user)
+
         totals = []
         for q in batch_request.queries:
-            totals.append(await TicketService.count_tickets(db, q, token))
+            totals.append(await TicketService.count_tickets(db, q, token, current_username))
         return totals
     except Exception as e:
         logger = logging.getLogger(__name__)
         logger.error(f"批量计数失败: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"批量计数失败: {str(e)}")
+
+
+@router.post("/{task_id}/follow", response_model=dict)
+async def follow_task(
+    task_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_active_user_from_token),
+):
+    """关注工单（卡片星标）。幂等：重复关注只刷新 created_at，不报错。
+
+    归属人由服务端 token 解析（actor_username），前端无法替他人关注。
+    """
+    exists = await db.execute(select(Task.id).where(Task.id == task_id))
+    if exists.scalar_one_or_none() is None:
+        raise HTTPException(status_code=404, detail="任务未找到")
+
+    username = actor_username(current_user)
+    # MySQL INSERT ... ON DUPLICATE KEY UPDATE：多端并发点星标不撞唯一键回滚
+    stmt = mysql_insert(TaskFollower).values(task_id=task_id, username=username)
+    stmt = stmt.on_duplicate_key_update(created_at=func.now())
+    await db.execute(stmt)
+    await db.commit()
+
+    return {"ok": True, "task_id": task_id, "followed": True}
+
+
+@router.delete("/{task_id}/follow", response_model=dict)
+async def unfollow_task(
+    task_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_active_user_from_token),
+):
+    """取消关注（取消星标）。幂等：未关注时返回 0 行影响，不报错。"""
+    username = actor_username(current_user)
+    await db.execute(
+        delete(TaskFollower).where(
+            TaskFollower.task_id == task_id,
+            TaskFollower.username == username,
+        )
+    )
+    await db.commit()
+
+    return {"ok": True, "task_id": task_id, "followed": False}
 
 
 @router.get("/stats/overview", response_model=dict)

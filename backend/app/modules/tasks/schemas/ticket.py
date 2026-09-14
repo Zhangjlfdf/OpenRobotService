@@ -203,6 +203,7 @@ class TicketListItemResponse(TicketBase):
     reply_count: int
     view_count: int
     redispatch_tip: Optional[str] = Field(None, description="派单结果提醒一句话摘要（无提醒为 None，见 §3.6）")
+    is_followed: bool = Field(False, description="当前登录用户是否已关注该工单（卡片星标）")
 
     class Config:
         from_attributes = True
