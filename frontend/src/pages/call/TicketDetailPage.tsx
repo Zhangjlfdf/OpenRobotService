@@ -1266,7 +1266,7 @@ export default function TicketDetailPage() {
       <Popup visible={showEscalatePopup} onClose={() => { setShowEscalatePopup(false); setEscalateReason(''); }} placement="bottom" showOverlay destroyOnClose>
         <div className="ticket-edit">
           <h4 className="ticket-edit__title">升级上报</h4>
-          <p style={{ color: '#999', fontSize: '13px', marginBottom: '12px' }}>请选择升级对象</p>
+          <p style={{ color: 'var(--muted-foreground)', fontSize: '13px', marginBottom: '12px' }}>请选择升级对象</p>
           <UserSelect value={escalateUser?.id ?? null} onChange={setEscalateUser} title="选择升级对象" />
           <Form initialData={{}}>
             <FormItem label="变更原因" name="escalateReason" labelAlign="top" requiredMark>
@@ -1290,9 +1290,9 @@ export default function TicketDetailPage() {
       <Popup visible={showReassignPopup} onClose={() => { setShowReassignPopup(false); setReassignUser(null); setReassignReason(''); setReassignKind(''); }} placement="bottom" showOverlay destroyOnClose>
         <div className="ticket-edit">
           <h4 className="ticket-edit__title">重新指派</h4>
-          <p style={{ color: '#999', fontSize: '13px', marginBottom: '12px' }}>选择新的处理人</p>
+          <p style={{ color: 'var(--muted-foreground)', fontSize: '13px', marginBottom: '12px' }}>选择新的处理人</p>
           <UserSelect value={reassignUser?.id ?? null} onChange={setReassignUser} placeholder="请选择处理人" title="选择处理人" />
-          <div style={{ margin: '12px 0 8px', fontSize: '14px', color: '#333' }}>转派类型<span style={{ color: '#d54941' }}> *</span></div>
+          <div style={{ margin: '12px 0 8px', fontSize: '14px', color: 'var(--foreground)' }}>转派类型<span style={{ color: 'var(--danger)' }}> *</span></div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginBottom: '12px' }}>
             {([
               { id: 'misassign' as const, label: '派错了', hint: '不该派给当前处理人，同类单会学习' },
@@ -1308,14 +1308,14 @@ export default function TicketDetailPage() {
                   style={{
                     textAlign: 'left',
                     padding: '10px 12px',
-                    borderRadius: '8px',
-                    border: on ? '1px solid #0052d9' : '1px solid #e7e7e7',
-                    background: on ? '#f2f3ff' : '#fff',
+                    borderRadius: 'var(--radius-md)',
+                    border: on ? '1px solid var(--primary)' : '1px solid var(--border)',
+                    background: on ? 'var(--primary-soft)' : 'var(--card)',
                     cursor: 'pointer',
                   }}
                 >
-                  <div style={{ fontSize: '14px', fontWeight: 600, color: '#222' }}>{opt.label}</div>
-                  <div style={{ fontSize: '12px', color: '#888', marginTop: '2px' }}>{opt.hint}</div>
+                  <div style={{ fontSize: '14px', fontWeight: 600, color: 'var(--foreground)' }}>{opt.label}</div>
+                  <div style={{ fontSize: '12px', color: 'var(--muted-foreground)', marginTop: '2px' }}>{opt.hint}</div>
                 </button>
               );
             })}
@@ -1348,23 +1348,23 @@ export default function TicketDetailPage() {
           <div className="ticket-edit-form__body">
             <div className="ticket-edit-form__field">
               <span className="ticket-edit-form__label">📌 工单问题</span>
-              <div style={{ fontSize: '14px', fontWeight: 600, color: '#1a1a1a', marginBottom: '4px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{ticket?.title}</div>
+              <div style={{ fontSize: '14px', fontWeight: 600, color: 'var(--foreground)', marginBottom: '4px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{ticket?.title}</div>
               <div style={{
-                fontSize: '13px', color: '#888', lineHeight: 1.6, whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+                fontSize: '13px', color: 'var(--muted-foreground)', lineHeight: 1.6, whiteSpace: 'pre-wrap', wordBreak: 'break-word',
                 display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden',
               }}>
-                {ticket?.description || <span style={{ color: '#bbb' }}>（无描述）</span>}
+                {ticket?.description || <span style={{ color: 'var(--gray-light)' }}>（无描述）</span>}
               </div>
             </div>
             <div className="ticket-edit-form__field">
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
                 <span className="ticket-edit-form__label" style={{ marginBottom: 0 }}>✅ 工单解决方式</span>
                 {resolve.resolutionFailed && (
-                  <span style={{ color: '#faad14', fontSize: '12px' }}>自动总结出错，请手动补充</span>
+                  <span style={{ color: 'var(--apricot)', fontSize: '12px' }}>自动总结出错，请手动补充</span>
                 )}
               </div>
               {resolve.resolutionLoading || resolve.resolutionPolling ? (
-                <div style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '20px 0', color: '#666', fontSize: '13px', justifyContent: 'center' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '20px 0', color: 'var(--muted-foreground)', fontSize: '13px', justifyContent: 'center' }}>
                   <Loading size="20px" /> 正在生成解决方式…
                 </div>
               ) : (

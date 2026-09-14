@@ -297,13 +297,13 @@ const TicketCard = memo(function TicketCard({ t, onOpen, avatarMap, currentUserI
               style={{
                 display: 'inline-flex', alignItems: 'center', gap: 4,
                 padding: '2px 8px', borderRadius: 999, fontSize: 12, fontWeight: 600,
-                color: '#b45309', background: 'rgba(245,158,11,0.14)',
-                border: '1px solid rgba(245,158,11,0.45)',
+                color: 'var(--apricot)', background: 'var(--apricot-soft)',
+                border: '1px solid var(--border)',
               }}
             >
               <span
                 style={{
-                  width: 6, height: 6, borderRadius: '50%', background: '#f59e0b',
+                  width: 6, height: 6, borderRadius: '50%', background: 'var(--apricot)',
                   animation: 'task-card2-pulse 1.2s ease-in-out infinite',
                 }}
               />

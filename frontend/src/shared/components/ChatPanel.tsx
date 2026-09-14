@@ -3332,7 +3332,7 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
                     </button>
                   </div>
                 )}
-                <label className="ticket-confirm__label">绑定项目 {!ticketConfirm.dualTicket && <span style={{ color: '#e34d59' }}>*</span>}</label>
+                <label className="ticket-confirm__label">绑定项目 {!ticketConfirm.dualTicket && <span style={{ color: 'var(--danger)' }}>*</span>}</label>
                 <ProjectSelect
                   value={draftField('project_id') || null}
                   nameHint={draftField('project') || null}
@@ -3358,7 +3358,7 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
                     <div className="ticket-confirm__banner ticket-confirm__banner--info">
                       项目不在项目集中，将默认提单至「摇人吧服务号提单」项目，同时向项目负责人发送申请工单
                     </div>
-                    <label className="ticket-confirm__label">项目负责人 <span style={{ color: '#e34d59' }}>*</span></label>
+                    <label className="ticket-confirm__label">项目负责人 <span style={{ color: 'var(--danger)' }}>*</span></label>
                     <UserSelect
                       value={ticketConfirm.projectOwner?.id ?? null}
                       onChange={(u) => setTicketConfirm((s) => ({ ...s, projectOwner: u }))}
@@ -3437,7 +3437,7 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
             <div
               onClick={(e) => e.stopPropagation()}
               style={{
-                background: '#fff', borderRadius: 14, maxWidth: 420, width: '100%',
+                background: 'var(--card)', borderRadius: 'var(--radius-xl)', maxWidth: 420, width: '100%',
                 maxHeight: '80vh', display: 'flex', flexDirection: 'column',
                 overflow: 'hidden', boxSizing: 'border-box',
               }}
@@ -3445,7 +3445,7 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
               <div
                 onContextMenu={(e) => e.preventDefault()}
                 style={{
-                  padding: '10px 14px 6px', fontSize: '12.5px', color: '#6b7280', textAlign: 'center', flexShrink: 0,
+                  padding: '10px 14px 6px', fontSize: '12.5px', color: 'var(--muted-foreground)', textAlign: 'center', flexShrink: 0,
                   // 禁长按弹原生菜单（只设在文本上，不设在容器——安卓长按图片的
                   // 保存/转发菜单走 contextmenu，容器级拦截会杀掉它）
                   WebkitTouchCallout: 'none', userSelect: 'none', WebkitUserSelect: 'none',
@@ -3454,7 +3454,7 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
                 长按图片可直接发送给朋友，或保存图片
               </div>
               <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '0 12px', WebkitOverflowScrolling: 'touch' }}>
-                <img src={forwardImage} alt="转发图" style={{ width: '100%', display: 'block', borderRadius: 8 }} />
+                <img src={forwardImage} alt="转发图" style={{ width: '100%', display: 'block', borderRadius: 'var(--radius-sm)' }} />
               </div>
               <div
                 style={{ display: 'flex', gap: 10, padding: 12, flexShrink: 0, WebkitTouchCallout: 'none', userSelect: 'none', WebkitUserSelect: 'none' }}
@@ -3462,8 +3462,8 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
               >
                 <button
                   style={{
-                    flex: 1.6, background: '#3d9be6', border: 'none', color: '#fff',
-                    fontWeight: 600, borderRadius: 10, padding: '11px 0', fontSize: 14, cursor: 'pointer',
+                    flex: 1.6, background: 'var(--blue-2)', border: 'none', color: '#fff',
+                    fontWeight: 600, borderRadius: 'var(--radius-md)', padding: '11px 0', fontSize: 14, cursor: 'pointer',
                   }}
                   onClick={() => {
                     const a = document.createElement('a');
@@ -3476,8 +3476,8 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
                 </button>
                 <button
                   style={{
-                    flex: 1, background: '#fff', border: '1px solid #d7dbe4', color: '#374151',
-                    borderRadius: 10, padding: '11px 0', fontSize: 14, cursor: 'pointer',
+                    flex: 1, background: 'var(--card)', border: '1px solid var(--border)', color: 'var(--foreground)',
+                    borderRadius: 'var(--radius-md)', padding: '11px 0', fontSize: 14, cursor: 'pointer',
                   }}
                   onClick={() => setForwardImage(null)}
                 >

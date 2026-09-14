@@ -21,15 +21,15 @@ const STATUS_MAP: Record<string, string> = {
   initial: '初始状态',
 };
 
-// 状态颜色映射
+// 状态颜色映射（全部走全局设计 token，禁止硬编码色值）
 const STATUS_COLOR: Record<string, string> = {
-  new: '#3b82f6',        // 蓝色 - 待处理
-  in_progress: '#f59e0b', // 橙色 - 处理中
-  pending: '#6b7280',     // 灰色 - 已挂起
-  resolved: '#10b981',    // 绿色 - 已解决
-  canceled: '#ef4444',    // 红色 - 已取消
-  closed: '#4b5563',      // 深灰 - 已关闭
-  initial: '#9ca3af',
+  new: 'var(--blue-3)',        // 待处理
+  in_progress: 'var(--apricot)', // 处理中
+  pending: 'var(--gray)',        // 已挂起
+  resolved: 'var(--sky)',        // 已解决
+  canceled: 'var(--danger)',     // 已取消
+  closed: 'var(--gray-dark)',    // 已关闭
+  initial: 'var(--gray-light)',
 };
 
 // 操作类型标签映射
@@ -55,17 +55,17 @@ const REASSIGN_KIND_LABEL: Record<string, string> = {
 
 // 操作类型图标
 const OP_TYPE_STYLE: Record<OperationType, { color: string; icon: string }> = {
-  create: { color: '#0052D9', icon: '📋' },
-  status_change: { color: '#ED7B2F', icon: '🔄' },
-  assign: { color: '#1199A3', icon: '👤' },
-  escalate: { color: '#D54941', icon: '⬆️' },
-  return: { color: '#8B5CF6', icon: '↩️' },
-  reassign: { color: '#1199A3', icon: '🔁' },
-  update: { color: '#47A358', icon: '✏️' },
-  comment: { color: '#6B7280', icon: '💬' },
-  view: { color: '#9CA3AF', icon: '👁️' },
-  ai_diagnose: { color: '#7C3AED', icon: '🤖' },
-  ai_assign: { color: '#7C3AED', icon: '🤖' },
+  create: { color: 'var(--blue-2)', icon: '📋' },
+  status_change: { color: 'var(--apricot)', icon: '🔄' },
+  assign: { color: 'var(--sky)', icon: '👤' },
+  escalate: { color: 'var(--danger)', icon: '⬆️' },
+  return: { color: 'var(--lilac)', icon: '↩️' },
+  reassign: { color: 'var(--sky)', icon: '🔁' },
+  update: { color: 'var(--blue-3)', icon: '✏️' },
+  comment: { color: 'var(--gray)', icon: '💬' },
+  view: { color: 'var(--gray-light)', icon: '👁️' },
+  ai_diagnose: { color: 'var(--lilac)', icon: '🤖' },
+  ai_assign: { color: 'var(--lilac)', icon: '🤖' },
 };
 
 // 格式化时间
@@ -386,7 +386,7 @@ const OperationTimeline: React.FC<OperationTimelineProps> = ({ logs, loading = f
     }${isAgreeLog(log) ? ' op-segment__sub--agreed' : ''}`;
     return (
       <div className={subCls} key={key}>
-        <div className="op-segment__sub-dot" style={{ borderColor: isAgreeLog(log) ? '#10b981' : style.color }}>
+        <div className="op-segment__sub-dot" style={{ borderColor: isAgreeLog(log) ? 'var(--sky)' : style.color }}>
           <span className="op-segment__sub-icon">{isAgreeLog(log) ? '✅' : style.icon}</span>
         </div>
         <div className="op-segment__sub-content">
@@ -415,7 +415,7 @@ const OperationTimeline: React.FC<OperationTimelineProps> = ({ logs, loading = f
   return (
     <div className="op-timeline">
       {groups.map((group, idx) => {
-        const color = STATUS_COLOR[group.status] || '#9ca3af';
+        const color = STATUS_COLOR[group.status] || 'var(--gray-light)';
         const statusLabel = STATUS_MAP[group.status] || group.status;
         const isLatest = idx === 0;
         // 下一个（更新的）状态：本状态结束 = 下一个状态开始。
