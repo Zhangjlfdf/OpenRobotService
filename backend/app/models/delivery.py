@@ -7,10 +7,11 @@
 注意：DAS 的项目类在此更名为 `ProjectDelivery`，以与身份底座的 `app.models.identity.Project`
 共存于同一 `app.models` 命名空间；**物理表名 `project` 保持不变**（双表合并留待 Wave 2）。
 
-含 7 张表：realtime_data / history_data / collection_data / project / risk /
-project_daily_report / project_license
+含 9 张表：realtime_data / history_data / collection_data / project / risk /
+project_daily_report / project_license / project_transport_efficiency /
+project_transport_efficiency_robot
 """
-from sqlalchemy import Column, Integer, BigInteger, String, Text, Float, Index
+from sqlalchemy import Column, Integer, BigInteger, String, Text, Float, Index, JSON
 
 from app.models.base import Base
 
@@ -142,6 +143,14 @@ class Project(Base):
         String(10), nullable=False, default=UNDERTAKE_YES, server_default=UNDERTAKE_YES,
         comment='是否承接（是/待定；「否」不入库）',
     )
+
+    # 项目扩展信息：承接「日益增长且丰富变化」的专属字段，支持递归嵌套字典/数组
+    # （如 project.robots[].name、project.network.vlan）。稳定、需查询/统计/独立
+    # 管理的字段应提升为主表列或拆子表，不应塞进 ext_info。
+    ext_info = Column(JSON, nullable=True, comment='项目扩展信息(递归嵌套 JSON)')
+    # 乐观锁版本号：update_project 校验客户端带回的 version，不一致返回 409，
+    # 防止 ext_info 整文档读改写模式下多人同时编辑互相覆盖。
+    version = Column(Integer, nullable=False, default=1, server_default='1', comment='乐观锁版本号')
 
     __table_args__ = (
         Index('idx_project_code', 'code', unique=True),
@@ -280,3 +289,36 @@ class ProjectTransportEfficiencyRobot(Base):
 
     def __repr__(self):
         return f"<ProjectTransportEfficiencyRobot(id={self.id}, project_code='{self.project_code}', report_date='{self.report_date}', robot_model='{self.robot_model}')>"
+
+
+class ProjectInfoNode(Base):
+    """项目信息树节点（邻接表，逐节点 CRUD）。
+
+    存储项目信息树（演示数据 a.json 中的 info_nodes），每节点一行，
+    通过 parent_id 递归成树。与 ext_info 的区别：ext_info 存「开发者定义结构的值」，
+    info_node 存「结构本身是用户数据」——用户可自由增删节点、拖拽排序、编辑值，
+    每个节点独立 CRUD，不会因整文档读改写而互相覆盖。
+    节点 id 为客户端生成的 UUID，供稳定引用（如工单挂到某节点）。
+    """
+    __tablename__ = 'project_info_node'
+
+    id = Column(String(64), primary_key=True, comment='节点UUID(客户端生成)')
+    project_id = Column(String(64), nullable=False, comment='所属项目ID')
+    parent_id = Column(String(64), nullable=True, comment='父节点ID, NULL=根节点')
+    title = Column(String(255), nullable=False, comment='节点标题')
+    content_type = Column(String(32), nullable=False, default='text', comment='内容类型: text/image/file/...')
+    value = Column(Text, nullable=True, comment='节点值')
+    sort_order = Column(Integer, nullable=False, default=0, comment='同级排序')
+    created_at = Column(String(30), nullable=False, comment='创建时间')
+    updated_at = Column(String(30), nullable=False, comment='更新时间')
+
+    __table_args__ = (
+        Index('idx_pn_project', 'project_id'),
+        Index('idx_pn_parent', 'parent_id'),
+        Index('idx_pn_project_parent_sort', 'project_id', 'parent_id', 'sort_order'),
+    )
+
+    def __repr__(self):
+        return f"<ProjectInfoNode(id='{self.id}', project_id='{self.project_id}', title='{self.title}')>"
+
+

@@ -1,0 +1,196 @@
+# 项目初始化模板（ext_info + info_nodes）
+#
+# 新建项目时按 project_type 选择 {type}.yaml，找不到回退本文件。
+# 增加新模板：在本目录新建 {project_type}.yaml，无需改代码。
+#
+# 三部分：
+#   overview  → project.ext_info.overview  （主表 JSON 列，展示型标量）
+#   activity  → project.ext_info.activity  （append-only 事件数组）
+#   info_nodes → project_info_node 表       （邻接表，Service 实例化时生成 UUID）
+
+# ── ext_info 部分 ──────────────────────────────────────
+
+overview:
+  progress: 0
+  tags: []
+  wecom_id: ""
+  ai_summary: ""
+
+activity:
+  version_changes: []
+  stage_changes: []
+
+# ── info_nodes 部分 ───────────────────────────────────
+# 树结构定义，不含 id/value（实例化时由 Service 生成 UUID，value 留空）
+# 对齐 a.json 演示数据的标准项目信息树
+
+info_nodes:
+  - title: 基础信息
+    sort_order: 0
+    children:
+      - title: 客户信息
+        sort_order: 0
+      - title: 订单信息
+        sort_order: 1
+        children:
+          - title: ERP
+            sort_order: 0
+      - title: 评审信息
+        sort_order: 2
+      - title: 项目地址
+        sort_order: 3
+      - title: 进厂要求
+        sort_order: 4
+        children:
+          - title: 着装
+            sort_order: 0
+          - title: 预约信息
+            sort_order: 1
+
+  - title: 车辆
+    sort_order: 1
+    children:
+      - title: 车型
+        sort_order: 0
+      - title: 数量
+        sort_order: 1
+      - title: 载具类型
+        sort_order: 2
+        children:
+          - title: 托盘
+            sort_order: 0
+          - title: 料笼
+            sort_order: 1
+
+  - title: 车端软件
+    sort_order: 2
+    children:
+      - title: 控制器品牌
+        sort_order: 0
+      - title: 软件版本
+        sort_order: 1
+      - title: 数据同步方式
+        sort_order: 2
+
+  - title: 调度软件
+    sort_order: 3
+    children:
+      - title: 版本
+        sort_order: 0
+        children:
+          - title: 子模块
+            sort_order: 0
+          - title: 调度配置
+            sort_order: 1
+      - title: 通用配置
+        sort_order: 1
+      - title: license
+        sort_order: 2
+
+  - title: 服务器信息
+    sort_order: 4
+    children:
+      - title: 外网
+        sort_order: 0
+      - title: 公网IP
+        sort_order: 1
+        children:
+          - title: 服务器参数配置
+            sort_order: 0
+      - title: 远程方式
+        sort_order: 2
+
+  - title: 环境
+    sort_order: 5
+    children:
+      - title: 地图布局
+        sort_order: 0
+      - title: 网络
+        sort_order: 1
+        children:
+          - title: 内网
+            sort_order: 0
+          - title: 外网
+            sort_order: 1
+      - title: 外设
+        sort_order: 2
+        children:
+          - title: 电梯
+            sort_order: 0
+          - title: 自动门
+            sort_order: 1
+          - title: 呼叫器
+            sort_order: 2
+          - title: 输送线
+            sort_order: 3
+
+  - title: 业务系统
+    sort_order: 6
+    children:
+      - title: DAS/WMS
+        sort_order: 0
+      - title: 接口协议
+        sort_order: 1
+      - title: IP/URL
+        sort_order: 2
+
+  - title: 业务流程
+    sort_order: 7
+    children:
+      - title: 成品
+        sort_order: 0
+      - title: 节拍
+        sort_order: 1
+      - title: 物料类型
+        sort_order: 2
+
+  - title: 人员
+    sort_order: 8
+    children:
+      - title: 客户对象
+        sort_order: 0
+      - title: 实施
+        sort_order: 1
+      - title: 车端
+        sort_order: 2
+      - title: 调度
+        sort_order: 3
+      - title: 业务
+        sort_order: 4
+      - title: 项目经理
+        sort_order: 5
+      - title: 销售
+        sort_order: 6
+      - title: 售前
+        sort_order: 7
+      - title: 事业部
+        sort_order: 8
+
+  - title: 特性
+    sort_order: 9
+    children:
+      - title: 风险点
+        sort_order: 0
+      - title: 注意事项
+        sort_order: 1
+      - title: 时间线
+        sort_order: 2
+        children:
+          - title: 大节点
+            sort_order: 0
+          - title: 小节点
+            sort_order: 1
+
+  - title: 项目配置
+    sort_order: 10
+    children:
+      - title: 识别
+        sort_order: 0
+
+  - title: 项目定制
+    sort_order: 11
+    children:
+      - title: 接口
+        sort_order: 0
+      - title: 大屏
+        sort_order: 1

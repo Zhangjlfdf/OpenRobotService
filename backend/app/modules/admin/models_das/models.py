@@ -16,6 +16,7 @@ from app.models.delivery import (
     ProjectLicense,
     ProjectTransportEfficiency,
     ProjectTransportEfficiencyRobot,
+    ProjectInfoNode,
 )
 
 __all__ = [
@@ -29,4 +30,5 @@ __all__ = [
     "ProjectLicense",
     "ProjectTransportEfficiency",
     "ProjectTransportEfficiencyRobot",
+    "ProjectInfoNode",
 ]
