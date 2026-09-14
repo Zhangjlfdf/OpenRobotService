@@ -16,6 +16,7 @@ import SafeHtml from '@/shared/components/SafeHtml';
 import DiscussionPanel from '@/shared/components/DiscussionPanel';
 import TicketDynamicsCard from '@/shared/components/TicketDynamicsCard';
 import StepNegotiationCard from '@/shared/components/StepNegotiationCard';
+import SpecDocCard from '@/shared/components/SpecDocCard';
 import { useStepNegotiation } from '@/shared/hooks/useStepNegotiation';
 import { useResolveTicket } from '@/shared/hooks/useResolveTicket';
 import AttachmentViewer, { type AttachmentViewItem } from '@/shared/components/AttachmentViewer';
@@ -1075,6 +1076,9 @@ export default function TaskDetailPage() {
     </div>
   );
 
+  const specDocRoles = getCurrentUserRoles();
+  const canEditSpecDoc = isAdmin || specDocRoles.isAssignee || specDocRoles.isReporter;
+
   return (
     <div className="task-detail-page" style={{ paddingBottom: 72 }}>
       <Navbar
@@ -1260,6 +1264,9 @@ export default function TaskDetailPage() {
           <h4 className="detail-card__h">问题描述</h4>
           <SafeHtml className="detail-card__body detail-card__body--pre" html={detail.description || '<p style="color:var(--muted-foreground)">无描述</p>'} />
         </div>
+
+        {/* 问题文档：提单人结构化描述 + 接单人补充（md 在线编辑） */}
+        <SpecDocCard taskId={detail.id} canEdit={canEditSpecDoc} />
 
         {/* 工单阶段性处理（协商节点）：抽到共享组件 StepNegotiationCard，与历史工单详情页复用 */}
         <StepNegotiationCard
