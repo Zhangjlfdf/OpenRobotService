@@ -33,44 +33,119 @@ info_nodes:
       - title: 订单信息
         sort_order: 1
         children:
-          - title: ERP
-            sort_order: 0
+        - title: ERP
+          sort_order: 0
       - title: 评审信息
         sort_order: 2
-      - title: 项目地址
+      - title: 项目区域/地点
         sort_order: 3
-      - title: 进厂要求
+        children:
+          - title: 区域选项
+            sort_order: 0
+            children:
+              - title: 大陆(China Mainland)
+                sort_order: 0
+                children:
+                  - title: 省份
+                    sort_order: 0
+                  - title: 地区
+                    sort_order: 1
+              - title: 亚洲Asia
+                sort_order: 1
+              - title: 欧洲Europe
+                sort_order: 2
+              - title: 北美North America
+                sort_order: 3
+              - title: 南美South America
+                sort_order: 4
+              - title: 非洲Africa
+                sort_order: 5
+      - title: 项目类型（对接权用户开放新增）
         sort_order: 4
+        children:
+          - title: 受关注项目
+            sort_order: 0
+          - title: 大客户项目
+            sort_order: 1
+          - title: 展会/演示项目
+            sort_order: 2
+          - title: 展厅项目
+            sort_order: 3
+          - title: PK项目
+            sort_order: 4
+          - title: 试点项目
+            sort_order: 5
+          - title: 试用项目
+            sort_order: 6
+          - title: 内部/测试项目
+            sort_order: 7
+      - title: 进厂要求
+        sort_order: 5
         children:
           - title: 着装
             sort_order: 0
           - title: 预约信息
             sort_order: 1
 
-  - title: 车辆
+  - title: 硬件
     sort_order: 1
     children:
-      - title: 车型
+      - title: 车辆
         sort_order: 0
-      - title: 数量
-        sort_order: 1
+        children:
+          - title: 车型1
+            sort_order: 0
+            children:
+              - title: 数量
+                sort_order: 0
+          - title: 车型2
+            sort_order: 1
+            children:
+              - title: 数量
+                sort_order: 0
       - title: 载具类型
-        sort_order: 2
+        sort_order: 1
         children:
           - title: 托盘
             sort_order: 0
           - title: 料笼
             sort_order: 1
+          - title: 料架
+            sort_order: 2
+          - title: 料车
+            sort_order: 3
 
   - title: 车端软件
     sort_order: 2
     children:
-      - title: 控制器品牌
+      - title: 控制器品牌（对接权用户支持新增）
         sort_order: 0
+        children:
+          - title: 自研
+            sort_order: 0
+          - title: 睿芯行
+            sort_order: 1
+          - title: 利科钛
+            sort_order: 2
+          - title: 海康
+            sort_order: 3
+          - title: 华睿
+            sort_order: 4
+          - title: 中兴
+            sort_order: 5
+          - title: 科聪
+            sort_order: 6
       - title: 软件版本
         sort_order: 1
       - title: 数据同步方式
         sort_order: 2
+      - title: 是否已与USP对接过
+        sort_order: 3
+        children:
+          - title: 是
+            sort_order: 0
+          - title: 否
+            sort_order: 1
 
   - title: 调度软件
     sort_order: 3
@@ -80,72 +155,202 @@ info_nodes:
         children:
           - title: 子模块
             sort_order: 0
-          - title: 调度配置
+            children:
+              - title: 调度配置
+                sort_order: 0
+          - title: 通用配置
             sort_order: 1
-      - title: 通用配置
-        sort_order: 1
       - title: license
-        sort_order: 2
+        sort_order: 1
+        children:
+          - title: 到期时间
+            sort_order: 0
+          - title: 续期记录
+            sort_order: 1
 
-  - title: 服务器信息
+  - title: 网络信息
     sort_order: 4
     children:
       - title: 外网
         sort_order: 0
-      - title: 公网IP
+      - title: 公网ip
         sort_order: 1
         children:
           - title: 服务器参数配置
             sort_order: 0
       - title: 远程方式
         sort_order: 2
+        children:
+          - title: SSH
+            sort_order: 0
+            children:
+              - title: IP
+                sort_order: 0
+              - title: 端口
+                sort_order: 1
+              - title: 远程码
+                sort_order: 2
+          - title: Todesk
+            sort_order: 1
+            children:
+              - title: 密码
+                sort_order: 0
+                children:
+                  - title: 动态密码
+                    sort_order: 0
+                  - title: 静态密码
+                    sort_order: 1
+          - title: AngDek
+            sort_order: 2
+            children:
+              - title: 远程码
+                sort_order: 0
+              - title: 密码
+                sort_order: 1
+                children:
+                  - title: 动态密码
+                    sort_order: 0
+                  - title: 静态密码
+                    sort_order: 1
+
+  - title: 服务器部署
+    sort_order: 5
+    children:
+      - title: 中力服务器
+        sort_order: 0
+        children:
+          - title: 是否与其他系统共用
+            sort_order: 0
+      - title: 客户服务器
+        sort_order: 1
+        children:
+          - title: 是否与其他系统共用
+            sort_order: 0
+      - title: 云服务器
+        sort_order: 2
+        children:
+          - title: 是否与其他系统共用
+            sort_order: 0
 
   - title: 环境
-    sort_order: 5
+    sort_order: 6
     children:
       - title: 地图布局
         sort_order: 0
-      - title: 网络
-        sort_order: 1
         children:
-          - title: 内网
+          - title: CAD源文件
             sort_order: 0
-          - title: 外网
+            children:
+              - title: 库位
+                sort_order: 0
+              - title: 库区形式/数量
+                sort_order: 1
+          - title: AGV路线动线
             sort_order: 1
+          - title: 通道与托盘间距尺寸
+            sort_order: 2
       - title: 外设
-        sort_order: 2
+        sort_order: 1
         children:
           - title: 电梯
             sort_order: 0
+            children:
+              - title: 厂家品牌(协议)
+                sort_order: 0
+                children:
+                  - title: Modbus Tcp
+                    sort_order: 0
+                  - title: ST
+                    sort_order: 1
+                  - title: 中力PLC
+                    sort_order: 2
           - title: 自动门
             sort_order: 1
           - title: 呼叫器
             sort_order: 2
-          - title: 输送线
+          - title: 输送线/隔离线
             sort_order: 3
+          - title: 红绿灯
+            sort_order: 4
+          - title: 机械臂
+            sort_order: 5
+          - title: 码垛机/盘盘机
+            sort_order: 6
+          - title: 缠绕机
+            sort_order: 7
+          - title: 光电
+            sort_order: 8
+          - title: 无外设声明
+            sort_order: 9
+          - title: 其他(自定义)
+            sort_order: 10
 
   - title: 业务系统
-    sort_order: 6
-    children:
-      - title: DAS/WMS
-        sort_order: 0
-      - title: 接口协议
-        sort_order: 1
-      - title: IP/URL
-        sort_order: 2
-
-  - title: 业务流程
     sort_order: 7
     children:
-      - title: 成品
+      - title: 系统
         sort_order: 0
+        children:
+          - title: DAS
+            sort_order: 0
+          - title: 客户WMS
+            sort_order: 1
+          - title: 客户MES/ERP
+            sort_order: 2
+          - title: 客户系统
+            sort_order: 3
+          - title: 其他上层系统
+            sort_order: 4
+      - title: 数字孪生
+        sort_order: 1
+        children:
+          - title: 接口协议
+            sort_order: 0
+            children:
+              - title: 接口标准
+                sort_order: 0
+              - title: 是否对接
+                sort_order: 1
+          - title: ip/url
+            sort_order: 1
+      - title: PDA
+        sort_order: 2
+      - title: 平板
+        sort_order: 3
+
+  - title: 业务流程
+    sort_order: 8
+    children:
+      - title: 搬运场景
+        sort_order: 0
+        children:
+          - title: 搬运类型
+            sort_order: 0
+            children:
+              - title: 线边搬运
+                sort_order: 0
+              - title: 仓储搬运
+                sort_order: 1
+              - title: 电梯接驳
+                sort_order: 2
+              - title: 室外搬运
+                sort_order: 3
+          - title: 装卸
+            sort_order: 1
+          - title: 分拣
+            sort_order: 2
       - title: 节拍
         sort_order: 1
+        children:
+          - title: 节拍
+            sort_order: 0
+          - title: 效率要求数值/无效率声明
+            sort_order: 1
       - title: 物料类型
         sort_order: 2
 
-  - title: 人员
-    sort_order: 8
+  - title: 人员信息
+    sort_order: 9
     children:
       - title: 客户对象
         sort_order: 0
@@ -163,14 +368,27 @@ info_nodes:
         sort_order: 6
       - title: 售前
         sort_order: 7
-      - title: 事业部
+      - title: 集成商
         sort_order: 8
 
-  - title: 特性
-    sort_order: 9
+  - title: 项目特性
+    sort_order: 10
     children:
       - title: 风险点
         sort_order: 0
+        children:
+          - title: 数据同步错误
+            sort_order: 0
+          - title: 公司评审不通过
+            sort_order: 1
+          - title: 缺前置承接
+            sort_order: 2
+          - title: 高风险承接
+            sort_order: 3
+          - title: 中风险承接
+            sort_order: 4
+          - title: 低风险承接
+            sort_order: 5
       - title: 注意事项
         sort_order: 1
       - title: 时间线
@@ -178,19 +396,49 @@ info_nodes:
         children:
           - title: 大节点
             sort_order: 0
+            children:
+              - title: 售前方案
+                sort_order: 0
+              - title: 签单洽谈
+                sort_order: 1
+              - title: 已签合同
+                sort_order: 2
+              - title: 出厂测试
+                sort_order: 3
+              - title: 即将进场
+                sort_order: 4
+              - title: 延期进场
+                sort_order: 5
+              - title: 正在进场
+                sort_order: 6
+              - title: 实施暂停
+                sort_order: 7
+              - title: 实施运行
+                sort_order: 8
+              - title: 试运行中
+                sort_order: 9
+              - title: 验收运行
+                sort_order: 10
+              - title: 项目结束
+                sort_order: 11
           - title: 小节点
             sort_order: 1
 
   - title: 项目配置
-    sort_order: 10
+    sort_order: 11
     children:
       - title: 识别
         sort_order: 0
 
   - title: 项目定制
-    sort_order: 11
+    sort_order: 12
     children:
       - title: 接口
-        sort_order: 0
-      - title: 大屏
         sort_order: 1
+      - title: 大屏
+        sort_order: 2
+          children:
+            - title: 页面
+              sort_order: 0
+      - title: 功能
+        sort_order: 3
