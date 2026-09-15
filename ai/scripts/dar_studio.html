@@ -99,6 +99,31 @@ label.f{display:flex;flex-direction:column;gap:5px;font-size:12px;color:var(--in
 .mgrid .mcard .v{font-size:24px}
 .repbar{display:flex;gap:14px;align-items:center;flex-wrap:wrap;font-size:12.5px;color:var(--ink2);
   padding:10px 14px;background:var(--brand-soft);border:1px solid #e0e7ff;border-radius:10px;margin-bottom:16px}
+/* ── 漏斗走查（ORS-#821）── */
+.funnel-wrap{display:flex;flex-direction:column;gap:3px;max-width:820px}
+.fbar{display:flex;align-items:center;gap:12px;cursor:pointer;padding:3px 8px;border-radius:8px}
+.fbar:hover,.fbar.is-sel{background:var(--brand-soft)}
+.fbar .lb{width:170px;font-size:12.5px;color:var(--ink2);text-align:right;flex-shrink:0}
+.fbar.sub .lb{width:150px;padding-left:20px}
+.fbar .tr{flex:1;display:flex;justify-content:center}
+.fbar .fill{height:26px;border-radius:6px;display:flex;align-items:center;justify-content:center;
+  font-size:12px;color:#fff;min-width:60px;gap:6px;transition:width .25s}
+.fseg{border:1px solid var(--line);border-radius:10px;padding:8px 10px;margin-bottom:8px}
+.fseg.is-cur{border-color:var(--brand);box-shadow:0 0 0 2px var(--brand-soft)}
+.fseg .q{font-size:13px;line-height:1.5;cursor:pointer}
+.fseg .meta{display:flex;gap:8px;align-items:center;margin-top:6px;font-size:12px;color:var(--ink3);flex-wrap:wrap}
+.fseg .ops{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap}
+.lbtn{font-size:12px;padding:3px 10px;border-radius:6px;border:1px solid var(--line);background:#fff;cursor:pointer;color:var(--ink2)}
+.lbtn:hover{border-color:var(--brand)}
+.lbtn.on{background:var(--brand);color:#fff;border-color:var(--brand)}
+.fdet{margin-top:8px;border-top:1px dashed var(--line);padding-top:8px;font-size:12.5px;line-height:1.6}
+.fdet .fq{color:var(--ink);margin:4px 0}
+.fdet .fa{color:var(--ink2);white-space:pre-wrap;background:var(--bg);border-radius:8px;padding:6px 10px;margin:4px 0 8px 12px}
+.fdet .fact{display:inline-block;background:#fef3c7;color:#92400e;border-radius:6px;padding:1px 8px;font-size:11.5px;margin:2px 0}
+.fdet img{max-width:180px;border-radius:8px;border:1px solid var(--line);margin:4px 6px 4px 0;vertical-align:top}
+.badge-eff{display:inline-block;border-radius:6px;padding:1px 8px;font-size:11.5px}
+.badge-src-man{background:#dcfce7;color:#166534}
+.badge-src-pre{background:#f1f5f9;color:#64748b;border:1px dashed var(--line)}
 .repbar b{color:var(--ink)}
 /* ── 向导 ── */
 .wiz{display:grid;grid-template-columns:repeat(6,1fr);gap:10px}
@@ -223,6 +248,26 @@ kbd{background:#f1f5f9;border:1px solid var(--line);border-bottom-width:2px;bord
       <div class="mhero" id="mhero"></div>
       <div class="mgrid" id="msmall"></div>
       <div class="repbar" id="repbar" style="display:none"></div>
+
+      <details class="card" id="funnelcard" open>
+        <summary style="cursor:pointer;font-size:13px;font-weight:600;color:var(--ink2)">
+          漏斗走查 <span class="hint" id="fsum" style="font-weight:400">加载中…</span></summary>
+        <div style="margin-top:10px;font-size:12px;color:var(--ink3);margin-bottom:8px">
+          点漏斗层看该层段清单，行内点标签即改判（写人工标注+后台吸收）。
+          快捷键：<b>j/k</b> 上下、<b>1-5</b> 打标签、<b>空格</b> 展开对话。
+          图片域名 <input type="text" id="fimgbase" placeholder="https://…/p" style="width:200px;font-size:11px;padding:2px 6px">
+        </div>
+        <div id="funnelbar" class="funnel-wrap"></div>
+        <div id="fsegs" style="display:none;margin-top:14px">
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+            <b id="fseglayer" style="font-size:13px"></b>
+            <span class="hint" id="fsegcount"></span>
+            <span style="flex:1"></span>
+            <input type="text" id="fsegfilter" placeholder="过滤：用户/关键词" style="width:180px;font-size:12px;padding:4px 8px">
+          </div>
+          <div id="fseglist" style="max-height:520px;overflow:auto"></div>
+        </div>
+      </details>
 
       <details class="card" id="uacard">
         <summary style="cursor:pointer;font-size:13px;font-weight:600;color:var(--ink2)">
@@ -1102,6 +1147,176 @@ function renderProbe(j){
     <div class="txt">${esc(c.text)}</div></div>`).join("");
   out.innerHTML = heads + (rows || '<div class="card"><div class="empty">无命中</div></div>');
 }
+
+// ═══ 漏斗走查（ORS-#821）：层点击 → 段明细 → 行内改判 → 键盘流 ═══
+const FL = [
+  {id:"total", name:"全部对话", kind:"main", sub:0},
+  {id:"tester", name:"测试人员对话", kind:"cut", sub:0},
+  {id:"chitchat", name:"寒暄", kind:"cut", sub:0},
+  {id:"ticket", name:"直接连/转工单", kind:"cut", sub:0},
+  {id:"qa", name:"真实咨询问题（分母）", kind:"main", sub:0},
+  {id:"answered", name:"直答 ✓", kind:"ok", sub:1},
+  {id:"unanswered", name:"未解答 · 覆盖答不好", kind:"bad", sub:1},
+  {id:"uncovered", name:"未解答 · 库未覆盖", kind:"bad", sub:1},
+  {id:"undetermined", name:"未判定", kind:"gray", sub:1},
+];
+const FLC = {main:"#3d76c4", cut:"#d97706", ok:"#2e9e5b", bad:"#d9534f", gray:"#98a2b3"};
+const LABELS = ["直答正确","未直答","未覆盖","直接提单","建议转单"];
+let fData = null, fCur = {layer:"", rows:[], idx:-1};
+
+function fImgBase(){
+  let v = $("#fimgbase").value.trim().replace(/\/+$/,"");
+  if(!v) v = localStorage.getItem("fimgbase") || "https://usp.ep-zl.com/p";
+  else localStorage.setItem("fimgbase", v);
+  return v + "/api/call/files/";
+}
+
+async function loadFunnel(){
+  $("#fsum").textContent = "加载中…";
+  try{
+    const j = await (await fetch("/api/funnel?env=prod")).json();
+    if(!j.found){ $("#fsum").textContent = "缺产物：" + (j.reason||""); $("#funnelbar").innerHTML = ""; return; }
+    fData = j;
+    renderFunnel();
+  }catch(e){ $("#fsum").textContent = "加载失败：" + e.message; }
+}
+
+function renderFunnel(){
+  const L = fData.layers, total = L.total || 1;
+  $("#fsum").innerHTML = `直答率（已判定口径）<b style="font-size:15px;color:var(--brand)">${L.direct_rate ?? "—"}%</b>
+    ｜已复核 <b>${L.reviewed}</b>/${L.total} 段
+    ${L.consistent ? "" : '｜<span style="color:var(--danger)">分层不守恒，数据异常！</span>'}`;
+  $("#funnelbar").innerHTML = FL.map(f=>{
+    const n = L[f.id] ?? 0;
+    const w = Math.max(n/total*100, 9);
+    const pc = total ? Math.round(n/total*1000)/10 : 0;
+    return `<div class="fbar${f.sub?" sub":""}${fCur.layer===f.id?" is-sel":""}" data-l="${f.id}" title="点击查看该层段清单">
+      <div class="lb">${f.name}</div>
+      <div class="tr"><div class="fill" style="width:${w}%;background:${FLC[f.kind]}">
+        <b>${n}</b><span style="opacity:.85">${pc}%</span></div></div></div>`;
+  }).join("");
+  $("#funnelbar").querySelectorAll(".fbar").forEach(el=>{
+    el.onclick = ()=> loadSegs(el.dataset.l);
+  });
+}
+
+async function loadSegs(layer){
+  if(!layer) return;
+  fCur.layer = layer; fCur.idx = -1;
+  document.querySelector(".funnel-wrap")?.querySelectorAll(".fbar").forEach(e=>e.classList.toggle("is-sel", e.dataset.l===layer));
+  $("#fsegs").style.display = "";
+  $("#fseglayer").textContent = (FL.find(x=>x.id===layer)||{}).name || layer;
+  $("#fseglist").innerHTML = '<div class="empty">加载中…</div>';
+  try{
+    const j = await (await fetch(`/api/funnel_segs?env=prod&layer=${layer}`)).json();
+    if(!j.found){ $("#fseglist").innerHTML = '<div class="empty">'+esc(j.reason||"")+'</div>'; $("#fsegcount").textContent=""; return; }
+    fCur.rows = j.items || [];
+    renderSegs();
+  }catch(e){ $("#fseglist").innerHTML = '<div class="empty">失败：'+esc(e.message)+'</div>'; }
+}
+
+function renderSegs(){
+  const kw = $("#fsegfilter").value.trim();
+  const rows = kw ? fCur.rows.filter(r => (r.user||"").includes(kw) || (r.question||"").includes(kw)) : fCur.rows;
+  $("#fsegcount").textContent = `${rows.length} 段`;
+  $("#fseglist").innerHTML = rows.map((r,i)=>{
+    const tks = [...(r.ticket_ids||[]), ...(r.task_ids||[])].filter((v,ix,a)=>a.indexOf(v)===ix);
+    return `<div class="fseg" data-i="${i}" data-cid="${r.cid}" data-a0="${r.astart}">
+      <div class="q" onclick="toggleDetail(this)">${esc(r.question||"（无文本）")}</div>
+      <div class="meta">
+        <span>${esc(r.type||"")}</span>
+        <span class="badge-eff ${r.src==="manual"?"badge-src-man":"badge-src-pre"}">${esc(r.eff||"未判定")}·${r.src==="manual"?"人工":"AI预标"}</span>
+        <span>${esc(r.user||"")}</span><span>${esc((r.at||"").slice(5,16))}</span>
+        ${tks.length?`<span title="关联工单">🎫 ${tks.map(t=>"#"+t).join(" ")}</span>`:""}
+      </div>
+      <div class="ops">${LABELS.map(lb=>`<button class="lbtn${r.eff===lb&&r.src==="manual"?" on":""}" data-lb="${lb}" onclick="labelSeg(${r.cid},${r.astart},'${lb}',this)">${lb}</button>`).join("")}</div>
+      <div class="fdet" style="display:none"></div>
+    </div>`;
+  }).join("") || '<div class="empty">该层无段</div>';
+  const save = JSON.parse(localStorage.getItem("fwalk") || "null");
+  if(save && save.layer === fCur.layer){
+    const i = rows.findIndex(r=>r.cid===save.cid && r.astart===save.astart);
+    if(i >= 0){ fCur.idx = i; markCur(); const el = $(`#fseglist .fseg[data-i="${i}"]`); el?.scrollIntoView({block:"center"}); }
+  }
+}
+
+function markCur(){
+  $("#fseglist").querySelectorAll(".fseg").forEach(e=>e.classList.toggle("is-cur", +e.dataset.i === fCur.idx));
+}
+
+async function labelSeg(cid, astart, lb, btn){
+  btn.disabled = true;
+  try{
+    const r = await (await fetch("/api/label_seg", {method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({env:"prod", cid, astart, label: lb})})).json();
+    if(!r.ok) throw new Error(r.detail||"失败");
+    const seg = btn.closest(".fseg");
+    seg.querySelectorAll(".lbtn").forEach(b=>b.classList.toggle("on", b===btn));
+    const be = seg.querySelector(".badge-eff");
+    be.className = "badge-eff badge-src-man";
+    be.textContent = lb + "·人工";
+    // 本地行数据同步（漏斗层可能已不属于当前层——保留在列表，重拉漏斗即归位）
+    const row = fCur.rows.find(x=>x.cid===cid && x.astart===astart);
+    if(row){ row.eff = lb; row.src = "manual"; }
+    loadFunnel();  // 计数即时反映（MANUAL 直读）
+  }catch(e){ alert("改判失败：" + e.message); btn.disabled = false; }
+}
+
+async function toggleDetail(qEl){
+  const seg = qEl.closest(".fseg");
+  const det = seg.querySelector(".fdet");
+  if(det.style.display === ""){ det.style.display = "none"; return; }
+  if(det.dataset.loaded){ det.style.display = ""; return; }
+  det.style.display = ""; det.innerHTML = "加载中…";
+  const row = fCur.rows[+seg.dataset.i];
+  if(!row){ det.innerHTML = "行数据缺失"; return; }
+  try{
+    const j = await (await fetch(`/api/seg_detail?env=prod&cid=${row.cid}&a0=${row.astart}&a1=${row.aend}`)).json();
+    const base = fImgBase();
+    det.innerHTML = (j.rounds||[]).map(r=>{
+      const files = (r.files||[]).filter(f=>f.isImage!==false).map(f=>
+        `<img src="${esc(base + f.object_path)}" title="${esc(f.filename||"")}" loading="lazy" onerror="this.replaceWith('(图失效:'+this.title+')')">`).join("");
+      const acts = (r.a_seg||[]).filter(s=>s.action==="ticket_draft").map(s=>
+        `<span class="fact">🎫 生成工单草稿 #${s.db_id||"?"}</span>`).join(" ");
+      const ans = (r.a_seg||[]).filter(s=>s.action!=="ticket_draft" && (s.text||"").trim())
+        .map(s=>`<div class="fa">${esc((s.text||"").slice(0,600))}</div>`).join("");
+      return `<div class="fq"><b>用户：</b>${esc((r.q||"").slice(0,300))}${files?`<div>${files}</div>`:""}</div>${acts}${ans}`;
+    }).join("") || "（空段）";
+    det.dataset.loaded = "1";
+  }catch(e){ det.innerHTML = "加载失败：" + esc(e.message); }
+}
+
+// 键盘流：j/k 移动、1-5 打标签、空格展开
+document.addEventListener("keydown", e=>{
+  if(!fCur.layer || $("#fsegs").style.display === "none") return;
+  if(["INPUT","TEXTAREA","SELECT"].includes(document.activeElement?.tagName)) return;
+  const rows = $("#fseglist").querySelectorAll(".fseg");
+  if(!rows.length) return;
+  const move = d=>{
+    fCur.idx = Math.min(Math.max(fCur.idx + d, 0), rows.length-1);
+    markCur(); rows[fCur.idx].scrollIntoView({block:"center"});
+    const row = fCur.rows[+rows[fCur.idx].dataset.i];
+    if(row) localStorage.setItem("fwalk", JSON.stringify({layer:fCur.layer, cid:row.cid, astart:row.astart}));
+  };
+  if(e.key === "j" || e.key === "ArrowDown"){ e.preventDefault(); move(1); }
+  else if(e.key === "k" || e.key === "ArrowUp"){ e.preventDefault(); move(-1); }
+  else if(e.key >= "1" && e.key <= "5"){
+    if(fCur.idx < 0) return;
+    const seg = rows[fCur.idx], row = fCur.rows[+seg.dataset.i];
+    if(!row) return;
+    const lb = LABELS[+e.key - 1];
+    labelSeg(row.cid, row.astart, lb, seg.querySelector(`.lbtn[data-lb="${lb}"]`));
+  }
+  else if(e.key === " "){
+    e.preventDefault();
+    if(fCur.idx < 0) return;
+    toggleDetail(rows[fCur.idx].querySelector(".q"));
+  }
+});
+$("#fsegfilter").addEventListener("input", ()=>{ fCur.idx = -1; renderSegs(); });
+$("#fimgbase").value = localStorage.getItem("fimgbase") || "";
+$("#fimgbase").addEventListener("change", ()=>{ localStorage.setItem("fimgbase", $("#fimgbase").value.trim()); });
+loadFunnel();
 </script>
 </body>
 </html>

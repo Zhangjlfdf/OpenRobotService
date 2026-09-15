@@ -23,7 +23,7 @@ import uuid
 
 import httpx
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
@@ -785,6 +785,218 @@ def unanswered(env: str = "prod"):
     return {"found": True, "file": os.path.basename(files[-1]),
             "total": ua.get("total"), "weeks": ua.get("weeks"),
             "items": ua.get("items", [])}
+
+
+def _segments_from_cls(cls):
+    """段边界：相邻 topic 变化即断段（与 dar_l1/_fail_items/标注工具同源）。"""
+    segs, cur = [], 0
+    for i in range(1, len(cls)):
+        prev = cls[i - 1].get("topic", 0) or 0
+        now = cls[i].get("topic", 0) or 0
+        if prev != now:
+            segs.append((cur, i))
+            cur = i
+    if cls:
+        segs.append((cur, len(cls)))
+    return segs
+
+
+def _seg_rows(env):
+    """全量段级清单（漏斗六层数据源）：SPLIT 段边界 × L1 cls × L3/人工有效判定。
+
+    layer 判定顺序：tester（会话级）→ chitchat（段内无 q=true）→ ticket
+    （eff=直接提单/建议转单）→ answered/unanswered/uncovered（eff）→
+    undetermined（无任何判定，AI 未判到且未人工标注）。
+    返回 (rows, meta)；rows 每段一行。"""
+    proc = os.path.join(DATA_ROOT, env, "processed")
+    split_p = os.path.join(proc, "conversations_split.jsonl")
+    cls_p = os.path.join(proc, "conversations_classified.jsonl")
+    jl = sorted(glob.glob(os.path.join(proc, "l3_judge_all_*.json")))
+    if not (os.path.exists(split_p) and os.path.exists(cls_p) and jl):
+        return None, {"reason": "缺产物：先跑 export prepare l1 l3（周流程第 1-7 步）"}
+    cls_by = {}
+    with open(cls_p, encoding="utf-8") as fh:
+        for line in fh:
+            if line.strip():
+                j = json.loads(line)
+                cls_by[str(j["conversation_id"])] = j.get("cls") or []
+    pre_by = {}
+    for r in json.load(open(jl[-1], encoding="utf-8")):
+        pre_by[(str(r.get("cid")), r.get("astart"))] = r
+    labs_man = {}
+    mp = _manual_path(env)
+    if os.path.exists(mp):
+        legacy = {"直答错误": "未直答", "直答不完整": "未直答", "转工单正确": "建议转单"}
+        for cid, lm in (json.load(open(mp, encoding="utf-8")).get("labels") or {}).items():
+            labs_man[str(cid)] = {int(k): legacy.get(v, v) for k, v in lm.items()
+                                  if str(k).isdigit()}
+    rows = []
+    with open(split_p, encoding="utf-8") as fh:
+        for line in fh:
+            if not line.strip():
+                continue
+            c = json.loads(line)
+            cls = cls_by.get(str(c["conversation_id"]))
+            if not cls:
+                continue
+            for a0, a1 in _segments_from_cls(cls):
+                seg_cls = cls[a0:a1]
+                man = labs_man.get(str(c["conversation_id"]), {}).get(a0)
+                jrow = pre_by.get((str(c["conversation_id"]), a0))
+                pre = (jrow or {}).get("pre") or ""
+                eff, src = (man, "manual") if man else (pre, "pre")
+                # 段首个咨询回合的问题（跳过「你好」式开场）
+                qi = next((i for i, s in enumerate(seg_cls) if s.get("q")), 0)
+                r0 = (c["rounds"] or [])[a0 + qi] if a0 + qi < len(c["rounds"] or []) else {}
+                tks = [t["id"] for t in (c.get("tasks") or [])]
+                # 段内工单动作（a_seg 提取的 db_id）——用户提完删会话也能对上
+                tic_ids = []
+                for rr in (c.get("rounds") or [])[a0:a1]:
+                    for s in (rr.get("a_seg") or []):
+                        if s.get("action") == "ticket_draft" and s.get("db_id"):
+                            tic_ids.append(s["db_id"])
+                if c.get("is_tester"):
+                    layer = "tester"
+                elif not any(s.get("q") for s in seg_cls):
+                    layer = "chitchat"
+                elif eff in ("直接提单", "建议转单"):
+                    layer = "ticket"
+                elif eff == "直答正确":
+                    layer = "answered"
+                elif eff == "未直答":
+                    layer = "unanswered"
+                elif eff == "未覆盖":
+                    layer = "uncovered"
+                else:
+                    layer = "undetermined"
+                rows.append({
+                    "cid": c["conversation_id"], "astart": a0, "aend": a1,
+                    "layer": layer, "eff": eff, "src": src,
+                    "question": (r0.get("q") or "")[:200],
+                    "type": seg_cls[qi].get("type", "其他") if seg_cls else "其他",
+                    "user": c.get("name") or c.get("user_id"),
+                    "is_tester": bool(c.get("is_tester")),
+                    "at": r0.get("at") or c.get("created_at"),
+                    "task_ids": tks, "ticket_ids": tic_ids,
+                })
+    return rows, {"split": split_p, "judge": os.path.basename(jl[-1])}
+
+
+def _funnel_layers(rows):
+    def n(l):
+        return sum(1 for r in rows if r["layer"] == l)
+
+    total = len(rows)
+    tester, chitchat, ticket = n("tester"), n("chitchat"), n("ticket")
+    answered, unanswered, uncovered = n("answered"), n("unanswered"), n("uncovered")
+    undet = n("undetermined")
+    qa = total - tester - chitchat - ticket
+    judged = answered + unanswered + uncovered
+    return {
+        "total": total, "tester": tester, "chitchat": chitchat, "ticket": ticket,
+        "qa": qa, "answered": answered, "unanswered": unanswered,
+        "uncovered": uncovered, "undetermined": undet,
+        "direct_rate": round(answered / judged * 100, 1) if judged else None,
+        "reviewed": sum(1 for r in rows if r["src"] == "manual"),
+        "consistent": qa == answered + unanswered + uncovered + undet,
+    }
+
+
+@app.get("/api/funnel")
+def funnel(env: str = "prod"):
+    """漏斗六层计数 + 直答率（已判定口径）+ 复核进度 + 层守恒。"""
+    if env not in ("test", "prod"):
+        raise HTTPException(400, "env 取值 test|prod")
+    rows, meta = _seg_rows(env)
+    if rows is None:
+        return {"found": False, **meta}
+    return {"found": True, "layers": _funnel_layers(rows), "meta": meta}
+
+
+@app.get("/api/funnel_segs")
+def funnel_segs(env: str = "prod", layer: str = "", week: str = "",
+                type_: str = Query("", alias="type"), user: str = ""):
+    """漏斗某层段明细（走查主战场）：layer 必填，week/type/user 可选过滤。"""
+    if env not in ("test", "prod"):
+        raise HTTPException(400, "env 取值 test|prod")
+    rows, meta = _seg_rows(env)
+    if rows is None:
+        return {"found": False, **meta}
+    if not layer:
+        raise HTTPException(400, "layer 必填")
+    out = [r for r in rows if r["layer"] == layer]
+    if week:
+        out = [r for r in out if (r.get("at") or "")[:10] >= week]
+    if type_:
+        out = [r for r in out if r["type"] == type_]
+    if user:
+        out = [r for r in out if user in (r.get("user") or "")]
+    out.sort(key=lambda r: (r.get("at") or "", r["cid"]))
+    return {"found": True, "layer": layer, "total": len(out), "items": out}
+
+
+class LabelSegReq(BaseModel):
+    env: str = "prod"
+    cid: int
+    astart: int
+    label: str
+
+
+_LABELS_VALID = ("直答正确", "未直答", "未覆盖", "直接提单", "建议转单")
+
+
+@app.post("/api/label_seg")
+def label_seg(req: LabelSegReq):
+    """漏斗走查页内单段改判：merge 进 manual_segmentation.json 的 labels
+    （save_manual 是标注工具全量覆盖，走查单段改判走这里防读改写竞态），
+    并后台触发 l1r（人工标签吸收，刷新指标即见）。"""
+    if req.env not in ("test", "prod"):
+        raise HTTPException(400, "env 取值 test|prod")
+    if req.label not in _LABELS_VALID:
+        raise HTTPException(400, f"label 取值 {'/'.join(_LABELS_VALID)}")
+    p = _manual_path(req.env)
+    d = {"bounds": {}, "labels": {}}
+    if os.path.exists(p):
+        try:
+            d = json.load(open(p, encoding="utf-8"))
+        except Exception:
+            d = {"bounds": {}, "labels": {}}
+    d.setdefault("labels", {}).setdefault(str(req.cid), {})[str(req.astart)] = req.label
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    with open(p, "w", encoding="utf-8") as fh:
+        json.dump(d, fh, ensure_ascii=False, indent=1)
+    busy = bool(_run_state["proc"] and _run_state["proc"].poll() is None)
+    split = os.path.join(DATA_ROOT, req.env, "processed", "conversations_split.jsonl")
+    if not busy and os.path.exists(split):
+        subprocess.Popen([sys.executable, os.path.join(HERE, "dar_weekly.py"),
+                          "--env", req.env, "l1r"],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         cwd=PROJ, env=_child_env())
+        return {"ok": True, "rerun": True}
+    return {"ok": True, "rerun": False}
+
+
+@app.get("/api/seg_detail")
+def seg_detail(env: str = "prod", cid: int = 0, a0: int = 0, a1: int = 0):
+    """走查页展开段对话：返回该段 rounds 切片（q/a_seg 分段/files 图片/时间）。"""
+    if env not in ("test", "prod"):
+        raise HTTPException(400, "env 取值 test|prod")
+    if not cid or a0 < 0 or a1 <= a0:
+        raise HTTPException(400, "cid/a0/a1 参数无效")
+    split_p = os.path.join(DATA_ROOT, env, "processed", "conversations_split.jsonl")
+    if not os.path.exists(split_p):
+        raise HTTPException(404, "缺 conversations_split.jsonl")
+    with open(split_p, encoding="utf-8") as fh:
+        for line in fh:
+            if not line.strip():
+                continue
+            c = json.loads(line)
+            # csv 导出的字段全是字符串——str 比较防 int/str 不匹配漏查
+            if str(c.get("conversation_id")) == str(cid):
+                rounds = (c.get("rounds") or [])[a0:a1]
+                return {"found": True, "cid": cid, "rounds": rounds,
+                        "n_all": len(c.get("rounds") or [])}
+    raise HTTPException(404, f"会话 {cid} 不存在")
 
 
 def _mtime_str(p: str) -> str:

@@ -177,8 +177,16 @@ def main():
                 if m["role"] == "USER":
                     if cur:
                         rounds.append(cur)
+                    files = []
+                    fu = m.get("file_urls")
+                    if fu:
+                        try:
+                            files = [f for f in (json.loads(fu) or [])
+                                     if isinstance(f, dict) and f.get("object_path")]
+                        except Exception:
+                            files = []
                     cur = {"q": m["content"] or "", "a": [], "a_seg": [],
-                           "at": m["created_at"], "task_ids": []}
+                           "at": m["created_at"], "task_ids": [], "files": files}
                 elif m["role"] == "ASSISTANT" and cur is not None:
                     text = m["content"] or ""
                     act = _ticket_action(text)
