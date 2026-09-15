@@ -14,6 +14,7 @@ import {
   MacCheck, MacChevronRight, MacChevronDown, MacChevronUp, MacFileText, MacPencil, MacPlus, MacRefreshCw,
   MacSparkles, MacBarChart3,
 } from '@/shared/components/macaronIcons';
+import ProjectInfoCard from './ProjectInfoCard';
 
 interface ProjectDocument {
   name: string;
@@ -480,6 +481,10 @@ export default function ProjectDetail() {
             </p>
           </div>
         </section>
+
+        {/* 项目信息管理（项目详细信息）：对照原型 ProjectDetailCard，位于项目概况之后（与原型顺序一致）。
+            后端暂无信息树接口，节点暂存本机并标注「待接入」，编辑入口跳独立编辑页 */}
+        <ProjectInfoCard projectId={id} canEdit={!isNew} />
 
         {/* 项目基础画像（对照原型 SectionCard + FieldRow） */}
         <section className="mac-card mac-card--pad" style={{ marginBottom: 12 }}>

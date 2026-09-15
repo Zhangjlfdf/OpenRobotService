@@ -2690,6 +2690,11 @@ html, body, #root {
   --mac-status-4: #86cae9;
   --mac-status-5: #c6e6f5;
   --mac-status-6: #d9eef8;
+  /* 项目信息树层级色（对照原型 text-tree-depth-1..4：一级最深蓝，逐级变浅） */
+  --mac-tree-1: #2f91bd;
+  --mac-tree-2: #2281aa;
+  --mac-tree-3: #5aa6c8;
+  --mac-tree-4: #8dc8e0;
   --mac-shadow-soft: 0 1px 2px rgba(80, 90, 100, 0.04), 0 8px 24px rgba(80, 90, 100, 0.06);
 }
 .tasks-view {
@@ -8151,3 +8156,163 @@ html, body, #root {
 .forward-snapshot .chat-select-check { display: none !important; }
 .forward-snapshot button { display: none !important; }
 .forward-snapshot .chat-bubble-wrap { margin: 0 !important; }
+
+/* ============ 项目信息管理（项目详细信息）卡片 + 信息树编辑页 ============
+   对照原型：components/project/ProjectDetailCard.tsx（浏览卡）与
+   components/tree/ProjectInformationTree.tsx（编辑树）。
+   层级色用 --mac-tree-1..4（原型 text-tree-depth-1..4 / bg-tree-depth-1 的同色值）。 */
+
+/* —— 卡头（浏览卡与编辑页共用）：标题 + 待接入标记 + 操作区 —— */
+.mac-info__head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+.mac-info__title-wrap { min-width: 0; }
+.mac-info__title { margin: 0; display: flex; align-items: center; gap: 6px; font-size: 15px; font-weight: 600; color: var(--mac-fg); }
+.mac-info__subtitle { margin: 3px 0 0; font-size: 11.5px; color: var(--mac-muted-fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mac-info__actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.mac-info__edit, .mac-info__collapse, .mac-info__iconbtn { padding: 6px; line-height: 0; border-radius: 9px; }
+.mac-info__edit { display: inline-flex; align-items: center; gap: 4px; padding: 5px 9px; font-size: 12px; line-height: 1.2; }
+.mac-info__act { display: inline-flex; align-items: center; gap: 4px; padding: 5px 9px; font-size: 11.5px; line-height: 1.2; }
+
+/* —— 显示内容标签池（浏览卡） —— */
+.mac-info__poolhead { display: flex; align-items: center; justify-content: space-between; margin-top: 14px; }
+.mac-info__poolhead-label { font-size: 12px; color: var(--mac-muted-fg); }
+.mac-info__poolhead-ops { display: flex; gap: 12px; }
+.mac-info__poolbtn { border: none; background: none; padding: 0; font: inherit; font-size: 12px; color: var(--mac-blue-2); cursor: pointer; }
+.mac-tagpool { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.mac-tagpool__chip {
+  position: relative; border: 1px solid var(--mac-border); background: #fff; border-radius: 999px;
+  padding: 4px 11px; font: inherit; font-size: 12px; color: var(--mac-fg); cursor: pointer;
+}
+.mac-tagpool__chip.is-active { border-color: rgba(54, 151, 195, 0.5); background: var(--mac-blue-soft); color: var(--mac-blue-1); font-weight: 500; }
+.mac-tagpool__warn {
+  position: absolute; top: -3px; right: -3px; width: 15px; height: 15px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  background: #808080; color: #fff; font-size: 9px; font-weight: 700;
+  border: 1px solid rgba(255, 255, 255, 0.55);
+}
+
+/* —— 提示 / 空态 —— */
+.mac-info__hint { margin: 10px 0 0; font-size: 11.5px; color: var(--mac-muted-fg); }
+.mac-info__state { padding: 22px 12px; text-align: center; font-size: 12.5px; line-height: 1.7; color: var(--mac-muted-fg); }
+.mac-info__state-sub { font-size: 11px; color: var(--mac-gray-light); }
+.mac-info-note {
+  display: flex; gap: 8px; align-items: flex-start; margin-bottom: 12px; padding: 10px 12px;
+  background: var(--mac-blue-soft); border-radius: 12px; font-size: 11.5px; line-height: 1.6; color: var(--mac-blue-1);
+}
+.mac-info-note__icon { display: inline-flex; margin-top: 1px; }
+
+/* —— 文档式浏览（浏览卡正文）：渲染后的 md 观感——按层级字号/颜色区分标题，不出现 # 记号 —— */
+.mac-doc { margin-top: 12px; }
+.mac-doc__section + .mac-doc__section { margin-top: 14px; }
+.mac-doc__head { display: flex; align-items: baseline; gap: 6px; }
+.mac-doc__title { margin: 0; min-width: 0; }
+.mac-doc__head--d1 .mac-doc__title { font-size: 16px; font-weight: 700; color: var(--mac-tree-1); }
+.mac-doc__head--d2 .mac-doc__title { font-size: 14px; font-weight: 600; color: var(--mac-tree-2); }
+.mac-doc__head--d3 .mac-doc__title { font-size: 13px; font-weight: 600; color: var(--mac-tree-3); }
+.mac-doc__head--d4 .mac-doc__title { font-size: 12.5px; font-weight: 600; color: var(--mac-tree-4); }
+.mac-doc__section--d2 { padding-left: 4px; }
+.mac-doc__section--d3, .mac-doc__section--d4 { padding-left: 8px; }
+.mac-doc__text { margin: 6px 0 0; display: flex; flex-direction: column; gap: 3px; }
+.mac-doc__text p { margin: 0; font-size: 13px; line-height: 1.6; color: #4a4f50; white-space: pre-wrap; }
+.mac-doc__empty { margin: 6px 0 0; font-size: 12.5px; color: var(--mac-gray-light); }
+.mac-doc__select { margin: 6px 0 0; }
+.mac-doc__pill { display: inline-block; padding: 3px 10px; border-radius: 999px; background: var(--mac-blue-soft); color: var(--mac-blue-1); font-size: 12px; }
+.mac-doc__attach { margin: 6px 0 0; display: flex; flex-direction: column; gap: 6px; }
+.mac-doc__thumb { display: block; max-width: 100%; max-height: 160px; border-radius: 10px; border: 1px solid var(--mac-border); object-fit: cover; }
+.mac-doc__file { display: flex; align-items: center; gap: 6px; padding: 8px 10px; background: var(--mac-secondary); border-radius: 10px; font-size: 12px; color: var(--mac-muted-fg); }
+.mac-doc__file-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--mac-fg); }
+.mac-doc__dl { display: inline-flex; padding: 2px; color: var(--mac-blue-2); }
+
+/* —— 信息树（编辑页） —— */
+.mac-info__tree { margin-top: 14px; display: flex; flex-direction: column; gap: 6px; }
+/* 二级及以下整体缩进，左侧虚线表示从属；同级子树之间留间距 */
+.mac-info-subtree { display: flex; flex-direction: column; gap: 6px; margin: 6px 0 0 12px; padding-left: 10px; border-left: 1px dashed rgba(147, 224, 255, 0.6); }
+
+.mac-info-row { position: relative; border-radius: 10px; border: 2px solid var(--mac-tree-1); background: var(--mac-tree-1); box-shadow: 0 1px 2px rgba(80, 90, 100, 0.05); }
+.mac-info-row--d2 { border-color: var(--mac-tree-2); background: #fff; }
+.mac-info-row--d3 { border-color: var(--mac-tree-3); background: #fff; }
+.mac-info-row--d4 { border-color: var(--mac-tree-4); background: #fff; }
+.mac-info-row.is-dragging { opacity: 0.7; box-shadow: 0 8px 20px rgba(80, 90, 100, 0.18); transform: scale(1.015); }
+.mac-info-row.is-drop-child { box-shadow: 0 0 0 2px var(--mac-blue-2); }
+.mac-info-row.is-drop-before::before { content: ''; position: absolute; left: 4px; right: 4px; top: -5px; height: 3px; border-radius: 2px; background: var(--mac-blue-2); }
+
+.mac-info-row__main { display: flex; align-items: center; gap: 4px; min-height: 36px; padding: 6px 8px 6px 4px; }
+.mac-info-row--d1 .mac-info-row__main { padding: 7px 10px 7px 6px; }
+.mac-info-row__grip { display: inline-flex; flex-shrink: 0; padding: 3px 1px; opacity: 0.6; cursor: grab; touch-action: none; }
+.mac-info-row--d1 .mac-info-row__grip { color: #fff; }
+.mac-info-row__toggle {
+  display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0;
+  width: 26px; height: 26px; border: none; border-radius: 8px; background: none; padding: 0;
+  color: inherit; cursor: pointer;
+}
+.mac-info-row__toggle:disabled { cursor: default; opacity: 0.75; }
+.mac-info-row__toggle-ghost { display: inline-block; width: 15px; }
+.mac-info-row--d1 .mac-info-row__toggle { color: #fff; }
+.mac-info-row__title { flex: 1; min-width: 0; font-size: 12.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mac-info-row--d1 .mac-info-row__title { font-size: 14px; color: #fff; }
+.mac-info-row--d2 .mac-info-row__title { color: var(--mac-tree-2); }
+.mac-info-row--d3 .mac-info-row__title { color: var(--mac-tree-3); }
+.mac-info-row--d4 .mac-info-row__title { color: var(--mac-tree-4); }
+.mac-info-row__input {
+  flex: 1; min-width: 0; border: 1px solid var(--mac-border); border-radius: 7px; background: #fff; padding: 5px 8px;
+  font: inherit; font-size: 13px; color: var(--mac-fg); outline: none; box-shadow: 0 0 0 1px var(--mac-blue-2);
+}
+.mac-info-row__select {
+  flex: 1; min-width: 0; border: 1px solid var(--mac-border); border-radius: 7px; background: #fff; padding: 5px 6px;
+  font: inherit; font-size: 12.5px; font-weight: 600; color: var(--mac-tree-2); outline: none;
+}
+.mac-info-row--d1 .mac-info-row__select { background: rgba(255, 255, 255, 0.16); border-color: rgba(255, 255, 255, 0.35); color: #fff; }
+.mac-info-row__missing {
+  flex-shrink: 0; margin-right: 2px; padding: 1px 6px; border-radius: 999px;
+  background: rgba(255, 255, 255, 0.22); color: #fff; font-size: 10px; font-weight: 600; white-space: nowrap;
+}
+.mac-info-row__ops { display: flex; align-items: center; gap: 2px; flex-shrink: 0; margin-left: auto; }
+.mac-info-row__op {
+  display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px;
+  border: none; border-radius: 8px; background: none; padding: 0; color: var(--mac-muted-fg); cursor: pointer;
+}
+.mac-info-row__op:active { background: rgba(80, 90, 100, 0.08); }
+.mac-info-row--d1 .mac-info-row__op { color: rgba(255, 255, 255, 0.85); }
+.mac-info-row--d1 .mac-info-row__op:active { background: rgba(255, 255, 255, 0.15); }
+
+/* —— 末级节点内容（文字 / 下拉 / 文件 / 图片）—— */
+.mac-info-node__text {
+  display: block; box-sizing: border-box; width: calc(100% - 68px); margin: 0 8px 8px 52px; resize: none;
+  border: 1px solid rgba(255, 255, 255, 0.35); border-radius: 8px; padding: 7px 9px; min-height: 34px;
+  font: inherit; font-size: 12px; line-height: 1.5; color: var(--mac-fg); background: rgba(255, 255, 255, 0.16); outline: none;
+}
+.mac-info-row--d2 .mac-info-node__text, .mac-info-row--d3 .mac-info-node__text, .mac-info-row--d4 .mac-info-node__text {
+  border-color: var(--mac-border); background: #fff;
+}
+.mac-info-node__text::placeholder { color: var(--mac-gray-light); opacity: 1; }
+.mac-info-row--d1 .mac-info-node__text::placeholder { color: rgba(255, 255, 255, 0.6); }
+.mac-info-node__text:focus { box-shadow: 0 0 0 1px var(--mac-blue-2); }
+.mac-info-node__select { display: flex; gap: 6px; align-items: center; margin: 0 8px 8px 52px; }
+.mac-info-node__select select {
+  flex: 1; min-width: 0; border: 1px solid var(--mac-border); border-radius: 8px; padding: 6px 8px;
+  font: inherit; font-size: 12px; color: var(--mac-fg); background: #fff; outline: none;
+}
+.mac-info-node__manage { flex-shrink: 0; padding: 5px 10px; font-size: 11.5px; background: #fff; }
+.mac-info-node__file { margin: 0 8px 8px 52px; }
+.mac-info-node__filebox { padding: 8px; border-radius: 8px; background: rgba(255, 255, 255, 0.16); }
+.mac-info-row--d2 .mac-info-node__filebox, .mac-info-row--d3 .mac-info-node__filebox, .mac-info-row--d4 .mac-info-node__filebox { background: var(--mac-secondary); }
+.mac-info-node__thumblink { display: block; margin-bottom: 6px; }
+.mac-info-node__filerow { display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--mac-muted-fg); }
+.mac-info-row--d1 .mac-info-node__filerow { color: rgba(255, 255, 255, 0.85); }
+.mac-info-node__filename { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--mac-fg); }
+.mac-info-row--d1 .mac-info-node__filename { color: #fff; }
+.mac-info-node__filesize { flex-shrink: 0; }
+.mac-info-node__choose { display: inline-flex; align-items: center; gap: 4px; padding: 5px 10px; font-size: 11.5px; background: #fff; }
+
+/* —— 弹层：下拉选项管理 / 删除确认 / 危险按钮 —— */
+.mac-sheet__actions { margin-top: 14px; }
+.mac-opt-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 2px; border-bottom: 1px solid var(--mac-border); }
+.mac-opt-row__label { font-size: 13px; color: var(--mac-fg); }
+.mac-opt-add { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
+.mac-opt-add > *:first-child { flex: 1; }
+.mac-info__danger { background: #65757a; color: #fff; }
+.mac-info__danger:hover { opacity: 0.9; }
+.mac-info__danger-text { display: inline-flex; align-items: center; gap: 6px; color: #65757a; }
+.mac-info-row--d1 .mac-info__danger-text { color: rgba(255, 255, 255, 0.9); }
+.mac-info__confirm { margin: 0; font-size: 13px; line-height: 1.6; color: var(--mac-fg); }
+.mac-info__confirm-actions { display: flex; gap: 10px; margin-top: 16px; }
+.mac-info__confirm-actions .mac-btn { flex: 1; }

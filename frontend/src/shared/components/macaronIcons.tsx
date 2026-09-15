@@ -260,3 +260,87 @@ export const MacFileText = ({ size }: { size?: number }) => (
     <path d="M16 17H8" />
   </Icon>
 );
+
+/* lucide more-horizontal（项目信息树「更多操作」） */
+export const MacMoreHorizontal = ({ size }: { size?: number }) => (
+  <Icon size={size}>
+    <circle cx="12" cy="12" r="1" />
+    <circle cx="19" cy="12" r="1" />
+    <circle cx="5" cy="12" r="1" />
+  </Icon>
+);
+
+/* lucide grip-vertical（信息树拖动把手：长按拖动调整从属） */
+export const MacGripVertical = ({ size }: { size?: number }) => (
+  <Icon size={size}>
+    <circle cx="9" cy="12" r="1" />
+    <circle cx="9" cy="5" r="1" />
+    <circle cx="9" cy="19" r="1" />
+    <circle cx="15" cy="12" r="1" />
+    <circle cx="15" cy="5" r="1" />
+    <circle cx="15" cy="19" r="1" />
+  </Icon>
+);
+
+/* lucide history（节点编辑历史入口） */
+export const MacHistory = ({ size }: { size?: number }) => (
+  <Icon size={size}>
+    <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+    <path d="M3 3v5h5" />
+    <path d="M12 7v5l4 2" />
+  </Icon>
+);
+
+/* lucide trash-2（删除节点/文件） */
+export const MacTrash2 = ({ size }: { size?: number }) => (
+  <Icon size={size}>
+    <path d="M3 6h18" />
+    <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
+    <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+    <path d="M10 11v6" />
+    <path d="M14 11v6" />
+  </Icon>
+);
+
+/* lucide image（图片内容节点） */
+export const MacImage = ({ size }: { size?: number }) => (
+  <Icon size={size}>
+    <rect width="18" height="18" x="3" y="3" rx="2" ry="2" />
+    <circle cx="9" cy="9" r="2" />
+    <path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21" />
+  </Icon>
+);
+
+/* lucide download（附件下载） */
+export const MacDownload = ({ size }: { size?: number }) => (
+  <Icon size={size}>
+    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+    <path d="m7 10 5 5 5-5" />
+    <path d="M12 15V3" />
+  </Icon>
+);
+
+/* lucide upload（文件导入/上传） */
+export const MacUpload = ({ size }: { size?: number }) => (
+  <Icon size={size}>
+    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+    <path d="m17 8-5-5-5 5" />
+    <path d="M12 3v12" />
+  </Icon>
+);
+
+/* lucide chevron-up-down（信息树全部展开） */
+export const MacChevronsUpDown = ({ size }: { size?: number }) => (
+  <Icon size={size}>
+    <path d="m7 15 5 5 5-5" />
+    <path d="m7 9 5-5 5 5" />
+  </Icon>
+);
+
+/* lucide chevron-down-up（信息树全部折叠） */
+export const MacChevronsDownUp = ({ size }: { size?: number }) => (
+  <Icon size={size}>
+    <path d="m7 20 5-5 5 5" />
+    <path d="m7 4 5 5 5-5" />
+  </Icon>
+);

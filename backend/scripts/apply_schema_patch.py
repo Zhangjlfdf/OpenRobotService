@@ -54,6 +54,9 @@ PATCHES = {
     # 缺列时 select 报 1054 Unknown column 'project.project_manager_id'
     "project": [
         ("project_manager_id", "VARCHAR(64) NULL COMMENT '项目经理ID（与 users.id 同长度，用于关联角色）'", None),
+        # 2026-09-14 项目信息改造（alembic a7b8c9d0e1f2）：缺列时项目查询/update 全部 1054
+        ("ext_info", "JSON NULL COMMENT '项目扩展信息(递归嵌套 JSON)'", None),
+        ("version", "INT NOT NULL DEFAULT 1 COMMENT '乐观锁版本号'", None),
     ],
     "task_operation_logs": [
         ("ended_at", "DATETIME NULL COMMENT '查看结束时间（仅 VIEW 有值）'", None),
