@@ -606,20 +606,8 @@ def _realtime_small(env: str):
     from collections import Counter as _Ctr
     proc = os.path.join(DATA_ROOT, env, "processed")
     small = []
-    fr = sorted(glob.glob(os.path.join(proc, "retrieval_check_*.json")))
-    if fr:
-        try:
-            rows = json.load(open(fr[-1], encoding="utf-8"))
-            sub = [r for r in rows if r.get("grp") == "真实组"
-                   and r.get("verdict") in ("yes", "partial", "no")]
-            if sub:
-                no = sum(1 for r in sub if r["verdict"] == "no")
-                small.append({"label": "KB 缺口率",
-                              "value": f"{no / len(sub) * 100:.1f}%",
-                              "sub": f"真实组检索重放 no {no}/{len(sub)}"
-                                     "（资料层上界，含直接提单段；补库缺口看 L3 未覆盖）"})
-        except Exception:
-            pass
+    # 0916 精简：KB 缺口率/标注进度两卡与漏斗重复（未解答·库未覆盖旁支/复核进度），去；
+    # 只留 L3 precision 与预标召回（AI 预标质量监控，漏斗不含）
     mp = _manual_path(env)
     split = os.path.join(proc, "conversations_split.jsonl")
     fj = sorted(glob.glob(os.path.join(proc, "l3_judge_all_*.json")))
@@ -663,10 +651,6 @@ def _realtime_small(env: str):
                         n_real_segs += 1
         n_lab = sum(len(lm) for cid, lm in labs_man.items()
                     if cid in convs and not convs[cid].get("is_tester"))
-        if n_real_segs:
-            small.append({"label": "标注进度",
-                          "value": f"{n_lab}/{n_real_segs}",
-                          "sub": "真实组人工标签覆盖（L2）"})
         rows = json.load(open(fj[-1], encoding="utf-8"))
         labs4 = ("直接提单", "直答正确", "未直答", "未覆盖")
         hit, tot, cm = _Ctr(), _Ctr(), _Ctr()

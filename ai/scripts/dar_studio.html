@@ -182,7 +182,7 @@ label.f{display:flex;flex-direction:column;gap:5px;font-size:12px;color:var(--in
 .be-未覆盖.badge-src-man{background:#fee2e2;color:#b91c1c}
 .be-直接提单.badge-src-man,.be-建议转单.badge-src-man{background:#ffedd5;color:#c2410c}
 .be-寒暄.badge-src-man{background:#f1f5f9;color:#64748b}
-.repbar b{color:var(--ink)}
+.repbar .rep-body b{color:#ffd43b}
 /* ── 向导 ── */
 .wiz{display:grid;grid-template-columns:repeat(6,1fr);gap:10px}
 .wstep{border:1px solid var(--line);border-radius:12px;padding:12px 12px 10px;background:#fff;
@@ -280,7 +280,7 @@ kbd{background:#f1f5f9;border:1px solid var(--line);border-bottom-width:2px;bord
   <aside class="side">
     <div class="brand"><div class="t">AI 质量工作台</div><div class="s">AI Quality Studio</div></div>
     <nav class="nav">
-      <button id="nav-week" class="on"><span class="dot"></span>周流程 · 指标生成</button>
+      <button id="nav-week" class="on"><span class="dot"></span>质量看板</button>
       <button id="nav-test"><span class="dot"></span>在线测试</button>
       <button id="nav-sink"><span class="dot"></span>工单沉淀</button>
     </nav>
@@ -296,7 +296,7 @@ kbd{background:#f1f5f9;border:1px solid var(--line);border-bottom-width:2px;bord
     <!-- ══ 页签1 周流程 ══ -->
     <section class="view on" id="view-week">
       <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">
-        <h2 class="pg" style="margin:0">周流程 · 指标生成</h2>
+        <h2 class="pg" style="margin:0">质量看板</h2>
         <span class="badge dim" style="margin-top:2px">数据源：生产库</span>
         <span style="flex:1"></span>
         <button class="btn sm" id="mrefresh">刷新指标</button>
@@ -1249,7 +1249,7 @@ async function loadFunnel(){
 function renderFunnel(){
   const L = fData.layers, T = L.total || 1;
   $("#fsum").innerHTML = `直答率（已判定口径）<b style="font-size:15px;color:var(--brand)">${L.direct_rate ?? "—"}%</b>
-    ｜已复核 <b>${L.reviewed}</b>/${L.total} 段
+    ｜走查复核 <b>${L.reviewed}</b>/${L.qa} 段（真实咨询层）
     ${L.consistent ? "" : '｜<span style="color:var(--danger)">分层不守恒，数据异常！</span>'}`;
   // 手绘形态：主漏斗=过滤后剩余逐层收窄，**终点是直答 ✓**（最终留下的）；
   // 测试/寒暄/转工单/未直答/未覆盖/未判定全部是被甩出的旁支；出口=直答率大字
