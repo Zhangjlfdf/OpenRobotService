@@ -868,16 +868,20 @@ def _seg_rows(env):
                     for s in (rr.get("a_seg") or []):
                         if s.get("action") == "ticket_draft" and s.get("db_id"):
                             tic_ids.append(s["db_id"])
+                # 猜你想问=元筛选，优先于人工标签（用户口径：推荐点击不进直答
+                # 统计，标没标过都一样——0916 走查实锤已标段命中池仍留在 qa）
+                seg_has_sug = any(((rr.get("q") or "").strip() in suggested_pool)
+                                  for rr in (c.get("rounds") or [])[a0:a1])
                 if c.get("is_tester"):
                     layer = "tester"
+                elif seg_has_sug:
+                    layer = "suggested"
                 elif eff == "寒暄":
                     layer = "chitchat"
                 # L1 无咨询信号判寒暄——但有人工标签时标签优先（走查发现误判，
                 # 点任一标签即从寒暄层捞进对应层）
                 elif not any(s.get("q") for s in seg_cls) and not man:
                     layer = "chitchat"
-                elif not man and (r0.get("q") or "").strip() in suggested_pool:
-                    layer = "suggested"
                 elif eff in ("直接提单", "建议转单"):
                     layer = "ticket"
                 elif eff == "直答正确":
