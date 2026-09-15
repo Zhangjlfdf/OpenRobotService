@@ -99,26 +99,41 @@ label.f{display:flex;flex-direction:column;gap:5px;font-size:12px;color:var(--in
 .mgrid .mcard .v{font-size:24px}
 .repbar{display:flex;gap:14px;align-items:center;flex-wrap:wrap;font-size:12.5px;color:var(--ink2);
   padding:10px 14px;background:var(--brand-soft);border:1px solid #e0e7ff;border-radius:10px;margin-bottom:16px}
-/* ── 漏斗走查（ORS-#821）── */
-.funnel-wrap{width:100%;max-width:860px;margin:0 auto;display:flex;flex-direction:column;gap:4px}
-.fn-row{display:grid;grid-template-columns:140px minmax(0,1fr) 230px;gap:8px;align-items:center}
-.fn-lb{font-size:12px;color:var(--ink3);text-align:right;white-space:nowrap;justify-self:end}
-.frow{display:flex;justify-content:center}
-.fill{height:32px;display:flex;align-items:center;justify-content:center;gap:7px;
-  font-size:12.5px;color:#fff;cursor:pointer;border-radius:7px;min-width:52px;
+/* ── 漏斗走查（ORS-#821，手绘图形态）── */
+.funnel-wrap{width:100%;max-width:900px;margin:0 auto;display:flex;flex-direction:column;gap:16px}
+.fn-row{display:grid;grid-template-columns:150px minmax(0,1fr) 265px;gap:0 14px;align-items:center}
+.fn-lb{font-size:12.5px;color:var(--ink2);text-align:right;white-space:nowrap;justify-self:end;line-height:1.3}
+.frow{display:flex;justify-content:center;align-items:center}
+.fill{height:36px;display:flex;align-items:center;justify-content:center;gap:8px;
+  font-size:13px;color:#fff;cursor:pointer;border-radius:8px;min-width:56px;
   transition:transform .15s;white-space:nowrap}
-.fill b{font-size:14.5px}
+.fill b{font-size:15px}
 .fill:hover{transform:scale(1.02)}
-.fill.is-sel{outline:3px solid var(--brand);outline-offset:2px}
-.fill.is-rest{cursor:default;opacity:.5}
+.fill.is-sel{outline:3px solid var(--brand);outline-offset:2px;z-index:1}
+.fill.is-rest{height:28px;opacity:.55;cursor:default}
 .fill.is-rest:hover{transform:none}
-.fn-side{display:flex;align-items:center;gap:4px;cursor:pointer;justify-self:start}
-.fn-side:hover .fs-chip{filter:brightness(1.05)}
-.fn-side .arrow{color:var(--ink3);font-size:16px;flex-shrink:0}
-.fs-chip{background:#d97706;color:#fff;border-radius:8px;padding:5px 10px;
-  font-size:12px;white-space:nowrap;display:flex;gap:6px;align-items:center}
-.fs-chip b{font-size:13.5px}
+/* 被过滤削掉段：斜纹+虚线框（视觉=从主流削掉的一块） */
+.fcut{height:28px;border:1.5px dashed #d97706;border-left:none;border-radius:0 8px 8px 0;
+  background:repeating-linear-gradient(45deg,#fbe3c2 0 7px,#f7d9a8 7px 14px);
+  display:flex;align-items:center;justify-content:flex-end;padding-right:6px;min-width:34px}
+.fcut .dot{width:7px;height:7px;border-radius:50%;background:#d97706}
+/* 旁路：连接线（虚线）+ 箭头 + 橙色块 */
+.fn-side{display:flex;align-items:center;cursor:pointer;min-width:0}
+.fn-side .lnk{flex:1;min-width:14px;border-top:2.5px dashed #d97706;height:0}
+.fn-side .ah{color:#d97706;font-size:17px;font-weight:700;flex-shrink:0;line-height:1}
+.fs-chip{background:#d97706;color:#fff;border-radius:9px;padding:6px 11px;
+  font-size:12.5px;white-space:nowrap;display:flex;gap:6px;align-items:center;flex-shrink:0}
+.fs-chip b{font-size:14px}
+.fn-side:hover .fs-chip{filter:brightness(1.07)}
 .fn-side.is-sel .fs-chip{outline:3px solid var(--brand);outline-offset:2px}
+/* 直答行的三旁支（竖排小 chip 组）+ 从分母削掉段连过去的一根总线 */
+.fn-side3{grid-column:3;display:flex;flex-direction:column;gap:6px;align-items:flex-start;
+  border-left:2.5px dashed #d9534f;padding-left:8px;justify-self:start}
+.fn-side3 .fn-side{cursor:pointer}
+.fn-side3 .fs-chip{background:#d9534f}
+.fn-rate{margin-top:18px;text-align:center;font-size:14px;color:var(--ink2)}
+.fn-rate b{font-size:26px;color:var(--brand);margin:0 4px}
+.fn-rate span{font-size:12px;color:var(--ink3)}
 .fseg{border:1px solid var(--line);border-radius:10px;padding:8px 10px;margin-bottom:8px}
 .fseg.is-cur{border-color:var(--brand);box-shadow:0 0 0 2px var(--brand-soft)}
 .fseg .q{font-size:13px;line-height:1.5;cursor:pointer}
@@ -1199,31 +1214,44 @@ function renderFunnel(){
   $("#fsum").innerHTML = `直答率（已判定口径）<b style="font-size:15px;color:var(--brand)">${L.direct_rate ?? "—"}%</b>
     ｜已复核 <b>${L.reviewed}</b>/${L.total} 段
     ${L.consistent ? "" : '｜<span style="color:var(--danger)">分层不守恒，数据异常！</span>'}`;
-  // 手绘形态：主漏斗显示「过滤后剩余」逐层收窄（全量→除测试→除寒暄→除转工单=分母），
-  // 被过滤的块箭头甩到右侧独立展示（旁路，可点开明细）；主流层名在左标签列
+  // 手绘形态：主漏斗=过滤后剩余逐层收窄，**终点是直答 ✓**（最终留下的）；
+  // 测试/寒暄/转工单/未直答/未覆盖/未判定全部是被甩出的旁支；出口=直答率大字
   const W = n => Math.max(n / T * 100, 6);
-  const row = (label, id, n, kind, side, rest) =>
+  const row = (label, id, n, kind, side, cutN) =>
     `<div class="fn-row">
        <div class="fn-lb">${esc(label)}</div>
-       <div class="frow"><div class="fill${rest?" is-rest":""}${id&&fCur.layer===id?" is-sel":""}"
-         ${id?`data-l="${id}" title="点击查看该层段清单"`:`title="过滤后剩余"`}
-         style="width:${W(n)}%;background:${FLC[kind]}"><b>${n}</b></div></div>
+       <div class="frow">
+         <div class="fill${side?" is-rest":""}${id&&fCur.layer===id?" is-sel":""}"
+           ${id?`data-l="${id}" title="点击查看该层段清单"`:`title="过滤后剩余"`}
+           style="width:${W(n)}%;background:${FLC[kind]}"><b>${n}</b></div>
+         ${cutN != null ? `<div class="fcut" style="width:${W(cutN)}%"><span class="dot"></span></div>` : ""}
+       </div>
        ${side || ""}
      </div>`;
   const side = (id, name, n) =>
     `<div class="fn-side${fCur.layer===id?" is-sel":""}" data-l="${id}" title="点击查看该层段清单">
-       <span class="arrow">↘</span>
+       <span class="lnk"></span><span class="ah">▸</span>
        <div class="fs-chip"><b>${n}</b>${esc(name)}</div></div>`;
+  const side3 = (parts) =>
+    `<div class="fn-side3">${parts.map(p =>
+      `<div class="fn-side${fCur.layer===p[0]?" is-sel":""}" data-l="${p[0]}" title="点击查看该层段清单">
+         <div class="fs-chip"><b>${p[2]}</b>${esc(p[1])}</div></div>`).join("")}</div>`;
   const r1 = T - L.tester, r2 = r1 - L.chitchat;
+  const badTotal = L.unanswered + L.uncovered + L.undetermined;
   $("#funnelbar").innerHTML = [
     row("全部对话", "total", T, "main"),
-    row("过滤测试后", "", r1, "main", side("tester", "测试人员对话", L.tester), true),
-    row("过滤寒暄后", "", r2, "main", side("chitchat", "寒暄", L.chitchat), true),
-    row("真实咨询问题（分母）", "qa", L.qa, "main", side("ticket", "直接连/转工单 →提单库", L.ticket)),
-    row("直答 ✓", "answered", L.answered, "ok"),
-    row("未解答·覆盖答不好", "unanswered", L.unanswered, "bad"),
-    row("未解答·库未覆盖", "uncovered", L.uncovered, "bad"),
-    row("未判定（走查补齐）", "undetermined", L.undetermined, "gray"),
+    row("过滤测试后", "", r1, "main", side("tester", "测试人员对话", L.tester), L.tester),
+    row("过滤寒暄后", "", r2, "main", side("chitchat", "寒暄", L.chitchat), L.chitchat),
+    row("真实咨询问题（分母）", "qa", L.qa, "main", side("ticket", "转工单 →提单库", L.ticket), L.ticket),
+    row("直答 ✓（最终留下）", "answered", L.answered, "ok", null, badTotal),
+    `<div class="fn-row">
+       <div class="fn-lb"></div><div></div>
+       ${side3([["unanswered","未直答·覆盖答不好",L.unanswered],
+                ["uncovered","未直答·库未覆盖",L.uncovered],
+                ["undetermined","未判定",L.undetermined]])}
+     </div>`,
+    `<div class="fn-rate">直答率 <b>${L.direct_rate ?? "—"}%</b>
+      <span>= ${L.answered} ÷ ${L.qa}（已判定口径）</span></div>`,
   ].join("");
   $("#funnelbar").querySelectorAll("[data-l]").forEach(el=>{
     el.onclick = ()=> loadSegs(el.dataset.l);
