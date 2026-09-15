@@ -100,42 +100,55 @@ label.f{display:flex;flex-direction:column;gap:5px;font-size:12px;color:var(--in
 .repbar{display:flex;gap:14px;align-items:center;flex-wrap:wrap;font-size:12.5px;color:var(--ink2);
   padding:10px 14px;background:var(--brand-soft);border:1px solid #e0e7ff;border-radius:10px;margin-bottom:16px}
 /* ── 漏斗走查（ORS-#821，手绘图形态）── */
-.funnel-wrap{width:100%;max-width:900px;margin:0 auto;display:flex;flex-direction:column;gap:16px}
+.funnel-wrap{width:100%;max-width:900px;margin:0 auto;display:flex;flex-direction:column;gap:16px;
+  padding:18px 20px;background:linear-gradient(180deg,#fbfcfe,#f6f8fc);
+  border:1px solid var(--line);border-radius:14px}
 .fn-row{display:grid;grid-template-columns:150px minmax(0,1fr) 265px;gap:0 14px;align-items:center}
 .fn-lb{font-size:12.5px;color:var(--ink2);text-align:right;white-space:nowrap;justify-self:end;line-height:1.3}
 .frow{display:flex;justify-content:center;align-items:center}
 .fill{height:36px;display:flex;align-items:center;justify-content:center;gap:8px;
   font-size:13px;color:#fff;cursor:pointer;border-radius:8px;min-width:56px;
-  transition:transform .15s;white-space:nowrap}
-.fill b{font-size:15px}
-.fill:hover{transform:scale(1.02)}
+  transition:transform .15s, box-shadow .15s;white-space:nowrap;
+  box-shadow:0 1px 3px rgba(15,23,42,.18)}
+.fill b{font-size:15px;text-shadow:0 1px 2px rgba(0,0,0,.15)}
+.fill:hover{transform:scale(1.02);box-shadow:0 3px 10px rgba(15,23,42,.25)}
 .fill.is-sel{outline:3px solid var(--brand);outline-offset:2px;z-index:1}
-.fill.is-rest{height:28px;opacity:.55;cursor:default}
+.fill.is-rest{height:28px;opacity:.55;cursor:default;box-shadow:none;background-image:
+  linear-gradient(180deg,rgba(255,255,255,.18),rgba(0,0,0,.08))}
 .fill.is-rest:hover{transform:none}
+/* 直答终点：加出口光晕 */
+.fill.is-final{box-shadow:0 0 0 3px #2e9e5b33, 0 2px 8px rgba(46,158,91,.35)}
 /* 被过滤削掉段：斜纹+虚线框（视觉=从主流削掉的一块） */
 .fcut{height:28px;border:1.5px dashed #d97706;border-left:none;border-radius:0 8px 8px 0;
-  background:repeating-linear-gradient(45deg,#fbe3c2 0 7px,#f7d9a8 7px 14px);
+  background:repeating-linear-gradient(45deg,#fdeed6 0 5px,#f9e0bd 5px 10px);
   display:flex;align-items:center;justify-content:flex-end;padding-right:6px;min-width:34px}
-.fcut .dot{width:7px;height:7px;border-radius:50%;background:#d97706}
+.fcut .dot{width:7px;height:7px;border-radius:50%;background:#d97706;
+  box-shadow:0 0 0 3px #d9770626}
 /* 旁路：连接线（虚线）+ 箭头 + 橙色块 */
 .fn-side{display:flex;align-items:center;cursor:pointer;min-width:0}
 .fn-side .lnk{flex:1;min-width:14px;border-top:2.5px dashed #d97706;height:0}
 .fn-side .ah{color:#d97706;font-size:17px;font-weight:700;flex-shrink:0;line-height:1}
-.fs-chip{background:#d97706;color:#fff;border-radius:9px;padding:6px 11px;
-  font-size:12.5px;white-space:nowrap;display:flex;gap:6px;align-items:center;flex-shrink:0}
-.fs-chip b{font-size:14px}
-.fn-side:hover .fs-chip{filter:brightness(1.07)}
+.fs-chip{background:linear-gradient(180deg,#e08613,#d97706);color:#fff;border-radius:9px;
+  padding:6px 11px;font-size:12.5px;white-space:nowrap;display:flex;gap:6px;align-items:center;
+  flex-shrink:0;box-shadow:0 1px 4px rgba(217,119,6,.35);transition:.15s}
+.fs-chip b{font-size:14px;text-shadow:0 1px 2px rgba(0,0,0,.15)}
+.fn-side:hover .fs-chip{filter:brightness(1.07);transform:translateX(2px)}
 .fn-side.is-sel .fs-chip{outline:3px solid var(--brand);outline-offset:2px}
 /* 直答行的三旁支（竖排小 chip 组）+ 从分母削掉段连过去的一根总线 */
 .fn-side3{grid-column:3;display:flex;flex-direction:column;gap:6px;align-items:flex-start;
   border-left:2.5px dashed #d9534f;padding-left:8px;justify-self:start}
 .fn-side3 .fn-side{cursor:pointer}
 .fn-side3 .fs-chip{background:#d9534f}
-.fn-rate{margin-top:18px;text-align:center;font-size:14px;color:var(--ink2)}
-.fn-rate b{font-size:26px;color:var(--brand);margin:0 4px}
+.fn-rate{margin-top:20px;text-align:center;font-size:14px;color:var(--ink2);
+  padding:14px 10px 4px;border-top:1px dashed var(--line);position:relative}
+.fn-rate::before{content:"▼";position:absolute;top:-8px;left:50%;transform:translateX(-50%);
+  color:#2e9e5b;font-size:12px;background:#f6f8fc;padding:0 8px}
+.fn-rate b{font-size:28px;color:var(--brand);margin:0 4px}
 .fn-rate span{font-size:12px;color:var(--ink3)}
-.fseg{border:1px solid var(--line);border-radius:10px;padding:8px 10px;margin-bottom:8px}
-.fseg.is-cur{border-color:var(--brand);box-shadow:0 0 0 2px var(--brand-soft)}
+.fseg{border:1px solid var(--line);border-radius:10px;padding:8px 10px;margin-bottom:8px;
+  transition:border-color .15s, box-shadow .15s}
+.fseg:hover{border-color:#b9c4d6;box-shadow:0 1px 5px rgba(15,23,42,.06)}
+.fseg.is-cur{border-color:var(--brand);box-shadow:inset 3px 0 0 var(--brand), 0 1px 6px rgba(79,70,229,.12)}
 .fseg .q{font-size:13px;line-height:1.5;cursor:pointer}
 .fseg .aprev{font-size:12px;color:var(--ink3);margin-top:4px;cursor:pointer;
   background:var(--bg);border-radius:6px;padding:4px 8px;line-height:1.5}
@@ -152,6 +165,11 @@ label.f{display:flex;flex-direction:column;gap:5px;font-size:12px;color:var(--in
 .badge-eff{display:inline-block;border-radius:6px;padding:1px 8px;font-size:11.5px}
 .badge-src-man{background:#dcfce7;color:#166534}
 .badge-src-pre{background:#f1f5f9;color:#64748b;border:1px dashed var(--line)}
+.be-直答正确.badge-src-man{background:#dcfce7;color:#15803d}
+.be-未直答.badge-src-man{background:#fee2e2;color:#b91c1c}
+.be-未覆盖.badge-src-man{background:#fee2e2;color:#b91c1c}
+.be-直接提单.badge-src-man,.be-建议转单.badge-src-man{background:#ffedd5;color:#c2410c}
+.be-寒暄.badge-src-man{background:#f1f5f9;color:#64748b}
 .repbar b{color:var(--ink)}
 /* ── 向导 ── */
 .wiz{display:grid;grid-template-columns:repeat(6,1fr);gap:10px}
@@ -1245,7 +1263,7 @@ function renderFunnel(){
     row("过滤猜你想问后", "", r2, "main", side("suggested", "猜你想问（平台推荐）", L.suggested), L.suggested),
     row("过滤寒暄后", "", r3, "main", side("chitchat", "寒暄", L.chitchat), L.chitchat),
     row("真实咨询问题（分母）", "qa", L.qa, "main", side("ticket", "转工单 →提单库", L.ticket), L.ticket),
-    row("直答 ✓（最终留下）", "answered", L.answered, "ok", null, badTotal),
+    row("直答 ✓（最终留下）", "answered", L.answered, "ok", null, badTotal).replace('class="fill', 'class="fill is-final'),
     `<div class="fn-row">
        <div class="fn-lb"></div><div></div>
        ${side3([["unanswered","未直答·覆盖答不好",L.unanswered],
@@ -1289,7 +1307,7 @@ function renderSegs(){
       ${r.answer ? `<div class="aprev" onclick="toggleDetail(this)">AI：${esc(r.answer)}…</div>` : ""}
       <div class="meta">
         <span>${esc(r.type||"")}</span>
-        <span class="badge-eff ${r.src==="manual"?"badge-src-man":"badge-src-pre"}">${esc(r.eff||"未判定")}·${r.src==="manual"?"人工":"AI预标"}</span>
+        <span class="badge-eff be-${esc(r.eff||"未判定")} ${r.src==="manual"?"badge-src-man":"badge-src-pre"}">${esc(r.eff||"未判定")}·${r.src==="manual"?"人工":"AI预标"}</span>
         <span>${esc(r.user||"")}</span><span>${esc((r.at||"").slice(5,16))}</span>
         ${tks.length?`<span title="关联工单">🎫 ${tks.map(t=>"#"+t).join(" ")}</span>`:""}
         ${r.n_files?`<span title="段内附件图 ${r.n_files} 张" style="color:var(--brand)">📷 ${r.n_files}</span>`:""}

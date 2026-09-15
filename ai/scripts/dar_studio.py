@@ -1166,7 +1166,7 @@ def layer_page(env: str = "prod", layer: str = ""):
         if r.get("n_files"):
             nf_span = '<span class="mt" style="color:#3d76c4">📷 ' + str(r["n_files"]) + "</span>"
         parts.append(
-            f'<div class="seg" id="s{r["cid"]}_{r["astart"]}">'
+            f'<div class="seg {"is-man" if r["src"] == "manual" else "is-pre"}" id="s{r["cid"]}_{r["astart"]}">'
             f'<div class="sh"><span class="idx">#{idx + 1}</span>'
             f'<span class="eff {r["src"]}">{esc(r["eff"] or "未判定")}·{"人工" if r["src"] == "manual" else "AI预标"}</span>'
             f'<span class="mt">{esc(r["type"])}</span><span class="mt">{esc(r["user"])}</span>'
@@ -1177,18 +1177,29 @@ def layer_page(env: str = "prod", layer: str = ""):
     html = f"""<!DOCTYPE html><html lang="zh"><head><meta charset="utf-8">
 <title>走查 · {esc(names.get(layer, layer))}（{len(items)} 段）</title>
 <style>
-body{{font-family:"Microsoft YaHei",sans-serif;background:#f1f5f9;margin:0;padding:20px}}
-.wrap{{max-width:860px;margin:0 auto}}
-h2{{font-size:16px;color:#0f172a}} .sub{{font-size:12.5px;color:#64748b;margin-bottom:16px}}
-.seg{{background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:12px 16px;margin-bottom:16px}}
+body{{font-family:"Microsoft YaHei",sans-serif;background:#eef2f7;margin:0;padding:0}}
+.top{{position:sticky;top:0;z-index:10;background:rgba(255,255,255,.92);backdrop-filter:blur(8px);
+border-bottom:1px solid #e2e8f0;padding:12px 24px;display:flex;gap:16px;align-items:center;flex-wrap:wrap}}
+.top h2{{font-size:16px;color:#0f172a;margin:0}}
+.top .n{{font-size:12.5px;color:#64748b}}
+.top .bk{{margin-left:auto;font-size:12.5px;color:#3d76c4;text-decoration:none;
+border:1px solid #c9dcf2;border-radius:7px;padding:4px 12px;background:#f4f9fe}}
+.wrap{{max-width:860px;margin:18px auto 40px;padding:0 16px}}
+.seg{{background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:12px 16px;margin-bottom:16px;
+box-shadow:0 1px 3px rgba(15,23,42,.05);transition:.15s}}
+.seg:hover{{border-color:#b9c4d6;box-shadow:0 2px 8px rgba(15,23,42,.08)}}
+.seg.is-pre{{border-left:4px solid #d97706}}
+.seg.is-man{{border-left:4px solid #2e9e5b;opacity:.88}}
 .sh{{display:flex;gap:10px;align-items:center;flex-wrap:wrap;font-size:12.5px;color:#64748b;margin-bottom:8px}}
-.idx{{font-weight:700;color:#0f172a}}
+.idx{{font-weight:700;color:#fff;background:#3d76c4;border-radius:999px;min-width:34px;height:22px;
+display:inline-flex;align-items:center;justify-content:center;font-size:11.5px;padding:0 6px}}
 .eff{{border-radius:6px;padding:1px 9px;font-size:11.5px}}
-.eff.manual{{background:#dcfce7;color:#166534}} .eff.pre{{background:#f1f5f9;color:#64748b;border:1px dashed #cbd5e1}}
+.eff.manual{{background:#dcfce7;color:#166534}} .eff.pre{{background:#fff7ed;color:#c2410c;border:1px dashed #fdba74}}
 .mt{{color:#94a3b8}}
 button.lb{{font-size:12px;padding:3px 11px;border-radius:6px;border:1.5px solid #cbd5e1;
-background:#fff;cursor:pointer;margin-right:6px;color:var(--c,#475569)}}
-button.lb:hover{{border-color:#3d76c4}} button.lb.on{{background:#3d76c4;color:#fff;border-color:#3d76c4}}
+background:#fff;cursor:pointer;margin:2px 6px 2px 0;color:var(--c,#475569);transition:.12s}}
+button.lb:hover{{border-color:#3d76c4;transform:translateY(-1px)}}
+button.lb.on{{background:#3d76c4;color:#fff;border-color:#3d76c4}}
 .turn{{margin-top:8px}}
 .uq{{color:#0f172a;font-size:13.5px;line-height:1.7}}
 .uq b{{color:#3d76c4;margin-right:8px}}
@@ -1197,9 +1208,11 @@ padding:9px 13px;margin:8px 0 4px 16px;color:#334155;font-size:13px;white-space:
 .act{{display:inline-block;background:#fef3c7;color:#92400e;border-radius:6px;
 padding:2px 10px;font-size:12px;margin:4px 0 4px 16px}}
 img{{max-width:400px;border-radius:10px;border:1px solid #e2e8f0;margin:6px 0;display:block}}
-</style></head><body><div class="wrap">
-<h2>走查 · {esc(names.get(layer, layer))}</h2>
-<div class="sub">{len(items)} 段 · {esc(env)} 数据 · 点标签即改判（写人工标注，工作台漏斗同步变）</div>
+</style></head><body>
+<div class="top"><h2>走查 · {esc(names.get(layer, layer))}</h2>
+<span class="n">{len(items)} 段 · {esc(env)} 数据 · 左边条：橙=AI预标待复核，绿=已人工 · 点标签即改判</span>
+<a class="bk" href="/" target="_self">← 工作台</a></div>
+<div class="wrap">
 {''.join(parts) or '<p>（该层无段）</p>'}
 </div>
 <script>
