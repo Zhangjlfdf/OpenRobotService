@@ -1290,7 +1290,9 @@ function renderSegs(){
         <span class="badge-eff ${r.src==="manual"?"badge-src-man":"badge-src-pre"}">${esc(r.eff||"未判定")}·${r.src==="manual"?"人工":"AI预标"}</span>
         <span>${esc(r.user||"")}</span><span>${esc((r.at||"").slice(5,16))}</span>
         ${tks.length?`<span title="关联工单">🎫 ${tks.map(t=>"#"+t).join(" ")}</span>`:""}
-        <a href="javascript:void(0)" style="margin-left:auto" onclick="toggleDetail(this.closest('.fseg').querySelector('.q'))">展开完整对话 ▾</a>
+        ${r.n_files?`<span title="段内附件图 ${r.n_files} 张" style="color:var(--brand)">📷 ${r.n_files}</span>`:""}
+        <a href="javascript:void(0)" style="margin-left:auto" onclick="toggleDetail(this.closest('.fseg').querySelector('.q'))">下面看 ▾</a>
+        <a href="/seg_page?env=prod&cid=${r.cid}&a0=${r.astart}&a1=${r.aend}" target="_blank" title="独立页面看完整对话（大图）">新开网页 ↗</a>
       </div>
       <div class="ops">${LABELS.map(lb=>`<button class="lbtn${r.eff===lb&&r.src==="manual"?" on":""}" data-lb="${lb}" onclick="labelSeg(${r.cid},${r.astart},'${lb}',this)">${lb}</button>`).join("")}</div>
       <div class="fdet" style="display:none"></div>

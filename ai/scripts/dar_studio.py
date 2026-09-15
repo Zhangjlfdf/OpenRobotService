@@ -24,7 +24,7 @@ import uuid
 import httpx
 import uvicorn
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -901,6 +901,8 @@ def _seg_rows(env):
                     "is_tester": bool(c.get("is_tester")),
                     "at": r0.get("at") or c.get("created_at"),
                     "task_ids": tks, "ticket_ids": tic_ids,
+                    "n_files": sum(len(rr.get("files") or []) for rr in
+                                   (c.get("rounds") or [])[a0:a1]),
                 })
     return rows, {"split": split_p, "judge": os.path.basename(jl[-1])}
 
@@ -1027,6 +1029,70 @@ def seg_detail(env: str = "prod", cid: int = 0, a0: int = 0, a1: int = 0):
                 return {"found": True, "cid": cid, "rounds": rounds,
                         "n_all": len(c.get("rounds") or [])}
     raise HTTPException(404, f"会话 {cid} 不存在")
+
+
+@app.get("/seg_page")
+def seg_page(env: str = "prod", cid: int = 0, a0: int = 0, a1: int = 0):
+    """走查「新开网页」：独立页面看段完整对话（大图直出，无需在漏斗页内滚动）。"""
+    if env not in ("test", "prod"):
+        raise HTTPException(400, "env 取值 test|prod")
+    if not cid or a0 < 0 or a1 <= a0:
+        raise HTTPException(400, "cid/a0/a1 参数无效")
+    split_p = os.path.join(DATA_ROOT, env, "processed", "conversations_split.jsonl")
+    conv = None
+    if os.path.exists(split_p):
+        with open(split_p, encoding="utf-8") as fh:
+            for line in fh:
+                if not line.strip():
+                    continue
+                c = json.loads(line)
+                if str(c.get("conversation_id")) == str(cid):
+                    conv = c
+                    break
+    if not conv:
+        raise HTTPException(404, f"会话 {cid} 不存在")
+    img_base = ("https://usp.ep-zl.com/p" if env == "prod"
+                else "http://125.122.97.107/t") + "/api/call/files/"
+
+    def esc(s):
+        return (str(s or "").replace("&", "&amp;").replace("<", "&lt;")
+                .replace(">", "&gt;").replace('"', "&quot;"))
+
+    parts = []
+    for rr in (conv.get("rounds") or [])[a0:a1]:
+        imgs = "".join(
+            f'<img src="{esc(img_base + f.get("object_path", ""))}" '
+            f'alt="{esc(f.get("filename", ""))}">' for f in (rr.get("files") or []))
+        acts = "".join(
+            f'<div class="act">🎫 生成工单草稿 #{esc(s.get("db_id") or "?")}</div>'
+            for s in (rr.get("a_seg") or []) if s.get("action") == "ticket_draft")
+        ans = "".join(
+            f'<div class="ai">{esc(s.get("text", ""))}</div>'
+            for s in (rr.get("a_seg") or [])
+            if s.get("action") != "ticket_draft" and (s.get("text") or "").strip())
+        parts.append(
+            f'<div class="turn"><div class="uq"><b>用户</b> · {esc(rr.get("at", ""))[:19]}'
+            f'<div>{esc(rr.get("q", ""))}</div>{imgs}</div>{acts}{ans}</div>')
+    html = f"""<!DOCTYPE html><html lang="zh"><head><meta charset="utf-8">
+<title>会话 {esc(cid)} · 段 {a0}-{a1}（{esc(env)}）</title>
+<style>
+body{{font-family:"Microsoft YaHei",sans-serif;background:#f1f5f9;margin:0;padding:24px}}
+.wrap{{max-width:760px;margin:0 auto}}
+h2{{font-size:15px;color:#475569}}
+.turn{{background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:14px 16px;margin-bottom:14px}}
+.uq{{color:#0f172a;font-size:14px;line-height:1.7}}
+.uq b{{color:#3d76c4;margin-right:8px}}
+.ai{{background:#f8fafc;border-left:3px solid #3d76c4;border-radius:8px;
+padding:10px 14px;margin:10px 0 4px 16px;color:#334155;font-size:13.5px;
+white-space:pre-wrap;line-height:1.7}}
+.act{{display:inline-block;background:#fef3c7;color:#92400e;border-radius:6px;
+padding:2px 10px;font-size:12px;margin:4px 0 4px 16px}}
+img{{max-width:420px;border-radius:10px;border:1px solid #e2e8f0;margin:8px 0;display:block}}
+</style></head><body><div class="wrap">
+<h2>会话 {esc(cid)} · 第 {a0}-{a1} 回合 · 用户 {esc(conv.get("name") or conv.get("user_id"))} · {esc(env)} 数据</h2>
+{''.join(parts) or '<p>（空段）</p>'}
+</div></body></html>"""
+    return HTMLResponse(html)
 
 
 def _mtime_str(p: str) -> str:
