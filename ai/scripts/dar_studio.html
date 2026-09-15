@@ -1317,7 +1317,7 @@ async function loadSegs(layer){
 
 function renderSegs(){
   const kw = $("#fsegfilter").value.trim();
-  const canLabel = fCur.layer === "qa";  // 标签只属于真实咨询层（0916 用户定调）
+  const canLabel = fCur.layer === "qa" || fCur.layer === "chitchat";  // 标签：真实咨询层判类 + 寒暄层捞误判（0916 开放）
   const rows = kw ? fCur.rows.filter(r => (r.user||"").includes(kw) || (r.question||"").includes(kw)) : fCur.rows;
   $("#fsegcount").textContent = `${rows.length} 段`;
   $("#fseglist").innerHTML = rows.map((r,i)=>{
@@ -1405,7 +1405,7 @@ document.addEventListener("keydown", e=>{
   if(e.key === "j" || e.key === "ArrowDown"){ e.preventDefault(); move(1); }
   else if(e.key === "k" || e.key === "ArrowUp"){ e.preventDefault(); move(-1); }
   else if(e.key >= "1" && e.key <= "6"){
-    if(fCur.layer !== "qa" || fCur.idx < 0) return;
+    if(!(fCur.layer === "qa" || fCur.layer === "chitchat") || fCur.idx < 0) return;
     const seg = rows[fCur.idx], row = fCur.rows[+seg.dataset.i];
     if(!row) return;
     const lb = LABELS[+e.key - 1];

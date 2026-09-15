@@ -1157,7 +1157,7 @@ def layer_page(env: str = "prod", layer: str = ""):
             f'<button class="lb{" on" if r["eff"] == lb and r["src"] == "manual" else ""}" '
             f'style="{"" if r["eff"] == lb and r["src"] == "manual" else f"--c:{col};"}" '
             f'onclick="lab(this,{r["cid"]},{r["astart"]},\'{lb}\')">{lb}</button>'
-            for lb, col in lbls) if layer == "qa" else "")
+            for lb, col in lbls) if layer in ("qa", "chitchat") else "")
         tks = [str(t) for t in (r.get("ticket_ids") or []) + (r.get("task_ids") or [])]
         tk_span = ""
         if tks:
