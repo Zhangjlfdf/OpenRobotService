@@ -103,6 +103,8 @@
   --td-brand-color: var(--primary);
   --td-brand-color-light: var(--primary-soft);
   --td-brand-color-active: var(--sky);
+  /* 禁用态：不映射会落回 TDesign 默认 --td-brand-color-3 靛蓝 #b5c7ff（白字），改为主色同色相浅蓝 */
+  --td-brand-color-disabled: oklch(0.84 0.07 230);
   --td-warning-color: var(--apricot);
   --td-error-color: var(--destructive);
   --td-success-color: var(--sky);
