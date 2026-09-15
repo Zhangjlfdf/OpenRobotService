@@ -105,10 +105,7 @@ label.f{display:flex;flex-direction:column;gap:5px;font-size:12px;color:var(--in
 .frow.sub{padding-right:0}
 .fill{height:28px;display:flex;align-items:center;justify-content:center;gap:5px;
   font-size:12px;color:#fff;min-width:64px;cursor:pointer;transition:width .25s;white-space:nowrap;overflow:hidden}
-.fill:first-child{border-radius:6px 0 0 6px}
-.fill:last-child{border-radius:0 6px 6px 0}
-.fill:only-child{border-radius:6px}
-.fill.is-rest{cursor:default;min-width:8px}
+.fill.oneline{border-radius:6px}
 .fill:hover{filter:brightness(1.08)}
 .fill.is-sel{outline:2.5px solid var(--brand);outline-offset:1px}
 .fseg{border:1px solid var(--line);border-radius:10px;padding:8px 10px;margin-bottom:8px}
@@ -1189,24 +1186,15 @@ function renderFunnel(){
   $("#fsum").innerHTML = `直答率（已判定口径）<b style="font-size:15px;color:var(--brand)">${L.direct_rate ?? "—"}%</b>
     ｜已复核 <b>${L.reviewed}</b>/${L.total} 段
     ${L.consistent ? "" : '｜<span style="color:var(--danger)">分层不守恒，数据异常！</span>'}`;
-  // 真漏斗形态：主流逐层收窄（全量→除测试→除寒暄→除转工单=分母），
-  // 每步抛出的块以橙色分流条紧挂主流右侧（视觉=从主流里抛出去一块）
-  const W = n => Math.max(n / T * 100, 7);
-  const bar = (id, name, n, kind, extra) =>
-    `<div class="fill ${kind}${extra||""}" data-l="${id}" title="点击查看该层段清单"
-      style="width:${W(n)}%;background:${FLC[kind]}"><b>${n}</b> ${esc(name)}</div>`;
-  const rest1 = T - L.tester, rest2 = rest1 - L.chitchat;
-  $("#funnelbar").innerHTML = [
-    `<div class="frow">${bar("total", "全部对话", T, "main", fCur.layer==="total"?" is-sel":"")}</div>`,
-    `<div class="frow"><div class="fill main is-rest" style="width:${W(rest1)}%;background:${FLC.main};opacity:.55"></div>${bar("tester", "抛出·测试人员", L.tester, "cut", fCur.layer==="tester"?" is-sel":"")}</div>`,
-    `<div class="frow"><div class="fill main is-rest" style="width:${W(rest2)}%;background:${FLC.main};opacity:.45"></div>${bar("chitchat", "抛出·寒暄", L.chitchat, "cut", fCur.layer==="chitchat"?" is-sel":"")}</div>`,
-    `<div class="frow"><div class="fill main is-rest" style="width:${W(L.qa)}%;background:${FLC.main};opacity:.4"></div>${bar("ticket", "抛出·转工单 →直接提单库", L.ticket, "cut", fCur.layer==="ticket"?" is-sel":"")}</div>`,
-    `<div class="frow">${bar("qa", "真实咨询问题（分母）", L.qa, "main", fCur.layer==="qa"?" is-sel":"")}</div>`,
-    `<div class="frow sub">${bar("answered", "直答 ✓", L.answered, "ok", fCur.layer==="answered"?" is-sel":"")}</div>`,
-    `<div class="frow sub">${bar("unanswered", "未解答·覆盖答不好", L.unanswered, "bad", fCur.layer==="unanswered"?" is-sel":"")}</div>`,
-    `<div class="frow sub">${bar("uncovered", "未解答·库未覆盖", L.uncovered, "bad", fCur.layer==="uncovered"?" is-sel":"")}</div>`,
-    `<div class="frow sub">${bar("undetermined", "未判定（走查补齐）", L.undetermined, "gray", fCur.layer==="undetermined"?" is-sel":"")}</div>`,
-  ].join("");
+  // 参考图形态：每层一块居中横条（宽=count/total），逐层往下走；点块开该层明细
+  const W = n => Math.max(n / T * 100, 12);
+  $("#funnelbar").innerHTML = FL.map(f=>{
+    const n = L[f.id] ?? 0;
+    return `<div class="frow${f.sub?" sub":""}">
+      <div class="fill oneline${fCur.layer===f.id?" is-sel":""}" data-l="${f.id}"
+        title="点击查看该层段清单" style="width:${W(n)}%;background:${FLC[f.kind]}">
+        <b>${n}</b>&nbsp;${esc(f.name)}</div></div>`;
+  }).join("");
   $("#funnelbar").querySelectorAll(".fill[data-l]").forEach(el=>{
     el.onclick = ()=> loadSegs(el.dataset.l);
   });
