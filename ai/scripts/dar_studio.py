@@ -956,7 +956,10 @@ def funnel_segs(env: str = "prod", layer: str = "", week: str = "",
         return {"found": False, **meta}
     if not layer:
         raise HTTPException(400, "layer 必填")
-    out = [r for r in rows if r["layer"] == layer]
+    # qa（真实咨询/分母）= 四细分层合集——领导要求的「真实咨询全过一遍」走查入口
+    qa_set = {"answered", "unanswered", "uncovered", "undetermined"}
+    out = [r for r in rows if r["layer"] == layer
+           or (layer == "qa" and r["layer"] in qa_set)]
     if week:
         out = [r for r in out if (r.get("at") or "")[:10] >= week]
     if type_:
