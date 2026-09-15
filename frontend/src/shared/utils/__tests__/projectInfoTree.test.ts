@@ -1,30 +1,31 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import {
-  PROJECT_INFO_MAX_DEPTH,
-  buildTemplateImportTree,
   computeInfoCompleteness,
   createInfoNode,
   deleteInfoNode,
   encodeInfoValue,
   flattenInfoTree,
+  importInfoTemplate,
   importInfoTree,
   loadInfoNodes,
   moveInfoNode,
   normalizeImportNodes,
   patchInfoNode,
+  REGION_MAINLAND,
   removeInfoNode,
   updateInfoNode,
+  visibleInfoNodes,
   type ProjectInfoNode,
 } from '../projectInfoTree';
 import {
   createInfoNodeApi,
   deleteInfoNodeApi,
   fetchInfoTree,
+  importInfoTemplateApi,
   importInfoTreeApi,
   moveInfoNodeApi,
   updateInfoNodeApi,
   type ApiInfoNode,
-  type ApiInfoTreeImportNode,
 } from '@/api/infoNodes';
 
 vi.mock('@/api/infoNodes', () => ({
@@ -34,13 +35,8 @@ vi.mock('@/api/infoNodes', () => ({
   moveInfoNodeApi: vi.fn(),
   deleteInfoNodeApi: vi.fn(),
   importInfoTreeApi: vi.fn(),
+  importInfoTemplateApi: vi.fn(),
 }));
-
-/** 需求指定的根节点顺序（来自《项目信息树形图》） */
-const ROOT_ORDER = [
-  '基础信息', '硬件', '车端软件', '调度软件', '网络信息', '服务器部署',
-  '环境', '业务系统', '业务流程', '人员信息', '项目特性', '项目配置', '项目定制',
-];
 
 const TS = '2026-09-14 10:00:00';
 
@@ -59,66 +55,23 @@ function apiNode(partial: Partial<ApiInfoNode> & { id: string }): ApiInfoNode {
   };
 }
 
-/** 展平 import 用的递归模板节点，记录父子关系 */
-function flattenImport(
-  list: ApiInfoTreeImportNode[],
-  parent: ApiInfoTreeImportNode | null = null,
-  out: Array<{ node: ApiInfoTreeImportNode; parent: ApiInfoTreeImportNode | null }> = [],
-) {
-  list.forEach((node) => {
-    out.push({ node, parent });
-    if (node.children?.length) flattenImport(node.children, node, out);
-  });
-  return out;
-}
-
-function depthInImport(entry: { node: ApiInfoTreeImportNode; parent: ApiInfoTreeImportNode | null }, all: ReturnType<typeof flattenImport>): number {
-  let depth = 1;
-  let current = entry.parent;
-  while (current) {
-    depth += 1;
-    current = all.find((item) => item.node === current)?.parent ?? null;
-  }
-  return depth;
-}
-
 const parseValue = (node: { value?: string | null }) => JSON.parse(node.value ?? 'null');
 const selectOf = (node: ProjectInfoNode) => node.value as { selected: string; options: string[] };
 
-describe('预设信息树模板（import 用）', () => {
-  it('13 个一级节点，顺序与需求一致', () => {
-    const tree = buildTemplateImportTree();
-    expect(tree.map((node) => node.title)).toEqual(ROOT_ORDER);
+// 预设信息树模板已下沉到后端（project_templates/*.yaml），前端只触发重建；
+// 模板结构本身（13 个一级节点、≤4 层、下拉选项）由后端实例化，另有校验。
+describe('按后端模板初始化', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it('调用 import-template 接口并返回写入的节点数', async () => {
+    vi.mocked(importInfoTemplateApi).mockResolvedValue(120);
+    await expect(importInfoTemplate('P1')).resolves.toBe(120);
+    expect(importInfoTemplateApi).toHaveBeenCalledWith('P1');
   });
 
-  it('整棵树不超过 4 层，每个节点都有 id', () => {
-    const all = flattenImport(buildTemplateImportTree());
-    const ids = all.map((entry) => entry.node.id);
-    expect(new Set(ids).size).toBe(ids.length);
-    expect(ids.every(Boolean)).toBe(true);
-    all.forEach((entry) => {
-      expect(depthInImport(entry, all), `节点「${entry.node.title}」`).toBeLessThanOrEqual(PROJECT_INFO_MAX_DEPTH);
-    });
-  });
-
-  it('下拉节点的选项即图中可选值清单，初始未选择', () => {
-    const all = flattenImport(buildTemplateImportTree());
-    const find = (title: string) => all.find((entry) => entry.node.title === title)!.node;
-
-    const region = find('项目区域/地点');
-    expect(region.content_type).toBe('select');
-    expect(parseValue(region)).toEqual({
-      selected: '',
-      options: ['大陆 China Mainland', '亚洲 Asia', '欧洲 Europe', '北美 North America', '南美 South America', '非洲 Africa'],
-    });
-    expect(parseValue(find('项目类型')).options).toContain('PK 项目');
-    expect(parseValue(find('是否与其他系统共用')).options).toEqual(['是', '否']);
-
-    all.forEach(({ node }) => {
-      if (node.content_type === 'select') {
-        expect(parseValue(node).options.length, `节点「${node.title}」`).toBeGreaterThan(0);
-      }
-    });
+  it('模板为空（后端返回 0）时不抛错，交由页面提示', async () => {
+    vi.mocked(importInfoTemplateApi).mockResolvedValue(0);
+    await expect(importInfoTemplate('P1')).resolves.toBe(0);
   });
 });
 
@@ -247,6 +200,70 @@ describe('导入内容归一化', () => {
 
   it('无法识别的格式直接抛错', () => {
     expect(() => normalizeImportNodes({ foo: 1 })).toThrow();
+  });
+
+  it('「标题: 内容」紧凑映射：文字 / 数组(下拉) / 对象(子节点) 三种写法可混用', () => {
+    const tree = normalizeImportNodes({
+      info_nodes: {
+        基础信息: {
+          客户信息: '',
+          订单信息: { ERP: '' },
+          项目类型: ['试点项目', '大客户项目'],
+        },
+      },
+    });
+
+    expect(tree.map((node) => node.title)).toEqual(['基础信息']);
+    const children = tree[0].children!;
+    expect(children.map((node) => node.title)).toEqual(['客户信息', '订单信息', '项目类型']);
+
+    expect(children[0].content_type).toBe('text');
+    expect(children[0].value).toBe('');
+
+    // 对象 → 子节点（递归）
+    expect(children[1].children!.map((node) => node.title)).toEqual(['ERP']);
+
+    // 数组 → 下拉节点，值编码成后端存的 TEXT
+    expect(children[2].content_type).toBe('select');
+    expect(parseValue(children[2])).toEqual({ selected: '', options: ['试点项目', '大客户项目'] });
+  });
+
+  it('options 清单（后端 YAML 模板写法）自动补成下拉值', () => {
+    const [node] = normalizeImportNodes([{ title: '载具类型', options: ['托盘', '料笼'] }]);
+    expect(node.content_type).toBe('select');
+    expect(parseValue(node)).toEqual({ selected: '', options: ['托盘', '料笼'] });
+  });
+});
+
+describe('区域细分字段联动（区域选项 → 省份/地区 | 具体国家）', () => {
+  /** 项目区域/地点 下：区域选项(下拉) + 省份 + 地区 + 具体国家 + 用户自建字段 */
+  const regionNodes = (selected: string, options = [REGION_MAINLAND, '亚洲Asia']): ProjectInfoNode[] => [
+    { id: 'p', project_id: 'P1', parent_id: null, title: '项目区域/地点', content_type: 'text', value: '', sort_order: 0, created_at: TS },
+    { id: 'd', project_id: 'P1', parent_id: 'p', title: '区域选项', content_type: 'select', value: { selected, options }, sort_order: 0, created_at: TS },
+    { id: 's', project_id: 'P1', parent_id: 'p', title: '省份', content_type: 'text', value: '浙江省', sort_order: 1, created_at: TS },
+    { id: 'a', project_id: 'P1', parent_id: 'p', title: '地区', content_type: 'text', value: '安吉县', sort_order: 2, created_at: TS },
+    { id: 'c', project_id: 'P1', parent_id: 'p', title: '具体国家', content_type: 'text', value: '', sort_order: 3, created_at: TS },
+    { id: 'x', project_id: 'P1', parent_id: 'p', title: '自建字段', content_type: 'text', value: '', sort_order: 4, created_at: TS },
+  ];
+  const titlesOf = (nodes: ProjectInfoNode[]) => visibleInfoNodes(nodes).map((node) => node.title);
+
+  it('未选择区域：省份/地区与具体国家都不显示', () => {
+    expect(titlesOf(regionNodes(''))).toEqual(['项目区域/地点', '区域选项', '自建字段']);
+  });
+
+  it('选中大陆：显示省份/地区，隐藏具体国家（原值保留在数据里）', () => {
+    const nodes = regionNodes(REGION_MAINLAND);
+    expect(titlesOf(nodes)).toEqual(['项目区域/地点', '区域选项', '省份', '地区', '自建字段']);
+    expect(nodes.find((node) => node.id === 's')?.value).toBe('浙江省');
+  });
+
+  it('选中其它区域：显示具体国家，隐藏省份/地区', () => {
+    expect(titlesOf(regionNodes('亚洲Asia'))).toEqual(['项目区域/地点', '区域选项', '具体国家', '自建字段']);
+  });
+
+  it('换成普通下拉（选项里没有大陆）：不做联动，细分字段照常显示', () => {
+    expect(titlesOf(regionNodes('甲', ['甲', '乙']))).toContain('省份');
+    expect(titlesOf(regionNodes('甲', ['甲', '乙']))).toContain('具体国家');
   });
 });
 

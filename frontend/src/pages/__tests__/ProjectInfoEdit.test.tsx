@@ -7,6 +7,7 @@ import {
   createInfoNodeApi,
   deleteInfoNodeApi,
   fetchInfoTree,
+  importInfoTemplateApi,
   updateInfoNodeApi,
   type ApiInfoNode,
 } from '@/api/infoNodes';
@@ -18,6 +19,7 @@ vi.mock('@/api/infoNodes', () => ({
   moveInfoNodeApi: vi.fn(),
   deleteInfoNodeApi: vi.fn(),
   importInfoTreeApi: vi.fn(),
+  importInfoTemplateApi: vi.fn(),
 }));
 
 // 页头副标题会拉一次项目详情、上传走资源管理服务：统一给个空实现
@@ -130,6 +132,49 @@ describe('ProjectInfoEdit（信息树编辑页）', () => {
     expect(screen.queryByText('基础信息')).toBeNull();
   });
 
+  it('区域选项选大陆 → 出现省份/地区；改选其它区域 → 换成具体国家', async () => {
+    const regionTree: ApiInfoNode[] = [
+      node({
+        id: 'r1', title: '基础信息', sort_order: 0,
+        children: [
+          node({
+            id: 'p1', parent_id: 'r1', title: '项目区域/地点', sort_order: 0,
+            children: [
+              node({
+                id: 'd1', parent_id: 'p1', title: '区域选项', content_type: 'select', sort_order: 0,
+                value: JSON.stringify({ selected: '', options: ['大陆(China Mainland)', '亚洲Asia'] }),
+              }),
+              node({ id: 's1', parent_id: 'p1', title: '省份', value: '浙江省', sort_order: 1 }),
+              node({ id: 'a1', parent_id: 'p1', title: '地区', value: '安吉县', sort_order: 2 }),
+              node({ id: 'c1', parent_id: 'p1', title: '具体国家', value: '', sort_order: 3 }),
+            ],
+          }),
+        ],
+      }),
+    ];
+    vi.mocked(fetchInfoTree).mockResolvedValue(regionTree);
+    vi.mocked(updateInfoNodeApi).mockImplementation(async (nodeId, updates) =>
+      node({ id: nodeId, value: typeof updates.value === 'string' ? updates.value : null }),
+    );
+    renderEdit();
+
+    // 未选择区域：三个细分字段都不显示
+    await screen.findByText('区域选项');
+    expect(screen.queryByText('省份')).toBeNull();
+    expect(screen.queryByText('具体国家')).toBeNull();
+
+    const select = screen.getByLabelText('区域选项内容') as HTMLSelectElement;
+    fireEvent.change(select, { target: { value: '大陆(China Mainland)' } });
+    expect(await screen.findByText('省份')).toBeTruthy();
+    expect(screen.getByText('地区')).toBeTruthy();
+    expect(screen.queryByText('具体国家')).toBeNull();
+
+    fireEvent.change(screen.getByLabelText('区域选项内容'), { target: { value: '亚洲Asia' } });
+    expect(await screen.findByText('具体国家')).toBeTruthy();
+    expect(screen.queryByText('省份')).toBeNull();
+    expect(screen.queryByText('地区')).toBeNull();
+  });
+
   it('加载失败时给出重试入口', async () => {
     vi.mocked(fetchInfoTree).mockRejectedValueOnce(new Error('network'));
     renderEdit();
@@ -137,5 +182,18 @@ describe('ProjectInfoEdit（信息树编辑页）', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '重新加载' }));
     expect(await screen.findByText('基础信息')).toBeTruthy();
+  });
+
+  it('空树时「按预设模板初始化」调后端模板接口并重载树', async () => {
+    vi.mocked(fetchInfoTree).mockResolvedValueOnce([]).mockResolvedValue(TREE);
+    vi.mocked(importInfoTemplateApi).mockResolvedValue(120);
+    renderEdit();
+
+    fireEvent.click(await screen.findByRole('button', { name: '按预设模板初始化' }));
+
+    await waitFor(() => expect(importInfoTemplateApi).toHaveBeenCalledWith('P1'));
+    // 初始化成功后重新拉树（第二次 fetchInfoTree 返回 TREE），页面切换成树视图
+    expect(await screen.findByText('基础信息')).toBeTruthy();
+    expect(fetchInfoTree).toHaveBeenCalledTimes(2);
   });
 });

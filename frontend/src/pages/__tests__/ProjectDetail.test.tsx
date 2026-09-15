@@ -47,6 +47,7 @@ vi.mock('@/api/infoNodes', () => ({
   moveInfoNodeApi: vi.fn(),
   deleteInfoNodeApi: vi.fn(),
   importInfoTreeApi: vi.fn(),
+  importInfoTemplateApi: vi.fn(),
 }));
 
 vi.mock('@/stores/auth', () => ({

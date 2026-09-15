@@ -63,15 +63,31 @@ ORM 定义：[delivery.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/mode
 
 ## 三、YAML 模板初始化机制
 
-- 模板目录：[project_templates/](file:///d:/CODE/9_9/OpenRobotService/backend/app/config/project_templates)，当前提供 `default.yaml`（12 个根节点、共 69 个节点，对齐演示数据 a.json 的标准信息树）。
+- 模板目录：[project_templates/](file:///d:/CODE/9_9/OpenRobotService/backend/app/config/project_templates)，当前提供 `default.yaml`（13 个根节点、共 121 个节点，对齐《项目信息树形图》）。
 - 选择规则：按项目的 `project_type` 找 `{type}.yaml`，文件不存在则回退 `default.yaml`；新增模板只需加文件，无需改代码。
 - 加载与缓存：模板在 Service 层集中加载，进程内按类型缓存，每次返回**深拷贝**避免调用方污染缓存。
+- **容错**：模板解析失败（缩进/编码错误）只记 error 日志并按空模板处理，不让项目接口整体 500（`ext_info` 为 NULL 的存量项目读取时也会走模板）。
 - 模板分三段：
   - `overview` → `ext_info.overview`（progress / tags / wecom_id / ai_summary 等标量）
   - `activity` → `ext_info.activity`（version_changes / stage_changes 事件数组）
-  - `info_nodes` → 递归树**定义**，仅含 title / sort_order / children，**不含 id / value**
+  - `info_nodes` → 递归树**定义**，节点字段：
 
-实现：[project_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/services/project_service.py#L18-L52) 中的 `_get_ext_info_template()` 与 `_split_template()`。
+| 字段 | 说明 |
+|------|------|
+| `title` | 节点标题（必填） |
+| `sort_order` | 同级排序，缺省按书写顺序 |
+| `content_type` | `text`（默认）/ `select` / `file` / `image`；有 `options` 时缺省即 `select` |
+| `options` | 仅 `select` 用；实例化时写入 `value = {"selected":"","options":[...]}`（与前端下拉解码一致） |
+| `value` | 预置值（可选）：`text` 用字符串，其余按 `content_type` 的结构 |
+| `children` | 子节点（递归） |
+
+- 模板结构有两条硬约束，改 YAML 时必须满足（前端 UI 的既定行为）：
+  1. **最深 4 层**（`PROJECT_INFO_MAX_DEPTH = 4`，第 4 层不可再挂子节点）；
+  2. **`select` 节点必须是末级**（前端只对叶子节点渲染内容编辑器）。
+  - 思维导图里第 5 层的「可选值清单」因此统一表达为 `content_type: select` + `options`，不展开成子节点。
+- **区域联动**（仅前端渲染行为，接口与数据不变）：`基础信息 → 项目区域/地点` 下，`区域选项` 这个下拉含 `大陆(China Mainland)` 选项。前端据此联动——选「大陆」时显示 `省份`/`地区`，选其它非空区域时显示 `具体国家`，未选择时三者都不显示；节点始终在数据里（切回时原值还在），只是隐藏渲染。`省份`/`地区`/`具体国家` 三个标题不能改名，否则联动失效（实现见前端 `projectInfoTree.ts` 的 `isInfoNodeVisible`）。旧版模板初始化过的项目若缺 `具体国家` 节点，需补一个同级节点才能生效。
+
+实现：[project_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/services/project_service.py) 中的 `_get_ext_info_template()` / `_split_template()` / `get_info_nodes_template()` / `template_node_value()`。
 
 ## 四、项目接口的修改
 
@@ -136,7 +152,7 @@ Service 逻辑（`update_project`）：
 - `ProjectUpdate`：新增 `ext_info`、`version: Optional[int]`
 - `ProjectResponse`：新增 `ext_info`、`version: int = 1`
 
-## 五、项目信息树接口（新增，6 个）
+## 五、项目信息树接口（新增，7 个）
 
 路由文件：[info_nodes.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/api/info_nodes.py)
 Service：[info_node_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/services/info_node_service.py)
@@ -201,6 +217,14 @@ Service：[info_node_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/ap
 - 响应：`200 {"imported": <节点总数>}`。
 - 适用场景：从 a.json 等外部信息树整体迁入。
 
+### 5.7 POST /info-nodes/projects/{project_id}/import-template —— 按项目模板重建信息树
+
+- 请求体：无（项目 id 走路径参数）。
+- 功能：读该项目 `project_type` 对应的 YAML 模板（缺省 `default.yaml`），实例化整棵信息树并**替换**该项目现有全部节点（与新建项目的初始化同一份模板定义）。
+- Service 逻辑：查项目（软删除项目视为不存在 → `404`）→ `get_info_nodes_template(project_type)` 取模板 → 递归生成 UUID 与 `content_type` / `value`（`options` 编码为 `{"selected":"","options":[...]}`）→ 复用 `import_tree`（先清空后批量插入）。
+- 响应：`200 {"imported": <节点总数>}`；模板为空或解析失败时**不改动现有节点**，返回 `{"imported": 0}`。
+- 适用场景：功能上线前创建、信息树为空的存量项目一键初始化；前端信息编辑页空态的「按预设模板初始化」按钮。
+
 ## 六、并发与一致性小结
 
 1. **ext_info 并发编辑**：靠 `version` 乐观锁（冲突 409）+ 更新瞬间行锁串行化；内部系统写入不带 version，显式绕过乐观锁。
@@ -236,3 +260,5 @@ Service：[info_node_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/ap
 2. `ext_info` 按整体对象提交；信息大纲树不要放进 `ext_info`，改用 `/info-nodes/*` 逐节点操作。
 3. 新建节点前由前端生成 UUID 作为 `id`；删除节点会连带删除整棵子树，需二次确认。
 4. 拖拽节点后调 PATCH move；批量替换整树调 import（注意会先清空旧树）。
+5. 空树项目一键初始化调 `import-template`——模板结构在后端 YAML 里，前端不保留副本（原前端常量 `PROJECT_INFO_TEMPLATE` 已删除），避免两套模板漂移。
+6. 导入文件（`/import`）除节点数组外，也接受「标题 → 内容」紧凑映射（`""` 文字、`[...]` 下拉选项、`{...}` 子节点，即 `project_templates/tmp.json` 的写法）。

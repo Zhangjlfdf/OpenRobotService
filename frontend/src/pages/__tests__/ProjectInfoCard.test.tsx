@@ -83,6 +83,25 @@ describe('ProjectInfoCard（项目信息管理卡）', () => {
     expect(screen.getByText('托盘')).toBeTruthy();
   });
 
+  it('标题与内容同行（同一 .mac-doc__row 内），根节点各占一个一级分组', async () => {
+    renderCard('CODE-1');
+    await screen.findByText('客户信息');
+    const rows = Array.from(document.querySelectorAll('.mac-doc__row'));
+    const rowOf = (title: string) =>
+      rows.find((row) => row.querySelector('.mac-doc__label')?.textContent === title);
+
+    // 标题与内容在同一行里，而不是标题一行、内容另起一行
+    expect(rowOf('客户信息')?.querySelector('.mac-doc__value')?.textContent).toBe('中力');
+    expect(rowOf('载具类型')?.querySelector('.mac-doc__value')?.textContent).toBe('托盘');
+    // 分支节点只有标题、没有内容块
+    expect(rowOf('基础信息')?.querySelector('.mac-doc__value')).toBeNull();
+
+    // 每个根节点一个一级分组（相邻分组之间由 CSS 画浅灰横线）
+    expect(document.querySelectorAll('.mac-doc__section--d1').length).toBe(2);
+    // 二级节点整体缩进一级
+    expect(document.querySelectorAll('.mac-doc__section--d2').length).toBe(3);
+  });
+
   it('点选一级标签只显示该标签下的内容', async () => {
     renderCard('CODE-1');
     fireEvent.click(await screen.findByRole('button', { name: /^硬件/ }));

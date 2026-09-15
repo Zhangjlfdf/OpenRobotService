@@ -95,3 +95,12 @@ export async function importInfoTreeApi(projectId: string, nodes: ApiInfoTreeImp
   });
   return data?.imported ?? 0;
 }
+
+/** 按后端模板重建信息树（服务端读 project_type → project_templates/*.yaml，先清空旧节点）；
+ *  与新建项目初始化同一份模板，前端不再各自维护一份结构定义；模板为空时返回 0 且不改动数据 */
+export async function importInfoTemplateApi(projectId: string): Promise<number> {
+  const data = await request()<{ imported?: number }>(`/info-nodes/projects/${encodeURIComponent(projectId)}/import-template`, {
+    method: 'POST',
+  });
+  return data?.imported ?? 0;
+}

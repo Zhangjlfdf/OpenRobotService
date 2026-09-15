@@ -15,14 +15,15 @@ import {
   MacGripVertical, MacHistory, MacImage, MacMoreHorizontal, MacPencil, MacPlus, MacTrash2, MacUpload,
 } from '@/shared/components/macaronIcons';
 import {
-  buildTemplateImportTree,
   computeInfoCompleteness,
   createInfoNode,
   deleteInfoNode,
   formatFileSize,
+  importInfoTemplate,
   importInfoTree,
   loadCollapsedIds,
   loadInfoNodes,
+  isInfoNodeVisible,
   moveInfoNode,
   normalizeImportNodes,
   patchInfoNode,
@@ -30,6 +31,7 @@ import {
   removeInfoNode,
   saveCollapsedIds,
   updateInfoNode,
+  visibleInfoNodes,
   type ProjectInfoContentType,
   type ProjectInfoFileValue,
   type ProjectInfoNode,
@@ -109,7 +111,8 @@ export default function ProjectInfoEdit() {
   }, [nodes]);
 
   const roots = byParent.get(null) ?? [];
-  const completeness = useMemo(() => computeInfoCompleteness(nodes), [nodes]);
+  // 完整度只统计当前看得见的字段（区域联动隐藏的字段不该计入「缺 N」）
+  const completeness = useMemo(() => computeInfoCompleteness(visibleInfoNodes(nodes)), [nodes]);
 
   const errMsg = (err: unknown) => (err instanceof Error && err.message ? err.message : '请稍后重试');
 
@@ -349,6 +352,27 @@ export default function ProjectInfoEdit() {
     }
   };
 
+  /** 空树项目「按预设模板初始化」：模板在后端（project_type → project_templates/*.yaml），
+   *  与新建项目同一份定义，前端只触发，不再自带一份结构副本 */
+  const initFromTemplate = async () => {
+    if (!id) return;
+    setImporting(true);
+    try {
+      const imported = await importInfoTemplate(id);
+      if (!imported) {
+        Toast({ message: '后端模板为空，未写入节点', theme: 'warning' });
+        return;
+      }
+      setNodes(await loadInfoNodes(id));
+      setCollapsedIds(new Set());
+      Toast({ message: `已按预设模板初始化 ${imported} 个节点`, theme: 'success' });
+    } catch (err) {
+      Toast({ message: `初始化失败：${errMsg(err)}`, theme: 'error' });
+    } finally {
+      setImporting(false);
+    }
+  };
+
   const rowProps = {
     byParent, collapsedIds, editingId, draggingId, dropTarget, uploadingNodeId,
     onToggle: (nodeId: string) => setCollapsedIds((current) => {
@@ -430,7 +454,7 @@ export default function ProjectInfoEdit() {
                 className="mac-btn mac-btn--outline"
                 style={{ marginTop: 12 }}
                 disabled={importing}
-                onClick={() => void importTree(buildTemplateImportTree(), (imported) => `已按预设模板初始化 ${imported} 个节点`)}
+                onClick={() => void initFromTemplate()}
               >
                 {importing ? '初始化中…' : '按预设模板初始化'}
               </button>
@@ -598,8 +622,10 @@ interface InfoRowProps {
 
 function InfoRow(props: InfoRowProps) {
   const { node, depth } = props;
-  const children = props.byParent.get(node.id) ?? [];
-  const isLeaf = children.length === 0;
+  const allChildren = props.byParent.get(node.id) ?? [];
+  // 区域联动字段按所选区域显隐（节点仍在，只是不渲染）；是否存在子节点按完整列表判断
+  const children = allChildren.filter((child) => isInfoNodeVisible(child, allChildren));
+  const isLeaf = allChildren.length === 0;
   const level = Math.min(depth, PROJECT_INFO_MAX_DEPTH);
   const isCollapsed = props.collapsedIds.has(node.id);
   const activeDrop = props.dropTarget?.id === node.id;

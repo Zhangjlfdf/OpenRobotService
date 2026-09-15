@@ -11,6 +11,7 @@ import {
   createInfoNodeApi,
   deleteInfoNodeApi,
   fetchInfoTree,
+  importInfoTemplateApi,
   importInfoTreeApi,
   moveInfoNodeApi,
   updateInfoNodeApi,
@@ -51,229 +52,10 @@ export interface ProjectInfoNode {
 /** 信息树最大层级（与设计稿一致：第 4 层不可再新增/下挂） */
 export const PROJECT_INFO_MAX_DEPTH = 4;
 
-// —— 预设信息树模板 ——
-// 来源：用户提供的《项目信息树形图》思维导图（frontend/src/pages/项目信息树形图.png），
-// 图中共 13 个一级分支，根节点顺序按需求指定（基础信息 → … → 项目定制）。
-// 图中第 5 层的「可选值清单」不建节点，改为挂在末级节点上的「下拉选择」内容形式（选项即图中清单），
-// 保证整棵树不超过 4 层；末级节点其余为「文字」。
-// 用途：空树项目的「按预设模板」初始化（走 import 接口写入后端）。
-// 注意：后端新建项目时按其模板目录（config/project_templates/default.yaml）初始化信息树，
-// 与本模板不是同一份内容；两边对齐时应以后端 YAML 为准，本常量届时可删除。
-
-/** 模板节点定义（仅本文件内部使用） */
-interface TemplateSpec {
-  title: string;
-  /** 有值即该节点为「下拉选择」，选项来自图中列出的可选值清单 */
-  options?: string[];
-  children?: TemplateSpec[];
-}
-
-const YES_NO = ['是', '否'];
-
-const PROJECT_INFO_TEMPLATE: TemplateSpec[] = [
-  {
-    title: '基础信息',
-    children: [
-      { title: '客户信息' },
-      { title: '订单信息', children: [{ title: 'ERP' }] },
-      { title: '评审信息' },
-      {
-        title: '项目区域/地点',
-        options: ['大陆 China Mainland', '亚洲 Asia', '欧洲 Europe', '北美 North America', '南美 South America', '非洲 Africa'],
-      },
-      {
-        title: '项目类型',
-        options: ['受关注项目', '大客户项目', '展会/演示项目', '展厅项目', 'PK 项目', '试点项目', '试用项目', '内部/测试项目'],
-      },
-      { title: '进厂要求', children: [{ title: '着装' }, { title: '预约信息' }] },
-    ],
-  },
-  {
-    title: '硬件',
-    children: [
-      {
-        title: '车辆',
-        children: [
-          { title: '车型1', children: [{ title: '数量' }] },
-          { title: '车型2', children: [{ title: '数量' }] },
-        ],
-      },
-      { title: '载具类型', options: ['托盘', '料笼', '料架', '料车'] },
-    ],
-  },
-  {
-    title: '车端软件',
-    children: [
-      { title: '控制器品牌', options: ['自研', '睿芯行', '利科钛', '海康', '华睿', '中兴', '科聪'] },
-      { title: '软件版本' },
-      { title: '数据同步方式' },
-      { title: '是否已与 USP 对接过', options: YES_NO },
-    ],
-  },
-  {
-    title: '调度软件',
-    children: [
-      {
-        title: '版本',
-        children: [{ title: '子模块', children: [{ title: '调度配置' }, { title: '通用配置' }] }],
-      },
-      // 图中拼写即「lincense」，按原图保留
-      { title: 'lincense', children: [{ title: '到期时间' }, { title: '续期记录' }] },
-    ],
-  },
-  {
-    title: '网络信息',
-    children: [
-      { title: '外网' },
-      { title: '公网ip', children: [{ title: '服务器参数配置' }] },
-      {
-        title: '远程方式',
-        children: [
-          { title: 'SSH', children: [{ title: 'IP' }, { title: '端口' }] },
-          { title: 'Todesk', children: [{ title: '远程码' }, { title: '密码', options: ['动态密码', '静态密码'] }] },
-          { title: 'AngDek', children: [{ title: '远程码' }, { title: '密码', options: ['动态密码', '静态密码'] }] },
-        ],
-      },
-    ],
-  },
-  {
-    title: '服务器部署',
-    children: [
-      { title: '中力服务器', children: [{ title: '是否与其他系统共用', options: YES_NO }] },
-      { title: '客户服务器', children: [{ title: '是否与其他系统共用', options: YES_NO }] },
-      { title: '云服务器', children: [{ title: '是否与其他系统共用', options: YES_NO }] },
-    ],
-  },
-  {
-    title: '环境',
-    children: [
-      {
-        title: '地图布局',
-        children: [
-          { title: 'CAD源文件', children: [{ title: '库位' }, { title: '库区形式/数量' }] },
-          { title: 'AGV路线动线' },
-          { title: '通道与托盘间距尺寸' },
-        ],
-      },
-      {
-        title: '外设',
-        children: [
-          { title: '电梯', children: [{ title: '厂家品牌（协议）', options: ['Modbus Tcp', 'ST', '中力PLC'] }] },
-          { title: '自动门' },
-          { title: '呼叫器' },
-          { title: '输送线/辊筒线' },
-          { title: '红绿灯' },
-          { title: '机械臂' },
-          { title: '码垛机/叠盘机' },
-          { title: '缠膜机' },
-          { title: '光电' },
-          { title: '无外设声明' },
-          { title: '其他（自定义）' },
-        ],
-      },
-    ],
-  },
-  {
-    title: '业务系统',
-    children: [
-      {
-        title: '系统',
-        children: [
-          { title: 'DAS' },
-          { title: '客户WMS' },
-          { title: '客户MES/ERP' },
-          { title: '客户系统', children: [{ title: '其他上层系统' }] },
-          // 图中「接口协议」下还挂着「接口标准 / 是否对接」（第 5 层），受 4 层上限约束展开为同级末级节点
-          {
-            title: '数字孪生',
-            children: [
-              { title: '接口协议' },
-              { title: '接口标准' },
-              { title: '是否对接', options: YES_NO },
-              { title: 'ip/url' },
-            ],
-          },
-          { title: 'PDA' },
-          { title: '平板' },
-        ],
-      },
-    ],
-  },
-  {
-    title: '业务流程',
-    children: [
-      {
-        title: '搬运场景',
-        children: [
-          { title: '搬运类型', options: ['线边搬运', '仓储搬运', '电梯接驳', '室外搬运'] },
-          { title: '装卸' },
-          { title: '分拣' },
-        ],
-      },
-      { title: '节拍', children: [{ title: '节拍' }, { title: '效率要求数值/无效率声明' }] },
-      { title: '物料类型' },
-    ],
-  },
-  {
-    title: '人员信息',
-    children: [
-      { title: '客户对象' },
-      { title: '实施' },
-      { title: '车端' },
-      { title: '调度' },
-      { title: '业务' },
-      { title: '项目经理' },
-      { title: '销售' },
-      { title: '售前' },
-      { title: '集成商' },
-    ],
-  },
-  {
-    title: '项目特性',
-    children: [
-      {
-        title: '风险点',
-        options: ['数据同步错误', '公司评审不通过', '缺前置承接', '高风险承接', '中风险承接', '低风险承接'],
-      },
-      { title: '注意事项' },
-      {
-        title: '时间线',
-        children: [
-          {
-            title: '大节点',
-            options: ['售前方案', '签单洽谈', '已签合同', '出厂测试', '即将进场', '延期进场', '正在实施', '实施暂停', '实施运行', '试运行中', '验收运营', '项目结束'],
-          },
-          { title: '小节点' },
-        ],
-      },
-    ],
-  },
-  { title: '项目配置', children: [{ title: '识别' }] },
-  {
-    title: '项目定制',
-    children: [{ title: '接口' }, { title: '大屏', children: [{ title: '页面' }] }, { title: '功能' }],
-  },
-];
-
-/** 按模板深度优先展开成 import 接口的递归节点（每节点生成新 UUID，多次导入不撞主键） */
-function buildTemplateImportNodes(specs: TemplateSpec[]): ApiInfoTreeImportNode[] {
-  return specs.map((spec, index) => {
-    const node: ApiInfoTreeImportNode = {
-      id: genId(),
-      title: spec.title,
-      content_type: spec.options ? 'select' : 'text',
-      value: spec.options ? encodeInfoValue({ options: [...spec.options], selected: '' }) : null,
-      sort_order: index,
-    };
-    if (spec.children?.length) node.children = buildTemplateImportNodes(spec.children);
-    return node;
-  });
-}
-
-/** 整棵预设信息树（供空树项目「按预设模板」初始化，走 import 接口写入后端） */
-export function buildTemplateImportTree(): ApiInfoTreeImportNode[] {
-  return buildTemplateImportNodes(PROJECT_INFO_TEMPLATE);
-}
+// —— 预设信息树模板（已下沉到后端，前端不再维护副本） ——
+// 唯一来源：backend/app/config/project_templates/{project_type}.yaml（缺省 default.yaml）。
+// 后端在「新建项目」与 POST /info-nodes/projects/{id}/import-template（按模板初始化）时实例化，
+// 前端只负责触发，避免前后端两套模板各自漂移。
 
 const selectedKey = (code: string) => `project-info-tree:selected:${code}`;
 const collapsedKey = (code: string) => `project-info-tree:collapsed:${code}`;
@@ -430,32 +212,57 @@ export async function deleteInfoNode(nodeId: string): Promise<void> {
   await deleteInfoNodeApi(nodeId);
 }
 
-/** 批量替换整树（文件导入 / 按预设模板初始化）；返回写入的节点数 */
+/** 批量替换整树（文件导入）；返回写入的节点数 */
 export async function importInfoTree(projectId: string, input: unknown): Promise<number> {
   return importInfoTreeApi(projectId, normalizeImportNodes(input));
 }
 
-/** 归一化导入内容：接受数组、{nodes:[…]} 或 {info_nodes:[…]}；补 id、序号与缺省字段 */
+/** 按后端模板重建整树（空树项目的「按预设模板初始化」）；
+ *  模板来自 project_type → project_templates/*.yaml，与新建项目同一份定义 */
+export async function importInfoTemplate(projectId: string): Promise<number> {
+  return importInfoTemplateApi(projectId);
+}
+
+/** 归一化导入内容：接受节点数组、{nodes:[…]}、{info_nodes:[…]}，
+ *  或「标题 → 内容」紧凑映射（backend/app/config/project_templates/tmp.json 的写法）。
+ *  统一补 id、序号与缺省字段，并把 options 清单转成 select 节点。 */
 export function normalizeImportNodes(input: unknown): ApiInfoTreeImportNode[] {
-  const list = Array.isArray(input)
-    ? input
-    : Array.isArray((input as { nodes?: unknown } | null)?.nodes)
-      ? (input as { nodes: unknown[] }).nodes
-      : Array.isArray((input as { info_nodes?: unknown } | null)?.info_nodes)
-        ? (input as { info_nodes: unknown[] }).info_nodes
-        : null;
-  if (!list) throw new Error('导入内容需要是信息树数组（或含 nodes / info_nodes 字段的对象）');
-  return normalizeImportLevel(list as Record<string, unknown>[]);
+  if (Array.isArray(input)) return normalizeImportLevel(input as Record<string, unknown>[]);
+  const container = input as { nodes?: unknown; info_nodes?: unknown } | null;
+  if (Array.isArray(container?.nodes)) return normalizeImportLevel(container.nodes as Record<string, unknown>[]);
+  const infoNodes = container?.info_nodes;
+  if (Array.isArray(infoNodes)) return normalizeImportLevel(infoNodes as Record<string, unknown>[]);
+  if (infoNodes && typeof infoNodes === 'object') {
+    return normalizeImportLevel(mapFormToLevel(infoNodes as Record<string, unknown>));
+  }
+  throw new Error('导入内容需要是信息树数组（或含 nodes / info_nodes 字段的对象、标题:内容 映射）');
+}
+
+/** 紧凑映射 → 节点数组：""/文字 → 文字节点；[选项…] → 下拉节点；{…} → 子节点 */
+function mapFormToLevel(map: Record<string, unknown>): Record<string, unknown>[] {
+  return Object.entries(map).map(([title, value], index) => {
+    if (Array.isArray(value)) {
+      return { title, sort_order: index, content_type: 'select', options: value };
+    }
+    if (value && typeof value === 'object') {
+      return { title, sort_order: index, children: mapFormToLevel(value as Record<string, unknown>) };
+    }
+    return { title, sort_order: index, value: typeof value === 'string' ? value : '' };
+  });
 }
 
 function normalizeImportLevel(items: Record<string, unknown>[]): ApiInfoTreeImportNode[] {
   return items.map((item, index) => {
-    const contentType = typeof item.content_type === 'string' ? item.content_type : 'text';
+    const options = Array.isArray(item.options)
+      ? (item.options as unknown[]).filter((option): option is string => typeof option === 'string')
+      : [];
+    const contentType =
+      typeof item.content_type === 'string' ? item.content_type : options.length ? 'select' : 'text';
     const node: ApiInfoTreeImportNode = {
       id: typeof item.id === 'string' && item.id ? item.id : genId(),
       title: typeof item.title === 'string' && item.title ? item.title : '未命名节点',
       content_type: contentType,
-      value: normalizeImportValue(item.value),
+      value: normalizeImportValue(item.value ?? (options.length ? { selected: '', options } : null)),
       sort_order: typeof item.sort_order === 'number' ? item.sort_order : index,
     };
     const children = Array.isArray(item.children) ? (item.children as Record<string, unknown>[]) : [];
@@ -531,6 +338,51 @@ export function formatFileSize(size: number): string {
   if (size < 1024) return `${size} B`;
   if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
   return `${(size / 1024 / 1024).toFixed(1)} MB`;
+}
+
+// —— 区域细分字段联动（项目区域/地点 下的三个候选字段按所选区域显隐） ——
+
+/** 「大陆(China Mainland)」选项：选中它才显示省份/地区 */
+export const REGION_MAINLAND = '大陆(China Mainland)';
+/** 大陆下的细分字段 */
+const MAINLAND_DETAIL_TITLES = ['省份', '地区'];
+/** 其它区域下的细分字段 */
+const OVERSEAS_DETAIL_TITLE = '具体国家';
+
+/** 同级的「区域」下拉：按选项里是否含大陆判定，避免改标题后联动失效 */
+function regionDriver(siblings: ProjectInfoNode[]): ProjectInfoNode | undefined {
+  return siblings.find((item) => {
+    if (item.content_type !== 'select') return false;
+    const options = (item.value as Partial<ProjectInfoSelectValue> | null)?.options;
+    return Array.isArray(options) && options.includes(REGION_MAINLAND);
+  });
+}
+
+/**
+ * 区域细分字段当前是否显示（节点本身仍在数据里，只是不渲染——切回大陆时原值还在）：
+ * - 未选择区域 → 省份/地区/具体国家都不显示；
+ * - 选中大陆 → 只显示省份/地区；
+ * - 选中其它区域 → 只显示具体国家；
+ * - 与区域无关的节点（含用户自建字段）一律显示。
+ */
+export function isInfoNodeVisible(node: ProjectInfoNode, siblings: ProjectInfoNode[]): boolean {
+  const driver = regionDriver(siblings);
+  if (!driver || driver.id === node.id) return true;
+  const selected = (driver.value as Partial<ProjectInfoSelectValue> | null)?.selected ?? '';
+  if (MAINLAND_DETAIL_TITLES.includes(node.title)) return selected === REGION_MAINLAND;
+  if (node.title === OVERSEAS_DETAIL_TITLE) return !!selected && selected !== REGION_MAINLAND;
+  return true;
+}
+
+/** 过滤掉当前不该显示的节点（完整度统计等按「看得见的字段」算） */
+export function visibleInfoNodes(nodes: ProjectInfoNode[]): ProjectInfoNode[] {
+  const byParent = new Map<string | null, ProjectInfoNode[]>();
+  nodes.forEach((node) => {
+    const list = byParent.get(node.parent_id) ?? [];
+    list.push(node);
+    byParent.set(node.parent_id, list);
+  });
+  return nodes.filter((node) => isInfoNodeVisible(node, byParent.get(node.parent_id) ?? []));
 }
 
 // —— 信息完整度（对照原型 node-completeness：统计每个一级标签下末级节点的填写情况） ——

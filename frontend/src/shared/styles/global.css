@@ -8200,23 +8200,34 @@ html, body, #root {
 }
 .mac-info-note__icon { display: inline-flex; margin-top: 1px; }
 
-/* —— 文档式浏览（浏览卡正文）：渲染后的 md 观感——按层级字号/颜色区分标题，不出现 # 记号 —— */
+/* —— 文档式浏览（浏览卡正文）：标题与内容同一行并列，层级用缩进/字号/颜色区分 —— */
 .mac-doc { margin-top: 12px; }
-.mac-doc__section + .mac-doc__section { margin-top: 14px; }
-.mac-doc__head { display: flex; align-items: baseline; gap: 6px; }
-.mac-doc__title { margin: 0; min-width: 0; }
-.mac-doc__head--d1 .mac-doc__title { font-size: 16px; font-weight: 700; color: var(--mac-tree-1); }
-.mac-doc__head--d2 .mac-doc__title { font-size: 14px; font-weight: 600; color: var(--mac-tree-2); }
-.mac-doc__head--d3 .mac-doc__title { font-size: 13px; font-weight: 600; color: var(--mac-tree-3); }
-.mac-doc__head--d4 .mac-doc__title { font-size: 12.5px; font-weight: 600; color: var(--mac-tree-4); }
-.mac-doc__section--d2 { padding-left: 4px; }
-.mac-doc__section--d3, .mac-doc__section--d4 { padding-left: 8px; }
-.mac-doc__text { margin: 6px 0 0; display: flex; flex-direction: column; gap: 3px; }
-.mac-doc__text p { margin: 0; font-size: 13px; line-height: 1.6; color: #4a4f50; white-space: pre-wrap; }
-.mac-doc__empty { margin: 6px 0 0; font-size: 12.5px; color: var(--mac-gray-light); }
-.mac-doc__select { margin: 6px 0 0; }
+/* 不同根节点之间用一根浅灰横线隔开 */
+.mac-doc__section--d1 + .mac-doc__section--d1 {
+  margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--mac-border);
+}
+.mac-doc__section--d2 { padding-left: 10px; }
+.mac-doc__section--d3 { padding-left: 20px; }
+.mac-doc__section--d4 { padding-left: 30px; }
+/* 行 = 标题 + 内容；同级行之间、行与下一层分组之间留 6px 节奏 */
+.mac-doc__row { display: flex; align-items: baseline; gap: 10px; }
+.mac-doc__row + .mac-doc__row,
+.mac-doc__row + .mac-doc__section,
+.mac-doc__section + .mac-doc__row { margin-top: 6px; }
+.mac-doc__label { flex: 0 1 auto; max-width: 62%; overflow-wrap: anywhere; }
+/* 根节点保持蓝阶，其余层级统一深灰（层级靠缩进与字号区分） */
+.mac-doc__row--d1 .mac-doc__label { font-size: 15px; font-weight: 700; color: var(--mac-tree-1); }
+.mac-doc__row--d2 .mac-doc__label { font-size: 13.5px; font-weight: 600; color: var(--mac-fg); }
+.mac-doc__row--d3 .mac-doc__label { font-size: 13px; font-weight: 600; color: var(--mac-fg); }
+.mac-doc__row--d4 .mac-doc__label { font-size: 12.5px; font-weight: 600; color: var(--mac-fg); }
+.mac-doc__value { flex: 1 1 auto; min-width: 0; font-size: 13px; line-height: 1.6; color: #4a4f50; }
+/* 附件行内容更高（文件块/缩略图），标题顶端对齐而不是基线对齐 */
+.mac-doc__row--media { align-items: flex-start; }
+.mac-doc__row--media .mac-doc__label { padding-top: 7px; }
+.mac-doc__text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.mac-doc__empty { font-size: 12.5px; color: var(--mac-gray-light); }
 .mac-doc__pill { display: inline-block; padding: 3px 10px; border-radius: 999px; background: var(--mac-blue-soft); color: var(--mac-blue-1); font-size: 12px; }
-.mac-doc__attach { margin: 6px 0 0; display: flex; flex-direction: column; gap: 6px; }
+.mac-doc__attach { display: flex; flex-direction: column; gap: 6px; }
 .mac-doc__thumb { display: block; max-width: 100%; max-height: 160px; border-radius: 10px; border: 1px solid var(--mac-border); object-fit: cover; }
 .mac-doc__file { display: flex; align-items: center; gap: 6px; padding: 8px 10px; background: var(--mac-secondary); border-radius: 10px; font-size: 12px; color: var(--mac-muted-fg); }
 .mac-doc__file-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--mac-fg); }

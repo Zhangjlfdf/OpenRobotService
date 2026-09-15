@@ -91,3 +91,18 @@ async def import_info_tree(project_id: str, data: InfoNodeImport):
     """
     count = info_node_service.import_tree(project_id, data.nodes)
     return {"imported": count}
+
+
+@info_node_router.post("/projects/{project_id}/import-template",
+                       summary="按项目模板重建信息树")
+async def import_info_template(project_id: str):
+    """用后端模板（project_type → {type}.yaml，缺省 default.yaml）重建整棵信息树。
+
+    与新建项目初始化走同一份模板定义，供存量空项目一键初始化；
+    先清空旧节点再写入。模板为空时不做改动，返回 {"imported": 0}。
+    """
+    try:
+        count = info_node_service.import_template(project_id)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    return {"imported": count}

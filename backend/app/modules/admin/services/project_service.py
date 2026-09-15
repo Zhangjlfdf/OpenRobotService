@@ -1,6 +1,7 @@
 from typing import List, Optional, Dict
 import json
 import copy
+import logging
 import uuid
 from pathlib import Path
 from datetime import datetime
@@ -20,6 +21,8 @@ from app.modules.admin.utils_das.config import DATABASE_URL, AUTH_SERVICE_BASE_U
 _TPL_DIR = Path(__file__).resolve().parent.parent.parent.parent / "config" / "project_templates"
 _tpl_cache: Dict[str, dict] = {}
 
+logger = logging.getLogger(__name__)
+
 
 def _get_ext_info_template(project_type: Optional[str] = None) -> dict:
     """按 project_type 读取模板，返回深拷贝。
@@ -27,14 +30,44 @@ def _get_ext_info_template(project_type: Optional[str] = None) -> dict:
     模板含 overview / activity / info_nodes 三部分：
     - overview + activity → project.ext_info
     - info_nodes → project_info_node 表（由 _init_info_nodes 实例化）
+
+    模板是外部 YAML 文件，写坏了（缩进/编码错误）不能让项目接口整体 500：
+    解析失败记 error 日志并按空模板处理，新建项目退化为「不初始化信息树」。
     """
     key = (project_type or "default").strip()
     if key not in _tpl_cache:
         path = _TPL_DIR / f"{key}.yaml"
         if not path.exists():
             path = _TPL_DIR / "default.yaml"
-        _tpl_cache[key] = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        try:
+            data = yaml.safe_load(path.read_text(encoding="utf-8"))
+            _tpl_cache[key] = data if isinstance(data, dict) else {}
+        except Exception as exc:  # yaml.YAMLError / OSError / UnicodeDecodeError
+            logger.error("项目模板解析失败，已按空模板处理：%s（%s）", path, exc)
+            _tpl_cache[key] = {}
     return copy.deepcopy(_tpl_cache[key])
+
+
+def template_node_value(node: dict) -> tuple[str, Optional[str]]:
+    """模板节点 → (content_type, value)。
+
+    content_type 缺省：有 options 视作 select，否则 text。
+    options（下拉候选值）编码成前端约定的 JSON 字符串 {"selected":"","options":[...]}，
+    text 的 value 保持普通字符串，未预置值时为 None。
+    """
+    content_type = node.get("content_type") or ("select" if node.get("options") else "text")
+    value = node.get("value")
+    if value is None and node.get("options"):
+        value = json.dumps({"selected": "", "options": list(node["options"])},
+                           ensure_ascii=False)
+    return content_type, value
+
+
+def get_info_nodes_template(project_type: Optional[str] = None) -> list:
+    """信息树模板（未实例化）：节点含 title/sort_order/children 与可选
+    content_type/options/value，由 info_node_service.import_template 写库。
+    """
+    return _get_ext_info_template(project_type).get("info_nodes", []) or []
 
 
 def _split_template(project_type: Optional[str] = None) -> tuple[dict, list]:
@@ -407,19 +440,22 @@ class ProjectService:
     def _init_info_nodes(self, db_session, project_id: str, nodes_tpl: list,
                          parent_id: str = None):
         """从模板递归创建 info_node 行：为每个节点生成新 UUID（避免多项目冲突），
-        保持模板定义的 title / sort_order / 层级关系。value 留空。
+        保持模板定义的 title / sort_order / 层级关系。
+        content_type 与 value 按模板实例化：select 节点的 options 清单编码进 value，
+        文本节点未预置值时留空（None）。
         """
         from app.modules.admin.models_das.models import ProjectInfoNode
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         for n in nodes_tpl:
             node_id = str(uuid.uuid4())
+            content_type, value = template_node_value(n)
             node = ProjectInfoNode(
                 id=node_id,
                 project_id=project_id,
                 parent_id=parent_id,
                 title=n.get("title", "未命名节点"),
-                content_type=n.get("content_type", "text"),
-                value=None,
+                content_type=content_type,
+                value=value,
                 sort_order=n.get("sort_order", 0),
                 created_at=now,
                 updated_at=now,

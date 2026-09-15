@@ -7,6 +7,7 @@
 """
 from datetime import datetime
 from typing import Dict, List, Optional
+import uuid
 
 from sqlalchemy import text
 from sqlalchemy.orm import sessionmaker
@@ -235,6 +236,52 @@ class InfoNodeService:
             return len(flat)
         finally:
             db.close()
+
+    def import_template(self, project_id: str) -> int:
+        """按项目模板重建信息树（替换现有全部节点）。
+
+        模板来源与新建项目一致：project_type → {type}.yaml，缺省 default.yaml
+        （project_templates/）。既服务「存量空项目一键初始化」，也保证前端
+        空态按钮与后端新建项目走同一份结构定义，不会两套模板漂移。
+        模板为空（或整个文件解析失败）时不改动现有节点，返回 0。
+        """
+        from app.modules.admin.services.project_service import (
+            get_info_nodes_template, template_node_value,
+        )
+
+        db = SessionLocal()
+        try:
+            project = db.query(Project).filter(
+                Project.id == project_id,
+                Project.status != PROJECT_DELETED,
+            ).first()
+            if not project:
+                raise LookupError("项目不存在")
+            project_type = project.project_type
+        finally:
+            db.close()
+
+        def build(nodes_tpl: List[Dict]) -> List[Dict]:
+            rows = []
+            for index, n in enumerate(nodes_tpl):
+                content_type, value = template_node_value(n)
+                row = {
+                    "id": str(uuid.uuid4()),
+                    "title": n.get("title", "未命名节点"),
+                    "content_type": content_type,
+                    "value": value,
+                    "sort_order": n.get("sort_order", index),
+                }
+                children = build(n.get("children") or [])
+                if children:
+                    row["children"] = children
+                rows.append(row)
+            return rows
+
+        rows = build(get_info_nodes_template(project_type))
+        if not rows:
+            return 0
+        return self.import_tree(project_id, rows)
 
 
 info_node_service = InfoNodeService()
