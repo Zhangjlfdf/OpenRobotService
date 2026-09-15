@@ -584,6 +584,7 @@ async function loadMetrics(){
     bits.push(`<span class="badge warn" style="font-weight:400">生产尚未出周报，展示 test 环境数据</span>`);
   if(j.this_week && j.this_week.n_segs)
     bits.push(`本周新增（${esc(j.this_week.from)}~${esc(j.this_week.to)}）：<b>${j.this_week.n_convs}</b> 会话 <b>${j.this_week.n_segs}</b> 段 · L1 <b>${esc(j.this_week.L1_rate)}</b>（全量为上线以来累积，本周单独看）`);
+  if(j.export_at) bits.push(`数据版本 <b>v${esc(String(j.export_at).replace(/[-: ]/g, "").slice(0, 12))}</b>（${esc(j.export_at)} 导出）`);
   if(j.note) bits.push(`附注：${esc(j.note)}`);
   if(j.avg_rounds && Object.keys(j.avg_rounds).length)
     bits.push(`轮次：${Object.entries(j.avg_rounds).map(([k,v])=>`${esc(k)} ${esc(v)}`).join(" · ")}`);

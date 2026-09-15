@@ -749,7 +749,18 @@ def metrics(env: str = "prod"):
             "wow": rep.get("wow"), "this_week": rep.get("this_week"),
             "unanswered_total": rep.get("unanswered_total"),
             "unanswered_this_week": rep.get("unanswered_this_week"),
+            # 数据版本号 = 导出时刻（日期时间组成，与 git 无关——0916 用户定调）
+            "export_at": _latest_export_at(env),
             "trend": trend, "hero": hero, "small": small}
+
+
+def _latest_export_at(env: str):
+    try:
+        metas = json.load(open(os.path.join(DATA_ROOT, env, "meta.json"),
+                               encoding="utf-8"))
+        return (metas[-1].get("at") or "")[:16].replace("T", " ")
+    except Exception:
+        return ""
 
 
 @app.get("/api/unanswered")
