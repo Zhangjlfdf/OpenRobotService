@@ -877,6 +877,10 @@ def _seg_rows(env):
                     "cid": c["conversation_id"], "astart": a0, "aend": a1,
                     "layer": layer, "eff": eff, "src": src,
                     "question": (r0.get("q") or "")[:200],
+                    # AI 回答预览：段内第一条非工单动作回答的开头（走查初判不点开也要能看）
+                    "answer": next((ai for rr in (c.get("rounds") or [])[a0:a1]
+                                    for ai in [((rr.get("a") or [""])[0] or "")[:160]]
+                                    if ai.strip()), "")[:160],
                     "type": seg_cls[qi].get("type", "其他") if seg_cls else "其他",
                     "user": c.get("name") or c.get("user_id"),
                     "is_tester": bool(c.get("is_tester")),
