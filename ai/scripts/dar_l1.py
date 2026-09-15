@@ -227,6 +227,14 @@ async def main():
             if len(starts) != n_before:
                 n_fix += 1
         print(f"人工切分覆盖 {len(seg)} 个会话（其中段数有变化 {n_fix} 个）")
+        # 覆盖后写回 classified.jsonl（0915 修 bug：原先只在 LLM 判定后写盘、
+        # review 覆盖仅改内存且 replay 模式不写——落盘文件永远是 LLM 原始切分，
+        # 漏斗等下游读到的边界与人工核对的不一致，人工标签按段首匹配大面积错位）
+        with open(cls_path, "w", encoding="utf-8") as fh:
+            for c in convs:
+                fh.write(json.dumps({"conversation_id": c["conversation_id"],
+                                     "cls": c["_cls"]}, ensure_ascii=False) + "\n")
+        print(f"人工边界版 classified 已落盘: {cls_path}")
     print("聚合…")
 
     # ---------------- 聚合 ----------------
