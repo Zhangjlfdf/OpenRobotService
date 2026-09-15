@@ -97,8 +97,20 @@ label.f{display:flex;flex-direction:column;gap:5px;font-size:12px;color:var(--in
 .urow .ur{color:var(--ink3);font-size:11.5px;margin-top:3px}
 .mgrid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:12px}
 .mgrid .mcard .v{font-size:24px}
-.repbar{display:flex;gap:14px;align-items:center;flex-wrap:wrap;font-size:12.5px;color:var(--ink2);
-  padding:10px 14px;background:var(--brand-soft);border:1px solid #e0e7ff;border-radius:10px;margin-bottom:16px}
+.repbar{display:block;padding:0;font-size:12.5px;color:var(--ink2);
+  background:linear-gradient(135deg,#1e3a8a,#3b5bdb 60%,#4c6ef5);
+  border:none;border-radius:14px;margin-bottom:16px;color:#dbe4ff;overflow:hidden;
+  box-shadow:0 4px 16px rgba(30,58,138,.28)}
+.repbar .rep-hd{display:flex;align-items:center;gap:14px;padding:12px 18px 0}
+.repbar .rep-t{font-size:15.5px;font-weight:650;color:#fff}
+.repbar .rep-t b{color:#ffd43b;margin-left:6px;font-size:16px}
+.repbar .rep-note{font-size:11.5px;color:#a5b4fc;margin-left:10px;font-weight:400}
+.repbar .rep-open{margin-left:auto;font-size:12.5px;color:#fff;text-decoration:none;
+  background:rgba(255,255,255,.14);border:1px solid rgba(255,255,255,.28);
+  border-radius:8px;padding:5px 13px;transition:.15s}
+.repbar .rep-open:hover{background:rgba(255,255,255,.24)}
+.repbar .rep-body{padding:9px 18px 13px;display:flex;gap:6px;flex-wrap:wrap;line-height:1.7}
+.repbar .rep-sep{color:#8093c9}
 /* ── 漏斗走查（ORS-#821，手绘图形态）── */
 .funnel-wrap{width:100%;max-width:900px;margin:0 auto;display:flex;flex-direction:column;gap:16px;
   padding:18px 20px;background:linear-gradient(180deg,#fbfcfe,#f6f8fc);
@@ -291,9 +303,9 @@ kbd{background:#f1f5f9;border:1px solid var(--line);border-bottom-width:2px;bord
         <button class="btn sm pri" id="openreport">完整周报</button>
       </div>
 
+      <div class="repbar" id="repbar" style="display:none"></div>
       <div class="mhero" id="mhero"></div>
       <div class="mgrid" id="msmall"></div>
-      <div class="repbar" id="repbar" style="display:none"></div>
 
       <details class="card" id="funnelcard" open>
         <summary style="cursor:pointer;font-size:13px;font-weight:600;color:var(--ink2)">
@@ -577,7 +589,13 @@ async function loadMetrics(){
     bits.push(`轮次：${Object.entries(j.avg_rounds).map(([k,v])=>`${esc(k)} ${esc(v)}`).join(" · ")}`);
   if(tr.length >= 2)
     bits.push(`L1 走势：${tr.map(t=>`${esc(String(t.date).slice(5))} ${t["L1_段级"]??"—"}`).join(" → ")}`);
-  bar.innerHTML = bits.join('<span style="color:#c7d2fe">｜</span>');
+  bar.innerHTML = `
+    <div class="rep-hd">
+      <div class="rep-t">本周周报 <b>${esc(j.date || "")}</b>
+        ${j.note ? `<span class="rep-note">附注：${esc(j.note)}</span>` : ""}</div>
+      ${j.file ? `<a class="rep-open" href="javascript:void(0)" onclick="document.getElementById('openreport').click()">完整周报 ↗</a>` : ""}
+    </div>
+    <div class="rep-body">${bits.join('<span class="rep-sep">｜</span>')}</div>`;
   bar.style.display = "";
 }
 $("#mrefresh").onclick = loadMetrics;
