@@ -606,8 +606,21 @@ def _realtime_small(env: str):
     from collections import Counter as _Ctr
     proc = os.path.join(DATA_ROOT, env, "processed")
     small = []
-    # 0916 精简：KB 缺口率/标注进度两卡与漏斗重复（未解答·库未覆盖旁支/复核进度），去；
-    # 只留 L3 precision 与预标召回（AI 预标质量监控，漏斗不含）
+    fr = sorted(glob.glob(os.path.join(proc, "retrieval_check_*.json")))
+    if fr:
+        try:
+            rows = json.load(open(fr[-1], encoding="utf-8"))
+            sub = [r for r in rows if r.get("grp") == "真实组"
+                   and r.get("verdict") in ("yes", "partial", "no")]
+            if sub:
+                no = sum(1 for r in sub if r["verdict"] == "no")
+                small.append({"label": "KB 缺口率",
+                              "value": f"{no / len(sub) * 100:.1f}%",
+                              "sub": f"真实组检索重放 no {no}/{len(sub)}"})
+        except Exception:
+            pass
+    # 0916 精简：标注进度卡与漏斗复核进度重复，去；
+    # KB 缺口率保留（用户要求三上四下对称）
     mp = _manual_path(env)
     split = os.path.join(proc, "conversations_split.jsonl")
     fj = sorted(glob.glob(os.path.join(proc, "l3_judge_all_*.json")))
