@@ -30,6 +30,7 @@ from app.models.delivery import (
     ProjectTransportEfficiency,
     ProjectTransportEfficiencyRobot,
     ProjectInfoNode,
+    ProjectInfoTemplate,
 )
 
 # 任务（承工单语义升格）

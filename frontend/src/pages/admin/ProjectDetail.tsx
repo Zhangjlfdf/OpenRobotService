@@ -4,7 +4,7 @@
 // 不再使用 field_links 承载编造的扩展字段。system_id 即企业微信原始记录 record_id，用于溯源。
 import { useState, useEffect, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { Navbar, Loading, Toast, Popup, Upload, Checkbox } from 'tdesign-mobile-react';
+import { Navbar, Loading, Toast, Popup, Upload, Checkbox, BackTop } from 'tdesign-mobile-react';
 import { Input, Textarea } from 'tdesign-mobile-react';
 import { createRequest, ApiError, clearCache } from '@/api/client';
 import API_CONFIG from '@/config/api';
@@ -661,6 +661,15 @@ export default function ProjectDetail() {
           </div>
         </div>
       </Popup>
+
+      {/* 一键回到顶部：滚动超过 200px 时出现在右下角（页面滚动容器是 MainLayout 的 .tabbar-shell__content）。
+          底部 TabBar 高约 56px + 安全区，按钮上移到 TabBar 之上。 */}
+      <BackTop
+        container={() => document.querySelector('.tabbar-shell__content') as HTMLElement}
+        visibilityHeight={200}
+        theme="round"
+        style={{ bottom: 'calc(56px + env(safe-area-inset-bottom) + 12px)' }}
+      />
     </div>
   );
 }

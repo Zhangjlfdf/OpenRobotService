@@ -29,8 +29,11 @@ vi.mock('@/api/client', () => ({
   clearCache: vi.fn(),
 }));
 
+// 权限可切换：默认管理员（「详情模板」入口可见），非管理员用例覆盖为 []
+const authState = vi.hoisted(() => ({ permissions: ['admin'] as string[] }));
 vi.mock('@/stores/auth', () => ({
-  useAuthStore: (selector: (s: { username: string }) => unknown) => selector({ username: 'admin' }),
+  useAuthStore: (selector: (s: { username: string; permissions: string[] }) => unknown) =>
+    selector({ username: 'admin', permissions: authState.permissions }),
 }));
 
 vi.mock('tdesign-mobile-react', () => {
@@ -40,7 +43,9 @@ vi.mock('tdesign-mobile-react', () => {
   const Input = ({ value, onChange, placeholder }: { value?: string; onChange?: (v: string) => void; placeholder?: string }) => (
     <input value={value ?? ''} onChange={(e) => onChange?.(e.target.value)} placeholder={placeholder} />
   );
-  return { Navbar, Popup, Input, Toast: () => null };
+  // 一键回到顶部按钮：无交互逻辑可测，渲染占位即可
+  const BackTop = () => <div data-testid="backtop" />;
+  return { Navbar, Popup, Input, Toast: () => null, BackTop };
 });
 
 const TS = '2026-09-14 10:00:00';
@@ -70,6 +75,7 @@ const renderEdit = () =>
     <MemoryRouter initialEntries={['/admin/project-detail/P1/edit']}>
       <Routes>
         <Route path="/admin/project-detail/:id/edit" element={<ProjectInfoEdit />} />
+        <Route path="/admin/project-info-template" element={<div>模板页占位</div>} />
       </Routes>
     </MemoryRouter>
   );
@@ -78,6 +84,7 @@ describe('ProjectInfoEdit（信息树编辑页）', () => {
   beforeEach(() => {
     localStorage.clear();
     vi.clearAllMocks();
+    authState.permissions = ['admin'];
     vi.mocked(fetchInfoTree).mockResolvedValue(TREE);
   });
 
@@ -87,6 +94,20 @@ describe('ProjectInfoEdit（信息树编辑页）', () => {
     expect(await screen.findByText('基础信息')).toBeTruthy();
     expect(screen.getByText('客户信息')).toBeTruthy();
     expect((screen.getByLabelText('客户信息内容') as HTMLTextAreaElement).value).toBe('中力');
+  });
+
+  it('管理员可见「详情模板」入口，点击进入模板编辑页', async () => {
+    renderEdit();
+    await screen.findByText('基础信息');
+    fireEvent.click(screen.getByRole('button', { name: '详情模板' }));
+    expect(await screen.findByText('模板页占位')).toBeTruthy();
+  });
+
+  it('非管理员不显示「详情模板」入口', async () => {
+    authState.permissions = [];
+    renderEdit();
+    await screen.findByText('基础信息');
+    expect(screen.queryByRole('button', { name: '详情模板' })).toBeNull();
   });
 
   it('行内改名写回后端（PUT 节点）', async () => {
@@ -102,6 +123,44 @@ describe('ProjectInfoEdit（信息树编辑页）', () => {
       expect(updateInfoNodeApi).toHaveBeenCalledWith('r1', { title: '基础信息2' });
     });
     expect(await screen.findByText('基础信息2')).toBeTruthy();
+  });
+
+  it('车型节点标题直接给「选车型」下拉框（8 系列 50 款，选中写回节点名）', async () => {
+    const vehicleTree: ApiInfoNode[] = [
+      node({
+        id: 'h1', title: '硬件', sort_order: 0,
+        children: [
+          node({
+            id: 'v1', parent_id: 'h1', title: '车辆', sort_order: 0,
+            children: [
+              node({
+                id: 'm1', parent_id: 'v1', title: '车型1', sort_order: 0,
+                children: [node({ id: 'q1', parent_id: 'm1', title: '数量', value: '2', sort_order: 0 })],
+              }),
+            ],
+          }),
+        ],
+      }),
+    ];
+    vi.mocked(fetchInfoTree).mockResolvedValue(vehicleTree);
+    vi.mocked(updateInfoNodeApi).mockImplementation(async (nodeId, updates) =>
+      node({ id: nodeId, title: updates.title ?? '节点' }),
+    );
+    renderEdit();
+
+    const select = (await screen.findByLabelText('选择车型')) as HTMLSelectElement;
+    // 8 个系列分组、50 款可选；未选择时显示节点原名占位
+    expect(select.querySelectorAll('optgroup')).toHaveLength(8);
+    expect(select.querySelectorAll('option:not([value=""])')).toHaveLength(50);
+    expect(select.value).toBe('');
+    // 「数量」等子节点不受影响，仍是普通节点
+    expect(screen.getAllByLabelText('选择车型')).toHaveLength(1);
+    expect(screen.getByText('数量')).toBeTruthy();
+
+    fireEvent.change(select, { target: { value: 'XC1051' } });
+    await waitFor(() => expect(updateInfoNodeApi).toHaveBeenCalledWith('m1', { title: 'XC1051' }));
+    // 保存后下拉框回显该车型
+    expect((screen.getByLabelText('选择车型') as HTMLSelectElement).value).toBe('XC1051');
   });
 
   it('「新标签」先建后端节点再进入改名态', async () => {

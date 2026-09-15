@@ -1,12 +1,16 @@
-"""项目信息树节点 API（逐节点 CRUD + 树查询 + 批量导入）。
+"""项目信息树节点 API（逐节点 CRUD + 树查询 + 批量导入 + 文件 AI 识别导入预览 + 详情模板）。
 
 路由前缀 /info-nodes，挂载到 admin_router 后实际路径为
 /api/admin/info-nodes/projects/{project_id}/...。
+详情模板接口（/info-nodes/template）仅管理员可用（require get_current_admin_user）。
 """
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from typing import Dict, List, Optional, Any
 from pydantic import BaseModel, Field
+from app.modules.admin.api.permissions import get_current_admin_user
 from app.modules.admin.services.info_node_service import info_node_service
+from app.modules.admin.services import info_node_import_service
+from app.modules.admin.services.info_template_service import info_template_service
 
 
 # ── 请求模型 ───────────────────────────────────────────
@@ -34,6 +38,11 @@ class InfoNodeMove(BaseModel):
 
 class InfoNodeImport(BaseModel):
     nodes: List[Dict[str, Any]] = Field(..., description="信息树(递归嵌套, 含children)")
+
+
+class InfoTemplateSave(BaseModel):
+    nodes: List[Dict[str, Any]] = Field(..., description="详情模板节点树(递归嵌套, 含children)")
+    dry_run: bool = Field(False, description="为 True 时只预览同步影响，不保存、不写项目")
 
 
 # ── 路由 ───────────────────────────────────────────────
@@ -106,3 +115,53 @@ async def import_info_template(project_id: str):
     except LookupError:
         raise HTTPException(status_code=404, detail="项目不存在")
     return {"imported": count}
+
+
+@info_node_router.post("/projects/{project_id}/parse-file",
+                       summary="AI 识别导入文件（预览，不落库）")
+async def parse_import_file(project_id: str, file: UploadFile = File(...)):
+    """上传 Word/Markdown/Excel/文本，由大模型（摇人同款，默认 DeepSeek flash）识别其中
+    的项目信息，与现有节点匹配后按「将填写 / 将覆盖 / 未匹配到节点」三类返回预览。
+
+    本接口只读不写：用户在前端勾选确认后，由前端逐节点调用既有 CRUD 接口落库。
+    未识别到信息时三个数组均为空。错误约定：400=文件/状态问题，503=AI 未配置或调用失败。
+    """
+    data = await file.read()
+    try:
+        return await info_node_import_service.analyze_import_file(project_id, file.filename or "", data)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+
+
+# ── 详情模板（管理员可编辑；保存后同步到所有项目的节点） ──
+
+@info_node_router.get("/template", summary="获取项目详情模板（仅管理员）")
+async def get_info_template(current_user: Dict[str, Any] = Depends(get_current_admin_user)):
+    """返回详情模板（数据库模板；首次访问用 YAML 默认模板补种）与项目数量。
+
+    返回字段：nodes（节点树，含稳定 id）/ name / updated_at / updated_by /
+    project_count（将受同步影响的项目数）/ source（db=已入库，yaml=本次由默认模板补种）。
+    """
+    return info_template_service.get_template()
+
+
+@info_node_router.post("/template", summary="保存项目详情模板并同步所有项目（仅管理员）")
+async def save_info_template(
+    payload: InfoTemplateSave,
+    current_user: Dict[str, Any] = Depends(get_current_admin_user),
+):
+    """保存模板并把变更同步到所有项目的信息节点。
+
+    dry_run=true：只预览影响（新增/更新/删除的节点数、涉及项目数），不写库；
+    否则：校验 → 保存模板 → 按同步锚点（template_node_id）对齐每个项目的节点，
+    存量节点首次按标题路径回填锚点，用户自建节点不受影响。
+    模板节点校验失败返回 400（层级过深 / 下拉带子节点 / 标题为空等）。
+    """
+    try:
+        if payload.dry_run:
+            return info_template_service.preview_sync(payload.nodes)
+        return info_template_service.save_and_sync(payload.nodes, current_user.get("username") or "")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))

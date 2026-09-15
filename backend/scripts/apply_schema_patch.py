@@ -62,6 +62,11 @@ PATCHES = {
         ("ended_at", "DATETIME NULL COMMENT '查看结束时间（仅 VIEW 有值）'", None),
         ("duration_seconds", "INT NULL COMMENT '查看时长（秒，仅 VIEW 有值）'", None),
     ],
+    # 2026-09-15 项目详情模板（管理员可编辑、同步所有项目）：
+    # 缺列时按模板同步会报 1054；project_info_template 表由 create_all 自动建，无需在此处理
+    "project_info_node": [
+        ("template_node_id", "VARCHAR(64) NULL COMMENT '来源的详情模板节点ID（模板同步锚点）；用户自建节点为 NULL'", None),
+    ],
 }
 
 

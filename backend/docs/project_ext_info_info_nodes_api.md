@@ -1,6 +1,6 @@
 # 项目扩展信息（ext_info）与项目信息树（info_nodes）后端接口变更说明
 
-> 变更日期：2026-09-14
+> 变更日期：2026-09-14（初版）；2026-09-15 新增 5.8 文件识别接口
 > 模块：`app/modules/admin`（后台管理）
 > 路由公共前缀：`/api/admin`（`/api` 来自 `API_V1_STR`，`/admin` 来自 `admin_router`）
 
@@ -152,10 +152,10 @@ Service 逻辑（`update_project`）：
 - `ProjectUpdate`：新增 `ext_info`、`version: Optional[int]`
 - `ProjectResponse`：新增 `ext_info`、`version: int = 1`
 
-## 五、项目信息树接口（新增，7 个）
+## 五、项目信息树接口（新增，8 个）
 
 路由文件：[info_nodes.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/api/info_nodes.py)
-Service：[info_node_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/services/info_node_service.py)
+Service：[info_node_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/services/info_node_service.py)、[info_node_import_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/services/info_node_import_service.py)（仅 5.8）
 路由前缀：`/api/admin/info-nodes`，tag：`admin-info-nodes`
 
 > 鉴权现状：本组路由暂未挂载 `security` 依赖（与项目接口的 DEBUG 开关鉴权不同），当前依赖部署侧网关管控，后续如需端级鉴权再补充。
@@ -225,6 +225,38 @@ Service：[info_node_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/ap
 - 响应：`200 {"imported": <节点总数>}`；模板为空或解析失败时**不改动现有节点**，返回 `{"imported": 0}`。
 - 适用场景：功能上线前创建、信息树为空的存量项目一键初始化；前端信息编辑页空态的「按预设模板初始化」按钮。
 
+### 5.8 POST /info-nodes/projects/{project_id}/parse-file —— AI 识别导入文件（预览，**不落库**）
+
+- 请求：`multipart/form-data`，字段 `file`（单个文件，≤10MB）。
+- 支持格式与抽取方式（全部在后端完成，前端不引解析库）：
+
+| 扩展名 | 抽取方式 |
+|--------|----------|
+| `.docx` | 标准库 `zipfile` 读 `word/document.xml`，段落逐行、表格行转 `单元格 \| 单元格` |
+| `.xlsx` | `openpyxl`（read_only），每个工作表以 `# 工作表：名字` 分隔、制表符分列 |
+| `.md` / `.markdown` / `.txt` / `.csv` | 按 `utf-8-sig → gbk → utf-8(replace)` 解码 |
+| `.doc` / `.xls` | 明确拒绝，提示另存为 `.docx` / `.xlsx` |
+
+- Service 逻辑（`info_node_import_service.analyze_import_file`）：
+  1. 校验大小/格式并抽取正文；正文超过 100,000 字符截断（响应 `truncated=true`）；
+  2. 读该项目信息树，展平为「节点目录」（每行 `路径<TAB>类型[<TAB>(末级)][<TAB>可选项：a|b]`）——只把目录与文件正文放进 prompt，**不要求大模型输出整树**；
+  3. 调大模型（与「摇人」共用 `settings.LLM_API_KEY` / `LLM_API_URL` / `LLM_MODEL_NAME`，即 DeepSeek flash；temperature=0.2、超时 120s、非流式），要求只输出 JSON `{"items":[{"title","value","nodeTitle","suggestedParentPath"}]}`；prompt 要求「把握 ≥ 0.9 才填 nodeTitle，否则给 suggestedParentPath」「select 节点 value 必须命中可选项，否则按未匹配」；
+  4. 解析返回（容忍 ```json 围栏与前后杂文字）后由**后端做权威匹配**（大模型的 nodeTitle 仅作提示）：
+     - 节点标题/完整路径去空白标点后精确匹配优先，`difflib.SequenceMatcher` 相似度 **≥ 0.9（满分 1）** 兜底模糊匹配；同名节点用 `suggestedParentPath` 消歧；
+     - select 节点 value 未命中可选项 → 降级为未匹配；同节点多条去重；识别值与节点现值一致则跳过；
+  5. 分桶返回三类：节点现值为空 → `fill`；非空且与识别值不同 → `overwrite`；无匹配节点 → `unmatched`（`suggestedParentPath` 逐段解析为 `suggested_parent_id`，层级上提到 ≤4 层，解析不到则 null，由前端用「导入信息」根兜底）。
+- 响应 `200`：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `file_name` / `model` | string | 文件名 / 实际使用的模型名 |
+| `text_length` / `truncated` / `extracted` | int / bool / int | 抽取字符数 / 是否截断 / 大模型识别条目数 |
+| `fill` / `overwrite` | 数组 | 元素：`node_id, path, title, content_type, current, value`（`current` 为空串=将填写） |
+| `unmatched` | 数组 | 元素：`title, value, suggested_parent_id, suggested_parent_path` |
+
+- 错误：`400`（格式不支持/内容为空/项目无数节点）；`503`（`LLM_API_KEY` 未配置或大模型调用失败，detail 带中文原因）。
+- **本接口不写库**：前端预览勾选后，用 5.3 更新（fill/overwrite）与 5.2 创建（unmatched）逐节点落库；未匹配且无归属的条目挂到按需创建的「导入信息」根节点下。
+
 ## 六、并发与一致性小结
 
 1. **ext_info 并发编辑**：靠 `version` 乐观锁（冲突 409）+ 更新瞬间行锁串行化；内部系统写入不带 version，显式绕过乐观锁。
@@ -241,6 +273,7 @@ Service：[info_node_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/ap
 | 404 | 项目/节点不存在（含软删除项目） | projects、info-nodes |
 | 409 | 项目编号/名称重复；**乐观锁版本冲突** | projects（PUT） |
 | 500 | 权限服务联动失败、删除项目外键残留等 | projects |
+| 503 | 文件识别接口：`LLM_API_KEY` 未配置或大模型调用失败 | info-nodes（parse-file） |
 
 ## 八、涉及文件清单
 
@@ -250,7 +283,8 @@ Service：[info_node_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/ap
 | 模型 | [app/models/delivery.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/models/delivery.py)（Project / ProjectInfoNode）、[models_das/models.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/models_das/models.py)（再导出） |
 | Schema | [schemas_das/request_models.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/schemas_das/request_models.py) |
 | API | [api/projects.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/api/projects.py)、[api/info_nodes.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/api/info_nodes.py) |
-| Service | [services/project_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/services/project_service.py)、[services/info_node_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/services/info_node_service.py) |
+| Service | [services/project_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/services/project_service.py)、[services/info_node_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/services/info_node_service.py)、[services/info_node_import_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/services/info_node_import_service.py) |
+| 测试 | [tests/test_info_node_import.py](file:///d:/CODE/9_9/OpenRobotService/backend/tests/test_info_node_import.py)（文本抽取/目录与 prompt 构造/LLM 返回解析/0.9 阈值匹配/select 校验/归属解析，13 用例） |
 | 模板 | [config/project_templates/default.yaml](file:///d:/CODE/9_9/OpenRobotService/backend/app/config/project_templates/default.yaml) |
 | 路由挂载 | [modules/admin/__init__.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/__init__.py) |
 
@@ -262,3 +296,4 @@ Service：[info_node_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/ap
 4. 拖拽节点后调 PATCH move；批量替换整树调 import（注意会先清空旧树）。
 5. 空树项目一键初始化调 `import-template`——模板结构在后端 YAML 里，前端不保留副本（原前端常量 `PROJECT_INFO_TEMPLATE` 已删除），避免两套模板漂移。
 6. 导入文件（`/import`）除节点数组外，也接受「标题 → 内容」紧凑映射（`""` 文字、`[...]` 下拉选项、`{...}` 子节点，即 `project_templates/tmp.json` 的写法）。
+7. 信息编辑页「文件导入」走 `parse-file`（上传 → 转圈 → 三组预览勾选 → 确认后逐节点 CRUD）；上传时不要手写 `Content-Type`（交给浏览器带 boundary），大模型识别耗时较长，前端请求超时需放宽到 180s 以上。原「JSON 整树导入」入口已被该弹层替换，`/import` 接口与前端 `importInfoTreeApi` 保留未删（截图/调试仍可直调）。

@@ -94,6 +94,8 @@ vi.mock('tdesign-mobile-react', () => {
       placeholder={props.placeholder}
     />
   );
+  // 一键回到顶部按钮：无交互逻辑可测，渲染占位即可
+  const BackTop = () => <div data-testid="backtop" />;
   return {
     Navbar,
     Loading,
@@ -106,6 +108,7 @@ vi.mock('tdesign-mobile-react', () => {
     Checkbox,
     Input,
     Textarea,
+    BackTop,
   };
 });
 

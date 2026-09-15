@@ -129,6 +129,8 @@ const ProjectDetail = lazyImport(() => import('@/pages/admin/ProjectDetail'));
 const TransportEfficiency = lazyImport(() => import('@/pages/admin/TransportEfficiency'));
 // 项目信息管理（项目详细信息）编辑页：项目详情卡右上角「编辑」进入
 const ProjectInfoEdit = lazyImport(() => import('@/pages/admin/ProjectInfoEdit'));
+// 项目详情模板（仅管理员）：编辑模板 → 保存并同步到所有项目的节点；入口在编辑页头部
+const ProjectInfoTemplate = lazyImport(() => import('@/pages/admin/ProjectInfoTemplate'));
 
 // 三大核心功能（明细列表页）
 const TicketMonitor = lazyImport(() => import('@/pages/admin/TicketMonitor'));
@@ -207,6 +209,8 @@ const router = createBrowserRouter([
               { path: 'project-detail/:id/transport-efficiency', element: <TransportEfficiency /> },
               // 编辑项目信息（信息树编辑页）：与详情页同为直挂路由（无 AdminLayout 导航壳）
               { path: 'project-detail/:id/edit', element: <ProjectInfoEdit /> },
+              // 详情模板（仅管理员可编辑）：保存后同步到所有项目的节点
+              { path: 'project-info-template', element: <ProjectInfoTemplate /> },
               // 次级入口：三大功能传统列表页 + 管理员工具
               { path: 'entries', element: <AdminEntries /> },
               {

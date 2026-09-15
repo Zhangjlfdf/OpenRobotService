@@ -8327,3 +8327,75 @@ html, body, #root {
 .mac-info__confirm { margin: 0; font-size: 13px; line-height: 1.6; color: var(--mac-fg); }
 .mac-info__confirm-actions { display: flex; gap: 10px; margin-top: 16px; }
 .mac-info__confirm-actions .mac-btn { flex: 1; }
+
+/* —— 文件导入（AI 识别）：三组预览 + 勾选确认 —— */
+.mac-import__hint { margin: 8px 0 12px; font-size: 11.5px; line-height: 1.65; color: var(--mac-muted-fg); }
+.mac-import__pick { display: flex; align-items: center; justify-content: center; gap: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mac-import__meta { margin: 12px 0 0; font-size: 11px; line-height: 1.6; color: var(--mac-gray-light); overflow-wrap: anywhere; }
+/* 项目名不一致提醒（可能导错文件）：琥珀色警示条，占满一行 */
+.mac-import__warn {
+  margin-top: 10px; padding: 9px 11px; border-radius: 10px;
+  background: #fff7e6; border: 1px solid #ffd591; color: #ad6800;
+  font-size: 11.5px; line-height: 1.7; overflow-wrap: anywhere;
+}
+/* 结果列表独立滚动，底部「取消 / 确认导入」常驻 */
+.mac-import__list { max-height: 46vh; overflow-y: auto; margin: 0 -2px; padding: 0 2px; }
+.mac-import__group { margin-top: 14px; }
+.mac-import__group-head { display: flex; align-items: baseline; }
+.mac-import__group-title { font-size: 12.5px; font-weight: 600; color: var(--mac-fg); }
+.mac-import__group-count { font-size: 12.5px; font-weight: 600; color: var(--mac-blue-1); }
+.mac-import__group-hint { margin: 2px 0 0; font-size: 11px; color: var(--mac-gray-light); }
+.mac-import__row {
+  display: flex; gap: 8px; align-items: flex-start; margin-top: 8px; padding: 9px 10px;
+  border: 1px solid var(--mac-border); border-radius: 10px; background: #fff; cursor: pointer;
+}
+.mac-import__row input[type='checkbox'] { flex-shrink: 0; margin: 2px 0 0; accent-color: var(--mac-blue-2); }
+.mac-import__body { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+.mac-import__path { font-size: 12px; font-weight: 600; color: var(--mac-blue-1); overflow-wrap: anywhere; }
+.mac-import__value { font-size: 11.5px; line-height: 1.55; color: var(--mac-fg); overflow-wrap: anywhere; white-space: pre-wrap; }
+.mac-import__old { color: var(--mac-muted-fg); }
+.mac-import__new { color: var(--mac-blue-1); }
+.mac-import__note { font-size: 10.5px; line-height: 1.5; color: var(--mac-muted-fg); overflow-wrap: anywhere; }
+.mac-import__actions { display: flex; gap: 10px; margin-top: 16px; }
+.mac-import__actions .mac-btn { flex: 1; }
+
+/* —— 详情模板编辑页（仅管理员）：模板节点行 + 同步预览 —— */
+.mac-tpl__hint { margin: 10px 0 12px; font-size: 11.5px; line-height: 1.7; color: var(--mac-muted-fg); }
+.mac-tpl__actions { margin-bottom: 2px; }
+.mac-tpl-row { border-radius: 10px; border: 2px solid var(--mac-tree-1); background: var(--mac-tree-1); box-shadow: 0 1px 2px rgba(80, 90, 100, 0.05); }
+.mac-tpl-row--d2 { border-color: var(--mac-tree-2); background: #fff; }
+.mac-tpl-row--d3 { border-color: var(--mac-tree-3); background: #fff; }
+.mac-tpl-row--d4 { border-color: var(--mac-tree-4); background: #fff; }
+.mac-tpl-row__head { display: flex; align-items: center; gap: 4px; min-height: 36px; padding: 6px 8px; }
+.mac-tpl-row--d1 .mac-tpl-row__head { padding: 7px 10px; }
+.mac-tpl-row__title {
+  flex: 1; min-width: 0; display: block; margin: 0; padding: 2px 0; border: none; background: none;
+  text-align: left; font: inherit; font-size: 12.5px; font-weight: 600; color: var(--mac-fg); cursor: pointer;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.mac-tpl-row--d1 .mac-tpl-row__title { font-size: 14px; color: #fff; }
+.mac-tpl-row--d2 .mac-tpl-row__title { color: var(--mac-tree-2); }
+.mac-tpl-row--d3 .mac-tpl-row__title { color: var(--mac-tree-3); }
+.mac-tpl-row--d4 .mac-tpl-row__title { color: var(--mac-tree-4); }
+.mac-tpl-row__type {
+  flex-shrink: 0; max-width: 110px; padding: 4px 6px; border: 1px solid var(--mac-border); border-radius: 7px;
+  background: #fff; font: inherit; font-size: 11px; color: var(--mac-muted-fg); outline: none;
+}
+.mac-tpl-row--d1 .mac-tpl-row__type { background: rgba(255, 255, 255, 0.16); border-color: rgba(255, 255, 255, 0.35); color: #fff; }
+.mac-tpl-row__options { display: flex; align-items: center; gap: 8px; margin: 0 8px 8px; padding: 6px 8px; border-radius: 8px; background: rgba(255, 255, 255, 0.16); }
+.mac-tpl-row--d2 .mac-tpl-row__options,
+.mac-tpl-row--d3 .mac-tpl-row__options,
+.mac-tpl-row--d4 .mac-tpl-row__options { background: var(--mac-secondary); }
+.mac-tpl-row__options-label { flex-shrink: 0; font-size: 11px; color: var(--mac-muted-fg); }
+.mac-tpl-row--d1 .mac-tpl-row__options-label { color: rgba(255, 255, 255, 0.8); }
+.mac-tpl-row__options-input {
+  flex: 1; min-width: 0; padding: 5px 8px; border: 1px solid var(--mac-border); border-radius: 7px;
+  background: #fff; font: inherit; font-size: 12px; color: var(--mac-fg); outline: none;
+}
+.mac-tpl-row__options-input:focus { box-shadow: 0 0 0 1px var(--mac-blue-2); }
+.mac-tpl-row--d1 .mac-info-row__op { color: rgba(255, 255, 255, 0.85); }
+.mac-tpl-row--d1 .mac-info-row__op:active { background: rgba(255, 255, 255, 0.15); }
+.mac-tpl__preview-list { margin-top: 10px; max-height: 180px; overflow-y: auto; border-top: 1px solid var(--mac-border); }
+.mac-tpl__preview-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 7px 2px; border-bottom: 1px solid var(--mac-border); }
+.mac-tpl__preview-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; color: var(--mac-fg); }
+.mac-tpl__preview-stat { flex-shrink: 0; font-size: 11px; color: var(--mac-muted-fg); }

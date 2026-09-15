@@ -1,18 +1,19 @@
 // 编辑项目信息 —— 项目信息树编辑页（对照原型 routes/projects.$id_.edit.tsx + components/tree/ProjectInformationTree.tsx）。
 // 集中管理节点：新增 / 改名 / 改内容形式 / 删除 / 长按拖动调整从属 / 全部展开折叠 / 四种内容形式（文字、下拉、文件、图片）。
+// 「文件导入」打开 AI 识别弹层（ProjectInfoFileImport：Word/Markdown/Excel/文本 → 大模型识别 → 三组预览勾选确认）。
 //
 // 数据走后端 /api/admin/info-nodes/*（逐节点 CRUD，数据层见 shared/utils/projectInfoTree.ts）：变更先本地乐观更新，
 // 接口失败时提示并整树重读回滚；文件/图片内容先上传资源管理服务（与项目文档同一接口）再写节点值。
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import { Input, Navbar, Popup, Toast } from 'tdesign-mobile-react';
+import { BackTop, Input, Navbar, Popup, Toast } from 'tdesign-mobile-react';
 import { createRequest } from '@/api/client';
 import API_CONFIG from '@/config/api';
 import { useAuthStore } from '@/stores/auth';
-import { type ApiInfoTreeImportNode } from '@/api/infoNodes';
+import ProjectInfoFileImport from './ProjectInfoFileImport';
 import {
   MacChevronDown, MacChevronRight, MacChevronsDownUp, MacChevronsUpDown, MacDownload, MacFileText,
-  MacGripVertical, MacHistory, MacImage, MacMoreHorizontal, MacPencil, MacPlus, MacTrash2, MacUpload,
+  MacGripVertical, MacHistory, MacImage, MacMoreHorizontal, MacPencil, MacPlus, MacScrollText, MacTrash2, MacUpload,
 } from '@/shared/components/macaronIcons';
 import {
   computeInfoCompleteness,
@@ -20,12 +21,10 @@ import {
   deleteInfoNode,
   formatFileSize,
   importInfoTemplate,
-  importInfoTree,
   loadCollapsedIds,
   loadInfoNodes,
   isInfoNodeVisible,
   moveInfoNode,
-  normalizeImportNodes,
   patchInfoNode,
   PROJECT_INFO_MAX_DEPTH,
   removeInfoNode,
@@ -37,6 +36,12 @@ import {
   type ProjectInfoNode,
   type ProjectInfoSelectValue,
 } from '@/shared/utils/projectInfoTree';
+import {
+  isKnownVehicleModel,
+  isVehicleModelNode,
+  VEHICLE_MODEL_DATALIST_ID,
+  VEHICLE_MODEL_SERIES,
+} from '@/shared/utils/vehicleModels';
 
 type DropMode = 'child' | 'before';
 const CONTENT_TYPE_NAMES: Record<ProjectInfoContentType, string> = {
@@ -50,13 +55,15 @@ export default function ProjectInfoEdit() {
   const { id = '' } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const username = useAuthStore((s) => s.username);
+  // 详情模板入口仅管理员可见（与后端 get_current_admin_user 的判据一致）
+  const canManageTemplate = useAuthStore((s) => Array.isArray(s.permissions) && s.permissions.includes('admin'));
   const request = useMemo(() => createRequest(API_CONFIG.ADMIN.BASE_URL, 'Admin'), []);
 
   const [nodes, setNodes] = useState<ProjectInfoNode[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
   const [importing, setImporting] = useState(false);
-  const [pendingImport, setPendingImport] = useState<{ nodes: ApiInfoTreeImportNode[]; count: number } | null>(null);
+  const [fileImportOpen, setFileImportOpen] = useState(false);
   const [collapsedIds, setCollapsedIds] = useState<Set<string>>(() => loadCollapsedIds(id));
   const [editingId, setEditingId] = useState<string | null>(null);
   const [menuNode, setMenuNode] = useState<ProjectInfoNode | null>(null);
@@ -71,7 +78,6 @@ export default function ProjectInfoEdit() {
   const [uploadingNodeId, setUploadingNodeId] = useState<string | null>(null);
   const [projectName, setProjectName] = useState('');
   const holdTimer = useRef<number | null>(null);
-  const importInputRef = useRef<HTMLInputElement>(null);
 
   // 项目名称仅用于页头副标题（真实数据；失败静默降级为项目编号）
   useEffect(() => {
@@ -314,46 +320,9 @@ export default function ProjectInfoEdit() {
     setTitleOptionsNode(null);
   };
 
-  // —— 整树导入 / 预设模板初始化（import 接口：先清空旧树再写入，需二次确认） ——
+  // —— 按预设模板初始化（空树项目；模板在后端 project_type → project_templates/*.yaml） ——
 
-  const countImportNodes = (list: ApiInfoTreeImportNode[]): number =>
-    list.reduce((sum, item) => sum + 1 + (item.children ? countImportNodes(item.children) : 0), 0);
-
-  const pickImportFile = (file: File) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      try {
-        const nodes = normalizeImportNodes(JSON.parse(String(reader.result ?? '')));
-        if (!nodes.length) {
-          Toast({ message: '文件中没有信息节点', theme: 'warning' });
-          return;
-        }
-        setPendingImport({ nodes, count: countImportNodes(nodes) });
-      } catch (err) {
-        Toast({ message: `文件解析失败：${errMsg(err)}`, theme: 'error' });
-      }
-    };
-    reader.readAsText(file);
-  };
-
-  const importTree = async (input: ApiInfoTreeImportNode[], successMsg: (imported: number) => string) => {
-    if (!id) return;
-    setImporting(true);
-    try {
-      const imported = await importInfoTree(id, input);
-      setNodes(await loadInfoNodes(id));
-      setCollapsedIds(new Set());
-      Toast({ message: successMsg(imported), theme: 'success' });
-      setPendingImport(null);
-    } catch (err) {
-      Toast({ message: `导入失败：${errMsg(err)}`, theme: 'error' });
-    } finally {
-      setImporting(false);
-    }
-  };
-
-  /** 空树项目「按预设模板初始化」：模板在后端（project_type → project_templates/*.yaml），
-   *  与新建项目同一份定义，前端只触发，不再自带一份结构副本 */
+  /** 空树项目「按预设模板初始化」：模板与新建项目同一份定义，前端只触发，不再自带一份结构副本 */
   const initFromTemplate = async () => {
     if (!id) return;
     setImporting(true);
@@ -410,25 +379,23 @@ export default function ProjectInfoEdit() {
             <div className="mac-info__actions">
               <button type="button" className="mac-btn mac-btn--ghost mac-info__iconbtn" onClick={expandAll} title="全部展开" aria-label="全部展开"><MacChevronsUpDown size={15} /></button>
               <button type="button" className="mac-btn mac-btn--ghost mac-info__iconbtn" onClick={collapseAll} title="全部折叠" aria-label="全部折叠"><MacChevronsDownUp size={15} /></button>
+              {canManageTemplate && (
+                <button
+                  type="button"
+                  className="mac-btn mac-btn--outline mac-info__act"
+                  title="编辑项目详情模板（保存后同步到所有项目的节点）"
+                  onClick={() => navigate('/admin/project-info-template')}
+                >
+                  <MacScrollText size={13} />详情模板
+                </button>
+              )}
               <button
                 type="button"
                 className="mac-btn mac-btn--outline mac-info__act"
-                disabled={importing}
-                onClick={() => importInputRef.current?.click()}
+                onClick={() => setFileImportOpen(true)}
               >
-                <MacUpload size={13} />{importing ? '导入中…' : '文件导入'}
+                <MacUpload size={13} />文件导入
               </button>
-              <input
-                ref={importInputRef}
-                type="file"
-                accept=".json,application/json"
-                hidden
-                onChange={(event) => {
-                  const selected = event.target.files?.[0];
-                  if (selected) pickImportFile(selected);
-                  event.target.value = '';
-                }}
-              />
               <button type="button" className="mac-btn mac-btn--primary mac-info__act" onClick={() => void addNode(null)}>
                 <MacPlus size={13} />新标签
               </button>
@@ -504,26 +471,14 @@ export default function ProjectInfoEdit() {
         </div>
       </Popup>
 
-      {/* 文件导入确认（import 接口先清空旧树再写入，需二次确认） */}
-      <Popup visible={!!pendingImport} onClose={() => setPendingImport(null)} placement="bottom" showOverlay>
-        <div className="mac-sheet">
-          <h4 className="mac-sheet__title">导入信息树</h4>
-          <p className="mac-info__confirm">
-            将用文件中的 {pendingImport?.count ?? 0} 个节点替换该项目全部现有节点，原内容不可恢复。
-          </p>
-          <div className="mac-info__confirm-actions">
-            <button type="button" className="mac-btn mac-btn--outline" disabled={importing} onClick={() => setPendingImport(null)}>取消</button>
-            <button
-              type="button"
-              className="mac-btn mac-btn--primary"
-              disabled={importing}
-              onClick={() => pendingImport && void importTree(pendingImport.nodes, (imported) => `已导入 ${imported} 个节点`)}
-            >
-              {importing ? '导入中…' : '确认导入'}
-            </button>
-          </div>
-        </div>
-      </Popup>
+      {/* 文件导入：AI 识别弹层（上传文档 → 三组预览勾选确认 → 逐节点落库） */}
+      <ProjectInfoFileImport
+        visible={fileImportOpen}
+        onClose={() => setFileImportOpen(false)}
+        projectId={id}
+        nodes={nodes}
+        onApplied={() => void reload()}
+      />
 
       {/* 编辑历史：后端无接口，先占位说明（不虚构真实操作记录） */}
       <Popup visible={!!historyNode} onClose={() => setHistoryNode(null)} placement="bottom" showOverlay>
@@ -588,6 +543,25 @@ export default function ProjectInfoEdit() {
           </div>
         </div>
       </Popup>
+
+      {/* 车型备选（datalist）：行内改名输入框共用一份，避免每一行重复渲染 50 个 option */}
+      <datalist id={VEHICLE_MODEL_DATALIST_ID}>
+        {VEHICLE_MODEL_SERIES.map((series) => (
+          <optgroup key={series.series} label={series.series}>
+            {series.models.map((model) => (
+              <option key={model.code} value={model.code}>{model.name}</option>
+            ))}
+          </optgroup>
+        ))}
+      </datalist>
+
+      {/* 一键回到顶部：滚动超过 200px 时出现在右下角（滚动容器是 MainLayout 的 .tabbar-shell__content） */}
+      <BackTop
+        container={() => document.querySelector('.tabbar-shell__content') as HTMLElement}
+        visibilityHeight={200}
+        theme="round"
+        style={{ bottom: 'calc(56px + env(safe-area-inset-bottom) + 12px)' }}
+      />
     </div>
   );
 }
@@ -597,6 +571,8 @@ export default function ProjectInfoEdit() {
 interface InfoRowProps {
   node: ProjectInfoNode;
   depth: number;
+  /** 父节点标题：车型节点识别用（挂在「车辆」下的自定义车型也能随时切回下拉） */
+  parentTitle?: string;
   missingCount?: number | undefined;
   byParent: Map<string | null, ProjectInfoNode[]>;
   collapsedIds: Set<string>;
@@ -630,6 +606,8 @@ function InfoRow(props: InfoRowProps) {
   const isCollapsed = props.collapsedIds.has(node.id);
   const activeDrop = props.dropTarget?.id === node.id;
   const titleOptions = ((node.value ?? {}) as { titleOptions?: string[] }).titleOptions ?? [];
+  // 车型节点（模板里的「车型1/车型2」或已选好/自定义的车型）：标题直接给「选车型」下拉框
+  const isVehicleNode = isVehicleModelNode(node.title, props.parentTitle);
   const classNames = [
     'mac-info-row',
     `mac-info-row--d${level}`,
@@ -666,6 +644,8 @@ function InfoRow(props: InfoRowProps) {
               className="mac-info-row__input"
               autoFocus
               defaultValue={node.title}
+              // 车型节点手动输入时也带车型备选（目录里没有的车型直接输入即可）
+              list={isVehicleNode ? VEHICLE_MODEL_DATALIST_ID : undefined}
               onBlur={(event) => {
                 const title = event.target.value.trim();
                 if (title && title !== node.title) props.onRename(node, title);
@@ -673,6 +653,22 @@ function InfoRow(props: InfoRowProps) {
               }}
               onKeyDown={(event) => { if (event.key === 'Enter') event.currentTarget.blur(); }}
             />
+          ) : isVehicleNode ? (
+            <select
+              className="mac-info-row__select"
+              value={isKnownVehicleModel(node.title) ? node.title : ''}
+              aria-label="选择车型"
+              onChange={(event) => event.target.value && props.onRename(node, event.target.value)}
+            >
+              <option value="" disabled>{node.title}</option>
+              {VEHICLE_MODEL_SERIES.map((series) => (
+                <optgroup key={series.series} label={series.series}>
+                  {series.models.map((model) => (
+                    <option key={model.code} value={model.code}>{model.code} · {model.name}</option>
+                  ))}
+                </optgroup>
+              ))}
+            </select>
           ) : !isLeaf && titleOptions.length ? (
             <select
               className="mac-info-row__select"
@@ -700,7 +696,7 @@ function InfoRow(props: InfoRowProps) {
         {isLeaf && <NodeContent {...props} />}
       </div>
       {!isCollapsed && children.map((child) => (
-        <InfoRow key={child.id} {...props} node={child} depth={depth + 1} missingCount={undefined} />
+        <InfoRow key={child.id} {...props} node={child} depth={depth + 1} parentTitle={node.title} missingCount={undefined} />
       ))}
     </div>
   );

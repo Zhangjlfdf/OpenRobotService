@@ -104,3 +104,155 @@ export async function importInfoTemplateApi(projectId: string): Promise<number> 
   });
   return data?.imported ?? 0;
 }
+
+// —— 文件导入（AI 识别）：上传文档 → 后端调大模型识别 → 三类预览（不落库，确认后走上面的 CRUD） ——
+
+/** 匹配到现有节点的识别条目（将填写 / 将覆盖共用） */
+export interface ApiParseMatchedItem {
+  node_id: string;
+  /** 节点完整路径（如「基础信息 / 客户信息」），用于预览展示 */
+  path: string;
+  title: string;
+  content_type: string;
+  /** 节点当前内容（text 原值 / select 的 selected；空串=将填写） */
+  current: string;
+  /** 识别出的新内容（select 已对齐到可选项） */
+  value: string;
+}
+
+/** 未匹配到节点的识别条目（确认后作为新节点创建） */
+export interface ApiParseNewItem {
+  title: string;
+  value: string;
+  /** 建议归属节点（后端已解析并校验层级）；null=前端用「导入信息」兜底 */
+  suggested_parent_id: string | null;
+  suggested_parent_path: string | null;
+}
+
+/** POST /info-nodes/projects/{id}/parse-file 返回 */
+export interface ApiImportParseResult {
+  file_name: string;
+  /** 实际使用的模型（服务端 settings.LLM_MODEL_NAME，与摇人同一配置） */
+  model: string;
+  text_length: number;
+  /** 正文超过服务端上限被截断时为 true */
+  truncated: boolean;
+  /** 大模型识别出的条目总数（含被去重的） */
+  extracted: number;
+  /** 当前系统内的项目名称 */
+  project_name: string;
+  /** 文件中识别到的项目名称；文件里没写则为 null */
+  file_project_name: string | null;
+  /** true = 两者确实不一致（后端判定），前端应提醒用户可能导错了文件 */
+  name_mismatch: boolean;
+  fill: ApiParseMatchedItem[];
+  overwrite: ApiParseMatchedItem[];
+  unmatched: ApiParseNewItem[];
+}
+
+/** 上传支持的文件（正文抽取与大模型识别都在后端完成），返回三类预览；本接口不写库 */
+export async function parseImportFileApi(projectId: string, file: File): Promise<ApiImportParseResult> {
+  const form = new FormData();
+  form.append('file', file);
+  const data = await request()<ApiImportParseResult>(
+    `/info-nodes/projects/${encodeURIComponent(projectId)}/parse-file`,
+    // 大模型识别耗时可能超过默认 30s，单独放宽超时（后端 LLM 调用上限 120s）
+    { method: 'POST', body: form, timeout: 180000 },
+  );
+  return {
+    file_name: data?.file_name ?? file.name,
+    model: data?.model ?? '',
+    text_length: data?.text_length ?? 0,
+    truncated: !!data?.truncated,
+    extracted: data?.extracted ?? 0,
+    project_name: data?.project_name ?? '',
+    file_project_name: typeof data?.file_project_name === 'string' && data.file_project_name
+      ? data.file_project_name
+      : null,
+    name_mismatch: !!data?.name_mismatch,
+    fill: Array.isArray(data?.fill) ? data.fill : [],
+    overwrite: Array.isArray(data?.overwrite) ? data.overwrite : [],
+    unmatched: Array.isArray(data?.unmatched) ? data.unmatched : [],
+  };
+}
+
+// —— 项目详情模板（仅管理员）：编辑模板 → 保存并同步到所有项目的节点 ——
+
+/** 模板节点（递归树；id 是模板侧稳定 UUID，即项目节点同步锚点） */
+export interface ApiInfoTemplateNode {
+  id: string;
+  title: string;
+  content_type: string;
+  /** 仅 select 节点：可选项 */
+  options?: string[];
+  sort_order?: number;
+  children?: ApiInfoTemplateNode[];
+}
+
+export interface ApiInfoTemplate {
+  id: string;
+  name: string;
+  nodes: ApiInfoTemplateNode[];
+  updated_at: string | null;
+  /** 最近编辑人（首次补种为 system） */
+  updated_by: string | null;
+  /** 会受同步影响的项目数（未删除项目总数） */
+  project_count: number;
+  /** db=已入库；yaml=首次访问由默认模板补种 */
+  source: string;
+}
+
+/** dry-run 预览 / 真实同步共用的统计与明细 */
+export interface ApiInfoTemplateSyncResult {
+  dry_run: boolean;
+  /** 未删除项目总数 */
+  projects: number;
+  /** 实际会（或已）变更的项目数 */
+  changed_projects: number;
+  added: number;
+  updated: number;
+  deleted: number;
+  /** 有变更项目的明细（后端最多给 20 条） */
+  details?: Array<{ project_id: string; project_name: string; added: number; updated: number; deleted: number }>;
+  /** 同步失败的项目（单个项目失败不拖垮整体） */
+  failed_projects?: Array<{ project_id: string; error: string }>;
+  updated_at?: string;
+  updated_by?: string;
+}
+
+/** 获取项目详情模板（仅管理员；后端首次访问会用默认模板补种入库） */
+export async function fetchInfoTemplateApi(): Promise<ApiInfoTemplate> {
+  const data = await request()<ApiInfoTemplate>('/info-nodes/template');
+  return {
+    id: data?.id ?? 'default',
+    name: data?.name ?? '项目详情模板',
+    nodes: Array.isArray(data?.nodes) ? data.nodes : [],
+    updated_at: data?.updated_at ?? null,
+    updated_by: data?.updated_by ?? null,
+    project_count: data?.project_count ?? 0,
+    source: data?.source ?? 'db',
+  };
+}
+
+/** 保存模板并同步到所有项目；dryRun=true 只预览影响不写库（校验失败后端返回 400） */
+export async function saveInfoTemplateApi(
+  nodes: ApiInfoTemplateNode[],
+  dryRun: boolean,
+): Promise<ApiInfoTemplateSyncResult> {
+  const data = await request()<ApiInfoTemplateSyncResult>('/info-nodes/template', {
+    method: 'POST',
+    body: JSON.stringify({ nodes, dry_run: dryRun }),
+  });
+  return {
+    dry_run: !!data?.dry_run,
+    projects: data?.projects ?? 0,
+    changed_projects: data?.changed_projects ?? 0,
+    added: data?.added ?? 0,
+    updated: data?.updated ?? 0,
+    deleted: data?.deleted ?? 0,
+    details: Array.isArray(data?.details) ? data.details : [],
+    failed_projects: Array.isArray(data?.failed_projects) ? data.failed_projects : [],
+    updated_at: data?.updated_at,
+    updated_by: data?.updated_by,
+  };
+}

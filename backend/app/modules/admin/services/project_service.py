@@ -63,11 +63,29 @@ def template_node_value(node: dict) -> tuple[str, Optional[str]]:
     return content_type, value
 
 
-def get_info_nodes_template(project_type: Optional[str] = None) -> list:
-    """信息树模板（未实例化）：节点含 title/sort_order/children 与可选
-    content_type/options/value，由 info_node_service.import_template 写库。
+def get_info_nodes_template_from_yaml(project_type: Optional[str] = None) -> list:
+    """YAML 里的信息树模板（未实例化）：节点含 title/sort_order/children 与可选
+    content_type/options/value。仅作为数据库详情模板的兜底来源。
     """
     return _get_ext_info_template(project_type).get("info_nodes", []) or []
+
+
+def get_info_nodes_template(project_type: Optional[str] = None) -> list:
+    """信息树模板（未实例化）：优先取数据库里的「详情模板」（管理员可编辑、可同步所有项目），
+    还没有模板行 / 读库失败时回退到 {project_type}.yaml（缺省 default.yaml）。
+
+    数据库模板节点带稳定 id（即项目节点的同步锚点 template_node_id）；
+    YAML 节点没有 id，实例化出的项目节点锚点为 NULL（首次模板同步时按标题路径回填）。
+    """
+    try:
+        from app.modules.admin.services.info_template_service import info_template_service
+
+        nodes = info_template_service.get_template_nodes()
+        if nodes:
+            return nodes
+    except Exception as exc:  # 表缺失/解析失败等：不能拖垮建项目
+        logger.warning("读取数据库详情模板失败，回退 YAML 模板：%s", exc)
+    return get_info_nodes_template_from_yaml(project_type)
 
 
 def _split_template(project_type: Optional[str] = None) -> tuple[dict, list]:
@@ -443,12 +461,14 @@ class ProjectService:
         保持模板定义的 title / sort_order / 层级关系。
         content_type 与 value 按模板实例化：select 节点的 options 清单编码进 value，
         文本节点未预置值时留空（None）。
+        模板节点带 id（数据库详情模板）时记到 template_node_id，作为后续模板同步的锚点。
         """
         from app.modules.admin.models_das.models import ProjectInfoNode
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         for n in nodes_tpl:
             node_id = str(uuid.uuid4())
             content_type, value = template_node_value(n)
+            tpl_node_id = n.get("id") if isinstance(n.get("id"), str) and n.get("id") else None
             node = ProjectInfoNode(
                 id=node_id,
                 project_id=project_id,
@@ -457,6 +477,7 @@ class ProjectService:
                 content_type=content_type,
                 value=value,
                 sort_order=n.get("sort_order", 0),
+                template_node_id=tpl_node_id,
                 created_at=now,
                 updated_at=now,
             )

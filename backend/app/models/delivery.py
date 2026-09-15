@@ -309,6 +309,7 @@ class ProjectInfoNode(Base):
     content_type = Column(String(32), nullable=False, default='text', comment='内容类型: text/image/file/...')
     value = Column(Text, nullable=True, comment='节点值')
     sort_order = Column(Integer, nullable=False, default=0, comment='同级排序')
+    template_node_id = Column(String(64), nullable=True, comment='来源的详情模板节点ID（模板同步锚点）；用户自建节点为 NULL')
     created_at = Column(String(30), nullable=False, comment='创建时间')
     updated_at = Column(String(30), nullable=False, comment='更新时间')
 
@@ -320,5 +321,27 @@ class ProjectInfoNode(Base):
 
     def __repr__(self):
         return f"<ProjectInfoNode(id='{self.id}', project_id='{self.project_id}', title='{self.title}')>"
+
+
+class ProjectInfoTemplate(Base):
+    """项目信息树「详情模板」（管理员可编辑，保存后同步到所有项目）。
+
+    当前只有一套模板（id 固定 'default'，所有项目共用；项目类型维度的 YAML 模板
+    仍保留，仅作为尚未初始化数据库模板时的兜底来源）。
+    nodes 存邻接树 JSON：每节点含 id（模板侧稳定 UUID，即项目节点的同步锚点
+    template_node_id）/ title / content_type / options / children。
+    项目节点按 template_node_id 对回模板：模板改名/移动后同步不依赖标题，
+    不会误伤用户自建的节点（template_node_id 为 NULL 的节点同步时不动）。
+    """
+    __tablename__ = 'project_info_template'
+
+    id = Column(String(64), primary_key=True, comment="模板ID（当前固定 default）")
+    name = Column(String(255), nullable=False, default='项目详情模板', comment='模板名称')
+    nodes = Column(Text, nullable=True, comment='节点树JSON(递归嵌套, 含 children)')
+    updated_at = Column(String(30), nullable=True, comment='更新时间')
+    updated_by = Column(String(128), nullable=True, comment='最近编辑人')
+
+    def __repr__(self):
+        return f"<ProjectInfoTemplate(id='{self.id}', name='{self.name}')>"
 
 

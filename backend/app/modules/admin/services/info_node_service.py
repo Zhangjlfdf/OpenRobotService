@@ -224,6 +224,7 @@ class InfoNodeService:
                         content_type=n.get("content_type", "text"),
                         value=n.get("value"),
                         sort_order=n.get("sort_order", 0),
+                        template_node_id=n.get("template_node_id"),
                         created_at=now,
                         updated_at=now,
                     ))
@@ -271,6 +272,8 @@ class InfoNodeService:
                     "content_type": content_type,
                     "value": value,
                     "sort_order": n.get("sort_order", index),
+                    # 数据库详情模板的节点带稳定 id：记到锚点，后续模板同步按它对齐
+                    "template_node_id": n.get("id") if isinstance(n.get("id"), str) and n.get("id") else None,
                 }
                 children = build(n.get("children") or [])
                 if children:
