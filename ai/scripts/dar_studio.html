@@ -585,7 +585,6 @@ async function loadMetrics(){
   if(j.this_week && j.this_week.n_segs)
     bits.push(`本周新增（${esc(j.this_week.from)}~${esc(j.this_week.to)}）：<b>${j.this_week.n_convs}</b> 会话 <b>${j.this_week.n_segs}</b> 段 · L1 <b>${esc(j.this_week.L1_rate)}</b>（全量为上线以来累积，本周单独看）`);
   if(j.note) bits.push(`附注：${esc(j.note)}`);
-  if(j.meta?.git_head) bits.push(`版本 <span class="mono">${esc(String(j.meta.git_head).slice(0,8))}</span>（本周合入 ${(j.meta.merges||[]).length} 条）`);
   if(j.avg_rounds && Object.keys(j.avg_rounds).length)
     bits.push(`轮次：${Object.entries(j.avg_rounds).map(([k,v])=>`${esc(k)} ${esc(v)}`).join(" · ")}`);
   if(tr.length >= 2)
