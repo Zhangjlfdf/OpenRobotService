@@ -557,7 +557,6 @@ async function loadMetrics(){
   if(j.meta?.git_head) bits.push(`版本 <span class="mono">${esc(String(j.meta.git_head).slice(0,8))}</span>（本周合入 ${(j.meta.merges||[]).length} 条）`);
   if(j.avg_rounds && Object.keys(j.avg_rounds).length)
     bits.push(`轮次：${Object.entries(j.avg_rounds).map(([k,v])=>`${esc(k)} ${esc(v)}`).join(" · ")}`);
-  if(j.ticket_quality?.建议转单未提单) bits.push(`建议转单未提单：${esc(j.ticket_quality.建议转单未提单)}`);
   if(tr.length >= 2)
     bits.push(`L1 走势：${tr.map(t=>`${esc(String(t.date).slice(5))} ${t["L1_段级"]??"—"}`).join(" → ")}`);
   bar.innerHTML = bits.join('<span style="color:#c7d2fe">｜</span>');
