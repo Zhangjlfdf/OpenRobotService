@@ -1157,11 +1157,12 @@ def layer_page(env: str = "prod", layer: str = ""):
                 f'<div>{esc(rr.get("q", ""))}</div>{imgs}</div>{acts}{ans}</div>')
         lbls = [("直答正确", "#2e9e5b"), ("未直答", "#d9534f"), ("未覆盖", "#d9534f"),
                 ("直接提单", "#d97706"), ("建议转单", "#d97706"), ("寒暄", "#98a2b3")]
-        btns = "".join(
+        # 标签只属于真实咨询层（0916 用户定调：其他层只是浏览）
+        btns = ("".join(
             f'<button class="lb{" on" if r["eff"] == lb and r["src"] == "manual" else ""}" '
             f'style="{"" if r["eff"] == lb and r["src"] == "manual" else f"--c:{col};"}" '
             f'onclick="lab(this,{r["cid"]},{r["astart"]},\'{lb}\')">{lb}</button>'
-            for lb, col in lbls)
+            for lb, col in lbls) if layer == "qa" else "")
         tks = [str(t) for t in (r.get("ticket_ids") or []) + (r.get("task_ids") or [])]
         tk_span = ""
         if tks:

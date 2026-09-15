@@ -1298,6 +1298,7 @@ async function loadSegs(layer){
 
 function renderSegs(){
   const kw = $("#fsegfilter").value.trim();
+  const canLabel = fCur.layer === "qa";  // 标签只属于真实咨询层（0916 用户定调）
   const rows = kw ? fCur.rows.filter(r => (r.user||"").includes(kw) || (r.question||"").includes(kw)) : fCur.rows;
   $("#fsegcount").textContent = `${rows.length} 段`;
   $("#fseglist").innerHTML = rows.map((r,i)=>{
@@ -1314,7 +1315,7 @@ function renderSegs(){
         <a href="javascript:void(0)" style="margin-left:auto" onclick="toggleDetail(this.closest('.fseg').querySelector('.q'))">下面看 ▾</a>
         <a href="/seg_page?env=prod&cid=${r.cid}&a0=${r.astart}&a1=${r.aend}" target="_blank" title="独立页面看完整对话（大图）">新开网页 ↗</a>
       </div>
-      <div class="ops">${LABELS.map(lb=>`<button class="lbtn${r.eff===lb&&r.src==="manual"?" on":""}" data-lb="${lb}" onclick="labelSeg(${r.cid},${r.astart},'${lb}',this)">${lb}</button>`).join("")}</div>
+      ${canLabel ? `<div class="ops">${LABELS.map(lb=>`<button class="lbtn${r.eff===lb&&r.src==="manual"?" on":""}" data-lb="${lb}" onclick="labelSeg(${r.cid},${r.astart},'${lb}',this)">${lb}</button>`).join("")}</div>` : ""}
       <div class="fdet" style="display:none"></div>
     </div>`;
   }).join("") || '<div class="empty">该层无段</div>';
@@ -1387,7 +1388,7 @@ document.addEventListener("keydown", e=>{
   if(e.key === "j" || e.key === "ArrowDown"){ e.preventDefault(); move(1); }
   else if(e.key === "k" || e.key === "ArrowUp"){ e.preventDefault(); move(-1); }
   else if(e.key >= "1" && e.key <= "6"){
-    if(fCur.idx < 0) return;
+    if(fCur.layer !== "qa" || fCur.idx < 0) return;
     const seg = rows[fCur.idx], row = fCur.rows[+seg.dataset.i];
     if(!row) return;
     const lb = LABELS[+e.key - 1];
