@@ -100,14 +100,17 @@ label.f{display:flex;flex-direction:column;gap:5px;font-size:12px;color:var(--in
 .repbar{display:flex;gap:14px;align-items:center;flex-wrap:wrap;font-size:12.5px;color:var(--ink2);
   padding:10px 14px;background:var(--brand-soft);border:1px solid #e0e7ff;border-radius:10px;margin-bottom:16px}
 /* ── 漏斗走查（ORS-#821）── */
-.funnel-wrap{display:flex;flex-direction:column;gap:3px;max-width:820px}
-.fbar{display:flex;align-items:center;gap:12px;cursor:pointer;padding:3px 8px;border-radius:8px}
-.fbar:hover,.fbar.is-sel{background:var(--brand-soft)}
-.fbar .lb{width:170px;font-size:12.5px;color:var(--ink2);text-align:right;flex-shrink:0}
-.fbar.sub .lb{width:150px;padding-left:20px}
-.fbar .tr{flex:1;display:flex;justify-content:center}
-.fbar .fill{height:26px;border-radius:6px;display:flex;align-items:center;justify-content:center;
-  font-size:12px;color:#fff;min-width:60px;gap:6px;transition:width .25s}
+.funnel-wrap{display:flex;flex-direction:column;gap:4px;max-width:860px}
+.frow{display:flex;justify-content:center;gap:0}
+.frow.sub{padding-right:0}
+.fill{height:28px;display:flex;align-items:center;justify-content:center;gap:5px;
+  font-size:12px;color:#fff;min-width:64px;cursor:pointer;transition:width .25s;white-space:nowrap;overflow:hidden}
+.fill:first-child{border-radius:6px 0 0 6px}
+.fill:last-child{border-radius:0 6px 6px 0}
+.fill:only-child{border-radius:6px}
+.fill.is-rest{cursor:default;min-width:8px}
+.fill:hover{filter:brightness(1.08)}
+.fill.is-sel{outline:2.5px solid var(--brand);outline-offset:1px}
 .fseg{border:1px solid var(--line);border-radius:10px;padding:8px 10px;margin-bottom:8px}
 .fseg.is-cur{border-color:var(--brand);box-shadow:0 0 0 2px var(--brand-soft)}
 .fseg .q{font-size:13px;line-height:1.5;cursor:pointer}
@@ -1182,20 +1185,29 @@ async function loadFunnel(){
 }
 
 function renderFunnel(){
-  const L = fData.layers, total = L.total || 1;
+  const L = fData.layers, T = L.total || 1;
   $("#fsum").innerHTML = `直答率（已判定口径）<b style="font-size:15px;color:var(--brand)">${L.direct_rate ?? "—"}%</b>
     ｜已复核 <b>${L.reviewed}</b>/${L.total} 段
     ${L.consistent ? "" : '｜<span style="color:var(--danger)">分层不守恒，数据异常！</span>'}`;
-  $("#funnelbar").innerHTML = FL.map(f=>{
-    const n = L[f.id] ?? 0;
-    const w = Math.max(n/total*100, 9);
-    const pc = total ? Math.round(n/total*1000)/10 : 0;
-    return `<div class="fbar${f.sub?" sub":""}${fCur.layer===f.id?" is-sel":""}" data-l="${f.id}" title="点击查看该层段清单">
-      <div class="lb">${f.name}</div>
-      <div class="tr"><div class="fill" style="width:${w}%;background:${FLC[f.kind]}">
-        <b>${n}</b><span style="opacity:.85">${pc}%</span></div></div></div>`;
-  }).join("");
-  $("#funnelbar").querySelectorAll(".fbar").forEach(el=>{
+  // 真漏斗形态：主流逐层收窄（全量→除测试→除寒暄→除转工单=分母），
+  // 每步抛出的块以橙色分流条紧挂主流右侧（视觉=从主流里抛出去一块）
+  const W = n => Math.max(n / T * 100, 7);
+  const bar = (id, name, n, kind, extra) =>
+    `<div class="fill ${kind}${extra||""}" data-l="${id}" title="点击查看该层段清单"
+      style="width:${W(n)}%;background:${FLC[kind]}"><b>${n}</b> ${esc(name)}</div>`;
+  const rest1 = T - L.tester, rest2 = rest1 - L.chitchat;
+  $("#funnelbar").innerHTML = [
+    `<div class="frow">${bar("total", "全部对话", T, "main", fCur.layer==="total"?" is-sel":"")}</div>`,
+    `<div class="frow"><div class="fill main is-rest" style="width:${W(rest1)}%;background:${FLC.main};opacity:.55"></div>${bar("tester", "抛出·测试人员", L.tester, "cut", fCur.layer==="tester"?" is-sel":"")}</div>`,
+    `<div class="frow"><div class="fill main is-rest" style="width:${W(rest2)}%;background:${FLC.main};opacity:.45"></div>${bar("chitchat", "抛出·寒暄", L.chitchat, "cut", fCur.layer==="chitchat"?" is-sel":"")}</div>`,
+    `<div class="frow"><div class="fill main is-rest" style="width:${W(L.qa)}%;background:${FLC.main};opacity:.4"></div>${bar("ticket", "抛出·转工单 →直接提单库", L.ticket, "cut", fCur.layer==="ticket"?" is-sel":"")}</div>`,
+    `<div class="frow">${bar("qa", "真实咨询问题（分母）", L.qa, "main", fCur.layer==="qa"?" is-sel":"")}</div>`,
+    `<div class="frow sub">${bar("answered", "直答 ✓", L.answered, "ok", fCur.layer==="answered"?" is-sel":"")}</div>`,
+    `<div class="frow sub">${bar("unanswered", "未解答·覆盖答不好", L.unanswered, "bad", fCur.layer==="unanswered"?" is-sel":"")}</div>`,
+    `<div class="frow sub">${bar("uncovered", "未解答·库未覆盖", L.uncovered, "bad", fCur.layer==="uncovered"?" is-sel":"")}</div>`,
+    `<div class="frow sub">${bar("undetermined", "未判定（走查补齐）", L.undetermined, "gray", fCur.layer==="undetermined"?" is-sel":"")}</div>`,
+  ].join("");
+  $("#funnelbar").querySelectorAll(".fill[data-l]").forEach(el=>{
     el.onclick = ()=> loadSegs(el.dataset.l);
   });
 }
@@ -1203,7 +1215,7 @@ function renderFunnel(){
 async function loadSegs(layer){
   if(!layer) return;
   fCur.layer = layer; fCur.idx = -1;
-  document.querySelector(".funnel-wrap")?.querySelectorAll(".fbar").forEach(e=>e.classList.toggle("is-sel", e.dataset.l===layer));
+  $("#funnelbar").querySelectorAll(".fill[data-l]").forEach(e=>e.classList.toggle("is-sel", e.dataset.l===layer));
   $("#fsegs").style.display = "";
   $("#fseglayer").textContent = (FL.find(x=>x.id===layer)||{}).name || layer;
   $("#fseglist").innerHTML = '<div class="empty">加载中…</div>';
