@@ -1161,7 +1161,7 @@ const FL = [
   {id:"undetermined", name:"未判定", kind:"gray", sub:1},
 ];
 const FLC = {main:"#3d76c4", cut:"#d97706", ok:"#2e9e5b", bad:"#d9534f", gray:"#98a2b3"};
-const LABELS = ["直答正确","未直答","未覆盖","直接提单","建议转单"];
+const LABELS = ["直答正确","未直答","未覆盖","直接提单","建议转单","寒暄"];
 let fData = null, fCur = {layer:"", rows:[], idx:-1};
 
 function fImgBase(){
@@ -1300,7 +1300,7 @@ document.addEventListener("keydown", e=>{
   };
   if(e.key === "j" || e.key === "ArrowDown"){ e.preventDefault(); move(1); }
   else if(e.key === "k" || e.key === "ArrowUp"){ e.preventDefault(); move(-1); }
-  else if(e.key >= "1" && e.key <= "5"){
+  else if(e.key >= "1" && e.key <= "6"){
     if(fCur.idx < 0) return;
     const seg = rows[fCur.idx], row = fCur.rows[+seg.dataset.i];
     if(!row) return;

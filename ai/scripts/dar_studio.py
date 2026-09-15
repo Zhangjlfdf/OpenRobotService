@@ -857,7 +857,11 @@ def _seg_rows(env):
                             tic_ids.append(s["db_id"])
                 if c.get("is_tester"):
                     layer = "tester"
-                elif not any(s.get("q") for s in seg_cls):
+                elif eff == "寒暄":
+                    layer = "chitchat"
+                # L1 无咨询信号判寒暄——但有人工标签时标签优先（走查发现误判，
+                # 点任一标签即从寒暄层捞进对应层）
+                elif not any(s.get("q") for s in seg_cls) and not man:
                     layer = "chitchat"
                 elif eff in ("直接提单", "建议转单"):
                     layer = "ticket"
@@ -942,7 +946,7 @@ class LabelSegReq(BaseModel):
     label: str
 
 
-_LABELS_VALID = ("直答正确", "未直答", "未覆盖", "直接提单", "建议转单")
+_LABELS_VALID = ("直答正确", "未直答", "未覆盖", "直接提单", "建议转单", "寒暄")
 
 
 @app.post("/api/label_seg")
