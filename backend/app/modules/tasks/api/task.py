@@ -25,7 +25,7 @@ from app.modules.tasks.schemas.ticket import (
     TicketCommentCreate, TicketCommentUpdate, TicketCommentResponse,
     TicketQueryParams, TicketCuibanNotification, TicketFilterRequest,
     TicketBatchCountRequest,
-    TicketCreateNotificationRequest, ProjectMemberResponse
+    TicketCreateNotificationRequest, RobotAlarmNotificationRequest, ProjectMemberResponse
 )
 from app.modules.tasks.models.ticket import TicketStatus, TicketPriority, TicketType
 from app.modules.tasks.services.ticket_service import TicketService, convert_to_shanghai_time
@@ -40,7 +40,8 @@ from app.modules.tasks.api.ws import (
 )
 from app.utils.minio_client import minio_client
 from app.utils.notification_utils import NotificationUtils, _format_shanghai
-from app.integrations.api import verify_sync_api_key
+from app.integrations.api import verify_sync_api_key, verify_robot_alarm_api_key
+from app.services.identity_service import IdentityService
 from app.core.config import settings
 from app.core.user_identity import user_matches, is_admin_user, to_user_id, actor_username, identity_keys
 from app.services.redispatch_tip_service import (  # 派单说明：列表/气泡/详情同一出口
@@ -2743,6 +2744,101 @@ async def send_ticket_create_notification(
     except Exception as e:
         logger.error(f"发送新建工单通知失败 task_id={body.task_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"发送新建工单通知失败: {str(e)}")
+
+
+@router.post("/robot-alarm-notification")
+async def send_robot_alarm_notification(
+    body: RobotAlarmNotificationRequest,
+    key: str = Depends(verify_robot_alarm_api_key),
+):
+    """设备报警提醒对外接口（供内部其他后端服务调用）。
+
+    调用方直接传入报警字段，后端按 template.yaml 模板 10 组装后发送微信模板消息。
+    鉴权仿企业微信 webhook，URL 携带 ?key=，需与后端 ROBOT_ALARM_API_KEY 一致。
+
+    模板字段顺序：[报警机型, 设备编号, 报警原因, 告警级别, 告警时间]
+
+    收件人解析（重要）：
+      - `project_code` 实际是 `project.id`，先据此查 user_project_roles 拿到项目全部关联用户。
+      - `users` 列表传入的不是 user.username，而是 user.external_credentials.usp.username 值；
+        后端将 `users` 与项目成员的 usp.username 比对，命中者用其真实 user.username 发通知。
+      - 未命中项目成员的入参会被丢弃（防止跨项目越权通知），并记录 warning 日志。
+      - 全部未命中或项目无成员 → 400。
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    try:
+        if not body.users:
+            raise HTTPException(status_code=400, detail="users 不能为空")
+
+        # 1. 通过 project_id (= project_code) 查询项目成员，含 external_credentials
+        members = await run_in_threadpool(
+            IdentityService.get_project_members,
+            body.project_code,
+            True,  # include_usp=True
+        )
+        if not members:
+            raise HTTPException(
+                status_code=404,
+                detail=f"项目 {body.project_code} 无关联成员或项目不存在",
+            )
+
+        # 2. 构建 usp_username -> user.username 映射（仅项目成员）
+        usp_to_username: Dict[str, str] = {}
+        for m in members:
+            ext = m.get("external_credentials") or {}
+            if not isinstance(ext, dict):
+                continue
+            usp_username = (ext.get("usp") or {}).get("username") or ""
+            usp_username = usp_username.strip()
+            if usp_username and m.get("username"):
+                usp_to_username[usp_username] = m["username"]
+
+        # 3. 比对入参 users 与项目成员，得到真实通知目标 username
+        requested = [u.strip() for u in body.users if u and u.strip()]
+        recipients: List[str] = []
+        unmatched: List[str] = []
+        seen: set = set()
+        for usp_name in requested:
+            real_username = usp_to_username.get(usp_name)
+            if real_username and real_username not in seen:
+                seen.add(real_username)
+                recipients.append(real_username)
+            else:
+                unmatched.append(usp_name)
+
+        if unmatched:
+            logger.warning(
+                f"设备报警通知: project_code={body.project_code} 存在未匹配项目成员的入参 users={unmatched}，已丢弃"
+            )
+
+        if not recipients:
+            raise HTTPException(
+                status_code=400,
+                detail=f"users 中无任何值匹配项目 {body.project_code} 成员的 external_credentials.usp.username",
+            )
+
+        # 4. 发送通知（传入真实 username，send_robot_alarm_notification 内部经 to_usernames 再归一）
+        result = await NotificationUtils.send_robot_alarm_notification(
+            robot_type=body.robot_type,
+            robot_id=body.robot_id,
+            content=body.content,
+            level=body.level,
+            start_time=body.start_time,
+            user_names=recipients,
+            token=None,
+            project_code=body.project_code,
+        )
+        logger.info(
+            f"设备报警通知已发送: project_code={body.project_code}, robot_type={body.robot_type}, "
+            f"robot_id={body.robot_id}, level={body.level}, recipients={recipients}, unmatched={unmatched}"
+        )
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"发送设备报警通知失败 project_code={body.project_code}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"发送设备报警通知失败: {str(e)}")
 
 
 @router.post("/{task_id}/internal/broadcast-comment")

@@ -272,6 +272,27 @@ class TicketCreateNotificationRequest(BaseModel):
     task_id: int = Field(..., description="工单ID")
 
 
+class RobotAlarmNotificationRequest(BaseModel):
+    """设备报警提醒请求（对外接口，供内部其他后端服务调用）。
+
+    调用方直接传入报警字段，后端按 template.yaml 模板 10 组装后发送微信模板消息。
+    鉴权走 URL ?key=（仿企业微信 webhook），需与后端 ROBOT_ALARM_API_KEY 一致。
+
+    收件人解析：
+      - `project_code` 实际是 `project.id`，后端据此查 user_project_roles 拿到项目成员。
+      - `users` 列表传入的不是 user.username，而是 user.external_credentials.usp.username；
+        后端将 `users` 与项目成员的 usp.username 比对，命中者用其真实 user.username 发通知；
+        未命中项目成员的入参会被丢弃。
+    """
+    project_code: str = Field(..., description="项目 ID（实际是 project.id，非代号；用于查项目成员）")
+    robot_type: str = Field(..., description="报警机型")
+    robot_id: str = Field(..., description="设备编号")
+    content: str = Field(..., description="报警原因")
+    level: str = Field(..., description="告警级别")
+    start_time: datetime = Field(..., description="告警时间")
+    users: List[str] = Field(default=[], description="接收人 user.external_credentials.usp.username 列表；后端会与项目成员比对，未匹配者丢弃")
+
+
 class TicketFilter(BaseModel):
     field: Optional[str] = Field(None, description="字段名")
     op: Optional[str] = Field(None, description="运算符")
