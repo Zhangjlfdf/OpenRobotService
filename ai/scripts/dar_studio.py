@@ -801,6 +801,18 @@ def _segments_from_cls(cls):
     return segs
 
 
+def _suggested_pool():
+    """「猜你想问」推荐池（前端 suggestedQuestions.ts 的数组条目）。
+    用户点推荐问题发送 → 段首问精确匹配池条目 → 判 suggested 层
+    （平台主动推荐的问题非用户真实困惑，不进直答分母，旁支单列）。"""
+    p = os.path.join(PROJ, "frontend", "src", "shared", "data", "suggestedQuestions.ts")
+    try:
+        src = open(p, encoding="utf-8").read()
+    except OSError:
+        return set()
+    return {m.group(1).strip() for m in re.finditer(r"'([^']+)'", src)}
+
+
 def _seg_rows(env):
     """全量段级清单（漏斗六层数据源）：SPLIT 段边界 × L1 cls × L3/人工有效判定。
 
@@ -830,6 +842,7 @@ def _seg_rows(env):
         for cid, lm in (json.load(open(mp, encoding="utf-8")).get("labels") or {}).items():
             labs_man[str(cid)] = {int(k): legacy.get(v, v) for k, v in lm.items()
                                   if str(k).isdigit()}
+    suggested_pool = _suggested_pool()
     rows = []
     with open(split_p, encoding="utf-8") as fh:
         for line in fh:
@@ -863,6 +876,8 @@ def _seg_rows(env):
                 # 点任一标签即从寒暄层捞进对应层）
                 elif not any(s.get("q") for s in seg_cls) and not man:
                     layer = "chitchat"
+                elif not man and (r0.get("q") or "").strip() in suggested_pool:
+                    layer = "suggested"
                 elif eff in ("直接提单", "建议转单"):
                     layer = "ticket"
                 elif eff == "直答正确":
@@ -896,15 +911,22 @@ def _funnel_layers(rows):
 
     total = len(rows)
     tester, chitchat, ticket = n("tester"), n("chitchat"), n("ticket")
+    suggested = n("suggested")
     answered, unanswered, uncovered = n("answered"), n("unanswered"), n("uncovered")
     undet = n("undetermined")
-    qa = total - tester - chitchat - ticket
+    qa = total - tester - chitchat - ticket - suggested
     judged = answered + unanswered + uncovered
+    # 双口径：全量（AI 预标兜底，走查过程口径）vs 人工已标段（=周报 L2_人工同口径）
+    m_ok = sum(1 for r in rows if r["src"] == "manual" and r["eff"] == "直答正确")
+    m_bad = sum(1 for r in rows if r["src"] == "manual" and r["eff"] in ("未直答", "未覆盖"))
     return {
         "total": total, "tester": tester, "chitchat": chitchat, "ticket": ticket,
+        "suggested": suggested,
         "qa": qa, "answered": answered, "unanswered": unanswered,
         "uncovered": uncovered, "undetermined": undet,
         "direct_rate": round(answered / judged * 100, 1) if judged else None,
+        "manual_rate": round(m_ok / (m_ok + m_bad) * 100, 1) if (m_ok + m_bad) else None,
+        "manual_judged": m_ok + m_bad,
         "reviewed": sum(1 for r in rows if r["src"] == "manual"),
         "consistent": qa == answered + unanswered + uncovered + undet,
     }

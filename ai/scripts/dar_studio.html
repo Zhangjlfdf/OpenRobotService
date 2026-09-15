@@ -1236,12 +1236,13 @@ function renderFunnel(){
     `<div class="fn-side3">${parts.map(p =>
       `<div class="fn-side${fCur.layer===p[0]?" is-sel":""}" data-l="${p[0]}" title="点击查看该层段清单">
          <div class="fs-chip"><b>${p[2]}</b>${esc(p[1])}</div></div>`).join("")}</div>`;
-  const r1 = T - L.tester, r2 = r1 - L.chitchat;
+  const r1 = T - L.tester, r2 = r1 - L.suggested, r3 = r2 - L.chitchat;
   const badTotal = L.unanswered + L.uncovered + L.undetermined;
   $("#funnelbar").innerHTML = [
     row("全部对话", "total", T, "main"),
     row("过滤测试后", "", r1, "main", side("tester", "测试人员对话", L.tester), L.tester),
-    row("过滤寒暄后", "", r2, "main", side("chitchat", "寒暄", L.chitchat), L.chitchat),
+    row("过滤猜你想问后", "", r2, "main", side("suggested", "猜你想问（平台推荐）", L.suggested), L.suggested),
+    row("过滤寒暄后", "", r3, "main", side("chitchat", "寒暄", L.chitchat), L.chitchat),
     row("真实咨询问题（分母）", "qa", L.qa, "main", side("ticket", "转工单 →提单库", L.ticket), L.ticket),
     row("直答 ✓（最终留下）", "answered", L.answered, "ok", null, badTotal),
     `<div class="fn-row">
@@ -1251,7 +1252,9 @@ function renderFunnel(){
                 ["undetermined","未判定",L.undetermined]])}
      </div>`,
     `<div class="fn-rate">直答率 <b>${L.direct_rate ?? "—"}%</b>
-      <span>= ${L.answered} ÷ ${L.qa}（已判定口径）</span></div>`,
+      <span>= ${L.answered} ÷ ${L.qa}（全量·AI预标兜底）</span>
+      &nbsp;｜&nbsp;人工已标口径 <b style="font-size:19px;color:var(--ink2)">${L.manual_rate ?? "—"}%</b>
+      <span>（${L.manual_judged} 段，= 周报 L2 口径，走查补标后两数趋同）</span></div>`,
   ].join("");
   $("#funnelbar").querySelectorAll("[data-l]").forEach(el=>{
     el.onclick = ()=> loadSegs(el.dataset.l);
