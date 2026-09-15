@@ -6,7 +6,7 @@ conversations/messages，去掉摇人专属的 scene_type / service_ticket_id �
 
 含 2 张表：dataqa_conversations / dataqa_messages
 """
-from sqlalchemy import Column, Integer, String, DateTime, Text, Enum, ForeignKey
+from sqlalchemy import Boolean, Column, Integer, String, DateTime, Text, Enum, ForeignKey
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
 
@@ -24,6 +24,10 @@ class DataqaConversation(Base):
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
     metadata_ = Column(Text, nullable=True, default=None)
+
+    # 逻辑删除：与 conversations 同构，删除只打标记，数据保留供 AI 统计
+    is_deleted = Column(Boolean, nullable=False, default=False, server_default="0")
+    deleted_at = Column(DateTime(timezone=True), nullable=True, default=None)
 
     messages = relationship("DataqaMessage", back_populates="conversation", cascade="all, delete-orphan")
 

@@ -83,13 +83,13 @@ async def lifespan(app: FastAPI):
         from sqlalchemy import text
         from ai.core.database import engine as _ai_engine
 
-        def _col(name: str) -> bool:
+        def _col(name: str, table: str = "tasks") -> bool:
             with _ai_engine.connect() as conn:
                 row = conn.execute(text(
                     "SELECT COUNT(*) FROM information_schema.COLUMNS "
                     "WHERE TABLE_SCHEMA = DATABASE() "
-                    "AND TABLE_NAME = 'tasks' AND COLUMN_NAME = :n"
-                ), {"n": name}).scalar()
+                    "AND TABLE_NAME = :t AND COLUMN_NAME = :n"
+                ), {"t": table, "n": name}).scalar()
             return bool(row)
 
         def _tbl(name: str) -> bool:
@@ -135,8 +135,34 @@ async def lifespan(app: FastAPI):
                 ))
                 conn.commit()
             logger.info("补丁: task_steps 表已创建")
+        # 0.3 conversations / dataqa_conversations 逻辑删除列（历史会话改软删：只打标记不删库，
+        #     数据保留供 AI 侧直达 / 派单准确率统计）。backend / ai 两边模型都带这两列，
+        #     DB 缺列时所有会话查询会 1054 Unknown column，这里做幂等自愈。
+        for _tbl_name in ("conversations", "dataqa_conversations"):  # 代码内硬编码白名单，非外部输入
+            with _ai_engine.connect() as conn:
+                if not _col("is_deleted", _tbl_name):
+                    conn.execute(text(
+                        f"ALTER TABLE {_tbl_name} ADD COLUMN is_deleted TINYINT(1) NOT NULL "
+                        "DEFAULT 0 COMMENT '逻辑删除：1=用户已删除（列表隐藏，数据保留供统计）'"
+                    ))
+                    logger.info(f"补丁: {_tbl_name}.is_deleted 已添加")
+                if not _col("deleted_at", _tbl_name):
+                    conn.execute(text(
+                        f"ALTER TABLE {_tbl_name} ADD COLUMN deleted_at DATETIME NULL "
+                        "COMMENT '逻辑删除时间（UTC）'"
+                    ))
+                    logger.info(f"补丁: {_tbl_name}.deleted_at 已添加")
+                _idx = f"ix_{_tbl_name}_is_deleted"
+                _has_idx = conn.execute(text(
+                    "SELECT COUNT(*) FROM information_schema.STATISTICS "
+                    "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = :t AND INDEX_NAME = :i"
+                ), {"t": _tbl_name, "i": _idx}).scalar()
+                if not _has_idx:
+                    conn.execute(text(f"CREATE INDEX {_idx} ON {_tbl_name}(is_deleted)"))
+                    logger.info(f"补丁: {_tbl_name} 索引 {_idx} 已添加")
+                conn.commit()
     except Exception as e:
-        logger.warning(f"DB schema 补丁（curr_step_* / task_steps）跳过: {e}")
+        logger.warning(f"DB schema 补丁（curr_step_* / task_steps / 会话软删列）跳过: {e}")
 
     # 1. 连通性检查（DeepSeek + Qdrant + Redis）
     try:
