@@ -557,7 +557,7 @@ export default function DiscussionPanel({
   };
 
   // ── @mention: 过滤项目成员 ──
-  // @候选池：无输入 → 项目成员（默认）；有输入（@刘/@liu）→ 项目成员 + 全部在职用户补全，可 @ 到项目外的人
+  // @候选池：无输入 → 项目成员（默认）；有输入（@刘）→ 项目成员 + 全部在职用户补全，可 @ 到项目外的人
   const mentionCandidates = useMemo(() => {
     const members = Array.isArray(mentionUsers) ? mentionUsers : [];
     if (!mentionFilter) return members;
@@ -571,11 +571,8 @@ export default function DiscussionPanel({
     if (mentionCandidates.length === 0) return [];
     if (!mentionFilter) return mentionCandidates;
     const kw = mentionFilter.toLowerCase();
-    return mentionCandidates.filter(
-      (u) =>
-        (u.username || '').toLowerCase().includes(kw) ||
-        (u.name || '').toLowerCase().includes(kw),
-    );
+    // 只匹配中文名 name，不匹配账号 username（避免拼音子串误命中）
+    return mentionCandidates.filter((u) => (u.name || '').toLowerCase().includes(kw));
   }, [mentionCandidates, mentionFilter]);
 
   // 重置 mentionIndex 当过滤结果变化时
