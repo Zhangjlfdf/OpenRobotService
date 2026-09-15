@@ -76,7 +76,7 @@ SPLIT = os.path.join(OUT, "conversations_split.jsonl")
 EXPORT_TABLES = {
     "users": "id,username,name",
     "conversations": "id,user_id,title,created_at,service_ticket_id,metadata_",
-    "messages": "id,conversation_id,role,message_type,sequence,created_at,content",
+    "messages": "id,conversation_id,role,message_type,sequence,created_at,content,file_urls",
     "tasks": ("id,title,task_type,status,created_by,project_name,source,"
               "external_id,created_at,metadata_info"),
 }
