@@ -6,6 +6,7 @@ import { createRequest } from '@/api/client';
 import API_CONFIG from '@/config/api';
 import { formatDateTime } from '@/shared/utils/url';
 import { normalizeList } from '@/shared/utils/list';
+import { useAuthStore, PERMISSION_RESOURCE_DOWNLOAD } from '@/stores/auth';
 
 // 后端 Child schema：resource-folders/root/children 与 resource-folders/{id}/children 的返回项
 interface ChildItem {
@@ -70,6 +71,8 @@ export default function FileExplorer() {
   const [sharingId, setSharingId] = useState<number | null>(null);
   const [syncing, setSyncing] = useState(false);
   const request = createRequest(ADMIN_BASE, 'Admin');
+  // 分享按钮需 backend:resource:base:download 权限（获取分享链接等同于下载）
+  const canDownload = useAuthStore((s) => s.hasPermission(PERMISSION_RESOURCE_DOWNLOAD));
 
   // 拉取当前层级的子节点。skipCache 保证文件列表实时性
   const fetchFolder = useCallback(
@@ -126,12 +129,12 @@ export default function FileExplorer() {
     window.open(`${ADMIN_BASE}${RESOURCES_PREFIX}/${item.id}/download`, '_blank');
   };
 
-  // 分享：获取 60 分钟有效的预签名 URL 并复制到剪贴板
+  // 分享：获取 3 分钟有效的预签名 URL 并复制到剪贴板
   const share = async (item: ChildItem) => {
     setSharingId(item.id);
     try {
       const res = await request<{ download_url?: string }>(
-        `${RESOURCES_PREFIX}/${item.id}/download-url?expires_minutes=60`,
+        `${RESOURCES_PREFIX}/${item.id}/download-url?expires_minutes=3`,
         { skipCache: true },
       );
       const url = res?.download_url;
@@ -149,7 +152,7 @@ export default function FileExplorer() {
         document.execCommand('copy');
         document.body.removeChild(ta);
       }
-      Toast({ message: '下载链接已复制（60 分钟内有效）', theme: 'success' });
+      Toast({ message: '下载链接已复制（3 分钟内有效）', theme: 'success' });
     } catch (err) {
       Toast({ message: `分享失败: ${String(err)}`, theme: 'error' });
     } finally {
@@ -280,7 +283,7 @@ export default function FileExplorer() {
                 </div>
               </div>
 
-              {!isFolder && (
+              {!isFolder && canDownload && (
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
                   <Button
                     size="small"
