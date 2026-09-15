@@ -1263,7 +1263,8 @@ async function labelSeg(cid, astart, lb, btn){
     // 本地行数据同步（漏斗层可能已不属于当前层——保留在列表，重拉漏斗即归位）
     const row = fCur.rows.find(x=>x.cid===cid && x.astart===astart);
     if(row){ row.eff = lb; row.src = "manual"; }
-    loadFunnel();  // 计数即时反映（MANUAL 直读）
+    loadFunnel();          // 漏斗计数即时反映（MANUAL 直读）
+    loadSegs(fCur.layer);  // 明细重载：改判段即时离开当前层（所见即所得）
   }catch(e){ alert("改判失败：" + e.message); btn.disabled = false; }
 }
 
