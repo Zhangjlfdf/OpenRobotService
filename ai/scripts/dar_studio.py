@@ -606,19 +606,16 @@ def _realtime_small(env: str):
     from collections import Counter as _Ctr
     proc = os.path.join(DATA_ROOT, env, "processed")
     small = []
-    fr = sorted(glob.glob(os.path.join(proc, "retrieval_check_*.json")))
-    if fr:
-        try:
-            rows = json.load(open(fr[-1], encoding="utf-8"))
-            sub = [r for r in rows if r.get("grp") == "真实组"
-                   and r.get("verdict") in ("yes", "partial", "no")]
-            if sub:
-                no = sum(1 for r in sub if r["verdict"] == "no")
-                small.append({"label": "KB 缺口率",
-                              "value": f"{no / len(sub) * 100:.1f}%",
-                              "sub": f"真实组检索重放 no {no}/{len(sub)}"})
-        except Exception:
-            pass
+    # KB 缺口率与漏斗同口径（0916 用户定调：全页统一，漏斗为准）：
+    # 未覆盖 ÷ 真实咨询已判定段
+    _rows, _meta = _seg_rows(env)
+    if _rows is not None:
+        _L = _funnel_layers(_rows)
+        if _L["qa"] and _L["qa"] - _L["undetermined"]:
+            _judged = _L["qa"] - _L["undetermined"]
+            small.append({"label": "KB 缺口率",
+                          "value": f"{_L['uncovered'] / _judged * 100:.1f}%",
+                          "sub": f"未覆盖 {_L['uncovered']}/{_judged} 段（真实咨询已判定，与漏斗一致）"})
     # 0916 精简：标注进度卡与漏斗复核进度重复，去；
     # KB 缺口率保留（用户要求三上四下对称）
     mp = _manual_path(env)
