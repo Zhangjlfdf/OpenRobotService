@@ -45,7 +45,7 @@ URGENT_MIN_MINUTES = 60
 URGENT_MAX_MINUTES = 120
 
 # 需要扫描的工单状态
-ACTIVE_STATUSES = "new,in_progress,pending"
+ACTIVE_STATUSES = "new,in_progress"
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

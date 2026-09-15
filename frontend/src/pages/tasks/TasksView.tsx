@@ -399,6 +399,8 @@ function ChipDropdown({
   const triggerRef = useRef<HTMLButtonElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
+  // 面板打开时间戳：用于忽略打开瞬间移动端软键盘弹起引发的首批 scroll/resize
+  const openedAtRef = useRef(0);
 
   const filtered = useMemo(() => {
     const kw = keyword.trim().toLowerCase();
@@ -428,6 +430,7 @@ function ChipDropdown({
     setCoords({ top, left, minWidth, maxHeight });
     setKeyword('');
     setOpen(true);
+    openedAtRef.current = Date.now();
   }, []);
 
   // 面板展开时聚焦搜索框（延迟一帧，避免与打开面板的 click 冲突）
@@ -440,6 +443,9 @@ function ChipDropdown({
   // 点击外部 / Esc / 滚动 / 窗口尺寸变化 关闭面板
   useEffect(() => {
     if (!open) return;
+    // 移动端面板打开即自动聚焦搜索框 → 软键盘弹起，浏览器会把输入框滚入视口并触发 resize；
+    // 宽限期内的首批 scroll/resize 属于键盘动画，不关闭面板（否则下拉与系统键盘会「一闪即关」）。
+    const OPEN_GRACE_MS = 500;
     const onDown = (e: MouseEvent) => {
       const t = e.target as Node;
       if (triggerRef.current?.contains(t)) return;
@@ -447,16 +453,27 @@ function ChipDropdown({
       setOpen(false);
     };
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false); };
-    const close = () => setOpen(false);
+    // 焦点仍在面板内（用户正在搜索框输入）时，软键盘弹起/收起引发的视口变化不关闭面板
+    const isKeyboardInduced = () =>
+      Date.now() - openedAtRef.current < OPEN_GRACE_MS
+      || !!panelRef.current?.contains(document.activeElement);
+    // 页面滚动才关闭；面板内部（选项列表）滚动不关闭
+    const onScroll = (e: Event) => {
+      const t = e.target;
+      if (t instanceof Node && panelRef.current?.contains(t)) return;
+      if (isKeyboardInduced()) return;
+      setOpen(false);
+    };
+    const onResize = () => { if (!isKeyboardInduced()) setOpen(false); };
     document.addEventListener('mousedown', onDown);
     document.addEventListener('keydown', onKey);
-    window.addEventListener('scroll', close, true);
-    window.addEventListener('resize', close);
+    window.addEventListener('scroll', onScroll, true);
+    window.addEventListener('resize', onResize);
     return () => {
       document.removeEventListener('mousedown', onDown);
       document.removeEventListener('keydown', onKey);
-      window.removeEventListener('scroll', close, true);
-      window.removeEventListener('resize', close);
+      window.removeEventListener('scroll', onScroll, true);
+      window.removeEventListener('resize', onResize);
     };
   }, [open]);
 
