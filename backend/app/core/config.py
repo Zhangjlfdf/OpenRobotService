@@ -146,6 +146,7 @@ class Settings(BaseSettings):
     ZENTAO_VERIFY_SSL: bool = Field(default=True)
     ZENTAO_PROJECT_IDS: str = Field(default="")            # "[1,2,3]" 或 "1,2,3" 或 "1;2;3"
     HELPDESK_SYNC_API_KEY: str = Field(default="")          # 外部任务源同步接口 API Key（Airflow 用，X-API-Key）
+    ROBOT_ALARM_API_KEY: str = Field(default="")            # 设备报警提醒对外接口 API Key（URL ?key= 方式鉴权）
 
     @property
     def WECHAT_CONFIG(self) -> Dict:
