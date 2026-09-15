@@ -1301,6 +1301,13 @@ function renderFunnel(){
 
 async function loadSegs(layer){
   if(!layer) return;
+  // 再点同一块 → 收起明细（toggle）
+  if(fCur.layer === layer && $("#fsegs").style.display !== "none"){
+    $("#fsegs").style.display = "none";
+    $("#funnelbar").querySelectorAll(".fill[data-l]").forEach(e=>e.classList.toggle("is-sel", false));
+    fCur.layer = "";
+    return;
+  }
   fCur.layer = layer; fCur.idx = -1;
   $("#funnelbar").querySelectorAll(".fill[data-l]").forEach(e=>e.classList.toggle("is-sel", e.dataset.l===layer));
   $("#fsegs").style.display = "";
