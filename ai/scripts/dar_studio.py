@@ -1098,6 +1098,128 @@ img{{max-width:420px;border-radius:10px;border:1px solid #e2e8f0;margin:8px 0;di
     return HTMLResponse(html)
 
 
+@app.get("/layer_page")
+def layer_page(env: str = "prod", layer: str = ""):
+    """整层走查网页：该层全部段连续排版（对话+图片+行内改判）——和领导一起审的入口。"""
+    if env not in ("test", "prod"):
+        raise HTTPException(400, "env 取值 test|prod")
+    if not layer:
+        raise HTTPException(400, "layer 必填")
+    rows, meta = _seg_rows(env)
+    if rows is None:
+        raise HTTPException(404, meta.get("reason", "缺产物"))
+    qa_set = {"answered", "unanswered", "uncovered", "undetermined"}
+    items = [r for r in rows if r["layer"] == layer
+             or (layer == "qa" and r["layer"] in qa_set)]
+    items.sort(key=lambda r: (r.get("at") or "", r["cid"]))
+    split_rounds = {}
+
+    def esc(s):
+        return (str(s or "").replace("&", "&amp;").replace("<", "&lt;")
+                .replace(">", "&gt;").replace('"', "&quot;"))
+
+    split_p = os.path.join(DATA_ROOT, env, "processed", "conversations_split.jsonl")
+    if os.path.exists(split_p):
+        with open(split_p, encoding="utf-8") as fh:
+            for line in fh:
+                if not line.strip():
+                    continue
+                c = json.loads(line)
+                split_rounds[str(c.get("conversation_id"))] = c
+    img_base = ("https://usp.ep-zl.com/p" if env == "prod"
+                else "http://125.122.97.107/t") + "/api/call/files/"
+    names = {"total": "全部对话", "tester": "测试人员对话", "chitchat": "寒暄",
+             "suggested": "猜你想问（平台推荐）", "ticket": "直接连/转工单",
+             "qa": "真实咨询问题（分母·走查全量）", "answered": "直答 ✓",
+             "unanswered": "未直答·覆盖答不好", "uncovered": "未直答·库未覆盖",
+             "undetermined": "未判定"}
+    parts = []
+    for idx, r in enumerate(items):
+        c = split_rounds.get(str(r["cid"])) or {}
+        turns = []
+        for rr in (c.get("rounds") or [])[r["astart"]:r["aend"]]:
+            imgs = "".join(
+                f'<img loading="lazy" src="{esc(img_base + f.get("object_path", ""))}" '
+                f'alt="{esc(f.get("filename", ""))}">' for f in (rr.get("files") or []))
+            acts = "".join(
+                f'<div class="act">🎫 生成工单草稿 #{esc(s.get("db_id") or "?")}</div>'
+                for s in (rr.get("a_seg") or []) if s.get("action") == "ticket_draft")
+            ans = "".join(
+                f'<div class="ai">{esc(s.get("text", ""))}</div>'
+                for s in (rr.get("a_seg") or [])
+                if s.get("action") != "ticket_draft" and (s.get("text") or "").strip())
+            turns.append(
+                f'<div class="turn"><div class="uq"><b>用户</b> · {esc(rr.get("at", ""))[:19]}'
+                f'<div>{esc(rr.get("q", ""))}</div>{imgs}</div>{acts}{ans}</div>')
+        lbls = [("直答正确", "#2e9e5b"), ("未直答", "#d9534f"), ("未覆盖", "#d9534f"),
+                ("直接提单", "#d97706"), ("建议转单", "#d97706"), ("寒暄", "#98a2b3")]
+        btns = "".join(
+            f'<button class="lb{" on" if r["eff"] == lb and r["src"] == "manual" else ""}" '
+            f'style="{"" if r["eff"] == lb and r["src"] == "manual" else f"--c:{col};"}" '
+            f'onclick="lab(this,{r["cid"]},{r["astart"]},\'{lb}\')">{lb}</button>'
+            for lb, col in lbls)
+        tks = [str(t) for t in (r.get("ticket_ids") or []) + (r.get("task_ids") or [])]
+        tk_span = ""
+        if tks:
+            tk_span = '<span class="mt">🎫 ' + " ".join("#" + t for t in dict.fromkeys(tks)) + "</span>"
+        nf_span = ""
+        if r.get("n_files"):
+            nf_span = '<span class="mt" style="color:#3d76c4">📷 ' + str(r["n_files"]) + "</span>"
+        parts.append(
+            f'<div class="seg" id="s{r["cid"]}_{r["astart"]}">'
+            f'<div class="sh"><span class="idx">#{idx + 1}</span>'
+            f'<span class="eff {r["src"]}">{esc(r["eff"] or "未判定")}·{"人工" if r["src"] == "manual" else "AI预标"}</span>'
+            f'<span class="mt">{esc(r["type"])}</span><span class="mt">{esc(r["user"])}</span>'
+            f'<span class="mt">{esc((r["at"] or "")[:16])}</span>'
+            f'<span class="mt">会话{r["cid"]}</span>'
+            f'{tk_span}{nf_span}'
+            f'</div>{btns}<div class="segs-turns">{"".join(turns) or "<p>（空段）</p>"}</div></div>')
+    html = f"""<!DOCTYPE html><html lang="zh"><head><meta charset="utf-8">
+<title>走查 · {esc(names.get(layer, layer))}（{len(items)} 段）</title>
+<style>
+body{{font-family:"Microsoft YaHei",sans-serif;background:#f1f5f9;margin:0;padding:20px}}
+.wrap{{max-width:860px;margin:0 auto}}
+h2{{font-size:16px;color:#0f172a}} .sub{{font-size:12.5px;color:#64748b;margin-bottom:16px}}
+.seg{{background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:12px 16px;margin-bottom:16px}}
+.sh{{display:flex;gap:10px;align-items:center;flex-wrap:wrap;font-size:12.5px;color:#64748b;margin-bottom:8px}}
+.idx{{font-weight:700;color:#0f172a}}
+.eff{{border-radius:6px;padding:1px 9px;font-size:11.5px}}
+.eff.manual{{background:#dcfce7;color:#166534}} .eff.pre{{background:#f1f5f9;color:#64748b;border:1px dashed #cbd5e1}}
+.mt{{color:#94a3b8}}
+button.lb{{font-size:12px;padding:3px 11px;border-radius:6px;border:1.5px solid #cbd5e1;
+background:#fff;cursor:pointer;margin-right:6px;color:var(--c,#475569)}}
+button.lb:hover{{border-color:#3d76c4}} button.lb.on{{background:#3d76c4;color:#fff;border-color:#3d76c4}}
+.turn{{margin-top:8px}}
+.uq{{color:#0f172a;font-size:13.5px;line-height:1.7}}
+.uq b{{color:#3d76c4;margin-right:8px}}
+.ai{{background:#f8fafc;border-left:3px solid #3d76c4;border-radius:8px;
+padding:9px 13px;margin:8px 0 4px 16px;color:#334155;font-size:13px;white-space:pre-wrap;line-height:1.7}}
+.act{{display:inline-block;background:#fef3c7;color:#92400e;border-radius:6px;
+padding:2px 10px;font-size:12px;margin:4px 0 4px 16px}}
+img{{max-width:400px;border-radius:10px;border:1px solid #e2e8f0;margin:6px 0;display:block}}
+</style></head><body><div class="wrap">
+<h2>走查 · {esc(names.get(layer, layer))}</h2>
+<div class="sub">{len(items)} 段 · {esc(env)} 数据 · 点标签即改判（写人工标注，工作台漏斗同步变）</div>
+{''.join(parts) or '<p>（该层无段）</p>'}
+</div>
+<script>
+async function lab(btn, cid, astart, lb){{
+  btn.disabled = true;
+  try{{
+    const r = await (await fetch('/api/label_seg', {{method:'POST',
+      headers:{{'Content-Type':'application/json'}},
+      body: JSON.stringify({{env:'{env}', cid, astart, label: lb}})}})).json();
+    if(!r.ok) throw new Error(r.detail || '失败');
+    const seg = btn.closest('.seg');
+    seg.querySelectorAll('button.lb').forEach(b=>b.classList.toggle('on', b===btn));
+    const be = seg.querySelector('.eff');
+    be.className = 'eff manual'; be.textContent = lb + '·人工';
+  }}catch(e){{ alert('改判失败：' + e.message); btn.disabled = false; }}
+}}
+</script></body></html>"""
+    return HTMLResponse(html)
+
+
 def _mtime_str(p: str) -> str:
     try:
         return time.strftime("%m-%d %H:%M", time.localtime(os.path.getmtime(p)))

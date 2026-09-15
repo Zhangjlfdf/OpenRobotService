@@ -290,6 +290,8 @@ kbd{background:#f1f5f9;border:1px solid var(--line);border-bottom-width:2px;bord
           <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
             <b id="fseglayer" style="font-size:13px"></b>
             <span class="hint" id="fsegcount"></span>
+            <a href="javascript:void(0)" id="fsegpage" target="_blank"
+               style="font-size:12.5px;font-weight:600;color:var(--brand)">整层新开网页审 ↗</a>
             <span style="flex:1"></span>
             <input type="text" id="fsegfilter" placeholder="过滤：用户/关键词" style="width:180px;font-size:12px;padding:4px 8px">
           </div>
@@ -1267,6 +1269,7 @@ async function loadSegs(layer){
   $("#funnelbar").querySelectorAll(".fill[data-l]").forEach(e=>e.classList.toggle("is-sel", e.dataset.l===layer));
   $("#fsegs").style.display = "";
   $("#fseglayer").textContent = (FL.find(x=>x.id===layer)||{}).name || layer;
+  $("#fsegpage").href = `/layer_page?env=prod&layer=${layer}`;
   $("#fseglist").innerHTML = '<div class="empty">加载中…</div>';
   try{
     const j = await (await fetch(`/api/funnel_segs?env=prod&layer=${layer}`)).json();
