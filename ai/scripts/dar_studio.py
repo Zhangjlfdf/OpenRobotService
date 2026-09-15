@@ -859,10 +859,13 @@ def _seg_rows(env):
                 tks = [t["id"] for t in (c.get("tasks") or [])]
                 # 段内工单动作（a_seg 提取的 db_id）——用户提完删会话也能对上
                 tic_ids = []
+                seg_ticketed = False
                 for rr in (c.get("rounds") or [])[a0:a1]:
                     for s in (rr.get("a_seg") or []):
-                        if s.get("action") == "ticket_draft" and s.get("db_id"):
-                            tic_ids.append(s["db_id"])
+                        if s.get("action") == "ticket_draft":
+                            seg_ticketed = True
+                            if s.get("db_id"):
+                                tic_ids.append(s["db_id"])
                 # 猜你想问=元筛选，优先于人工标签（用户口径：推荐点击不进直答
                 # 统计，标没标过都一样——0916 走查实锤已标段命中池仍留在 qa）
                 seg_has_sug = any(((rr.get("q") or "").strip() in suggested_pool)
@@ -873,6 +876,10 @@ def _seg_rows(env):
                     layer = "suggested"
                 elif eff == "寒暄":
                     layer = "chitchat"
+                elif seg_ticketed or eff in ("直接提单", "建议转单"):
+                    # 段内出过工单草稿（报障→转单流）或判定为提单类——归转工单层
+                    # （0916 实锤：报障段无咨询回合被误吞进寒暄）
+                    layer = "ticket"
                 # L1 无咨询信号判寒暄——但有人工标签时标签优先（走查发现误判，
                 # 点任一标签即从寒暄层捞进对应层）
                 elif not any(s.get("q") for s in seg_cls) and not man:
