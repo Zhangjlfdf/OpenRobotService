@@ -30,7 +30,7 @@ from app.modules.tasks.schemas.ticket import (
 from app.modules.tasks.models.ticket import TicketStatus, TicketPriority, TicketType
 from app.modules.tasks.services.ticket_service import TicketService, convert_to_shanghai_time
 from app.modules.tasks.services.operation_log_service import OperationLogService, get_role_prefix
-from app.models.task import OperationType, TaskStep, TaskFollower, Task
+from app.models.task import OperationType, TaskStep, TaskFollower, TaskParticipant, Task
 from app.modules.tasks.api.ws import (
     ws_broadcast_comment,
     ws_broadcast_comment_deleted,
@@ -1113,6 +1113,16 @@ async def add_comment(
             .where(Ticket.id == task_id)
             .values(updated_at=func.now())
         )
+
+        # ── 写入参与人（幂等 upsert） ──
+        # 评论/附件是参与工单的核心行为，成功后把当前用户记入 task_participants。
+        # 同事务：评论失败则参与人不写入，原子性保证。
+        # ON DUPLICATE KEY UPDATE 刷新 last_active_at，重复评论只更新时间不产生脏数据。
+        participant_stmt = mysql_insert(TaskParticipant).values(
+            task_id=task_id, username=username,
+        ).on_duplicate_key_update(last_active_at=func.now())
+        await db.execute(participant_stmt)
+
         await db.commit()
 
         # ── 记录评论操作日志 ──

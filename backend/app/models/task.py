@@ -250,6 +250,34 @@ class TaskFollower(Base):
         return f"<TaskFollower(task_id={self.task_id}, username='{self.username}')>"
 
 
+class TaskParticipant(Base):
+    """任务参与人表：记录与工单相关度较高的多个人（工单视角）。
+
+    与 TaskFollower 同构但语义不同：
+      - follower 是「用户视角」——我主动关注了哪些工单（卡片星标）；
+      - participant 是「工单视角」——这工单有哪些相关人（评论/附件等业务事件触发）。
+
+    当前写入触发点：评论端点（POST /{task_id}/comments）成功后同事务幂等 upsert。
+    后续可扩展派单/被@等触发点。同一 (task_id, username) 唯一，重复参与只刷新时间。
+    """
+    __tablename__ = "task_participants"
+
+    id = Column(BigInteger, primary_key=True, index=True, comment="参与记录ID")
+    task_id = Column(BigInteger, ForeignKey("tasks.id", ondelete="CASCADE"),
+                     nullable=False, index=True, comment="任务ID")
+    username = Column(String(50), nullable=False, index=True, comment="参与人username")
+    created_at = Column(DateTime, server_default=func.now(), nullable=False, comment="首次参与时间")
+    last_active_at = Column(DateTime, server_default=func.now(), nullable=False,
+                            comment="最近一次参与时间（重复参与时刷新）")
+
+    __table_args__ = (
+        UniqueConstraint("task_id", "username", name="uq_task_participants"),
+    )
+
+    def __repr__(self):
+        return f"<TaskParticipant(task_id={self.task_id}, username='{self.username}')>"
+
+
 class TaskUserMapping(Base):
     """外部任务源账号 → 本平台 user_id 的映射（跨源通用，见 INTEGRATION_DESIGN.md §4.3）。
 

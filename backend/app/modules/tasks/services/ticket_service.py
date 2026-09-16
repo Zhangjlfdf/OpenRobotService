@@ -9,7 +9,7 @@ from sqlalchemy.orm.attributes import set_committed_value
 from starlette.concurrency import run_in_threadpool
 
 from app.modules.tasks.models.ticket import Ticket, TicketComment, TicketStatus, TicketPriority, TicketType
-from app.models.task import TaskFollower
+from app.models.task import TaskFollower, TaskParticipant
 from app.models.identity import UserDB
 from app.modules.tasks.schemas.ticket import TicketCreate, TicketUpdate, TicketCommentCreate, TicketCommentUpdate, TicketQueryParams, TicketFilterRequest, QuotedComment
 from app.core.config import settings
@@ -443,6 +443,16 @@ class TicketService:
             )
             return query.where(Ticket.id.in_(follower_subq))
 
+        # 「我参与的」：同上，走 task_participants 表子查询。
+        # 用于「与我相关」过滤纳入参与工单的场景。
+        if field_type == 'participated':
+            if not current_username:
+                return query.where(Ticket.id.is_(None))
+            participant_subq = select(TaskParticipant.task_id).where(
+                TaskParticipant.username == current_username
+            )
+            return query.where(Ticket.id.in_(participant_subq))
+
         if op == 'is_null':
             return query.where(column.is_(None))
         elif op == 'not_null':
@@ -588,6 +598,8 @@ class TicketService:
             'currStepAgreed': (Ticket.curr_step_agreed, 'enum'),
             # 「我关注的」：column 留空，特殊类型 followed 走关注表子查询（见 _build_single_filter）
             'followedBy': (None, 'followed'),
+            # 「我参与的」：column 留空，特殊类型 participated 走参与人表子查询
+            'participatedBy': (None, 'participated'),
         }
 
         NUMBER_OPS = {'gt', 'lt', 'ge', 'le', 'eq', 'ne', 'is_null', 'not_null'}
