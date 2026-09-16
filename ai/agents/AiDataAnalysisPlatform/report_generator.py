@@ -22,7 +22,15 @@ from typing import AsyncIterator
 
 from sqlalchemy import func as sa_func
 
-from ai.core.database import SessionLocal, Task, ProjectDelivery, Risk, User, UserProjectRole
+from ai.core.database import (
+    SessionLocal,
+    Task,
+    ProjectDelivery,
+    Risk,
+    User,
+    UserProjectRole,
+    CollectionData,
+)
 
 from .llm_client import LLMClient
 from .config import AnalysisConfig
@@ -108,6 +116,128 @@ def _cn_label(mapping: dict[str, str], value: str | None, default: str) -> str:
     if not key:
         return default
     return mapping.get(key, str(value).strip())
+
+
+# ── 采集数据（collection_data）解析 ──────────────────────────────
+# 字段口径与搬运效率分析页面一致：
+# backend/app/modules/admin/services/transport_efficiency_service.py
+# 的 _find_metrics / _metrics_to_summary_and_robots / _parse_rate。
+
+# collection_data 中搬运效率数据的 indicator 标签（数据导入落库时统一改名）
+COLLECTION_EFFICIENCY_INDICATOR = "GroupEfficiency"
+
+
+def _find_group_efficiency_metrics(obj, depth: int = 0) -> dict | None:
+    """在 collection_data 的 data JSON 中递归查找 GroupEfficiency 指标对象。
+
+    数据包结构：{data: [{data: [metrics], ...}], start_time, end_time}，
+    指标对象以 effectWorkTime 或 dataIndicators 字段为标识。
+    """
+    if depth > 6:
+        return None
+    if isinstance(obj, dict):
+        if "effectWorkTime" in obj or "dataIndicators" in obj:
+            return obj
+        for value in obj.values():
+            found = _find_group_efficiency_metrics(value, depth + 1)
+            if found:
+                return found
+    elif isinstance(obj, list):
+        for value in obj:
+            found = _find_group_efficiency_metrics(value, depth + 1)
+            if found:
+                return found
+    return None
+
+
+def _parse_rate_text(value) -> float | None:
+    """人工干预率解析为百分比数值（0~100），供卡片按 % 展示。
+
+    数据源为 "10.0%" 之类百分比字符串时转数值；已是数值则视为百分比原样返回。
+    """
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return round(float(value), 2)
+    text = str(value).strip()
+    try:
+        num = float(text.rstrip("%"))
+    except ValueError:
+        return None
+    return round(num, 2)
+
+
+def _compute_collection_summary_and_robots(metrics: dict) -> tuple[dict, list[dict]]:
+    """把 GroupEfficiency 指标对象转换为搬运效率汇总 + 各组数据对比。
+
+    计算逻辑与搬运效率分析页面（transport_efficiency_service）一致。
+    """
+    task_number = (metrics.get("dataIndicators") or {}).get("taskNumber") or {}
+
+    effect_work_time = metrics.get("effectWorkTime") or {}
+    robot_error_time = metrics.get("robotErrorTime") or {}
+    no_work_time = metrics.get("noWorkTime") or {}
+    per_error_time = metrics.get("perErrorTime") or []
+    average_carry_time = metrics.get("averageCarryTime") or []
+
+    groups = list(effect_work_time.keys())
+    group_count = len(groups) or 1
+
+    total_effect = sum(
+        (effect_work_time.get(g) or {}).get("diffTimeSeconds", 0) or 0 for g in groups
+    )
+    total_fault = sum(
+        (robot_error_time.get(g) or {}).get("totalTimeSeconds", 0) or 0 for g in groups
+    )
+    total_idle = sum(
+        (no_work_time.get(g) or {}).get("totalIdleTimeSeconds", 0) or 0 for g in groups
+    )
+    total_error_num = sum((e.get("errorNum") or 0) for e in per_error_time)
+    total_per_error = sum((e.get("perErrorTimeSeconds") or 0) for e in per_error_time)
+    total_per_carry = sum(
+        (c.get("perGroupSingleTaskSeconds") or 0) for c in average_carry_time
+    )
+    carry_len = len(average_carry_time) or 1
+
+    summary = {
+        "total_tasks": task_number.get("totalTasks"),
+        "carry_task_count": task_number.get("carry"),
+        "effective_work_hours": round(total_effect / 3600 / group_count, 2),
+        "fault_hours": round(total_fault / 3600 / group_count, 2),
+        "idle_hours": round(total_idle / 3600 / group_count, 2),
+        "avg_error_count": round(total_error_num / group_count, 2),
+        "avg_fault_duration_minutes": round(total_per_error / 60 / group_count, 2),
+        "avg_carry_duration_minutes": round(total_per_carry / 60 / carry_len, 2),
+        "avg_manual_switch_count": (metrics.get("averageManualCount") or {}).get("averageManualCount"),
+        "manual_intervention_rate": _parse_rate_text(
+            (metrics.get("rateArtificialIntervention") or {}).get("rateArtificialIntervention")
+        ),
+    }
+
+    error_map = {e.get("robotGroup"): e for e in per_error_time if e.get("robotGroup")}
+    carry_map = {c.get("robotGroup"): c for c in average_carry_time if c.get("robotGroup")}
+
+    robots = []
+    for group in groups:
+        eff_seconds = (effect_work_time.get(group) or {}).get("diffTimeSeconds") or 0
+        fault_seconds = (robot_error_time.get(group) or {}).get("totalTimeSeconds") or 0
+        idle_seconds = (no_work_time.get(group) or {}).get("totalIdleTimeSeconds") or 0
+        carry_info = carry_map.get(group) or {}
+        error_info = error_map.get(group) or {}
+        task_count = carry_info.get("taskCount") or 0
+        eff_hours = eff_seconds / 3600
+        robots.append({
+            "机器人组": group,
+            "搬运任务总数(个)": task_count,
+            "有效工作时长(h)": round(eff_hours, 2),
+            "有效搬运效率(小时/个)": round(eff_hours / task_count, 2) if task_count else 0,
+            "机器人故障时间(h)": round(fault_seconds / 3600, 2),
+            "无工作时间(h)": round(idle_seconds / 3600, 2),
+            "平均单次故障(分钟)": round((error_info.get("perErrorTimeSeconds") or 0) / 60, 2),
+            "平均单次搬运时间(分钟)": round((carry_info.get("perGroupSingleTaskSeconds") or 0) / 60, 2),
+        })
+
+    return summary, robots
 
 
 # ── 日期工具 ──────────────────────────────────────────────────────
@@ -489,6 +619,7 @@ class ReportDataCollector:
         ticket_keys: set[str] = set()
         project_keys: set[str] = set()
         risk_keys: set[str] = set()
+        collection_keys: set[str] = set()
 
         for key in metric_keys:
             metric = get_metric_def(key)
@@ -501,10 +632,12 @@ class ReportDataCollector:
                 project_keys.add(key)
             elif metric.dimension == "risk":
                 risk_keys.add(key)
+            elif metric.dimension == "collection":
+                collection_keys.add(key)
 
         logger.info(
-            "按指标采集 ticket=%s project=%s risk=%s",
-            ticket_keys, project_keys, risk_keys,
+            "按指标采集 ticket=%s project=%s risk=%s collection=%s",
+            ticket_keys, project_keys, risk_keys, collection_keys,
         )
 
         result: dict = {"date_range": date_range_str}
@@ -512,9 +645,13 @@ class ReportDataCollector:
         if ticket_keys:
             result["ticket"] = self._collect_ticket_metrics(ticket_keys, start, end)
         if project_keys:
-            result["project"] = self._collect_project_metrics(project_keys)
+            result["project"] = self._collect_project_metrics(project_keys, start, end)
         if risk_keys:
             result["risk"] = self._collect_risk_metrics(risk_keys, start, end)
+        if collection_keys:
+            result["collection"] = self._collect_collection_metrics(
+                collection_keys, start, end
+            )
 
         return result
 
@@ -643,7 +780,9 @@ class ReportDataCollector:
 
     # ── 项目维度指标采集 ────────────────────────────────────
 
-    def _collect_project_metrics(self, keys: set[str]) -> dict:
+    def _collect_project_metrics(
+        self, keys: set[str], start: datetime, end: datetime
+    ) -> dict:
         """一次性采集所有请求的项目指标。"""
         db = self._get_db()
         try:
@@ -680,6 +819,36 @@ class ReportDataCollector:
                     label = _cn_label(_PROJECT_STATUS_CN, p.status, "未知")
                     dist[label] = dist.get(label, 0) + 1
                 result["by_status"] = dist
+
+            if "project.no_data_items" in keys:
+                # 窗口内无 collection_data 上报记录的项目清单：
+                # 采集记录窗口与查询窗口有重叠（start_time_int <= end 且 end_time_int >= start）
+                # 即视为「有数据」，其余项目为无数据。
+                start_ts = int(start.timestamp())
+                end_ts = int(end.timestamp())
+                reported_rows = (
+                    db.query(CollectionData.project)
+                    .filter(
+                        CollectionData.indicator == COLLECTION_EFFICIENCY_INDICATOR,
+                        CollectionData.start_time_int <= end_ts,
+                        CollectionData.end_time_int >= start_ts,
+                    )
+                    .all()
+                )
+                reported = {row[0] for row in reported_rows if row[0]}
+                no_data_items = [
+                    {
+                        "项目ID": p.id,
+                        "项目代码": p.code,
+                        "项目名称": p.name,
+                        "状态": _cn_label(_PROJECT_STATUS_CN, p.status, "未知"),
+                    }
+                    for p in projects
+                    if str(p.id) not in reported
+                ]
+                result["no_data_list"] = no_data_items
+                result["no_data_count"] = len(no_data_items)
+                result["with_data_count"] = len(projects) - len(no_data_items)
 
             need_items = "project.items" in keys
             if need_items:
@@ -780,6 +949,127 @@ class ReportDataCollector:
         finally:
             db.close()
 
+    # ── 采集数据（collection_data）维度指标采集 ──────────────
+
+    def _collect_collection_metrics(
+        self, keys: set[str], start: datetime, end: datetime
+    ) -> dict:
+        """采集 collection_data 表的搬运效率指标（字段口径与搬运效率分析页面一致）。
+
+        查询口径：
+        - indicator == GroupEfficiency（数据导入落库的搬运效率标签）；
+        - start_time_int / end_time_int 为秒级时间戳，查询窗口前后各放宽 1 天
+          （与搬运效率分析服务的宽窗口策略一致），再用记录 data JSON 自带的
+          start_time 日期精确归入目标窗口；
+        - 标量指标与各组对比取窗口内最新一条记录（搬运效率分析页面为单日口径），
+          collection.items 返回窗口内每条记录（每日/每项目）的汇总明细。
+        """
+        db = self._get_db()
+        try:
+            start_ts = int((start - timedelta(days=1)).timestamp())
+            end_ts = int((end + timedelta(days=1)).timestamp())
+
+            q = db.query(CollectionData).filter(
+                CollectionData.indicator == COLLECTION_EFFICIENCY_INDICATOR,
+                CollectionData.start_time_int >= start_ts,
+                CollectionData.end_time_int <= end_ts,
+            )
+            if self._project_ids:
+                q = q.filter(CollectionData.project.in_(self._project_ids))
+            rows = q.order_by(CollectionData.start_time_int.desc()).all()
+
+            result: dict = {}
+            if not rows:
+                return result
+
+            # 解析每条记录并按记录自带 start_time 的日期精确过滤目标窗口
+            day_start = start.strftime("%Y-%m-%d")
+            day_end = end.strftime("%Y-%m-%d")
+            entries: list[dict] = []
+            for row in rows:
+                try:
+                    data_obj = json.loads(row.data)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                metrics = _find_group_efficiency_metrics(data_obj)
+                if not metrics:
+                    continue
+                start_iso = (
+                    data_obj.get("start_time")
+                    if isinstance(data_obj, dict)
+                    else None
+                )
+                day = None
+                if isinstance(start_iso, str) and len(start_iso) >= 10:
+                    day = start_iso[:10]
+                    if not (day_start <= day <= day_end):
+                        continue
+                else:
+                    # 老数据无 start_time：退回 start_time_int 推导日期
+                    try:
+                        day = datetime.fromtimestamp(
+                            int(row.start_time_int)
+                        ).strftime("%Y-%m-%d")
+                    except (TypeError, ValueError, OSError):
+                        day = day_start
+                summary, robots = _compute_collection_summary_and_robots(metrics)
+                entries.append({
+                    "project": row.project,
+                    "day": day,
+                    "summary": summary,
+                    "robots": robots,
+                })
+
+            if not entries:
+                return result
+
+            # 窗口内最新一条记录：标量卡片与各组数据对比
+            latest = entries[0]
+
+            # 窗口内按天聚合（每天取最新一条，entries 已按时间倒序，
+            # 每个 day 首次出现即该天最新记录）：多日趋势图数据源
+            by_day: dict[str, dict] = {}
+            for entry in entries:
+                if entry["day"] not in by_day:
+                    by_day[entry["day"]] = entry["summary"]
+            if len(by_day) >= 2:
+                result["by_day"] = by_day
+
+            if "collection.items" in keys:
+                items = []
+                for entry in entries:
+                    items.append({
+                        "项目": entry["project"],
+                        "日期": entry["day"],
+                        **entry["summary"],
+                    })
+                result["items"] = items
+
+            if "collection.robot_group_compare" in keys:
+                result["robot_group_compare"] = latest["robots"]
+
+            # 标量指标：全部取最新记录的汇总字段
+            scalar_fields = {
+                "collection.total_tasks": "total_tasks",
+                "collection.carry_task_count": "carry_task_count",
+                "collection.effective_work_hours": "effective_work_hours",
+                "collection.fault_hours": "fault_hours",
+                "collection.idle_hours": "idle_hours",
+                "collection.avg_error_count": "avg_error_count",
+                "collection.avg_fault_duration_minutes": "avg_fault_duration_minutes",
+                "collection.avg_carry_duration_minutes": "avg_carry_duration_minutes",
+                "collection.avg_manual_switch_count": "avg_manual_switch_count",
+                "collection.manual_intervention_rate": "manual_intervention_rate",
+            }
+            summary = latest["summary"]
+            for key, field in scalar_fields.items():
+                if key in keys:
+                    result[field] = summary.get(field)
+
+            return result
+        finally:
+            db.close()
+
     # ── 汇总采集 ──────────────────────────────────────────────
 
     def collect_all(
@@ -849,34 +1139,36 @@ class ReportGenerator:
             db.close()
 
     @staticmethod
-    def lookup_project_by_hint(hint: str) -> str | None:
+    def lookup_project_by_hint(hint: str, user_id: str | None = None) -> str | None:
         """从问题文本提取的项目名线索中匹配 project 表，返回 project.code。
 
-        匹配优先级：code 精确匹配 → name 包含匹配。
-        返回首个命中；无命中返回 None。
+        匹配优先级（字面模糊 + 消歧决策）：code 精确 → name 精确 →
+        name 包含 → 片段覆盖 + bigram 相似。有 user_id 时优先在用户关联
+        项目（user_project_roles）范围内匹配，未命中或无 user_id 时回退
+        全局匹配。多候选并列/低置信时不猜（返回 None），由 clarify
+        候选按钮消歧。
 
         Args:
             hint: 从问题中提取的项目名线索（如 "XX"、"XX项目" 中的 XX）。
-               小于 2 字符直接返回 None。
+                小于 2 字符直接返回 None。
+            user_id: 登录用户 ID，限定优先匹配范围（可为 None）。
         """
         if not hint or len(hint) < 2:
             return None
-        db = SessionLocal()
-        try:
-            # code 精确匹配
-            proj = db.query(ProjectDelivery).filter(ProjectDelivery.code == hint).first()
-            if proj:
-                logger.info("项目名线索 %r → code 精确命中 %s", hint, proj.code)
-                return proj.code
-            # name 包含匹配
-            proj = db.query(ProjectDelivery).filter(ProjectDelivery.name.contains(hint)).first()
-            if proj:
-                logger.info("项目名线索 %r → name 包含命中 %s (code=%s)", hint, proj.name, proj.code)
-                return proj.code
-            logger.info("项目名线索 %r 未匹配到任何项目", hint)
-            return None
-        finally:
-            db.close()
+        from .project_matcher import resolve_project
+
+        scope_ids: list[str] | None = None
+        if user_id:
+            try:
+                scope_ids = ReportGenerator._resolve_project_ids_by_user(user_id) or None
+            except Exception as exc:
+                logger.warning("用户关联项目查询失败: %s", exc)
+        if scope_ids:
+            code, _ = resolve_project(hint, scope_ids)
+            if code:
+                return code
+        code, _ = resolve_project(hint)
+        return code
 
     @staticmethod
     def _resolve_scope(

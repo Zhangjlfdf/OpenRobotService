@@ -48,7 +48,12 @@ class LLMClient:
     def __init__(self, config: AnalysisConfig) -> None:
         self._config = config
         self._base_url = config.api_base_url.rstrip("/")
-        self._client = httpx.AsyncClient(timeout=config.settings.timeout)
+        # Python 3.14 + httpx 0.28.1 在 Windows 上回环连接(localhost→同一服务)
+        # 默认传输层在 IPv6 回退时返回 502，强制 IPv4 传输解决
+        _transport = httpx.AsyncHTTPTransport(local_address="0.0.0.0")
+        self._client = httpx.AsyncClient(
+            transport=_transport, timeout=config.settings.timeout
+        )
         # 仅用于展示；实际模型由 AI 服务侧决定，HTTP 接口不返回模型名
         self._model = config.provider_config.model
         self._temperature = config.settings.temperature

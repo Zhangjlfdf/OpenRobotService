@@ -47,6 +47,16 @@ const PIE_COLORS = ['#227197', '#3697c3', '#51bfee', '#93e0ff', '#7fc6e8', '#5aa
 const DONUT_COLOR_REAL = '#3697c3';
 const DONUT_COLOR_VIRTUAL = '#c9d4d9';
 
+// 饼图外置标签通用配置：固定宽度 + overflow: 'break'，长文本（如「文章内账号名称」）
+// 在标签框内自动换行显示，不再被省略号截断（移动端小屏空间不足时尤为明显）
+const PIE_LABEL = {
+  color: '#888d8f',
+  fontSize: 10,
+  lineHeight: 13,
+  width: 60,
+  overflow: 'break',
+};
+
 /** subscribe_scene 关注渠道编码 → 中文含义（微信官方 ADD_SCENE_* 定义，取自用户提供的接口文档） */
 const SUBSCRIBE_SCENE_LABELS: Record<string, string> = {
   ADD_SCENE_SEARCH: '公众号搜索',
@@ -224,7 +234,7 @@ export default function AdminEntries() {
         radius: ['38%', '62%'],
         center: ['50%', '42%'],
         data: pieData,
-        label: { color: '#888d8f', fontSize: 10, formatter: '{b} {c}' },
+        label: { ...PIE_LABEL, formatter: '{b} {c}' },
         itemStyle: { borderColor: '#fff', borderWidth: 2 },
       }],
     };
@@ -253,7 +263,7 @@ export default function AdminEntries() {
         { name: '真实用户', value: userStats?.real ?? 0 },
         { name: '虚拟用户', value: userStats?.virtual ?? 0 },
       ],
-      label: { color: '#888d8f', fontSize: 10, formatter: '{b} {c}' },
+      label: { ...PIE_LABEL, formatter: '{b} {c}' },
       itemStyle: { borderColor: '#fff', borderWidth: 2 },
     }],
   }), [userStats]);
@@ -268,7 +278,7 @@ export default function AdminEntries() {
       radius: ['30%', '55%'],
       center: ['50%', '40%'],
       data: sceneStats?.list || [],
-      label: { color: '#888d8f', fontSize: 10, formatter: '{b} {c}' },
+      label: { ...PIE_LABEL, formatter: '{b} {c}' },
       itemStyle: { borderColor: '#fff', borderWidth: 2 },
     }],
   }), [sceneStats]);

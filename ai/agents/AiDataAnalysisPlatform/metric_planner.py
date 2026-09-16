@@ -27,9 +27,10 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import date
 
 from .logging_config import get_logger
-from .metric_registry import catalog_for_llm_prompt, get_metric_def
+from .metric_registry import MetricDimension, catalog_for_llm_prompt, get_metric_def
 from .prompts import build_plan_parser_system_prompt, build_plan_parser_user_prompt
 from .schemas import AnalysisPlan, ScopeSpec, TimeRangeSpec
 
@@ -48,17 +49,66 @@ _TIME_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"(上月|上个月)"), "last_month"),
 ]
 
+# 绝对日期模式：「9月7号」「从9月7号以后」「9月1号到9月7号」
+_ABS_DATE_RE = re.compile(r"(\d{1,2})月(\d{1,2})[号日]")
+_ABS_AFTER_RE = re.compile(r"(\d{1,2})月(\d{1,2})[号日]\s*(?:以后|之后|以来|起|开始)")
+_ABS_RANGE_RE = re.compile(
+    r"(\d{1,2})月(\d{1,2})[号日]\s*(?:到|至|~|-)\s*(\d{1,2})月(\d{1,2})[号日]"
+)
 
-def _extract_time(text: str) -> tuple[str, bool, int]:
-    """从文本提取时间范围，返回 (type, 是否显式提及, 天数)。"""
+
+def _extract_time(
+    text: str,
+) -> tuple[str, bool, int, str | None, str | None, str]:
+    """从文本提取时间范围。
+
+    返回 (type, 是否显式提及, 天数, 起始日期 YYYY-MM-DD, 结束日期 YYYY-MM-DD, 中文描述)。
+    绝对日期（如「从9月7号以后」）优先于相对时间词，type 为 custom：
+    「以后/之后/以来/起」→ start=该日期、end=今天；「到/至」区间 → start=end=两端日期；
+    单独日期 → 当天。年份取当前年，若推导日期在未来则回退一年。
+    """
+    today = date.today()
+
+    def _to_iso(m: str, d: str) -> str:
+        try:
+            year = today.year
+            target = date(year, int(m), int(d))
+            if target > today:
+                target = date(year - 1, int(m), int(d))
+            return target.strftime("%Y-%m-%d")
+        except ValueError:
+            return today.strftime("%Y-%m-%d")
+
+    # 「9月1号到9月7号」区间
+    rng = _ABS_RANGE_RE.search(text)
+    if rng:
+        start_iso = _to_iso(rng.group(1), rng.group(2))
+        end_iso = _to_iso(rng.group(3), rng.group(4))
+        label = f"{rng.group(1)}月{rng.group(2)}号 至 {rng.group(3)}月{rng.group(4)}号"
+        return "custom", True, 7, start_iso, end_iso, label
+
+    # 「从9月7号以后/之后/以来/起/开始」
+    after = _ABS_AFTER_RE.search(text)
+    if after:
+        start_iso = _to_iso(after.group(1), after.group(2))
+        label = f"{after.group(1)}月{after.group(2)}号以后"
+        return "custom", True, 7, start_iso, today.strftime("%Y-%m-%d"), label
+
+    # 单独日期「9月7号」
+    single = _ABS_DATE_RE.search(text)
+    if single:
+        day_iso = _to_iso(single.group(1), single.group(2))
+        label = f"{single.group(1)}月{single.group(2)}号"
+        return "custom", True, 7, day_iso, day_iso, label
+
     for pattern, time_type in _TIME_PATTERNS:
         m = pattern.search(text)
         if m:
             days = 7
             if time_type == "recent_days":
                 days = int(m.group(2) or 7)
-            return time_type, True, days
-    return "recent_days", False, 7
+            return time_type, True, days, None, None, ""
+    return "recent_days", False, 7, None, None, ""
 
 
 # ── 快路径：动作词 ──────────────────────────────────────────────
@@ -84,8 +134,59 @@ def _extract_action(text: str) -> str:
 # 指标子规则：(正则, 命中时加入的 metric keys)；子规则依次判断，
 # 最后一个兜底子规则（正则 None）在无任何命中时生效。
 _DIMENSION_RULES: list[tuple[re.Pattern, str, list[tuple[re.Pattern | None, list[str]]]]] = [
+    # 搬运效率/机器人组维度（collection_data 表）：放在最前，
+    # 保证「搬运任务数量」「总任务数」「任务情况」等所有任务类问题优先命中
+    # collection，不被工单「任务」等词抢先。
+    # 任务口径统属搬运效率（taskNumber.totalTasks / taskNumber.carry）。
     (
-        re.compile(r"(工单|任务|报障|提单)"),
+        re.compile(r"(搬运|搬货|AGV|agv|机器人|任务)"),
+        "collection",
+        [
+            # 无数据转投：含「搬运/任务」但语义是「哪些项目无数据/为空」时，
+            # 不按 collection 单项目口径分析，转投全局无数据项目清单
+            # （project.no_data_items）；「为空」用负向后顾排除「不为空」。
+            # 数据词间允许夹入维度词（「没有搬运数据」「没有搬运效率数据」）。
+            (re.compile(r"((?:没有|无|没)(?:搬运效率|搬运|机器人|任务|效率){0,2}数据|未上报|没有上报|未采集|没有采集|(?<!不)为空)"), [
+                "project.no_data_items",
+            ]),
+            (re.compile(r"(干预|切手动)"), [
+                "collection.avg_manual_switch_count",
+                "collection.manual_intervention_rate",
+            ]),
+            (re.compile(r"故障"), [
+                "collection.fault_hours",
+                "collection.avg_fault_duration_minutes",
+                "collection.items",
+            ]),
+            (re.compile(r"(各组|组对比|型号|机器人组)"), [
+                "collection.robot_group_compare",
+                "collection.items",
+            ]),
+            # 「总任务数」「任务数量」等任务计数口径 → 总任务数 + 搬运任务数量
+            # （放在各组之后：各组对比优先）
+            (re.compile(r"任务数"), [
+                "collection.total_tasks",
+                "collection.carry_task_count",
+            ]),
+            (None, [
+                "collection.total_tasks",
+                "collection.carry_task_count",
+                "collection.effective_work_hours",
+                "collection.fault_hours",
+                "collection.idle_hours",
+                "collection.avg_error_count",
+                "collection.avg_fault_duration_minutes",
+                "collection.avg_carry_duration_minutes",
+                "collection.avg_manual_switch_count",
+                "collection.manual_intervention_rate",
+                "collection.robot_group_compare",
+                "collection.items",
+            ]),
+        ],
+    ),
+    (
+        # 工单维度：任务类问法已全部归搬运效率维度，这里只保留工单/报障/提单
+        re.compile(r"(工单|报障|提单)"),
         "ticket",
         [
             (re.compile(r"(解决率|完成率)"), ["ticket.resolve_rate"]),
@@ -112,38 +213,112 @@ _DIMENSION_RULES: list[tuple[re.Pattern, str, list[tuple[re.Pattern | None, list
             (re.compile(r"(活跃|进行中)"), ["project.active_count"]),
             (re.compile(r"(完成|交付)"), ["project.completed_count"]),
             (re.compile(r"(暂停|搁置)"), ["project.on_hold_count"]),
+            # 「没有数据」「未上报」等 → 指定时间范围内无采集数据上报的项目清单
+            # （同样支持「没有搬运数据」等夹入维度词的问法）
+            (re.compile(r"((?:没有|无|没)(?:搬运效率|搬运|机器人|任务|效率){0,2}数据|未上报|没有上报|未采集|没有采集)"),
+             ["project.no_data_items"]),
             (None, ["project.total", "project.active_count", "project.by_status"]),
         ],
     ),
 ]
 
 
-def _fast_path_parse(text: str) -> AnalysisPlan | None:
+def _project_hint_from_text(text: str) -> str | None:
+    """从文本提取「XX项目」形式的项目名线索（澄清轮补充回答识别用）。"""
+    m = re.search(r"([^，,。.!！？?\s]{2,16})项目", text)
+    if m:
+        return m.group(1).strip()
+    return None
+
+
+def _dimension_hit(text: str) -> bool:
+    """文本是否命中任一维度词（用于区分项目补充回答与指标提问）。"""
+    return any(pat.search(text) for pat, _, _ in _DIMENSION_RULES)
+
+
+def _plan_missing_fields(plan: AnalysisPlan) -> list[str]:
+    """plan 完整性校验（AnalysisPlanner.missing_fields 的模块级实现）。
+
+    搬运效率（collection_data）维度必须明确到单个项目：多项目混合时
+    标量卡片取窗口内最新一条记录，口径不清晰，故强制确认项目。
+    """
+    missing: list[str] = []
+
+    if not plan.metric_keys:
+        missing.append("metric_keys")
+
+    has_time_sensitive = any(
+        (m := get_metric_def(k)) is not None and m.requires_time_range
+        for k in plan.metric_keys
+    )
+    if has_time_sensitive and not plan.time_range.explicit:
+        missing.append("time_range")
+
+    has_collection = any(
+        (m := get_metric_def(k)) is not None
+        and m.dimension == MetricDimension.COLLECTION
+        for k in plan.metric_keys
+    )
+    if has_collection and plan.scope.type != "single_project":
+        missing.append("project_code")
+
+    if plan.scope.type == "single_project" and not plan.scope.project_code:
+        missing.append("project_code")
+
+    return missing
+
+
+def _fast_path_parse(
+    text: str, previous_plan: AnalysisPlan | None = None
+) -> AnalysisPlan | None:
     """快路径解析：命中明确模板时返回 plan，否则返回 None（交给 LLM）。
 
     仅命中时间词/动作词而无维度词时，也返回带空 metric_keys 的 plan，
     供多轮澄清合并使用。
+
+    项目补充回答：上一轮缺失 project_code 时，本轮「XX项目」类回复视为
+    范围补充，不解析项目维度兜底指标（避免覆盖上一轮已解析的 metric_keys）。
     """
-    time_type, time_explicit, days = _extract_time(text)
+    time_type, time_explicit, days, start_date, end_date, time_label = _extract_time(text)
     action = _extract_action(text)
 
     metric_keys: list[str] = []
     matched_dim: str | None = None
-    for dim_pattern, dim_name, sub_rules in _DIMENSION_RULES:
-        if not dim_pattern.search(text):
-            continue
-        matched_dim = dim_name
-        for rule_pattern, keys in sub_rules:
-            if rule_pattern is None or rule_pattern.search(text):
-                metric_keys.extend(keys)
-                break
-        # 命中一个维度即停止（问题通常针对单一维度）
-        break
+
+    # 项目补充回答识别：上一轮缺 project_code 且本轮文本含「XX项目」形式
+    project_supplement: ScopeSpec | None = None
+    if previous_plan is not None and "project_code" in _plan_missing_fields(previous_plan):
+        hint = _project_hint_from_text(text)
+        if hint is None and not time_explicit and action == "summary" \
+                and not _dimension_hit(text):
+            # 消歧候选按钮发送的完整项目名可能不含「项目」后缀（如「LST-CAT」）：
+            # 无维度/时间/动作词的短文本整体视为项目补充，交给查库映射收敛。
+            # 只取换行前第一段（question 部分），避免拼接的页面场景上下文混入
+            stripped = text.strip().split("\n")[0].strip()
+            if 2 <= len(stripped) <= 30:
+                hint = stripped
+        if hint:
+            project_supplement = ScopeSpec(type="single_project", project_name=hint)
+
+    if project_supplement is None:
+        for dim_pattern, dim_name, sub_rules in _DIMENSION_RULES:
+            if not dim_pattern.search(text):
+                continue
+            matched_dim = dim_name
+            for rule_pattern, keys in sub_rules:
+                if rule_pattern is None or rule_pattern.search(text):
+                    metric_keys.extend(keys)
+                    break
+            # 命中一个维度即停止（问题通常针对单一维度）
+            break
 
     # 动作补丁：仅在维度命中时按维度补充对应指标
     if metric_keys and action == "trend" and matched_dim == "ticket" \
             and not any(k.endswith("_by_day") for k in metric_keys):
         metric_keys.append("ticket.new_by_day")
+    if metric_keys and action == "trend" and matched_dim == "collection" \
+            and "collection.items" not in metric_keys:
+        metric_keys.append("collection.items")
     if metric_keys and action == "distribution":
         if matched_dim == "ticket" \
                 and not any(k.startswith("ticket.by_") for k in metric_keys):
@@ -156,7 +331,10 @@ def _fast_path_parse(text: str) -> AnalysisPlan | None:
             metric_keys.append("project.by_status")
 
     # 完全无命中（无维度、无时间、无动作）→ None 交给 LLM
-    if not metric_keys and not time_explicit and action == "summary":
+    # 项目补充回答（supplement）即使无指标/时间也须保留：否则澄清轮回复
+    # 「XX项目」会被误判为无命中而走 LLM 慢路径，导致反复要求确认项目
+    if not metric_keys and not time_explicit and action == "summary" \
+            and project_supplement is None:
         return None
 
     # 去重保序
@@ -165,8 +343,15 @@ def _fast_path_parse(text: str) -> AnalysisPlan | None:
 
     return AnalysisPlan(
         metric_keys=unique_keys,
-        time_range=TimeRangeSpec(type=time_type, days=days, explicit=time_explicit),
-        scope=ScopeSpec(type="global"),
+        time_range=TimeRangeSpec(
+            type=time_type,
+            days=days,
+            start=start_date,
+            end=end_date,
+            label=time_label,
+            explicit=time_explicit,
+        ),
+        scope=project_supplement or ScopeSpec(type="global"),
         action=action,
         confidence=0.9,
         original_question=text,
@@ -251,8 +436,8 @@ def _plan_from_llm_json(obj: dict, question: str) -> AnalysisPlan:
 
 _CLARIFY_TEMPLATES: dict[str, tuple[str, list[str]]] = {
     "metric_keys": (
-        "您想了解哪方面的数据指标？我目前支持工单、风险、项目三个维度的统计。",
-        ["工单解决率", "逾期工单", "风险等级分布", "项目进展"],
+        "您想了解哪方面的数据指标？我目前支持工单、风险、项目、搬运效率四个维度的统计。",
+        ["工单解决率", "逾期工单", "风险等级分布", "项目进展", "搬运效率"],
     ),
     "time_range": (
         "请补充统计的时间范围。",
@@ -328,7 +513,7 @@ class AnalysisPlanner:
         if not text:
             return AnalysisPlan(original_question=question)
 
-        fast = _fast_path_parse(text)
+        fast = _fast_path_parse(text, previous_plan)
         if fast is not None:
             return self._merge_with_previous(fast, previous_plan)
 
@@ -388,22 +573,7 @@ class AnalysisPlanner:
     @staticmethod
     def missing_fields(plan: AnalysisPlan) -> list[str]:
         """校验 plan 是否可直接执行，返回缺失的必要字段。"""
-        missing: list[str] = []
-
-        if not plan.metric_keys:
-            missing.append("metric_keys")
-
-        has_time_sensitive = any(
-            (m := get_metric_def(k)) is not None and m.requires_time_range
-            for k in plan.metric_keys
-        )
-        if has_time_sensitive and not plan.time_range.explicit:
-            missing.append("time_range")
-
-        if plan.scope.type == "single_project" and not plan.scope.project_code:
-            missing.append("project_code")
-
-        return missing
+        return _plan_missing_fields(plan)
 
     @staticmethod
     def build_clarify_questions(

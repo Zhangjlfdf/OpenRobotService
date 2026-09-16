@@ -82,6 +82,11 @@ _ANALYSIS_SUBJECT_KEYWORDS = (
     "成功率",
     "逾期",
     "故障",
+    "搬运",
+    "效率",
+    "机器人",
+    "AGV",
+    "agv",
 )
 
 _ANALYSIS_STRONG_PATTERNS = (
@@ -90,6 +95,7 @@ _ANALYSIS_STRONG_PATTERNS = (
     r"(日报|周报|月报)",
     r"(成功率|完成率|解决率|逾期率|风险分布|工单分布|趋势)",
     r"(新增|新建|逾期|解决率|完成率|等级分布|状态分布|类型分布|优先级分布)",
+    r"(搬运效率|机器人组|人工干预率|切手动|搬货|AGV|agv)",
 )
 
 # LLM 兜底意图判定的系统提示词：要求只输出一个词，便于低成本解析
@@ -283,22 +289,7 @@ class DataAnalysisAgent:
         plan = await self._planner.parse(question, context, previous_plan)
 
         # 显式参数覆盖/兜底 plan 的范围
-        if project_code:
-            plan.scope = ScopeSpec(type="single_project", project_code=project_code)
-        elif user_id:
-            plan.scope = ScopeSpec(type="user_projects", user_id=user_id)
-        elif plan.scope.type == "single_project" and plan.scope.project_name:
-            # 用户提到了项目名但未映射出代码 → 查库映射
-            code = self._resolve_project_code_by_name(plan.scope.project_name)
-            if code:
-                plan.scope.project_code = code
-        elif plan.scope.type == "global":
-            # 快路径不解析项目名：问题中出现"XX项目"等实体时查库映射补全范围
-            hint = self._extract_project_hint(question)
-            if hint:
-                code = ReportGenerator.lookup_project_by_hint(hint)
-                if code:
-                    plan.scope = ScopeSpec(type="single_project", project_code=code)
+        self._apply_scope_overrides(plan, question, project_code, user_id)
 
         missing = self._planner.missing_fields(plan)
         plan.missing_fields = missing
@@ -313,6 +304,13 @@ class DataAnalysisAgent:
             clarify_text, suggestions = self._planner.build_clarify_questions(
                 plan, missing
             )
+            if "project_code" in missing:
+                # 项目名匹配低置信/多候选：用真实候选项目名渲染消歧按钮
+                candidates = self._project_suggestions(question, plan, user_id)
+                if candidates:
+                    suggestions = candidates + [
+                        s for s in suggestions if s not in candidates
+                    ]
             return ChatResponse(
                 answer=clarify_text,
                 mode="clarify",
@@ -341,6 +339,250 @@ class DataAnalysisAgent:
             charts=charts,
             cards=cards,
         )
+
+    def _apply_scope_overrides(
+        self,
+        plan: AnalysisPlan,
+        question: str,
+        project_code: str | None,
+        user_id: str | None,
+    ) -> None:
+        """显式参数覆盖/兜底 plan 的范围（非流式与流式流程共用）。
+
+        优先级：前端显式 project_code > plan 已解析项目 > 问题文本项目名线索
+        查库映射 > 登录用户关联项目（user_id）兜底。
+
+        用户明确提到的项目优先于 user_id 兜底，否则澄清轮补充的
+        「XX项目」会被 user_projects 覆盖，搬运效率等需明确项目的维度无法收敛。
+        """
+        if project_code:
+            plan.scope = ScopeSpec(type="single_project", project_code=project_code)
+            return
+
+        # plan 已解析出的项目信息优先于用户关联项目兜底
+        if plan.scope.type == "single_project":
+            if not plan.scope.project_code and plan.scope.project_name:
+                # 用户提到了项目名但未映射出代码 → 查库映射（优先用户关联项目），
+                # 命中后写回 DB 全称（口径回显与回答均展示项目全称）
+                code, full_name = self._resolve_project_by_name(
+                    plan.scope.project_name, user_id
+                )
+                if code:
+                    plan.scope.project_code = code
+                    if full_name:
+                        plan.scope.project_name = full_name
+            return
+
+        if plan.scope.type == "global":
+            # 快路径不解析项目名：问题中出现"XX项目"等实体时查库映射补全范围
+            hint = self._extract_project_hint(question)
+            if hint:
+                code, full_name = self._resolve_project_by_name(hint, user_id)
+                if code:
+                    plan.scope = ScopeSpec(
+                        type="single_project",
+                        project_code=code,
+                        project_name=full_name or hint,
+                    )
+                    return
+
+        # 兜底：登录用户关联项目
+        if user_id:
+            plan.scope = ScopeSpec(type="user_projects", user_id=user_id)
+
+    # ── 流式对话（SSE 事件源，供 router /chat/stream 使用）──────────
+
+    async def chat_stream(
+        self,
+        question: str,
+        context: str | None = None,
+        data: str | None = None,
+        data_source: DataSource = DataSource.JSON,
+        analysis_type: AnalysisType = AnalysisType.GENERAL,
+        project_code: str | None = None,
+        user_id: str | None = None,
+        conversation_id: str | None = None,
+    ) -> AsyncIterator[dict]:
+        """流式快速对话，逐事件产出 dict（与 :meth:`chat` 同语义）。
+
+        事件协议（router 层序列化为 SSE）：
+        - {"type": "meta", "mode": ..., "plan": ..., "charts": ..., "cards": ...,
+           "suggestions": ..., "conversation_id": ...}  回答前的结构化元信息
+        - {"type": "delta", "content": "..."}            逐块回答文本
+        - {"type": "done", "conversation_id": ..., "mode": ...}
+        """
+        has_data = data is not None and bool(data.strip())
+        has_scope = bool(project_code or user_id)
+        intent = self._classify_question_intent(question, context)
+        if intent == "unknown":
+            intent = await self._classify_intent_with_llm(question, context)
+        pending_plan = self._plan_cache.get(conversation_id)
+
+        # 1) 用户提供了数据 → 流式分析问答
+        if has_data:
+            yield {
+                "type": "meta", "mode": "analysis", "plan": None,
+                "charts": None, "cards": None, "suggestions": None,
+                "conversation_id": conversation_id,
+            }
+            async for chunk in self._analyzer.analyze_stream(
+                data=data,
+                data_source=data_source,
+                analysis_type=analysis_type,
+                question=question,
+                context=context,
+            ):
+                yield {"type": "delta", "content": chunk}
+            yield {"type": "done", "conversation_id": conversation_id, "mode": "analysis"}
+            return
+
+        # 2) 数据分析意图（或显式范围 / 澄清会话中）→ 指标对话流程（流式）
+        if intent == "analysis" or has_scope or pending_plan is not None:
+            conversation_id = conversation_id or uuid4().hex
+            async for event in self._chat_metric_flow_stream(
+                question=question,
+                context=context,
+                project_code=project_code,
+                user_id=user_id,
+                conversation_id=conversation_id,
+            ):
+                yield event
+            return
+
+        # 3) 普通聊天（流式）
+        async for event in self._chat_reply_stream(question, context, conversation_id):
+            yield event
+
+    async def _chat_metric_flow_stream(
+        self,
+        question: str,
+        context: str | None,
+        project_code: str | None,
+        user_id: str | None,
+        conversation_id: str | None,
+    ) -> AsyncIterator[dict]:
+        """指标对话主流程（流式）：问题 → plan → 采集 → 流式分析。
+
+        与 ``_chat_metric_flow`` 同逻辑，区别是图表/卡片随 meta 事件先行下发，
+        回答文本经 delta 事件逐块输出。
+        """
+        previous_plan = self._plan_cache.get(conversation_id)
+        plan = await self._planner.parse(question, context, previous_plan)
+
+        self._apply_scope_overrides(plan, question, project_code, user_id)
+
+        missing = self._planner.missing_fields(plan)
+        plan.missing_fields = missing
+
+        # 无法解析出指标且无显式范围 → 回落普通聊天（流式）
+        if not plan.metric_keys and plan.scope.type == "global":
+            async for event in self._chat_reply_stream(question, context, conversation_id):
+                yield event
+            return
+
+        if missing:
+            # 缓存 plan，等用户下一轮补充
+            self._plan_cache.put(conversation_id, plan)
+            clarify_text, suggestions = self._planner.build_clarify_questions(
+                plan, missing
+            )
+            if "project_code" in missing:
+                # 项目名匹配低置信/多候选：用真实候选项目名渲染消歧按钮
+                candidates = self._project_suggestions(question, plan, user_id)
+                if candidates:
+                    suggestions = candidates + [
+                        s for s in suggestions if s not in candidates
+                    ]
+            yield {
+                "type": "meta", "mode": "clarify", "plan": plan.model_dump(),
+                "charts": None, "cards": None, "suggestions": suggestions,
+                "conversation_id": conversation_id,
+            }
+            yield {"type": "delta", "content": clarify_text}
+            yield {"type": "done", "conversation_id": conversation_id, "mode": "clarify"}
+            return
+
+        # plan 完整 → 采集数据并生成图表（LLM 前的确定性部分）
+        tr = plan.time_range
+        range_type = (
+            TimeRangeType(tr.type)
+            if tr.type in [t.value for t in TimeRangeType]
+            else TimeRangeType.RECENT_DAYS
+        )
+        try:
+            start, end, label = resolve_time_range(
+                range_type,
+                days=tr.days or 7,
+                start_str=tr.start,
+                end_str=tr.end,
+            )
+        except ValueError:
+            start, end, label = resolve_time_range(
+                TimeRangeType.RECENT_DAYS, days=7
+            )
+
+        collector = ReportDataCollector(
+            project_ids=self._resolve_plan_project_ids(plan)
+        )
+        collected = collector.collect_by_plan(
+            plan.metric_keys, start, end, label
+        )
+        charts, cards = build_charts(plan.metric_keys, collected)
+        collected_data = json.dumps(
+            localize_collected_data(collected), ensure_ascii=False, indent=2, default=str
+        )
+        scope_cn = _SCOPE_TYPE_CN.get(plan.scope.type, plan.scope.type)
+        if plan.scope.type == "single_project" and plan.scope.project_code:
+            scope_cn = (
+                f"指定项目「{plan.scope.project_name}」（项目编号 {plan.scope.project_code}）"
+                if plan.scope.project_name
+                else f"指定项目（项目编号 {plan.scope.project_code}）"
+            )
+        collected_context = (
+            f"数据来源：平台实时统计；"
+            f"统计周期：{label}；"
+            f"统计范围：{scope_cn}。"
+            f"回答中提及项目时请使用项目完整名称。"
+        )
+        merged_context = (
+            f"{context}\n\n{collected_context}" if context else collected_context
+        )
+
+        self._plan_cache.delete(conversation_id)
+
+        # 图表/卡片/口径先行下发，回答文本流式追加
+        yield {
+            "type": "meta", "mode": "analysis", "plan": plan.model_dump(),
+            "charts": [c.model_dump() for c in charts],
+            "cards": [c.model_dump() for c in cards],
+            "suggestions": None,
+            "conversation_id": conversation_id,
+        }
+        async for chunk in self._analyzer.analyze_stream(
+            data=collected_data,
+            data_source=DataSource.JSON,
+            analysis_type=AnalysisType.CUSTOM,
+            question=question,
+            context=merged_context,
+        ):
+            yield {"type": "delta", "content": chunk}
+        yield {"type": "done", "conversation_id": conversation_id, "mode": "analysis"}
+
+    async def _chat_reply_stream(
+        self, question: str, context: str | None, conversation_id: str | None
+    ) -> AsyncIterator[dict]:
+        """普通聊天回复（流式）。"""
+        system_prompt = build_system_prompt(AnalysisType.CUSTOM)
+        user_prompt = build_chat_prompt(question, context)
+
+        yield {
+            "type": "meta", "mode": "chat", "plan": None,
+            "charts": None, "cards": None, "suggestions": None,
+            "conversation_id": conversation_id,
+        }
+        async for chunk in self._llm.chat_stream(system_prompt, user_prompt):
+            yield {"type": "delta", "content": chunk}
+        yield {"type": "done", "conversation_id": conversation_id, "mode": "chat"}
 
     async def _analyze_by_plan(
         self, plan: AnalysisPlan, question: str, context: str | None
@@ -380,10 +622,17 @@ class DataAnalysisAgent:
             localize_collected_data(collected), ensure_ascii=False, indent=2, default=str
         )
         scope_cn = _SCOPE_TYPE_CN.get(plan.scope.type, plan.scope.type)
+        if plan.scope.type == "single_project" and plan.scope.project_code:
+            scope_cn = (
+                f"指定项目「{plan.scope.project_name}」（项目编号 {plan.scope.project_code}）"
+                if plan.scope.project_name
+                else f"指定项目（项目编号 {plan.scope.project_code}）"
+            )
         collected_context = (
             f"数据来源：平台实时统计；"
             f"统计周期：{label}；"
             f"统计范围：{scope_cn}。"
+            f"回答中提及项目时请使用项目完整名称。"
         )
         merged_context = (
             f"{context}\n\n{collected_context}" if context else collected_context
@@ -420,24 +669,64 @@ class DataAnalysisAgent:
             return project_ids or ["__no_project__"]
         return None
 
-    @staticmethod
-    def _resolve_project_code_by_name(name: str) -> str | None:
-        """按项目名称模糊匹配项目代码。"""
-        from ai.core.database import ProjectDelivery, SessionLocal
+    def _resolve_project_by_name(
+        self, name: str, user_id: str | None = None
+    ) -> tuple[str | None, str | None]:
+        """按项目名称模糊匹配项目，返回 (项目代码, DB 全称)。
 
-        db = SessionLocal()
-        try:
-            row = (
-                db.query(ProjectDelivery)
-                .filter(ProjectDelivery.name.like(f"%{name}%"))
-                .first()
-            )
-            return row.id if row else None
-        except Exception as exc:
-            logger.warning("项目名称→代码映射失败: %s", exc)
-            return None
-        finally:
-            db.close()
+        有 user_id 时优先在用户关联项目（user_project_roles）范围内匹配，
+        避免命中其他用户的同名/相似名项目；用户范围内无命中或未传
+        user_id 时回退全局匹配。多候选并列/低置信时不猜（返回
+        (None, None)），由 clarify 候选按钮消歧。
+        """
+        from .project_matcher import resolve_project
+
+        scope_ids: list[str] | None = None
+        if user_id:
+            try:
+                scope_ids = ReportGenerator._resolve_project_ids_by_user(user_id) or None
+            except Exception as exc:
+                logger.warning("用户关联项目查询失败: %s", exc)
+        if scope_ids:
+            code, matches = resolve_project(name, scope_ids)
+            if code and matches:
+                return code, matches[0].name
+        code, matches = resolve_project(name)
+        if code and matches:
+            return code, matches[0].name
+        return None, None
+
+    def _project_suggestions(
+        self, question: str, plan: AnalysisPlan, user_id: str | None
+    ) -> list[str]:
+        """project_code 缺失时的候选项目名列表（clarify 消歧按钮用）。
+
+        从本轮问题文本提取项目线索（或取 plan 已解析的项目名），
+        在用户关联项目范围内召回候选；无候选时回退全局召回。
+        """
+        hint = self._extract_project_hint(question)
+        if not hint and plan.scope.type == "single_project":
+            hint = plan.scope.project_name
+        if not hint:
+            return []
+        from .project_matcher import match_projects
+
+        scope_ids: list[str] | None = None
+        if user_id:
+            try:
+                scope_ids = ReportGenerator._resolve_project_ids_by_user(user_id) or None
+            except Exception:
+                scope_ids = None
+        cands = match_projects(hint, scope_ids)
+        if not cands:
+            cands = match_projects(hint)
+        if not cands:
+            return []
+        # 并列候选一并返回（分数差距 <0.05 视为并列），避免目标项目被截断；
+        # 按钮上限 4 个，超出则取前 4
+        top_score = cands[0].score
+        picks = [c for c in cands if c.score >= top_score - 0.05][:4]
+        return [c.name for c in picks]
 
     async def _chat_reply(
         self, question: str, context: str | None
