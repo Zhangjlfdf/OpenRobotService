@@ -6,6 +6,7 @@ from typing import List
 
 from ai.agents.AiDiagnosisPlatform.assigner.prompts.shared import (
     engineer_brief_lines,
+    feature_role_routing_guidance,
     person_anti_hallucination,
     ticket_fields_block,
     ticket_type_person_guidance,
@@ -48,6 +49,7 @@ def build_l1(
     lines = [
         intro,
         ticket_type_person_guidance(ticket).rstrip(),
+        feature_role_routing_guidance().rstrip(),
         "工单写的是现象或需求，不是职责原文。先看懂本单要解决什么，再对照各人卡片判断谁能接。",
         "职责文案可以为空；责任模块是选人的主依据。有职责文案时作补充，无职责文案时只依据责任模块，"
         "禁止因此压低分数，也禁止臆造未写出的职责。",

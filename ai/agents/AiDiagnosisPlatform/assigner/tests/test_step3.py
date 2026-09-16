@@ -164,6 +164,9 @@ class TestL1PromptHasName:
         assert "不要用过往工单经验" in prompt
         assert "不影响打分" not in prompt
         assert "候选ID: u-a" not in prompt
+        assert "【仅需求单·产品/研发分流】" in prompt
+        assert "待产品澄清" in prompt
+        assert "产品已对齐" in prompt
         from ai.agents.AiDiagnosisPlatform.assigner.prompts.shared import ticket_fields_block
         assert ticket_fields_block(_ticket()).rstrip() in prompt
 
