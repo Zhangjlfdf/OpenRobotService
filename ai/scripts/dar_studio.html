@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>AI 质量工作台</title>
+<script src="/vendor/echarts.min.js"></script>
 <style>
 :root{
   --bg:#f1f5f9; --card:#ffffff; --ink:#0f172a; --ink2:#475569; --ink3:#94a3b8;
@@ -389,6 +390,36 @@ kbd{background:#f1f5f9;border:1px solid var(--line);border-bottom-width:2px;bord
 .caserow:hover{background:#f8fafc;color:var(--ink)}
 .caserow input{flex-shrink:0}
 .casename{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0}
+
+/* ── 页签4 知识库 ── */
+.kbstats{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px}
+.kbdom{flex:1;min-width:168px;background:#fff;border:1px solid var(--line);border-radius:10px;padding:10px 14px}
+.kbdom .dn{font-size:13px;font-weight:650;display:flex;align-items:center;gap:6px}
+.kbdom .dn .mono{font-size:11px;color:var(--ink3);font-weight:400}
+.kbdom .dn2{font-size:11.5px;color:var(--ink3);margin-top:4px;line-height:1.7}
+.kbdom .dn2 b{color:var(--ink2);font-variant-numeric:tabular-nums}
+.kbdom.empty{opacity:.55}
+.kbbar{display:flex;gap:10px;align-items:center;margin-bottom:8px}
+.kbbar input{flex:1;max-width:340px}
+.kbtree{background:#fff;border:1px solid var(--line);border-radius:12px;padding:10px 14px;font-size:13px}
+.kbtree details{margin:1px 0}
+.kbtree summary{display:flex;align-items:center;gap:7px;cursor:pointer;list-style:none;
+  padding:3.5px 6px;border-radius:7px;user-select:none}
+.kbtree summary::-webkit-details-marker{display:none}
+.kbtree summary:hover{background:var(--bg)}
+.kbtree .tw{width:13px;color:var(--ink3);font-size:10px;flex-shrink:0;transition:transform .12s}
+.kbtree details[open]>summary .tw{transform:rotate(90deg)}
+.kbtree .fo{flex-shrink:0;font-size:12px}
+.kbtree .lb{font-size:11px;background:var(--brand-soft);color:var(--brand);border-radius:20px;padding:0 8px}
+.kbtree .kn{font-weight:600}
+.kbtree .kc{margin-left:auto;color:var(--ink3);font-size:11.5px;white-space:nowrap;font-variant-numeric:tabular-nums}
+.kbtree .kids{margin-left:14px;padding-left:9px;border-left:1px solid var(--line)}
+.kbtree .file{display:flex;align-items:center;gap:7px;padding:2.5px 6px;border-radius:6px;color:var(--ink2)}
+.kbtree .file:hover{background:var(--bg)}
+.kbtree .file .fn{font-family:ui-monospace,Consolas,monospace;font-size:12px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.kbtree .file .kc{margin-left:auto;color:var(--ink3);font-size:11px;font-variant-numeric:tabular-nums}
+.kbtree .hit{background:#fef3c7;border-radius:6px}
 </style>
 </head>
 <body>
@@ -399,6 +430,7 @@ kbd{background:#f1f5f9;border:1px solid var(--line);border-bottom-width:2px;bord
       <button id="nav-week" class="on"><span class="dot"></span>质量看板</button>
       <button id="nav-test"><span class="dot"></span>在线测试</button>
       <button id="nav-sink"><span class="dot"></span>工单沉淀</button>
+      <button id="nav-kb"><span class="dot"></span>知识库</button>
     </nav>
     <div class="fill"></div>
     <div class="conn">
@@ -593,6 +625,33 @@ kbd{background:#f1f5f9;border:1px solid var(--line);border-bottom-width:2px;bord
         <div class="term"><div class="hd">$ 工单沉淀的拉取/应用输出在这里（指标生成页另有自己的日志卡，互不串台）</div></div>
       </details>
     </section>
+
+    <!-- ══ 页签4 知识库 ══ -->
+    <section class="view" id="view-kb">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">
+        <h2 class="pg" style="margin:0">知识库结构</h2>
+        <span class="badge dim" id="kbstat">加载中…</span>
+        <span style="flex:1"></span>
+        <button class="btn sm" id="kbrefresh" title="忽略缓存强制重算 chunk 统计">强制重算</button>
+      </div>
+      <p class="sub">源目录 <span class="mono">D:\Code\OpenRobotService_Data\kb</span> → KBDomainIngester 按文件名路由切分 → Qdrant 时间戳集合 → 切指针。chunk 数由真实 parser 现算，源文件有改动自动重算；标签 = 检索侧 _sub_labels 映射。</p>
+
+      <div class="kbstats" id="kbdoms"></div>
+
+      <div class="kbbar">
+        <div class="seg" id="kbmode">
+          <button data-m="graph" class="on">树图</button>
+          <button data-m="tree">列表</button>
+        </div>
+        <input type="text" id="kbfilter" placeholder="过滤文件/目录名（仅列表模式，如 calibration、KB-MAP）">
+        <label class="kbfiles-tog" id="kbfiles-tog" style="display:none">
+          <input type="checkbox" id="kbgraphfiles">展开到文件
+        </label>
+        <span id="kbfilterhint" style="font-size:12px;color:var(--ink3)"></span>
+      </div>
+      <div class="kbgraph" id="kbgraph"></div>
+      <div class="kbtree" id="kbtree" style="display:none"><div class="empty">加载中…</div></div>
+    </section>
   </main>
 </div>
 <div id="toasts"></div>
@@ -647,15 +706,18 @@ async function sse(url, body, onEvent, onDone){
 
 /* ── 导航 ── */
 function nav(v){
-  ["week","test","sink"].forEach(k=>{
+  ["week","test","sink","kb"].forEach(k=>{
     $("#nav-"+k).classList.toggle("on", v===k);
     $("#view-"+k).classList.toggle("on", v===k);
   });
+  // 知识库页签懒加载：首次切入才请求统计（parser 全量 parse 约几秒）
+  if(v==="kb" && !window._kbLoaded){ window._kbLoaded = true; loadKB(); }
   try { localStorage.setItem("dar_studio_tab", v); } catch (e) {}
 }
 $("#nav-week").onclick = ()=>nav("week");
 $("#nav-test").onclick = ()=>nav("test");
 $("#nav-sink").onclick = ()=>nav("sink");
+$("#nav-kb").onclick = ()=>nav("kb");
 // 启动恢复上次页签：F5 刷新停留在原页签，不回第一个
 nav(localStorage.getItem("dar_studio_tab") || "week");
 // SKIP_USER_IDS 静默归到「测试人员」层，不在 UI 单独展示（用户硬要求）
@@ -1055,6 +1117,67 @@ $("#sinkapply").onclick = async ()=>{
                             hdr:`sink_flow --apply ${sinkDir} --reviewer ${reviewer}`});
 };
 loadSink();
+
+/* ══ 页签4 知识库 ══ */
+let kbData = null;
+
+async function loadKB(refresh){
+  try{
+    const r = await fetch(`/api/kb_structure${refresh ? "?refresh=1" : ""}`);
+    const j = await r.json();
+    if(!r.ok) throw new Error(j.detail || `HTTP ${r.status}`);
+    kbData = j;
+    $("#kbstat").textContent =
+      `${j.total_files} 文件 · ${j.total_chunks} chunks · 生成于 ${j.generated_at}`;
+    const DN = {industry:"📐 行业知识", company:"🏢 公司/车端", team:"🧭 团队知识",
+                project:"📦 项目", personal:"👤 个人"};
+    $("#kbdoms").innerHTML = j.domains.map(d=>`
+      <div class="kbdom ${d.files ? "" : "empty"}">
+        <div class="dn">${DN[d.domain] || d.domain}<span class="mono">${d.domain}</span></div>
+        <div class="dn2"><b>${d.files}</b> 文件 · <b>${d.chunks}</b> chunks
+          ${d.collection ? `<br>集合 <span class="mono">${esc(d.collection)}</span>${d.ingest_at ? ` · 入库 ${d.ingest_at}` : ""}` : "<br>暂无内容/集合"}
+        </div>
+      </div>`).join("");
+    renderKBTree();
+  }catch(e){
+    $("#kbtree").innerHTML = `<div class="empty">加载失败：${esc(String(e.message || e))}</div>`;
+  }
+}
+
+function kbRender(n, q, depth){
+  if(n.dir){
+    const kids = [...(n.children || [])].sort((a,b)=>(b.dir?1:0)-(a.dir?1:0)||a.name.localeCompare(b.name));
+    // 目录名本身命中 → 整棵子树不过滤直接展示
+    const selfMatch = q && n.name.toLowerCase().includes(q);
+    const inner = kids.map(c=>kbRender(c, selfMatch ? "" : q, depth+1)).filter(h=>h!==null).join("");
+    if(q && !inner) return null;
+    const open = q || depth < 2 || (n.files || 0) <= 30 ? " open" : "";
+    const lbl = n.label ? ` <span class="lb">${n.label}</span>` : "";
+    return `<details${open}><summary><span class="tw">▶</span><span class="fo">📁</span>
+      <span class="kn">${esc(n.name)}</span>${lbl}
+      <span class="kc">${n.chunks} chunks · ${n.files} 文件</span></summary>
+      <div class="kids">${inner}</div></details>`;
+  }
+  if(q && !n.name.toLowerCase().includes(q)) return null;
+  return `<div class="file"><span class="fo">📄</span><span class="fn">${esc(n.name)}</span>
+    <span class="kc">${n.chunks}</span></div>`;
+}
+
+function renderKBTree(){
+  const q = $("#kbfilter").value.trim().toLowerCase();
+  const html = kbData.domains.map(d=>{
+    const inner = kbRender(d.tree, q, 1);
+    if(q && inner===null) return "";
+    return `<details open><summary><span class="tw">▶</span><span class="fo">🗄️</span>
+      <span class="kn">${d.domain}</span><span class="kc">${d.chunks} chunks · ${d.files} 文件</span></summary>
+      <div class="kids">${inner || "<div class='empty'>（空）</div>"}</div></details>`;
+  }).join("");
+  $("#kbtree").innerHTML = html || "<div class='empty'>无匹配文件</div>";
+  $("#kbfilterhint").textContent = q ? `按「${$("#kbfilter").value.trim()}」过滤中` : "";
+}
+
+$("#kbrefresh").onclick = ()=>loadKB(true);
+$("#kbfilter").oninput = ()=>{ if(kbData) renderKBTree(); };
 
 /* ══ 页签2 在线测试 ══ */
 function setConn(user){
