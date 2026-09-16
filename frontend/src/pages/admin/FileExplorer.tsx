@@ -7,6 +7,7 @@ import API_CONFIG from '@/config/api';
 import { formatDateTime } from '@/shared/utils/url';
 import { normalizeList } from '@/shared/utils/list';
 import { useAuthStore, PERMISSION_RESOURCE_DOWNLOAD } from '@/stores/auth';
+import { readStored } from '@/stores/authStorage';
 
 // 后端 Child schema：resource-folders/root/children 与 resource-folders/{id}/children 的返回项
 interface ChildItem {
@@ -126,7 +127,9 @@ export default function FileExplorer() {
 
   const download = (item: ChildItem) => {
     // 代理下载端点直接返回文件流，支持浏览器内预览/下载
-    window.open(`${ADMIN_BASE}${RESOURCES_PREFIX}/${item.id}/download`, '_blank');
+    // window.open 无法带 Authorization 头，token 走查询参数，与任务附件下载一致
+    const token = encodeURIComponent(readStored('AUTH_TOKEN') || '');
+    window.open(`${ADMIN_BASE}${RESOURCES_PREFIX}/${item.id}/download?token=${token}`, '_blank');
   };
 
   // 分享：获取 3 分钟有效的预签名 URL 并复制到剪贴板

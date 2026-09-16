@@ -9,6 +9,7 @@ import { Input, Textarea } from 'tdesign-mobile-react';
 import { createRequest, ApiError, clearCache } from '@/api/client';
 import API_CONFIG from '@/config/api';
 import { useAuthStore } from '@/stores/auth';
+import { readStored } from '@/stores/authStorage';
 import { STATUS_OPTIONS, LIFECYCLE_STATUSES, PROJECT_ABORTED, calcLifecycleProgress } from '@/shared/utils/projectLifecycle';
 import { MacCheck, MacChevronRight, MacFileText, MacPencil, MacPlus, MacRefreshCw } from '@/shared/components/macaronIcons';
 
@@ -498,7 +499,7 @@ export default function ProjectDetail() {
               <div key={doc.resource_id} className="mac-doc-row">
                 <a
                   className="mac-doc-row__link"
-                  href={`${API_CONFIG.ADMIN.BASE_URL}/resource-manager/resources/${doc.resource_id}/download`}
+                  href={`${API_CONFIG.ADMIN.BASE_URL}/resource-manager/resources/${doc.resource_id}/download?token=${encodeURIComponent(readStored('AUTH_TOKEN') || '')}`}
                   target="_blank"
                   rel="noreferrer"
                 >
