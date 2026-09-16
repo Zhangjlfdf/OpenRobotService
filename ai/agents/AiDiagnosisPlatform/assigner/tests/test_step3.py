@@ -570,3 +570,21 @@ class TestL3AutoCluster:
         assert count_term(10) > count_term(1)
         assert soft < raw
         assert 1.2 < soft < 1.8
+
+
+class TestClusterLearningSource:
+    """问题簇学习只认 tasks.source == ai。"""
+
+    def test_only_ai_source_allowed(self):
+        """正常流程：ai 可进簇；manual / zentao / 空 / 大小写变体按规则。"""
+        from ai.agents.AiDiagnosisPlatform.assigner.sync.history_sync import (
+            is_cluster_learning_source,
+        )
+        assert is_cluster_learning_source("ai") is True
+        assert is_cluster_learning_source("AI") is True
+        assert is_cluster_learning_source(" ai ") is True
+        assert is_cluster_learning_source("manual") is False
+        assert is_cluster_learning_source("zentao") is False
+        assert is_cluster_learning_source("") is False
+        assert is_cluster_learning_source(None) is False
+        assert is_cluster_learning_source("ai_agent") is False

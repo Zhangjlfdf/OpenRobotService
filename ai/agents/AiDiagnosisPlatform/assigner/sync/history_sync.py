@@ -1,9 +1,8 @@
-"""历史工单同步服务：从后端 tasks 表拉取已解决/已关闭的工单分配记录。
+"""问题簇历史同步：从后端 tasks 表拉取已解决/已关闭的 AI 工单分配记录。
 
 缓存策略：首次请求或缓存过期时全量同步，TTL 10 分钟。
-数据来源：tasks 表 status ∈ {resolved, closed} 且 assigned_to 非空。
-A/B 两路都吃这两档：很多人解了不关，只取 closed 会漏经验。
-A 路走 Qdrant（history_indexer），B 路走本模块拉表聚簇；两边都吃 resolved+closed 全量，不再截 500。
+仅供 Step3·问题簇学习：status ∈ {resolved, closed}、assigned_to 非空、source='ai'。
+相似工单走 Qdrant（history_indexer），不经本模块，仍可索引非 AI 结单。
 """
 
 import time
@@ -16,6 +15,14 @@ logger = get_logger("ASSIGNER")
 _history_cache: Optional[List[dict]] = None
 _history_ts: Optional[float] = None
 _CACHE_TTL = 600
+
+# 问题簇学习只认 AI 工单（与派单 Worker 一致）
+CLUSTER_LEARNING_SOURCE = "ai"
+
+
+def is_cluster_learning_source(source) -> bool:
+    """是否允许进入问题簇学习。只认 tasks.source == 'ai'。"""
+    return (str(source or "").strip().lower() == CLUSTER_LEARNING_SOURCE)
 
 
 def _extract_keywords(text: str, keyword_dict: Dict[str, List[str]]) -> Set[str]:
@@ -33,8 +40,7 @@ def _extract_keywords(text: str, keyword_dict: Dict[str, List[str]]) -> Set[str]
 def _extract_modules(text: str, keyword_dict: Dict[str, List[str]]) -> List[str]:
     """从文本判定工单归属的模块（问题域标签）。
 
-    命中某模块的任意关键词即计入。返回命中模块列表，供 B路（问题域聚人）和
-    A路（相似工单）payload 使用。
+    命中某模块的任意关键词即计入。返回命中模块列表。
     """
     if not text or not keyword_dict:
         return []
@@ -54,7 +60,6 @@ def _norm_task_type(t) -> str:
         if hasattr(t, "value"):
             return str(t.value)
         s = str(t)
-        # "TaskType.problem" → "problem"
         return s.rsplit(".", 1)[-1].strip().lower() or "problem"
     except Exception:
         return "problem"
@@ -69,10 +74,10 @@ def _fetch_from_tasks_table(module_keywords: Dict[str, List[str]]) -> list[dict]
         rows = (
             db.query(Task)
             .filter(
-                # 已解决 + 已关闭：解了不关的单也进 B 路自动簇
                 Task.status.in_([TaskStatus.RESOLVED, TaskStatus.CLOSED]),
                 Task.assigned_to.isnot(None),
                 Task.assigned_to != "",
+                Task.source == CLUSTER_LEARNING_SOURCE,
             )
             .order_by(Task.created_at.desc())
             .all()
@@ -83,7 +88,6 @@ def _fetch_from_tasks_table(module_keywords: Dict[str, List[str]]) -> list[dict]
             desc = t.description or ""
             combined = f"{title} {desc}"
             keywords = _extract_keywords(combined, module_keywords)
-            # 从 metadata_info 提取故障码/车型（Agent 诊断结果落库存于 JSON）
             meta = getattr(t, "metadata_info", None)
             if not isinstance(meta, dict):
                 try:
@@ -91,6 +95,9 @@ def _fetch_from_tasks_table(module_keywords: Dict[str, List[str]]) -> list[dict]
                     meta = json.loads(meta) if meta else {}
                 except Exception:
                     meta = {}
+            src = getattr(t, "source", None) or CLUSTER_LEARNING_SOURCE
+            if not is_cluster_learning_source(src):
+                continue
             records.append({
                 "ticket_id": str(t.id),
                 "engineer_id": t.assigned_to,
@@ -98,15 +105,15 @@ def _fetch_from_tasks_table(module_keywords: Dict[str, List[str]]) -> list[dict]
                 "description": desc[:300],
                 "task_type": _norm_task_type(getattr(t, "task_type", None)),
                 "keywords": keywords,
-                # ── 召回增强字段 ──
-                "modules": _extract_modules(combined, module_keywords),  # 问题域标签（B路用）
-                "created_at": (                                         # 时间衰减：优先用解决/关闭时间
+                "modules": _extract_modules(combined, module_keywords),
+                "created_at": (
                     getattr(t, "resolved_at", None)
                     or getattr(t, "closed_at", None)
                     or getattr(t, "created_at", None)
                 ),
-                "fault_code": meta.get("fault_code") or "",              # 故障码强匹配用
-                "robot_type": meta.get("robot_type") or "",              # 车型匹配用
+                "fault_code": meta.get("fault_code") or "",
+                "robot_type": meta.get("robot_type") or "",
+                "source": str(src).strip(),
             })
         return records
     finally:
@@ -125,7 +132,10 @@ def load_history_records(
     t0 = time.perf_counter()
     _history_cache = _fetch_from_tasks_table(module_keywords)
     _history_ts = time.time()
-    logger.info(f"[history_sync] 同步完成: {len(_history_cache)} 条, {(time.perf_counter() - t0) * 1000:.0f}ms")
+    logger.info(
+        f"[history_sync] 问题簇 AI 源同步完成: {len(_history_cache)} 条, "
+        f"{(time.perf_counter() - t0) * 1000:.0f}ms"
+    )
     return _history_cache
 
 
