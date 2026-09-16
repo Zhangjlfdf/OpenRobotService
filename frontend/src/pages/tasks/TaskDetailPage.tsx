@@ -423,7 +423,13 @@ export default function TaskDetailPage() {
         { label: '暂停任务', nextStatus: 'pending', theme: 'warning', customStyle: BTN_SECONDARY },
         { label: '处理完成', nextStatus: 'resolved', theme: 'success', customStyle: BTN_PRIMARY },
       ],
-      pending: [{ label: '继续处理', nextStatus: 'in_progress', theme: 'primary', actionType: 'resume', customStyle: BTN_PRIMARY }],
+      pending: (isAssignee && isReporter)
+        ? [
+            // 工单退回发起人后：发起人可重新发起（继续处理）或关闭工单
+            { label: '重新发起', nextStatus: 'in_progress', theme: 'primary', actionType: 'resume', customStyle: BTN_PRIMARY },
+            { label: '关闭工单', nextStatus: 'closed', theme: 'default', customStyle: BTN_SECONDARY },
+          ]
+        : [{ label: '继续处理', nextStatus: 'in_progress', theme: 'primary', actionType: 'resume', customStyle: BTN_PRIMARY }],
       resolved: [
         { label: '未解决', nextStatus: 'in_progress', theme: 'warning', actionType: 'reopen', customStyle: BTN_SECONDARY },
         { label: '确认关闭', nextStatus: 'closed', theme: 'default', customStyle: BTN_PRIMARY },
@@ -1482,6 +1488,9 @@ export default function TaskDetailPage() {
           const canOperate = hasPermission('backend:tasks:operate');
           const assigneeOnlyStatuses = ['new', 'in_progress', 'pending', 'paused'];
           const showRoleActions = canOperate || (assigneeOnlyStatuses.includes(status) ? isAssignee : (status === 'resolved' ? isReporter : false));
+          // 已解决状态：提单人仅可修改工单/升级上报，不应退回工单或重新指派
+          // 退回工单/重新指派应由处理人在非已解决状态下操作
+          const isResolved = status === 'resolved';
           // 达到最大回合：升级上报强制可见（提单人/接单人任一），替代管理员介入
           const round = detail.step_negotiation_round ?? 0;
           const maxRound = detail.step_neg_max_rounds ?? 3;
@@ -1496,8 +1505,12 @@ export default function TaskDetailPage() {
                 {showRoleActions && (
                   <>
                     <Button size="small" theme="default" onClick={startEdit}>修改工单</Button>
-                    <Button size="small" theme="default" onClick={() => { setReturnReason(''); setShowReturnConfirmPopup(true); }}>退回工单</Button>
-                    <Button size="small" theme="default" onClick={() => { setReassignUser(null); setReassignReason(''); setShowReassignPopup(true); }}>重新指派</Button>
+                    {!isResolved && (
+                      <Button size="small" theme="default" onClick={() => { setReturnReason(''); setShowReturnConfirmPopup(true); }}>退回工单</Button>
+                    )}
+                    {!isResolved && (
+                      <Button size="small" theme="default" onClick={() => { setReassignUser(null); setReassignReason(''); setShowReassignPopup(true); }}>重新指派</Button>
+                    )}
                     <Button
                       size="small"
                       theme={reachedMax ? 'danger' : 'default'}
