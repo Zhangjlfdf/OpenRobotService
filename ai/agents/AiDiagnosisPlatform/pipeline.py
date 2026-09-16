@@ -668,6 +668,10 @@ _PROJECT_ASK_RE = re.compile(
     r"项目名称|项目名字|哪个项目|什么项目|所在的项目|所在项目|"
     r"关联项目|所属项目|项目是哪|项目叫什")
 
+# 项目序号回应：纯序号/第N个/N号（含中文数字），供 project_choice 原话溯源门
+# 判「用户在答编号题」（还原块挂起时 LLM 按块把序号还原成项目名照抄）
+_PROJ_SEQ_RE = re.compile(r"^\s*(?:第)?\s*[0-9０-９一二三四五六七八九十]{1,3}\s*(?:个|号|项)?\s*$")
+
 
 def _strip_project_ask(text: str) -> str:
     """追问话术后验门：删除问项目的问句（按句切分，命中模式的句子整句删除）。
@@ -2393,6 +2397,38 @@ class AiDiagnosisPlatform:
                 if len(hs) == 1:
                     cands[id(hs[0])] = hs[0]
         return list(cands.values())
+
+    @staticmethod
+    def _project_choice_supported(choice: str, query: str, has_candidates: bool) -> bool:
+        """project_choice 原话溯源门（0916 conv1325/task835 实锤）。
+
+        事故形态：用户答编号「2」正确预填「摇人吧服务号」后，还原块按设计清空；
+        后续收集轮 LLM 从快路径注入的名下项目列表里幻觉照抄 project_choice=
+        "MMQ自测"，把已落地的正确预填覆盖掉——话术报 MMQ自测、用户弹窗手动改回，
+        预填与所选项目不一致（用户报 bug 单 835）。
+
+        支撑判定（三选一，与 planner [mention] 原话溯源门同纪律）：
+        1. choice=="last"：指代上一单（独立语义，上游有自己的数据来源校验）；
+        2. 原话直呼：choice 去空格后出现在去空格的本轮原话里；
+        3. 序号回应：还原块挂起（has_candidates）且原话是纯序号（「2」「第2个」
+           「3号」）——LLM 按 _proj_pick_block 把序号还原成完整项目名照抄，
+           原话里只有序号，不能拿「原话不含项目名」误杀。
+
+        无支撑 = LLM 幻觉（用户本轮根本没提项目），拒收——预填是单向管道，
+        已落地的正确预填不允许被无原话支撑的输出覆盖；用户改项目走弹窗
+        （设计内唯一改口入口）或原话明说（有支撑，允许覆盖）。
+        """
+        c = (choice or "").strip()
+        if not c:
+            return False
+        if c.lower() == "last":
+            return True
+        q = "".join((query or "").split())
+        if q and "".join(c.split()) in q:
+            return True
+        if has_candidates and _PROJ_SEQ_RE.match(query or ""):
+            return True
+        return False
 
     @staticmethod
     def _match_project_mention(mention: str, pool: List[Dict[str, str]]) -> Optional[Dict[str, str]]:
@@ -5644,7 +5680,22 @@ class AiDiagnosisPlatform:
         _pf_hit_this_turn = False
         if str(parsed.get("project_choice") or "").strip():
             _choice_raw = str(parsed.get("project_choice")).strip()
-            if _choice_raw.lower() == "last":
+            # 🔴 原话溯源门（0916 conv1325/task835 实锤）：预填已落地（答编号
+            # 「2」正确命中摇人吧服务号、还原块已清空）后，后续收集轮 LLM 从
+            # 快路径注入的名下项目列表里幻觉照抄 project_choice="MMQ自测"，
+            # 把正确预填覆盖掉——话术报 MMQ自测、用户弹窗手动改回，预填与
+            # 所选项目不一致。choice 必须在本轮原话里有支撑（直呼项目名/
+            # 还原块挂起时的序号回应/last 指代），无支撑=幻觉，拒收并保留
+            # 现有预填（用户改项目走弹窗或原话明说，两者都不受限）。
+            if not self._project_choice_supported(
+                    _choice_raw, request.query,
+                    bool(state.project_candidates)):
+                logger.warning(
+                    f"[stream] project_choice 原话溯源不支撑，拒收幻觉保留现有预填: "
+                    f"{_choice_raw[:50]!r} query={(request.query or '')[:50]!r} "
+                    f"pending={getattr(state, 'pending_prefill_project', None) and state.pending_prefill_project.get('name')!r}")
+                parsed["project_choice"] = ""
+            elif _choice_raw.lower() == "last":
                 # 指代上一单项目（0828 智能感）：数据来自真实提交记录，无需校验池；
                 # 上单无项目（存量会话/未绑定）→ 按未命中处理，闸门出题兜底
                 _lt = state.last_submitted_ticket or {}
@@ -5773,8 +5824,25 @@ class AiDiagnosisPlatform:
         # → 原流程照旧。按钮路径不经此处（prepare_ticket 与项目零关联）。
         # 出题候选记入 _gate_proj_choices，收尾塞 result 事件给前端渲染可点按钮
         # （与 prepare 路径统一：点击=以用户身份发送序号走编号还原链路）。
+        # 0916 补 action=submit 触发（task835 用户实测）：信息完备的直接提单，
+        # flash 输出 submit 却漏填 ticket_intent → 闸门被绕过先问字段，违反
+        # 「提单先引导项目后补字段」规定。submit=LLM 已认定提单，更该先撞项目题
+        # （出题轮同轮预置 decide 挂收集，答完编号必进字段收集，闭环已有）。
+        # 排除 ticket_cancel：取消提单轮的 action 也是 submit，不能被截胡出题。
         _gate_proj_choices = []
-        if (parsed.get("ticket_intent") and not state.project_asked
+        logger.info(
+            "[stream] 项目闸门判定: "
+            f"ticket_intent={parsed.get('ticket_intent')!r} "
+            f"action={parsed['action']!r} "
+            f"cancel={parsed.get('ticket_cancel')!r} "
+            f"asked={state.project_asked!r} "
+            f"pending={bool(state.pending_prefill_project)!r} "
+            f"collecting={state.ticket_collecting!r} "
+            f"draft={bool(memory.metadata.get('ticket_draft'))!r}")
+        if ((parsed.get("ticket_intent")
+                or parsed.get("action") == "submit")
+                and not parsed.get("ticket_cancel", False)
+                and not state.project_asked
                 and not state.pending_prefill_project and not state.ticket_collecting
                 # 草稿已存在＝项目已进草稿（预填/弹窗已定），再出选题只会
                 # 打断草稿后的补充与追问（0903 实锤：问「没有弹窗」被出题顶掉）

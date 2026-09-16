@@ -12,6 +12,7 @@
 """
 import asyncio
 import glob
+import hashlib
 import json
 import os
 import re
@@ -32,6 +33,8 @@ PROJ = os.path.dirname(os.path.dirname(HERE))
 BACKEND = os.path.join(PROJ, "backend")  # 让 from app.* 可解析
 if BACKEND not in sys.path:
     sys.path.insert(0, BACKEND)
+if PROJ not in sys.path:
+    sys.path.insert(0, PROJ)  # 让 from ai.config import _KB_DIR 可解析（知识库页签用）
 DATA_ROOT = r"C:/Users/PAJ26020/Desktop/export_dar"
 SINK_ROOT = r"D:/Code/OpenRobotService_Data/review/ticket_resolutions"
 PORT = int(os.environ.get("DAR_STUDIO_PORT", "9527"))
@@ -1699,6 +1702,116 @@ def sink_review(dir: str = ""):
     if not os.path.isfile(p):
         raise HTTPException(404, "审核页不存在（先「拉取待审」）")
     return FileResponse(p, headers={"Cache-Control": "no-cache"})
+
+
+# ── 知识库结构（页签4 知识库）────────────────────────────────
+# sub_domain → 检索标签（仅展示用；与 retrieval.py / pipeline.py 的 _sub_labels
+# 同源，那边新增子域后这里补一行即可，漏了只影响着色不影响功能）
+_KB_LABELS = {
+    "navigation": "📐 导航", "standards": "📐 标准",
+    "product_catalog": "🏢 产品", "vda5050_protocol": "🏢 协议",
+    "vehicle_errors": "🚗 车端", "vehicle_implementation": "🚗 车端",
+    "vehicle_calibration": "🚗 车端", "vehicle_io": "🚗 车端", "vehicle_motion": "🚗 车端",
+    "ORS": "🎫 服务号",
+    "team/diagnosis_cards": "🔍 诊断卡", "USP/faq": "📋 FAQ", "USP/manual": "📖 手册",
+    "USP/error_codes": "🚨 平台错误码", "USP/overview": "📘 模块文档",
+    "USP/troubleshooting": "🏭 排查树", "USP/translation": "🌐 翻译",
+    "USP/terminology": "🔤 术语表", "USP/ui_pages": "🧭 页面导航",
+}
+
+_KB_CACHE: dict = {"sig": None, "data": None}
+
+
+def _kb_fingerprint() -> str:
+    """全部 KB md 文件的 mtime+size 指纹——没变就直接用缓存，页面秒开。"""
+    from ai.config import _KB_DIR
+    h = hashlib.md5()
+    for d in ("industry", "company", "team", "project", "personal"):
+        root = _KB_DIR / d
+        if not root.is_dir():
+            continue
+        for p in sorted(root.rglob("*.md")):
+            st = p.stat()
+            h.update(f"{p}|{st.st_mtime_ns}|{st.st_size};".encode())
+    return h.hexdigest()
+
+
+def _kb_build() -> dict:
+    """扫 KB 源目录 → 真实 parser 算 chunk 数 → 目录树 + 域级指针/入库时间。"""
+    from ai.config import _KB_DIR, get_active_collection_for
+    from ai.ingestion.parsers.kb_markdown import KBDomainIngester
+
+    domains = []
+    total_files = total_chunks = 0
+    for d in ("industry", "company", "team", "project", "personal"):
+        ing = KBDomainIngester(domain=d)
+        per_file: dict = {}
+        for e in ing.parse():
+            per_file[e.source_file] = per_file.get(e.source_file, 0) + 1
+
+        root = {"name": d, "dir": True, "chunks": 0, "files": 0, "children": []}
+        for rel in sorted(per_file):
+            node = root
+            parts = rel.split("/")
+            for seg in parts[:-1]:
+                child = next((c for c in node["children"] if c["dir"] and c["name"] == seg), None)
+                if child is None:
+                    child = {"name": seg, "dir": True, "chunks": 0, "files": 0, "children": []}
+                    node["children"].append(child)
+                node = child
+            node["children"].append({"name": parts[-1], "dir": False, "chunks": per_file[rel]})
+
+        def _agg(n):
+            if not n["dir"]:
+                return n["chunks"], 1
+            cs = fs = 0
+            for c in n["children"]:
+                cc, cf = _agg(c)
+                c["chunks"], c["files"] = cc, cf
+                cs += cc
+                fs += cf
+            return cs, fs
+
+        root["chunks"], root["files"] = _agg(root)
+        for c in root["children"]:
+            if c["dir"]:
+                c["label"] = _KB_LABELS.get(f"{d}/{c['name']}", _KB_LABELS.get(c["name"], ""))
+
+        state_p = _KB_DIR / ".ingest_state" / f"{d}.json"
+        ing_at = ""
+        if state_p.is_file():
+            ing_at = time.strftime("%m-%d %H:%M", time.localtime(state_p.stat().st_mtime))
+        domains.append({"domain": d, "files": root["files"], "chunks": root["chunks"],
+                        "collection": get_active_collection_for(d) or "",
+                        "ingest_at": ing_at, "tree": root})
+        total_files += root["files"]
+        total_chunks += root["chunks"]
+    return {"domains": domains, "total_files": total_files, "total_chunks": total_chunks,
+            "generated_at": time.strftime("%Y-%m-%d %H:%M:%S")}
+
+
+@app.get("/api/kb_structure")
+def kb_structure(refresh: int = 0):
+    """KB 目录树 + chunk 统计（复用真实 parser；源文件 mtime 没变走缓存，refresh=1 强制重算）。"""
+    try:
+        sig = _kb_fingerprint()
+    except Exception as e:
+        raise HTTPException(500, f"扫描 KB 目录失败: {e}")
+    if refresh or _KB_CACHE["data"] is None or _KB_CACHE["sig"] != sig:
+        try:
+            _KB_CACHE["data"] = _kb_build()
+            _KB_CACHE["sig"] = sig
+        except Exception as e:
+            raise HTTPException(500, f"解析 KB 失败: {e}")
+    return _KB_CACHE["data"]
+
+
+@app.get("/vendor/echarts.min.js")
+def vendor_echarts():
+    """本地 vendored echarts（知识库树图用），避免外网 CDN 依赖。"""
+    return FileResponse(os.path.join(HERE, "vendor", "echarts.min.js"),
+                        media_type="application/javascript",
+                        headers={"Cache-Control": "max-age=86400"})
 
 
 @app.get("/")
