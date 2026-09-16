@@ -66,6 +66,8 @@ export const buildRelevanceFilters = (
       { field: 'assignedToName', op: 'contains', value: username },
       { field: 'customer', op: 'eq', value: username },
       { field: 'customerName', op: 'contains', value: username },
+      // 我参与的工单：当前用户在 task_participants 表中（评论/附件等行为触发写入）
+      { field: 'participatedBy', op: 'eq', value: true },
     ];
     return [{ or: userRelatedFilters }];
   }
