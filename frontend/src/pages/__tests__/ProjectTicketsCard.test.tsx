@@ -47,6 +47,14 @@ vi.mock('@/stores/auth', () => ({
   useAuthStore: (selector: (s: { permissions: string[] }) => unknown) => selector({ permissions: authState.permissions }),
 }));
 
+// 工单条目点击跳转：断言 mock 的 useNavigate 收到的目标路由
+// （jsdom 的 UA 不是微信，navigateInWechat 会直接调 navigate）
+const mockNavigate = vi.hoisted(() => vi.fn());
+vi.mock('react-router-dom', async () => {
+  const actual = await vi.importActual<typeof import('react-router-dom')>('react-router-dom');
+  return { ...actual, useNavigate: () => mockNavigate };
+});
+
 const TS = '2026-09-14 10:00:00';
 
 const TICKET = {
@@ -133,6 +141,12 @@ describe('ProjectTicketsCard（项目工单卡）', () => {
     // 未配置时给默认排序口径说明，不显示 AI 判定
     expect(screen.getByText(/当前按优先级、截止时间与创建时间默认排序/)).toBeTruthy();
     expect(screen.queryByText('AI 判定')).toBeNull();
+  });
+
+  it('点击阻滞工单条目跳转到该工单详情页（/tasks/:id）', async () => {
+    renderCard();
+    fireEvent.click(await screen.findByText('导航不识别货架'));
+    expect(mockNavigate).toHaveBeenCalledWith('/tasks/12');
   });
 
   it('AI 配置模式：显示 AI 判定徽标、总述与逐单阻滞理由', async () => {

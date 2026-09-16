@@ -2,6 +2,7 @@
 // 位于「项目信息管理」与「项目动态」之间，卡片三部分：
 //   ① 顶部三格汇总：总工单数 / 正在处理 / 已完成（状态 key 与仪表盘同口径）；
 //   ② 核心阻滞工单（AI 配置判定，未配置时按优先级/超期默认排序）；
+//      条目整块可点，跳转该工单详情页 /tasks/:id（与仪表盘「工单明细」列表同交互）；
 //   ③ 工单变化趋势（近 8 周每周新建工单数，柱状图，echarts）。
 //
 // 数据源：GET /api/admin/project-tickets/projects/{id}/overview（系统任务 tasks 表，
@@ -10,6 +11,7 @@
 // permissions 含 admin）；点开弹窗输入判定要求，服务端把项目 + 工单基础数据交大模型
 // 判定核心阻滞工单并落库，返回更新后的阻滞板块直接替换展示。
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { Popup, Textarea, Toast } from 'tdesign-mobile-react';
 import {
   configureBlockingWeightsApi,
@@ -25,6 +27,7 @@ import {
 } from '@/shared/components/macaronIcons';
 import { TICKET_STATUS_MAP } from '@/shared/constants/dashboard';
 import { PRIORITY_DISPLAY_MAP } from '@/shared/constants/ticket';
+import { navigateInWechat } from '@/shared/utils/wechatJsSdk';
 
 // 后端条目给的是原始 TaskStatus 枚举值；卡片展示统一转到与仪表盘一致的前端状态 key
 // （pending→暂停/挂起、canceled→已取消），标签/配色直接复用仪表盘常量。
@@ -43,6 +46,8 @@ const TREND_BAR_COLOR = '#3697c3';
 export default function ProjectTicketsCard({ projectId }: { projectId: string }) {
   // 「配置阻滞权重」仅管理员/超级管理员可见（与后端 get_current_admin_user 的判据一致）
   const canConfigure = useAuthStore((s) => Array.isArray(s.permissions) && s.permissions.includes('admin'));
+
+  const navigate = useNavigate();
 
   const [overview, setOverview] = useState<ProjectTicketsOverview | null>(null);
   const [loading, setLoading] = useState(true);
@@ -210,12 +215,20 @@ export default function ProjectTicketsCard({ projectId }: { projectId: string })
                   blockingTickets.map((ticket) => {
                     const meta = TICKET_STATUS_MAP[RAW_STATUS_TO_KEY[ticket.status] ?? ticket.status];
                     const reason = blocking?.reasons?.[String(ticket.id)];
+                    // 整块可点：跳转该工单详情页（/tasks/:id，与仪表盘「工单明细」列表同交互）
                     return (
-                      <article key={ticket.id} className="mac-tix__ticket">
+                      <article
+                        key={ticket.id}
+                        className="mac-tix__ticket"
+                        onClick={() => navigateInWechat(navigate, `/tasks/${ticket.id}`)}
+                      >
                         <div className="mac-tix__ticket-head">
                           <span className="mac-tix__ticket-title">{ticket.title}</span>
-                          <span className={`mac-tix__pri mac-tix__pri--${ticket.priority || 'medium'}`}>
-                            {PRIORITY_DISPLAY_MAP[ticket.priority] ?? ticket.priority}
+                          <span className="mac-tix__ticket-tail">
+                            <span className={`mac-tix__pri mac-tix__pri--${ticket.priority || 'medium'}`}>
+                              {PRIORITY_DISPLAY_MAP[ticket.priority] ?? ticket.priority}
+                            </span>
+                            <span className="mac-tix__ticket-go" aria-hidden="true">›</span>
                           </span>
                         </div>
                         <div className="mac-tix__ticket-meta">

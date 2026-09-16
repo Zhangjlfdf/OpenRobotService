@@ -21,7 +21,9 @@
    - 未配置：默认规则——未完成工单（new / in_progress / pending）按
      「优先级（紧急→低）> 截止时间早者在前（无截止置后）> 创建时间新者在前」取前 3；
    - 已配置：按 AI 判定结果（`project_blocking_config.ai_result` 的工单ID 列表）回查展示，
-     工单已删除或已改绑其它项目的静默剔除；列表全空时退回默认规则。
+     工单已删除或已改绑其它项目的静默剔除；列表全空时退回默认规则；
+   - 条目交互：整块可点，跳转该工单详情页 `/tasks/:id`（与仪表盘「工单明细」
+     TicketStatusDetail 列表同交互；PC 微信内经 navigateInWechat 转整页跳转）。
 3. **工单变化趋势**：按自然周（周一为起点）统计该项目每周**新建**工单数，近 8 周（含本周）。
 
 ## 2. GET /projects/{project_id}/overview —— 工单概览
@@ -113,6 +115,6 @@
 - 后端：`backend/tests/test_project_tickets.py`（23 例，反射 runner，见文件头运行方式）——
   周趋势分桶、默认阻滞排序、提示词组装、AI 结果解析容错、阻滞板块取数与降级、
   描述摘要截断、空提示词校验。
-- 前端：`frontend/src/pages/__tests__/ProjectTicketsCard.test.tsx`（10 例）——
-  统计格、阻滞条目各字段、AI 模式徽标/总述/理由、趋势图数据、空态、失败重试、
-  管理员按钮显隐、弹窗预填与提交、空提示词与失败分支。
+- 前端：`frontend/src/pages/__tests__/ProjectTicketsCard.test.tsx`（11 例）——
+  统计格、阻滞条目各字段、点击条目跳转工单详情、AI 模式徽标/总述/理由、趋势图数据、
+  空态、失败重试、管理员按钮显隐、弹窗预填与提交、空提示词与失败分支。

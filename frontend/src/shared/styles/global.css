@@ -8449,10 +8449,16 @@ html, body, #root {
 .mac-tix__config { font-size: 11px; padding: 3px 9px; border-radius: 999px; color: var(--mac-blue-1); }
 .mac-tix__ai-summary { margin: 8px 0 0; font-size: 11.5px; line-height: 1.6; color: var(--mac-fg); }
 .mac-tix__empty { margin-top: 8px; font-size: 11.5px; color: var(--mac-muted-fg); }
+/* 阻滞工单条目：整块可点，跳转该工单详情页 /tasks/:id（与仪表盘「工单明细」列表同交互）；
+   右侧 › 作可进入的提示，按下时整块轻微变淡反馈（与 .mac-field-stack__row 同款） */
 .mac-tix__ticket {
   margin-top: 8px; padding: 10px 12px; border-radius: 12px;
   background: #fff; box-shadow: var(--mac-shadow-soft);
+  cursor: pointer;
 }
+.mac-tix__ticket:active { opacity: 0.85; }
+.mac-tix__ticket-tail { display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.mac-tix__ticket-go { color: var(--mac-muted-fg); font-size: 15px; line-height: 1; }
 .mac-tix__ticket-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
 .mac-tix__ticket-title { font-size: 12.5px; font-weight: 600; color: var(--mac-fg); line-height: 1.5; overflow-wrap: anywhere; }
 /* 优先级徽标：紧急实底最深、逐级变浅（蓝阶即状态类保留色，不引红黄色相） */
