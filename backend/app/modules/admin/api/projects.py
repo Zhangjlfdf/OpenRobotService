@@ -9,6 +9,7 @@ from typing import Optional, Dict, List, Any
 from app.modules.admin.schemas_das.request_models import ProjectCreate, ProjectUpdate, ProjectResponse
 from app.modules.admin.services.project_service import project_service, ProjectConflictError
 from app.modules.admin.services.risk_service import risk_service
+from app.modules.admin.services import project_ai_summary_service
 from app.modules.admin.services.permission_service import PermissionService
 from app.modules.admin.utils_das.config import security, DEBUG_MODE
 from app.core.database import db_manager
@@ -309,6 +310,27 @@ async def get_project(
         project["risk_list"] = "无"
     
     return project
+
+
+@project_router.post("/{project_id}/ai-summary", summary="生成 AI 项目摘要")
+async def generate_project_ai_summary(
+    project_id: str,
+    credentials: Optional = Depends(security if not DEBUG_MODE else lambda: None)
+) -> Dict[str, Any]:
+    """读取项目基础字段 +「项目信息管理」整棵信息树，大模型总结后写回 ext_info.overview.ai_summary。
+
+    大模型与「文件导入（AI 识别）」同一个（backend/.env 的 LLM_API_KEY，默认 DeepSeek flash，
+    接口走仓库根目录 ai/core/llm.py 的 LLMClient）。响应返回 summary 与更新后的 ext_info。
+    """
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    try:
+        return await project_ai_summary_service.generate_for_project(project)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
 
 
 @project_router.get("/{project_id}/members", response_model=List[Dict[str, Any]], summary="获取项目已关联人员")

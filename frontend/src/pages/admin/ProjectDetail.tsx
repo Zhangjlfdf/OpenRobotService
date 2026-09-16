@@ -4,6 +4,8 @@
 // 不再使用 field_links 承载编造的扩展字段。system_id 即企业微信原始记录 record_id，用于溯源。
 import { useState, useEffect, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { Navbar, Loading, Toast, Popup, Upload, Checkbox, BackTop } from 'tdesign-mobile-react';
 import { Input, Textarea } from 'tdesign-mobile-react';
 import { createRequest, ApiError, clearCache } from '@/api/client';
@@ -62,6 +64,7 @@ interface ProjectDetailData {
   system_integration?: string[] | null;
   server_deployment_status?: string | null;
   settlement_period?: string | null;
+  ext_info?: { overview?: Record<string, unknown>; activity?: Record<string, unknown> } | null;
 }
 
 // 项目阶段枚举与「项目时间进度」计算见 shared/utils/projectLifecycle.ts（与项目进度列表共用同一口径）
@@ -148,9 +151,11 @@ export default function ProjectDetail() {
   // 按要求先置空、保留就地编辑能力；编辑结果暂存在本页 state，待后端补列后再改为 saveField。
   const [overviewDraft, setOverviewDraft] = useState({ client: '', agvCount: '', uspVersion: '' });
   const [summaryExpanded, setSummaryExpanded] = useState(false);
-  // AI 项目摘要：后端暂无项目级摘要（现有 ai_summary 只到工单/任务级），先置空但保留展示空间，
-  // 接入后把这里换成接口返回值即可。
-  const aiSummary = '';
+  // AI 项目摘要：存 ext_info.overview.ai_summary，由 POST /projects/{id}/ai-summary 生成
+  // （后端读取「项目信息管理」整棵信息树 + 项目基础字段，与文件导入同一大模型），
+  // 刷新页面后随项目详情接口读回，不需要单独的加载逻辑。
+  const [aiGenerating, setAiGenerating] = useState(false);
+  const aiSummary = String((project?.ext_info?.overview?.ai_summary as string | undefined) || '');
   const [uploading, setUploading] = useState(false);
   const [lastSyncTime, setLastSyncTime] = useState<string | null>(null);
   const [syncFailed, setSyncFailed] = useState(false);
@@ -226,6 +231,26 @@ export default function ProjectDetail() {
   const saveOverviewDraft = (key: 'client' | 'agvCount' | 'uspVersion', label: string) => (value: string) => {
     setOverviewDraft((draft) => ({ ...draft, [key]: value }));
     Toast({ message: `「${label}」暂存在本页，后端字段接入后才会保存`, theme: 'warning' });
+  };
+
+  // 生成 AI 项目摘要：后端汇总项目基础字段与信息树全文调大模型，写回
+  // ext_info.overview.ai_summary 并随响应返回（大模型耗时较长，超时放宽到 180s）
+  const generateAiSummary = async () => {
+    if (aiGenerating || isNew) return;
+    setAiGenerating(true);
+    try {
+      const res = await request<{ summary: string; ext_info?: ProjectDetailData['ext_info'] }>(
+        `/projects/${id}/ai-summary`,
+        { method: 'POST', timeout: 180000 },
+      );
+      setProject((prev) => (prev ? { ...prev, ext_info: res.ext_info ?? prev.ext_info } : prev));
+      setSummaryExpanded(true);
+      Toast({ message: 'AI 摘要已生成并保存', theme: 'success' });
+    } catch (err) {
+      Toast({ message: `生成失败: ${err instanceof Error ? err.message : ''}`, theme: 'error' });
+    } finally {
+      setAiGenerating(false);
+    }
   };
 
   const handleCreate = async () => {
@@ -465,20 +490,32 @@ export default function ProjectDetail() {
             <div className="mac-task-exec">近7天任务执行：{project.task_execution_status}</div>
           )}
 
-          {/* AI 项目摘要：数据源待接入（后端暂无项目级摘要），先置空占位，保留展开/收起交互与展示空间 */}
+          {/* AI 项目摘要：POST /projects/{id}/ai-summary 生成（后端读取项目信息管理整棵树 +
+              项目基础字段，与文件导入同一大模型），结果存 ext_info.overview.ai_summary */}
           <div className="mac-ai">
             <div className="mac-ai__head">
               <span className="mac-ai__icon"><MacSparkles size={14} /></span>
               <span className="mac-ai__title">AI 项目摘要</span>
-              <span className="mac-ov-pending">待接入</span>
-              <button type="button" className="mac-ai__toggle" onClick={() => setSummaryExpanded((value) => !value)}>
-                {summaryExpanded ? '收起' : '展开'}
-                {summaryExpanded ? <MacChevronUp size={13} /> : <MacChevronDown size={13} />}
-              </button>
+              <div className="mac-ai__head-right">
+                {!isNew && (
+                  <button type="button" className="mac-ai__gen" disabled={aiGenerating} onClick={generateAiSummary}>
+                    {aiGenerating ? '生成中...' : aiSummary ? '重新生成' : 'AI 生成'}
+                  </button>
+                )}
+                <button type="button" className="mac-ai__toggle" onClick={() => setSummaryExpanded((value) => !value)}>
+                  {summaryExpanded ? '收起' : '展开'}
+                  {summaryExpanded ? <MacChevronUp size={13} /> : <MacChevronDown size={13} />}
+                </button>
+              </div>
             </div>
-            <p className={`mac-ai__body${aiSummary ? (summaryExpanded ? '' : ' is-collapsed') : ' is-empty'}`}>
-              {aiSummary || '暂无数据'}
-            </p>
+            {/* 摘要为大模型输出的结构化 Markdown（## 小节 + - 要点），用 react-markdown 渲染为 React 元素（天然防 XSS） */}
+            <div className={`mac-ai__body${aiSummary ? (summaryExpanded ? '' : ' is-collapsed') : ' is-empty'}`}>
+              {aiSummary ? (
+                <div className="mac-ai__md">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{aiSummary}</ReactMarkdown>
+                </div>
+              ) : '暂无数据'}
+            </div>
           </div>
         </section>
 

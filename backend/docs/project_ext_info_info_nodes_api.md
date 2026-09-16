@@ -1,6 +1,6 @@
 # 项目扩展信息（ext_info）与项目信息树（info_nodes）后端接口变更说明
 
-> 变更日期：2026-09-14（初版）；2026-09-15 新增 5.8 文件识别接口
+> 变更日期：2026-09-14（初版）；2026-09-15 新增 5.8 文件识别接口；2026-09-16 新增 4.4 AI 项目摘要接口
 > 模块：`app/modules/admin`（后台管理）
 > 路由公共前缀：`/api/admin`（`/api` 来自 `API_V1_STR`，`/admin` 来自 `admin_router`）
 
@@ -146,7 +146,27 @@ Service 逻辑（`update_project`）：
 
 前端处理约定：捕获 409 后提示用户刷新页面、基于最新数据重新编辑，不得静默重试覆盖他人修改。
 
-### 4.4 Schema 变更汇总
+### 4.4 POST /api/admin/projects/{project_id}/ai-summary —— AI 项目摘要（新增）
+
+- 用途：后台管理-项目详情页「项目概况」卡底部「AI 项目摘要」卡片；点「AI 生成 / 重新生成」时，后端读取项目基础字段 +「项目信息管理」整棵信息树，由大模型总结项目基础情况，写回 `ext_info.overview.ai_summary` 并随响应返回。
+- 请求：无 body。
+- Service 逻辑（`project_ai_summary_service.generate_for_project`）：
+  1. 读该项目的完整信息树（同 5.1），为空直接 400（提示先初始化信息树）；
+  2. 组装提示词（纯函数 `build_summary_prompt`）：项目 25 个已入库基础字段按中文标签逐行输出（空值跳过）+ 信息树按「父路径 / 子节点：内容」逐行渲染——text 折叠空白、select 解 `{"selected":...}`（非 JSON 旧数据按原文兜底）、file/image 取文件名；**空值节点不输出正文**，只统计为「（另有 N 个末级节点未填写）」附在末尾；正文超 12,000 字符截断；
+  3. 调大模型：接口用仓库根 `ai/core/llm.py` 的 `LLMClient`，密钥/模型取 backend 配置（`settings.LLM_API_KEY` / `LLM_API_URL` / `LLM_MODEL_NAME`，即**与文件识别（5.8）同一个 DeepSeek flash**）；temperature=0.3、max_tokens=1500、非流式、显式关闭思考链；
+  4. 清洗输出（去 ``` 围栏/首尾引号）后深拷贝 `ext_info` 合并 `overview.ai_summary`，走 `project_service.update_project` 落库（内部写入**不带 version**、跳过乐观锁，version 仍 +1，与企微同步同约定）；保存失败（项目被删）抛 400。
+- 响应 `200`：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `summary` | string | 生成的摘要正文（结构化 Markdown：`## 小节` + `- 要点`，250 字以内） |
+| `model` | string | 实际使用的模型名 |
+| `ext_info` | object | 写库后的完整 ext_info，前端直接替换本地状态即可，无需重新拉详情 |
+
+- 错误：`400`（信息树暂无节点 / 保存时项目已被删除）；`404`（项目不存在）；`503`（`LLM_API_KEY` 未配置、ai 模块缺失或大模型调用失败，detail 带中文原因）。
+- 提示词由两部分固定文案 + 动态资料组成：system「只输出总结本身（无代码块围栏/解释/寒暄）」；user「【项目基础字段】+【项目信息管理】+【输出格式】（结构化 Markdown：固定小节顺序——项目概况/硬件与车型/系统与部署/交付与进度/风险与关注点，无资料的小节省略；每节 1～2 条要点、全文 250 字以内、加粗最多 3～4 处；**不得编造**、不重复、不用套话）」。前端用 react-markdown 渲染该 Markdown。
+
+### 4.5 Schema 变更汇总
 
 - `ProjectBase`：新增 `ext_info: Optional[Dict[str, Any]]`
 - `ProjectUpdate`：新增 `ext_info`、`version: Optional[int]`
@@ -268,12 +288,12 @@ Service：[info_node_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/ap
 
 | 状态码 | 场景 | 来源 |
 |--------|------|------|
-| 400 | 更新节点时无任何有效字段；授权接口 type 参数非法 | info-nodes / licenses |
+| 400 | 更新节点时无任何有效字段；授权接口 type 参数非法；AI 摘要时信息树无节点 | info-nodes / licenses / projects（ai-summary） |
 | 401 | 未提供/无效 token、token 缺用户信息（/me 类接口） | projects |
 | 404 | 项目/节点不存在（含软删除项目） | projects、info-nodes |
 | 409 | 项目编号/名称重复；**乐观锁版本冲突** | projects（PUT） |
 | 500 | 权限服务联动失败、删除项目外键残留等 | projects |
-| 503 | 文件识别接口：`LLM_API_KEY` 未配置或大模型调用失败 | info-nodes（parse-file） |
+| 503 | 文件识别接口 / AI 项目摘要：`LLM_API_KEY` 未配置或大模型调用失败 | info-nodes（parse-file）、projects（ai-summary） |
 
 ## 八、涉及文件清单
 
@@ -283,8 +303,8 @@ Service：[info_node_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/ap
 | 模型 | [app/models/delivery.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/models/delivery.py)（Project / ProjectInfoNode）、[models_das/models.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/models_das/models.py)（再导出） |
 | Schema | [schemas_das/request_models.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/schemas_das/request_models.py) |
 | API | [api/projects.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/api/projects.py)、[api/info_nodes.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/api/info_nodes.py) |
-| Service | [services/project_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/services/project_service.py)、[services/info_node_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/services/info_node_service.py)、[services/info_node_import_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/services/info_node_import_service.py) |
-| 测试 | [tests/test_info_node_import.py](file:///d:/CODE/9_9/OpenRobotService/backend/tests/test_info_node_import.py)（文本抽取/目录与 prompt 构造/LLM 返回解析/0.9 阈值匹配/select 校验/归属解析，13 用例） |
+| Service | [services/project_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/services/project_service.py)、[services/info_node_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/services/info_node_service.py)、[services/info_node_import_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/services/info_node_import_service.py)、[services/project_ai_summary_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/services/project_ai_summary_service.py)（4.4） |
+| 测试 | [tests/test_info_node_import.py](file:///d:/CODE/9_9/OpenRobotService/backend/tests/test_info_node_import.py)（文本抽取/目录与 prompt 构造/LLM 返回解析/0.9 阈值匹配/select 校验/归属解析，13 用例）、[tests/test_project_ai_summary.py](file:///d:/CODE/9_9/OpenRobotService/backend/tests/test_project_ai_summary.py)（节点内容解码/信息树渲染/prompt 组装/输出清洗，10 用例） |
 | 模板 | [config/project_templates/default.yaml](file:///d:/CODE/9_9/OpenRobotService/backend/app/config/project_templates/default.yaml) |
 | 路由挂载 | [modules/admin/__init__.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/__init__.py) |
 
@@ -297,3 +317,4 @@ Service：[info_node_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/ap
 5. 空树项目一键初始化调 `import-template`——模板结构在后端 YAML 里，前端不保留副本（原前端常量 `PROJECT_INFO_TEMPLATE` 已删除），避免两套模板漂移。
 6. 导入文件（`/import`）除节点数组外，也接受「标题 → 内容」紧凑映射（`""` 文字、`[...]` 下拉选项、`{...}` 子节点，即 `project_templates/tmp.json` 的写法）。
 7. 信息编辑页「文件导入」走 `parse-file`（上传 → 转圈 → 三组预览勾选 → 确认后逐节点 CRUD）；上传时不要手写 `Content-Type`（交给浏览器带 boundary），大模型识别耗时较长，前端请求超时需放宽到 180s 以上。原「JSON 整树导入」入口已被该弹层替换，`/import` 接口与前端 `importInfoTreeApi` 保留未删（截图/调试仍可直调）。
+8. 项目概况卡「AI 项目摘要」：非新建模式显示「AI 生成 / 重新生成」按钮（生成中禁用），POST `/projects/{id}/ai-summary`（超时同样放宽到 180s）；摘要正文从 `project.ext_info.overview.ai_summary` 派生并用 react-markdown 渲染（结构化 Markdown；纯文本旧数据也兼容），生成响应里的 `ext_info` 直接替换本地状态即可持久展示；未生成过时展示「暂无数据」，空信息树项目后端会返回 400 提示先初始化信息树。

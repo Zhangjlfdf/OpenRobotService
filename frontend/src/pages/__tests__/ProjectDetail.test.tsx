@@ -1,12 +1,14 @@
 import type { ReactNode } from 'react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, within, act } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 
 const mockNavigate = vi.fn();
 const mockCreateRequest = vi.fn();
 const mockToast = vi.fn();
 const mockAiGet = vi.fn();
+// useParams 的 id 由用例控制：默认 'new'（新建模式），AI 摘要用例切到 'p1'
+const routeParams = vi.hoisted(() => ({ id: 'new' }));
 
 // 必须用 vi.hoisted：vi.mock 工厂会被提升到文件顶部，在普通顶层 class 之前执行，
 // 直接引用会报 "Cannot access 'MockApiError' before initialization"
@@ -23,7 +25,7 @@ vi.mock('react-router-dom', async () => {
   const actual = await vi.importActual('react-router-dom');
   return {
     ...actual,
-    useParams: () => ({ id: 'new' }),
+    useParams: () => ({ id: routeParams.id }),
     useNavigate: () => mockNavigate,
   };
 });
@@ -124,6 +126,7 @@ const renderView = () =>
 describe('ProjectDetail（USP 项目新建）', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    routeParams.id = 'new';
     mockNavigate.mockClear();
     mockToast.mockClear();
     mockCreateRequest.mockClear();
@@ -167,5 +170,85 @@ describe('ProjectDetail（USP 项目新建）', () => {
     await waitFor(() => {
       expect(mockToast).toHaveBeenCalledWith({ message: '项目编号「CODE-1」已存在，请重新输入', theme: 'warning' });
     });
+  });
+});
+
+describe('ProjectDetail（AI 项目摘要）', () => {
+  // 非新建模式的最小项目：只要渲染路径不崩即可，字段多走可选链/兜底
+  const baseProject = {
+    id: 'p1',
+    project_code: 'P-001',
+    name: '测试项目A',
+    status: '正在实施',
+    category_basis: '重要紧急',
+    issues: 0,
+    risks: 0,
+  };
+  const genCall = ['/projects/p1/ai-summary', { method: 'POST', timeout: 180000 }];
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    routeParams.id = 'p1';
+    mockToast.mockClear();
+    mockCreateRequest.mockClear();
+    mockAiGet.mockClear();
+  });
+
+  it('已有摘要：渲染 ext_info 里的 AI 摘要（纯文本旧数据也兼容），点「重新生成」用新摘要刷新', async () => {
+    mockCreateRequest
+      .mockResolvedValueOnce({ ...baseProject, ext_info: { overview: { ai_summary: '旧的摘要内容' } } })
+      .mockResolvedValueOnce({ summary: '全新的摘要内容', ext_info: { overview: { ai_summary: '全新的摘要内容' } } });
+
+    renderView();
+    // 首次 GET 项目详情（含 include_risks 查询串），摘要来自 ext_info.overview.ai_summary
+    expect(await screen.findByText('旧的摘要内容')).toBeTruthy();
+    expect(mockCreateRequest).toHaveBeenCalledWith('/projects/p1?include_risks=true');
+
+    fireEvent.click(screen.getByText('重新生成'));
+    expect(await screen.findByText('全新的摘要内容')).toBeTruthy();
+    expect(mockCreateRequest).toHaveBeenLastCalledWith(...genCall);
+    expect(mockToast).toHaveBeenCalledWith({ message: 'AI 摘要已生成并保存', theme: 'success' });
+  });
+
+  it('Markdown 摘要渲染为标题 / 列表 / 加粗结构', async () => {
+    const md = '## 项目概况\n\n- **项目类型**：试点项目\n- 车数：6 台';
+    mockCreateRequest.mockResolvedValueOnce({
+      ...baseProject,
+      ext_info: { overview: { ai_summary: md } },
+    });
+
+    renderView();
+    // 页面上「项目概况」标题、类型标签等文案在其他区块也有，断言一律限定在摘要卡内
+    await waitFor(() => expect(document.querySelector('.mac-ai__md')).toBeTruthy());
+    const mdBox = document.querySelector('.mac-ai__md') as HTMLElement;
+    expect(within(mdBox).getByRole('heading', { name: '项目概况' })).toBeTruthy();
+    expect(within(mdBox).getByText('项目类型')).toBeTruthy(); // **加粗**字段名
+    expect(within(mdBox).getByText('车数：6 台')).toBeTruthy();
+    expect(within(mdBox).getAllByRole('listitem')).toHaveLength(2);
+  });
+
+  it('无摘要：按钮为「AI 生成」，生成中禁用并显示加载文案，完成后展示摘要', async () => {
+    // 用受控 Promise 卡住生成请求，观察按钮的「生成中...」禁用态
+    let resolvePost: (value: unknown) => void = () => {};
+    mockCreateRequest
+      .mockResolvedValueOnce({ ...baseProject, ext_info: null })
+      .mockImplementationOnce(() => new Promise((resolve) => { resolvePost = resolve; }));
+
+    renderView();
+    const generateBtn = await screen.findByRole('button', { name: 'AI 生成' });
+    expect(document.querySelector('.mac-ai__body')?.textContent).toBe('暂无数据');
+
+    fireEvent.click(generateBtn);
+    const pendingBtn = screen.getByRole('button', { name: '生成中...' }) as HTMLButtonElement;
+    expect(pendingBtn.disabled).toBe(true);
+    expect(mockCreateRequest).toHaveBeenLastCalledWith(...genCall);
+
+    await act(async () => {
+      resolvePost({ summary: '第一次生成的摘要', ext_info: { overview: { ai_summary: '第一次生成的摘要' } } });
+    });
+    expect(screen.getByText('第一次生成的摘要')).toBeTruthy();
+    // 生成完成后按钮变为「重新生成」
+    expect(screen.getByRole('button', { name: '重新生成' })).toBeTruthy();
+    expect(mockToast).toHaveBeenCalledWith({ message: 'AI 摘要已生成并保存', theme: 'success' });
   });
 });

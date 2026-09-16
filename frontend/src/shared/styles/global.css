@@ -5270,13 +5270,27 @@ html, body, #root {
 }
 .mac-ov-cta { display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 8px 10px; font-size: 11.5px; }
 
-/* 概况卡底部 AI 项目摘要（先置空占位，保留展开/收起交互与展示空间） */
+/* 概况卡底部 AI 项目摘要（生成按钮 + 展开/收起；数据存 ext_info.overview.ai_summary） */
 .mac-ai { margin-top: 14px; padding: 12px; background: var(--mac-blue-soft); border-radius: 14px; }
 .mac-ai__head { display: flex; align-items: center; gap: 6px; }
 .mac-ai__icon { flex-shrink: 0; display: inline-flex; color: var(--mac-blue-2); }
 .mac-ai__title { font-size: 12px; font-weight: 600; color: var(--mac-fg); }
+.mac-ai__head-right { margin-left: auto; display: inline-flex; align-items: center; gap: 10px; }
+.mac-ai__gen {
+  display: inline-flex;
+  align-items: center;
+  border: none;
+  border-radius: 999px;
+  padding: 3px 10px;
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  color: #fff;
+  background: var(--mac-blue-2);
+  cursor: pointer;
+}
+.mac-ai__gen:disabled { opacity: 0.6; cursor: default; }
 .mac-ai__toggle {
-  margin-left: auto;
   display: inline-flex;
   align-items: center;
   gap: 4px;
@@ -5288,9 +5302,19 @@ html, body, #root {
   color: var(--mac-muted-fg);
   cursor: pointer;
 }
-.mac-ai__body { margin: 6px 0 0; min-height: 32px; font-size: 12px; line-height: 1.65; color: var(--mac-fg); white-space: pre-wrap; }
-.mac-ai__body.is-collapsed { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
+.mac-ai__body { margin: 6px 0 0; min-height: 32px; font-size: 12px; line-height: 1.65; color: var(--mac-fg); }
+/* 收起态：正文是块级 Markdown（标题/列表），line-clamp 对块级子元素截断不稳定，用 max-height ≈ 2 行 */
+.mac-ai__body.is-collapsed { max-height: 44px; overflow: hidden; }
 .mac-ai__body.is-empty { color: var(--mac-muted-fg); }
+/* 摘要正文（## 小节 / - 要点 / **加粗**）的最小 Markdown 样式集，字号随卡片 12px，与 .markdown-body 解耦 */
+.mac-ai__md > :first-child { margin-top: 0; }
+.mac-ai__md > :last-child { margin-bottom: 0; }
+.mac-ai__md h1, .mac-ai__md h2, .mac-ai__md h3, .mac-ai__md h4 { margin: 10px 0 4px; font-size: 12px; font-weight: 700; }
+.mac-ai__md p { margin: 0 0 6px; }
+.mac-ai__md ul, .mac-ai__md ol { margin: 0 0 6px; padding-left: 16px; }
+.mac-ai__md li { margin: 0 0 2px; }
+.mac-ai__md li::marker { color: var(--mac-blue-2); }
+.mac-ai__md strong { font-weight: 600; }
 
 /* 生命周期时间线（对照原型：26px 圆点 + 竖线 + 阶段/状态/补充说明） */
 .mac-timeline { position: relative; margin-top: 16px; }
