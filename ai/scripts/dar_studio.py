@@ -35,6 +35,12 @@ if BACKEND not in sys.path:
     sys.path.insert(0, BACKEND)
 if PROJ not in sys.path:
     sys.path.insert(0, PROJ)  # 让 from ai.config import _KB_DIR 可解析（知识库页签用）
+
+# seg_to_ticket 的 DB 路径（app.core.db）连接串：独立 DB 隧道 13306 → 测试库。
+# setdefault 不覆盖外部环境变量；DB 不可达时 /api/seg_to_ticket 自动 fallback csv。
+os.environ.setdefault("DATABASE_URL",
+                      "mysql+pymysql://root:123456@127.0.0.1:13306/helpdesk_test")
+
 DATA_ROOT = r"C:/Users/PAJ26020/Desktop/export_dar"
 SINK_ROOT = r"D:/Code/OpenRobotService_Data/review/ticket_resolutions"
 PORT = int(os.environ.get("DAR_STUDIO_PORT", "9527"))
@@ -80,7 +86,7 @@ def skip_users():
     return {"ids": sorted(SKIP_USER_IDS), "names": _skip_user_names()}
 
 # ── ssh 隧道（测试环境 9400/9401 不对公网开放，只能经服务器转发）────
-_tunnel = {"proc": None, "ready": False}
+_tunnel = {"proc": None, "ready": False, "db_proc": None}
 
 
 def _port_open(port: int) -> bool:
@@ -97,26 +103,41 @@ def _port_open(port: int) -> bool:
 
 
 def ensure_tunnel() -> bool:
-    """本地 19640/19641/3306 → 服务器 9400/9401/3306。已有隧道（含上次实例残留）直接复用。"""
-    if _tunnel["ready"] or _port_open(19640):
+    """主隧道：本地 19640/19641 → 服务器 9400/9401（测试环境后端/AI）。
+    DB 隧道独立进程：本地 13306 → 服务器 3306（0916 拆分——原先三条转发同
+    进程 + ExitOnForwardFailure，本地 3306 被任何进程占用即整条隧道秒退，
+    测试环境登录一起挂）。两条隧道互不影响，已有实例直接复用。"""
+    if not _tunnel["ready"] and not _port_open(19640):
+        if not _tunnel["proc"] or _tunnel["proc"].poll() is not None:
+            _tunnel["proc"] = subprocess.Popen(
+                ["ssh", "-p", SSH_PORT, "-N",
+                 "-o", "ExitOnForwardFailure=yes", "-o", "BatchMode=yes",
+                 "-o", "ServerAliveInterval=30",
+                 "-L", "19640:127.0.0.1:9400", "-L", "19641:127.0.0.1:9401",
+                 SSH_HOST],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        for _ in range(40):  # 最多等 10s
+            if _port_open(19640):
+                _tunnel["ready"] = True
+                print(f"ssh 主隧道就绪：19640→9400 / 19641→9401（{SSH_HOST}:{SSH_PORT}）")
+                break
+            time.sleep(0.25)
+    else:
         _tunnel["ready"] = True
-        return True
-    if not _tunnel["proc"] or _tunnel["proc"].poll() is not None:
-        _tunnel["proc"] = subprocess.Popen(
-            ["ssh", "-p", SSH_PORT, "-N",
-             "-o", "ExitOnForwardFailure=yes", "-o", "BatchMode=yes",
-             "-o", "ServerAliveInterval=30",
-             "-L", "19640:127.0.0.1:9400", "-L", "19641:127.0.0.1:9401",
-             "-L", "3306:127.0.0.1:3306",   # 生产 DB 走 127.0.0.1 → 同服务器 MySQL
-             SSH_HOST],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    for _ in range(40):  # 最多等 10s
-        if _port_open(19640):
-            _tunnel["ready"] = True
-            print(f"ssh 隧道就绪：19640→9400 / 19641→9401 / 3306→3306（{SSH_HOST}:{SSH_PORT}）")
-            return True
-        time.sleep(0.25)
-    return False
+
+    # DB 隧道（13306→3306）：独立进程独立守护，bind 失败只影响 DB 查询
+    # （seg_to_ticket 已有 csv fallback），绝不拖累测试环境登录。
+    if _tunnel["db_proc"] is None or _tunnel["db_proc"].poll() is not None:
+        if not _port_open(13306):
+            _tunnel["db_proc"] = subprocess.Popen(
+                ["ssh", "-p", SSH_PORT, "-N",
+                 "-o", "ExitOnForwardFailure=yes", "-o", "BatchMode=yes",
+                 "-o", "ServerAliveInterval=30",
+                 "-L", "13306:127.0.0.1:3306",
+                 SSH_HOST],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            print("ssh DB 隧道启动：13306→3306（独立进程，挂了不影响主隧道）")
+    return _tunnel["ready"]
 
 
 # ── 登录态（内存）──────────────────────────────────────────────
@@ -1719,6 +1740,20 @@ _KB_LABELS = {
     "USP/terminology": "🔤 术语表", "USP/ui_pages": "🧭 页面导航",
 }
 
+# 目录名 → 中文名（树图/列表展示用；原名进 tooltip 和过滤）
+_KB_DIR_CN = {
+    "navigation": "导航原理", "standards": "国标文档",
+    "product_catalog": "产品目录", "vda5050_protocol": "VDA5050 协议",
+    "vehicle_errors": "车端错误码", "vehicle_implementation": "车端实施",
+    "vehicle_calibration": "车辆标定", "vehicle_io": "IO 定义", "vehicle_motion": "运动控制",
+    "ORS": "服务号平台", "USP": "USP 平台",
+    "diagnosis_cards": "诊断知识卡", "error_codes": "平台错误码", "faq": "常见问答",
+    "manual": "操作手册", "overview": "模块概览", "terminology": "术语表",
+    "translation": "翻译对照", "troubleshooting": "故障排查树", "ui_pages": "页面导航",
+    "map": "地图", "monitor": "监控", "peripheral": "外设", "robot": "机器人",
+    "simulator": "仿真", "system": "系统", "task": "任务", "warehousing": "仓储",
+}
+
 _KB_CACHE: dict = {"sig": None, "data": None}
 
 
@@ -1746,20 +1781,41 @@ def _kb_build() -> dict:
     for d in ("industry", "company", "team", "project", "personal"):
         ing = KBDomainIngester(domain=d)
         per_file: dict = {}
+        first_title: dict = {}
         for e in ing.parse():
             per_file[e.source_file] = per_file.get(e.source_file, 0) + 1
+            first_title.setdefault(e.source_file, e.title)
 
-        root = {"name": d, "dir": True, "chunks": 0, "files": 0, "children": []}
+        def _file_cn(rel: str) -> str:
+            """文件中文标题：优先 H1（卡片无 H1 用 frontmatter title 即 chunk 首题）。"""
+            try:
+                with open(ing._domain_dir / rel, encoding="utf-8") as fh:
+                    text = fh.read(4000)
+                m = re.search(r"^#\s+(.+)$", text, re.MULTILINE)
+                if m:
+                    return m.group(1).strip()
+            except Exception:
+                pass
+            return (first_title.get(rel) or "").split(" / ")[0].strip()
+
+        cn_file = {rel: _file_cn(rel) for rel in per_file}
+
+        _KB_DOMAIN_CN = {"industry": "行业知识", "company": "公司 · 车端", "team": "团队知识",
+                         "project": "项目知识", "personal": "个人知识"}
+        root = {"name": d, "dir": True, "chunks": 0, "files": 0, "children": [],
+                "cn": _KB_DOMAIN_CN.get(d, d)}
         for rel in sorted(per_file):
             node = root
             parts = rel.split("/")
             for seg in parts[:-1]:
                 child = next((c for c in node["children"] if c["dir"] and c["name"] == seg), None)
                 if child is None:
-                    child = {"name": seg, "dir": True, "chunks": 0, "files": 0, "children": []}
+                    child = {"name": seg, "dir": True, "chunks": 0, "files": 0, "children": [],
+                             "cn": _KB_DIR_CN.get(seg, "")}
                     node["children"].append(child)
                 node = child
-            node["children"].append({"name": parts[-1], "dir": False, "chunks": per_file[rel]})
+            node["children"].append({"name": parts[-1], "dir": False,
+                                     "chunks": per_file[rel], "cn": cn_file.get(rel, "")})
 
         def _agg(n):
             if not n["dir"]:
@@ -1812,6 +1868,39 @@ def vendor_echarts():
     return FileResponse(os.path.join(HERE, "vendor", "echarts.min.js"),
                         media_type="application/javascript",
                         headers={"Cache-Control": "max-age=86400"})
+
+
+def _kb_safe_path(rel: str, exts: tuple):
+    """KB 相对路径校验：禁止穿越、限扩展名、必须存在。返回绝对 Path。"""
+    from ai.config import _KB_DIR
+    rel = (rel or "").replace("\\", "/").lstrip("/")
+    if not rel or any(seg in ("..", "") for seg in rel.split("/")):
+        raise HTTPException(400, "非法路径")
+    p = (_KB_DIR / rel).resolve()
+    if not str(p).startswith(str(_KB_DIR.resolve())):
+        raise HTTPException(400, "路径越界")
+    if p.suffix.lower() not in exts or not p.is_file():
+        raise HTTPException(404, "文件不存在")
+    return p
+
+
+@app.get("/api/kb_file")
+def kb_file(rel: str = ""):
+    """读单个 KB md 源文件原文（预览抽屉用）。"""
+    p = _kb_safe_path(rel, (".md",))
+    return {"rel": rel.replace("\\", "/").lstrip("/"), "text": p.read_text(encoding="utf-8")}
+
+
+_IMG_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+              ".gif": "image/gif", ".webp": "image/webp", ".svg": "image/svg+xml"}
+
+
+@app.get("/api/kb_media")
+def kb_media(rel: str = ""):
+    """KB 内图片（预览抽屉里 md 引用的 media/xxx.png）。"""
+    p = _kb_safe_path(rel, tuple(_IMG_TYPES))
+    return FileResponse(p, media_type=_IMG_TYPES[p.suffix.lower()],
+                        headers={"Cache-Control": "max-age=3600"})
 
 
 @app.get("/")
