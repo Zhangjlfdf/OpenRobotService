@@ -5256,9 +5256,8 @@ html, body, #root {
 /* 暂无后端列/接口的字段标记：控件可编辑，但明确标注尚未接入 */
 .mac-ov-pending { flex-shrink: 0; padding: 1px 6px; border-radius: 999px; background: var(--mac-secondary); color: var(--mac-muted-fg); font-size: 10px; font-weight: 500; }
 
-/* 概况卡内的分隔区块（三列日期 / AGV·USP + 搬运效率分析行） */
+/* 概况卡内的分隔区块（项目阶段 + 时间进度）：客户信息块与其下内容之间唯一的一条浅灰线 */
 .mac-ov-divider { margin-top: 14px; padding-top: 14px; border-top: 1px solid rgba(232, 234, 234, 0.7); }
-.mac-ov-divider .mac-dates { margin-top: 0; }
 .mac-ov-actions {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
@@ -8186,8 +8185,14 @@ html, body, #root {
    components/tree/ProjectInformationTree.tsx（编辑树）。
    层级色用 --mac-tree-1..4（原型 text-tree-depth-1..4 / bg-tree-depth-1 的同色值）。 */
 
-/* —— 卡头（浏览卡与编辑页共用）：标题 + 待接入标记 + 操作区 —— */
-.mac-info__head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+/* —— 卡头（浏览卡与编辑页共用）：标题 + 待接入标记 + 操作区 ——
+   下划线定位/颜色与 .mac-card-title 一致（原型每张卡标题都为 border-b pb-2.5），
+   使项目工单、项目信息管理与概况/动态卡的卡头分隔完全统一 */
+.mac-info__head {
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 8px;
+  padding-bottom: 10px; border-bottom: 1px solid rgba(232, 234, 234, 0.7);
+  margin-bottom: 12px;
+}
 .mac-info__title-wrap { min-width: 0; }
 .mac-info__title { margin: 0; display: flex; align-items: center; gap: 6px; font-size: 15px; font-weight: 600; color: var(--mac-fg); }
 .mac-info__subtitle { margin: 3px 0 0; font-size: 11.5px; color: var(--mac-muted-fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -8224,9 +8229,11 @@ html, body, #root {
 .mac-tagpool__warn--static, .mac-tagpool__dot--static { position: static; }
 
 /* —— 提示 / 空态 —— */
+/* 标签池（选择显示内容）与下方内容区（图例 + 文档树）之间用浅灰线隔开 */
 .mac-info__legend {
   display: flex; flex-wrap: wrap; align-items: center; gap: 4px 16px;
-  margin: 10px 0 0; font-size: 11.5px; color: var(--mac-muted-fg);
+  margin: 14px 0 0; padding-top: 14px; border-top: 1px solid rgba(232, 234, 234, 0.7);
+  font-size: 11.5px; color: var(--mac-muted-fg);
 }
 .mac-info__legend-item { display: inline-flex; align-items: center; gap: 5px; }
 .mac-info__hint { margin: 10px 0 0; font-size: 11.5px; color: var(--mac-muted-fg); }
@@ -8405,6 +8412,68 @@ html, body, #root {
   margin-top: 8px; padding: 8px 10px; border-radius: 10px;
   background: var(--mac-secondary); font-size: 11.5px; line-height: 1.6; color: var(--mac-muted-fg);
 }
+
+/* —— 项目工单卡（项目详情页）：状态统计 + 核心阻滞工单 + 近 8 周趋势 ——
+   色彩遵循马卡龙蓝阶约定：状态/优先级只走 --mac-blue-* 与 --mac-status-* 蓝阶，不引入新色相 */
+/* 顶部三格（总工单数 / 正在处理 / 已完成）：横向三个小方块按钮，尺寸对齐原型
+   ProjectTicketsCard 的统计格（px-2 py-2 / 数字 15px / 标签 10.5px / rounded-lg）；
+   白底 + 描边 + 柔和阴影的按钮语言，总工单数保持浅蓝底强调，数字用等宽数字对齐 */
+.mac-tix__stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 12px; }
+.mac-tix__stat {
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
+  padding: 8px 4px; border-radius: 8px;
+  border: 1px solid var(--mac-border);
+  background: #fff;
+  box-shadow: var(--mac-shadow-soft);
+}
+.mac-tix__stat--total { background: var(--mac-blue-soft); }
+.mac-tix__num { font-size: 15px; font-weight: 700; color: var(--mac-fg); line-height: 1.3; font-variant-numeric: tabular-nums; }
+.mac-tix__stat--total .mac-tix__num { color: var(--mac-blue-1); }
+.mac-tix__label { font-size: 10.5px; color: var(--mac-muted-fg); }
+
+/* 分节线：卡片内不同功能区块（汇总 / 核心阻滞工单 / 趋势）之间用浅灰细线隔开，
+   颜色与卡头下划线一致；线上 14px 由自身 margin-top 给出，线下 14px 由相邻区块的
+   margin-top 给出（与 .mac-ov-divider 同款节奏，浏览时各卡片分隔一致） */
+.mac-tix__sep { margin-top: 14px; border-top: 1px solid rgba(232, 234, 234, 0.7); }
+
+.mac-tix__block { margin-top: 14px; padding: 12px; border-radius: 14px; background: var(--mac-secondary); }
+.mac-tix__block-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.mac-tix__block-title { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; color: var(--mac-fg); }
+.mac-tix__block-title svg { color: var(--mac-blue-1); }
+.mac-tix__block-ops { display: inline-flex; align-items: center; gap: 8px; }
+.mac-tix__mode {
+  padding: 1px 8px; border-radius: 999px; background: rgba(90, 95, 99, 0.08);
+  color: var(--mac-muted-fg); font-size: 10.5px; white-space: nowrap;
+}
+.mac-tix__mode.is-ai { background: var(--mac-blue-soft); color: var(--mac-blue-1); }
+.mac-tix__config { font-size: 11px; padding: 3px 9px; border-radius: 999px; color: var(--mac-blue-1); }
+.mac-tix__ai-summary { margin: 8px 0 0; font-size: 11.5px; line-height: 1.6; color: var(--mac-fg); }
+.mac-tix__empty { margin-top: 8px; font-size: 11.5px; color: var(--mac-muted-fg); }
+.mac-tix__ticket {
+  margin-top: 8px; padding: 10px 12px; border-radius: 12px;
+  background: #fff; box-shadow: var(--mac-shadow-soft);
+}
+.mac-tix__ticket-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+.mac-tix__ticket-title { font-size: 12.5px; font-weight: 600; color: var(--mac-fg); line-height: 1.5; overflow-wrap: anywhere; }
+/* 优先级徽标：紧急实底最深、逐级变浅（蓝阶即状态类保留色，不引红黄色相） */
+.mac-tix__pri { flex-shrink: 0; padding: 1px 8px; border-radius: 999px; font-size: 10.5px; white-space: nowrap; background: rgba(54, 151, 195, 0.12); color: var(--mac-blue-1); }
+.mac-tix__pri--urgent { background: var(--mac-blue-1); color: #fff; }
+.mac-tix__pri--high { background: color-mix(in oklab, var(--mac-blue-2) 22%, #fff); color: var(--mac-blue-1); }
+.mac-tix__pri--low { background: rgba(90, 95, 99, 0.08); color: var(--mac-muted-fg); }
+.mac-tix__ticket-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin-top: 6px; font-size: 11px; color: var(--mac-muted-fg); }
+.mac-tix__status { display: inline-flex; align-items: center; gap: 4px; }
+.mac-tix__status-dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; }
+.mac-tix__overdue { color: #ad6800; }
+.mac-tix__ticket-desc { margin: 6px 0 0; font-size: 11.5px; line-height: 1.6; color: var(--mac-fg); overflow-wrap: anywhere; }
+.mac-tix__reason { display: flex; align-items: flex-start; gap: 5px; margin: 6px 0 0; font-size: 11px; line-height: 1.6; color: var(--mac-blue-1); }
+.mac-tix__reason svg { flex-shrink: 0; margin-top: 3px; }
+.mac-tix__hint { margin: 8px 0 0; font-size: 10.5px; line-height: 1.6; color: var(--mac-muted-fg); }
+.mac-tix__trend { margin-top: 14px; }
+.mac-tix__trend-title { font-size: 12px; font-weight: 600; color: var(--mac-fg); }
+.mac-tix__config-sheet { display: flex; flex-direction: column; gap: 10px; }
+.mac-tix__config-hint { margin: 0; font-size: 11.5px; line-height: 1.65; color: var(--mac-muted-fg); }
+.mac-tix__config-actions { display: flex; gap: 10px; }
+.mac-tix__config-actions .mac-btn { flex: 1; justify-content: center; }
 
 /* —— 文件导入（AI 识别）：三组预览 + 勾选确认 —— */
 .mac-import__hint { margin: 8px 0 12px; font-size: 11.5px; line-height: 1.65; color: var(--mac-muted-fg); }

@@ -409,3 +409,26 @@ class ProjectInfoNodeMark(Base):
                 f"operator='{self.operator}', project_id='{self.project_id}')>")
 
 
+class ProjectBlockingConfig(Base):
+    """项目「核心阻滞工单」AI 配置（项目详情页-项目工单卡）。
+
+    管理员/超级管理员在卡片上点「配置阻滞权重」输入提示词后，后端把项目基础字段 +
+    该项目工单基础数据 + 提示词交给大模型判定「当前项目最重要的阻滞工单」，
+    判定结果（工单ID 列表 + 理由）存本表，卡片据此展示核心阻滞工单。
+
+    每个项目一行（project_id 主键，重新配置即覆盖）；未配置的项目由服务层
+    按默认规则（未完成工单按优先级/超期排序）挑候选，不落表。
+    """
+    __tablename__ = 'project_blocking_config'
+
+    project_id = Column(String(64), primary_key=True, comment='项目ID')
+    prompt = Column(Text, nullable=False, comment='管理员输入的阻滞判定提示词（权重说明）')
+    ai_result = Column(Text, nullable=True, comment='AI 判定结果(JSON: ticket_ids/summary/reasons)')
+    updated_by = Column(String(64), nullable=True, comment='最后配置人登录名')
+    updated_by_name = Column(String(64), nullable=True, comment='最后配置人显示名')
+    updated_at = Column(String(30), nullable=False, comment='配置时间')
+
+    def __repr__(self):
+        return f"<ProjectBlockingConfig(project_id='{self.project_id}')>"
+
+

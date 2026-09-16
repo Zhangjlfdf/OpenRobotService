@@ -60,6 +60,12 @@ vi.mock('@/stores/auth', () => ({
   useAuthStore: (selector: (s: { username: string }) => unknown) => selector({ username: 'admin' }),
 }));
 
+// 项目工单卡同样挂载即拉取：保持挂起，避免占用下方 mockCreateRequest 的请求桩
+vi.mock('@/api/projectTickets', () => ({
+  fetchProjectTicketsOverviewApi: () => new Promise(() => {}),
+  configureBlockingWeightsApi: vi.fn(),
+}));
+
 vi.mock('@/config/api', () => ({
   default: { ADMIN: { BASE_URL: '/api/admin' }, TASKS: { BASE_URL: '/api/tasks' } },
 }));
@@ -194,10 +200,11 @@ describe('ProjectDetail（卡片裁剪）', () => {
     mockCreateRequest.mockResolvedValue({ ...baseProject });
   });
 
-  it('只保留项目概况 / 项目信息管理 / 项目动态三张卡，其余卡片不再渲染', async () => {
+  it('只保留项目概况 / 项目信息管理 / 项目工单 / 项目动态四张卡，其余卡片不再渲染', async () => {
     renderView();
     expect(await screen.findByText('项目概况')).toBeTruthy();
     expect(screen.getByText('项目信息管理')).toBeTruthy();
+    expect(screen.getByText('项目工单')).toBeTruthy();
     expect(screen.getByText('项目动态')).toBeTruthy();
     expect(screen.getByText('关注节点变动')).toBeTruthy();
 
@@ -208,10 +215,11 @@ describe('ProjectDetail（卡片裁剪）', () => {
     expect(screen.getByText('项目阶段')).toBeTruthy();
   });
 
-  it('新建模式不渲染「项目动态」（项目尚未落库）', () => {
+  it('新建模式不渲染「项目工单」与「项目动态」（项目尚未落库）', () => {
     routeParams.id = 'new';
     renderView();
     expect(screen.getByText('项目概况')).toBeTruthy();
+    expect(screen.queryByText('项目工单')).toBeNull();
     expect(screen.queryByText('项目动态')).toBeNull();
   });
 });

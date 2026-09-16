@@ -16,6 +16,7 @@ import {
   MacSparkles, MacBarChart3,
 } from '@/shared/components/macaronIcons';
 import ProjectInfoCard from './ProjectInfoCard';
+import ProjectTicketsCard from './ProjectTicketsCard';
 import ProjectActivityCard from './ProjectActivityCard';
 
 interface ProjectDocument {
@@ -326,38 +327,39 @@ export default function ProjectDetail() {
             </div>
           </div>
 
-          {/* 项目阶段 —— 编辑入口随「项目生命周期」卡移除后挪进概况（进度由它决定）；
-              绑定 status（企业微信「项目生命周期」列实时同步） */}
-          <PickerField label="项目阶段" value={project.status || '未设置'} onClick={() => setActivePicker('status')} required={isNew} />
-
-          {/* 项目时间进度（与项目进度列表同一口径：按生命周期阶段线性计算；仅「项目中止」隐藏） */}
-          {!isAborted && (
-            <div className="mac-progress mac-progress--detail" style={{ marginTop: 14 }}>
-              <div className="mac-progress__head">
-                <span>项目时间进度</span>
-                <span className="mac-progress__pct">{progressPct}%</span>
-              </div>
-              <div className="mac-progress__track">
-                <div className="mac-progress__fill" style={{ width: `${progressPct}%` }} />
-              </div>
-            </div>
-          )}
-
-          {/* 部署 / 近期交付 / 最终交付 */}
+          {/* 项目阶段 + 项目时间进度：同属进度管控，整体与上方客户信息块用浅灰线隔开。
+              阶段编辑入口随「项目生命周期」卡移除后挪进概况（进度由它决定），
+              绑定 status（企业微信「项目生命周期」列实时同步）；
+              进度与项目进度列表同一口径（按生命周期阶段线性计算；仅「项目中止」隐藏） */}
           <div className="mac-ov-divider">
-            <div className="mac-dates">
-              <div>
-                <div className="mac-dates__label">部署时间</div>
-                <div className="mac-dates__value">{project.deployment_date || '-'}</div>
+            <PickerField label="项目阶段" value={project.status || '未设置'} onClick={() => setActivePicker('status')} required={isNew} />
+            {!isAborted && (
+              <div className="mac-progress mac-progress--detail" style={{ marginTop: 14 }}>
+                <div className="mac-progress__head">
+                  <span>项目时间进度</span>
+                  <span className="mac-progress__pct">{progressPct}%</span>
+                </div>
+                <div className="mac-progress__track">
+                  <div className="mac-progress__fill" style={{ width: `${progressPct}%` }} />
+                </div>
               </div>
-              <div>
-                <div className="mac-dates__label">近期交付</div>
-                <div className="mac-dates__value">{project.recent_delivery_date || '-'}</div>
-              </div>
-              <div>
-                <div className="mac-dates__label">最终交付</div>
-                <div className="mac-dates__value">{project.final_delivery_date || '-'}</div>
-              </div>
+            )}
+          </div>
+
+          {/* 部署 / 近期交付 / 最终交付：与上方项目阶段、时间进度同属时间信息一个功能块，
+              不再单独加分隔线（mac-dates 自带 margin-top 与进度条留白） */}
+          <div className="mac-dates">
+            <div>
+              <div className="mac-dates__label">部署时间</div>
+              <div className="mac-dates__value">{project.deployment_date || '-'}</div>
+            </div>
+            <div>
+              <div className="mac-dates__label">近期交付</div>
+              <div className="mac-dates__value">{project.recent_delivery_date || '-'}</div>
+            </div>
+            <div>
+              <div className="mac-dates__label">最终交付</div>
+              <div className="mac-dates__value">{project.final_delivery_date || '-'}</div>
             </div>
           </div>
 
@@ -428,6 +430,10 @@ export default function ProjectDetail() {
           canEdit={!isNew}
           onMarkChange={() => setActivityToken((value) => value + 1)}
         />
+
+        {/* 项目工单（对照原型 ProjectTicketsCard）：总数/各状态数量 + 核心阻滞工单 +
+            近 8 周变化趋势；新建模式下项目未落库（也没有工单），不渲染 */}
+        {!isNew && <ProjectTicketsCard projectId={id} />}
 
         {/* 项目动态（对照原型 ProjectActivityCard 的「关注节点变动」分组）：
             被关注节点的最新一条变动，只展示变动内容（不带时间与人员）；新建模式下项目未落库，不渲染 */}

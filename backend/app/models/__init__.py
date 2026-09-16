@@ -33,6 +33,7 @@ from app.models.delivery import (
     ProjectInfoNodeChange,
     ProjectInfoNodeMark,
     ProjectInfoTemplate,
+    ProjectBlockingConfig,
 )
 
 # 任务（承工单语义升格）
@@ -103,6 +104,7 @@ __all__ = [
     "ProjectInfoNode",
     "ProjectInfoNodeChange",
     "ProjectInfoNodeMark",
+    "ProjectBlockingConfig",
     # task
     "Task", "TaskComment", "TaskStatus", "TaskPriority", "TaskType", "TaskUserMapping", "TaskStep",
     # task dispatch log

@@ -250,6 +250,15 @@ export const MacBarChart3 = ({ size }: { size?: number }) => (
   </Icon>
 );
 
+/* lucide triangle-alert（核心阻滞工单图标） */
+export const MacAlertTriangle = ({ size }: { size?: number }) => (
+  <Icon size={size}>
+    <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3" />
+    <path d="M12 9v4" />
+    <path d="M12 17h.01" />
+  </Icon>
+);
+
 /* lucide file-text（项目文档图标） */
 export const MacFileText = ({ size }: { size?: number }) => (
   <Icon size={size}>
