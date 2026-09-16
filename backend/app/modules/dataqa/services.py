@@ -1,4 +1,6 @@
 """dataqa 会话/消息服务（AI 数据助手专用表，独立于 call 会话）。"""
+from datetime import datetime
+
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, desc
 from typing import Optional, List
@@ -23,13 +25,23 @@ class DataqaConversationService:
 
     @staticmethod
     async def get_conversation(db: AsyncSession, conversation_id: int) -> Optional[DataqaConversation]:
-        return await DatabaseUtils.get_by_id(db, DataqaConversation, conversation_id)
+        # 逻辑删除过滤：软删会话对全部接口不可见（详情 404，重命名/删除拒绝）
+        result = await db.execute(
+            select(DataqaConversation).filter(
+                DataqaConversation.id == conversation_id,
+                DataqaConversation.is_deleted.is_(False),
+            )
+        )
+        return result.scalars().first()
 
     @staticmethod
     async def get_conversations_by_user(db: AsyncSession, user_id: str, skip: int = 0, limit: int = 100) -> List[DataqaConversation]:
         result = await db.execute(
             select(DataqaConversation)
-            .filter(DataqaConversation.user_id == user_id)
+            .filter(
+                DataqaConversation.user_id == user_id,
+                DataqaConversation.is_deleted.is_(False),
+            )
             .order_by(desc(DataqaConversation.updated_at))
             .offset(skip)
             .limit(limit)
@@ -38,7 +50,8 @@ class DataqaConversationService:
 
     @staticmethod
     async def update_conversation(db: AsyncSession, conversation_id: int, conversation: DataqaConversationUpdate) -> Optional[DataqaConversation]:
-        db_conversation = await DatabaseUtils.get_by_id(db, DataqaConversation, conversation_id)
+        # 复用 get_conversation 的软删过滤：已删会话不可再修改/重命名
+        db_conversation = await DataqaConversationService.get_conversation(db, conversation_id)
         if not db_conversation:
             return None
 
@@ -53,13 +66,16 @@ class DataqaConversationService:
 
     @staticmethod
     async def delete_conversation(db: AsyncSession, conversation_id: int) -> bool:
-        conversation = await DatabaseUtils.get_by_id(db, DataqaConversation, conversation_id)
+        """逻辑删除：只打标记，不删 dataqa_conversations / dataqa_messages 任何数据。
+
+        与 call 会话同构：数据保留供 AI 统计。原「显式删消息 + db.delete」物理删除已弃用。
+        """
+        conversation = await DataqaConversationService.get_conversation(db, conversation_id)
         if not conversation:
             return False
 
-        # 显式删消息兜底（表级 FK ON DELETE CASCADE 已配置，双保险）
-        await DataqaMessageService.delete_messages_by_conversation(db, conversation_id)
-        await db.delete(conversation)
+        conversation.is_deleted = True
+        conversation.deleted_at = datetime.utcnow()
         await db.commit()
         return True
 

@@ -24,7 +24,11 @@ import { MacDonut, MacLegend, MacStat, macTone } from '@/shared/components/macar
 import { MacChevronRight, MacRefreshCw } from '@/shared/components/macaronIcons';
 import { ProjectMonthBars } from '@/shared/components/macaronMonthBars';
 import { currentYearMonth, normalizeSettlementPeriod } from '@/shared/utils/settlement';
-import { useAuthStore, PERMISSION_VIEW_ALL } from '@/stores/auth';
+import {
+  useAuthStore,
+  PERMISSION_VIEW_ALL,
+  PERMISSION_RESOURCE_READ,
+} from '@/stores/auth';
 import {
   buildDashboardFilterKey, loadDashboardCache, saveDashboardCache,
 } from '@/stores/dashboardCache';
@@ -217,6 +221,8 @@ export default function Dashboard() {
   const canAccessAdminEntries = hasPermission('frontend:admin:other:show');
   // 拥有此权限的用户不受「仅看自己关联项目」限制，可查看全部项目和工单
   const canViewAll = hasPermission(PERMISSION_VIEW_ALL);
+  // 资源管理入口需 backend:resource:base:read 权限（隐藏「数据资源」弹层中相应入口）
+  const canReadResource = hasPermission(PERMISSION_RESOURCE_READ);
   // stale-while-revalidate：优先用上次缓存的看板数据立即渲染图表（产品口径），
   // 本次 summary-all 返回后覆盖刷新；换账号/口径变化/过期则回退空态
   const filterKey = useMemo(
@@ -468,13 +474,15 @@ export default function Dashboard() {
         <Popup visible={dataResourceSheetVisible} placement="bottom" onVisibleChange={setDataResourceSheetVisible}>
           <div style={{ padding: '8px 16px 20px', background: '#fff', borderRadius: '12px 12px 0 0' }}>
             <div style={{ textAlign: 'center', fontSize: 13, color: '#999', padding: '8px 0 12px' }}>数据资源</div>
-            <div
-              onClick={() => { console.log('[Dashboard] click 资源管理 → navigate /admin/file-explorer'); setDataResourceSheetVisible(false); navigate('/admin/file-explorer'); }}
-              style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '14px 8px', borderBottom: '1px solid #f0f0f0', cursor: 'pointer' }}
-            >
-              <span style={{ fontSize: 18 }}>🗂️</span>
-              <span style={{ fontSize: 15 }}>资源管理</span>
-            </div>
+            {canReadResource && (
+              <div
+                onClick={() => { console.log('[Dashboard] click 资源管理 → navigate /admin/file-explorer'); setDataResourceSheetVisible(false); navigate('/admin/file-explorer'); }}
+                style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '14px 8px', borderBottom: '1px solid #f0f0f0', cursor: 'pointer' }}
+              >
+                <span style={{ fontSize: 18 }}>🗂️</span>
+                <span style={{ fontSize: 15 }}>资源管理</span>
+              </div>
+            )}
             <div
               onClick={() => { setDataResourceSheetVisible(false); navigate('/admin/data-import'); }}
               style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '14px 8px', borderBottom: '1px solid #f0f0f0', cursor: 'pointer' }}

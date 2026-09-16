@@ -40,6 +40,18 @@ export function isManualLogout(): boolean {
 /** 拥有此权限的用户可查看全部项目和工单数据，不受「仅看自己关联项目」限制 */
 export const PERMISSION_VIEW_ALL = 'backend:project:all';
 
+/** 项目 licence 授权导出（导出 licence 授权 / 完整授权） */
+export const PERMISSION_LICENSE_EXPORT = 'backend:project:license:export';
+/** 项目人员授权导出（导出人员授权 / 完整授权） */
+export const PERMISSION_USER_EXPORT = 'backend:project:user:export';
+/** 申请项目 licence 授权 */
+export const PERMISSION_LICENSE_APPLY = 'backend:project:license:apply';
+
+/** 资源管理：查看资源/文件夹列表/搜索/统计 */
+export const PERMISSION_RESOURCE_READ = 'backend:resource:base:read';
+/** 资源管理：下载资源/获取分享链接（含缩略图、预览 URL） */
+export const PERMISSION_RESOURCE_DOWNLOAD = 'backend:resource:base:download';
+
 export interface AuthState {
   isLoggedIn: boolean;
   username: string;
