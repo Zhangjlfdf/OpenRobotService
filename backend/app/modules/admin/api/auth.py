@@ -6,8 +6,14 @@ from app.core.security import decode_token
 
 
 async def get_current_active_user_from_token(request: Request) -> Dict[str, Any]:
+    # 浏览器原生请求（window.open / <a> / <img>）无法自定义 Authorization 头，
+    # 与 app.core.auth_routes 保持一致：Header 缺失时回退读取 URL 上的 ?token= 参数
     token = request.headers.get("Authorization", "")
-    token = token[7:]
+    if token.startswith("Bearer "):
+        token = token[7:]
+    elif not token:
+        token = request.query_params.get("token", "")
+
     payload = decode_token(token)
     if payload is None:
         raise HTTPException(

@@ -4,7 +4,7 @@ MIGRATION.md 阶段 3：从 `app/modules/das/api/export.py` 搬迁而来，
 路由前缀从 `/api/DAS/export` 迁移到 `/api/admin/export`。
 """
 from fastapi import APIRouter, Depends, Query, HTTPException, Request, Body
-from typing import Optional, Dict, List
+from typing import Any, Optional, Dict, List
 from pydantic import BaseModel
 from app.modules.admin.utils_das.config import security, DEBUG_MODE, AUTH_SERVICE_BASE_URL
 from app.modules.admin.services.project_service import project_service
