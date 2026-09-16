@@ -10,7 +10,6 @@
 import argparse
 import asyncio
 import csv
-import io
 import json
 import os
 import re
@@ -18,7 +17,7 @@ import sys
 import time
 from collections import Counter, defaultdict
 
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # 不换 wrapper 对象：pytest 捕获下替换会炸
 _PROJ = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, _PROJ)
 os.chdir(_PROJ)
@@ -36,9 +35,30 @@ DATA = rf"C:/Users/PAJ26020/Desktop/export_dar/{ENV}/processed/conversations_spl
 TOPIC_TYPES = ["故障处置", "操作指引", "功能咨询", "状态查询", "资料查询", "其他"]
 
 
+# 长会话分窗：单次输出 max_tokens 有限，rounds 过多时 JSON 被截断、
+# 后半段落回默认值（q=true/topic=0）——切分质量崩。按窗滑判，窗口间话题续号。
+CLASSIFY_WINDOW = 40
+
+
 async def classify(rounds):
-    """逐回合 {q,t} + 末尾 {n_topics}。失败降级全算提问（方向：保守）。"""
-    fb = [{"q": True, "t": False, "topic": 0} for _ in rounds] + [{"n_topics": 0}]
+    """逐回合 {q,t} + 末尾 {n_topics}。失败降级全算提问（方向：保守）。
+    超过 CLASSIFY_WINDOW 条按窗滑判，窗口间话题编号续接。"""
+    if len(rounds) <= CLASSIFY_WINDOW:
+        return await _classify_once(rounds, 0)
+    out = []
+    base = 0
+    for s in range(0, len(rounds), CLASSIFY_WINDOW):
+        part = await _classify_once(rounds[s:s + CLASSIFY_WINDOW], base)
+        base += part[-1]["n_topics"]
+        out.extend(part[:-1])
+    out.append({"n_topics": base})
+    return out
+
+
+async def _classify_once(rounds, topic_base):
+    """单窗判定：topic 编号从 topic_base 起续接（0=完整会话）。"""
+    fb = [{"q": True, "t": False, "topic": topic_base} for _ in rounds] + [
+        {"n_topics": (1 if topic_base else 0)}]
     if not rounds:
         return fb
     try:
@@ -46,9 +66,15 @@ async def classify(rounds):
         llm = await get_dar_client()
         lines = []
         for i, r in enumerate(rounds):
-            head = (r["a"][0] if r["a"] else "")[:120]
+            # 每条 AI 回答的开头都给（不只第一条——多段回答/追问的判定需要全貌）
+            heads = " / ".join(((a or "")[:80]).strip() for a in (r.get("a") or []))
             when = (r["at"] or "")[5:16]
-            lines.append(f"{i}. [{when}] 用户说：{(r['q'] or '')[:200]} → 助手答（开头）：{head}")
+            lines.append(f"{i}. [{when}] 用户说：{(r['q'] or '')[:300]} → 助手答（开头）：{heads[:220]}")
+        cont = (
+            f"\n（这是长对话的中段：前文已有 {topic_base} 个话题，本段话题编号从 {topic_base} 起；"
+            f"若本段开头延续前面的话题，请继续用编号 {max(0, topic_base - 1)}。）\n"
+            if topic_base else ""
+        )
         prompt = (
             "下面是一场客服对话里用户的每条消息（含时间）和助手回答的开头。"
             "请把对话切分成话题段，再逐条判断：\n"
@@ -68,28 +94,30 @@ async def classify(rounds):
             "功能咨询=功能是否存在、有什么能力、概念含义；"
             "状态查询=查某个单据/任务/数据的当前状态；"
             "资料查询=要文档、参数、清单等资料；其他=以上都不是。\n"
+            + cont +
             "只输出 JSON：{\"rounds\": [{\"i\":0,\"topic\":0,\"q\":true,\"t\":false}, ...],"
             " \"topics\": [{\"topic\":0,\"type\":\"操作指引\"}, ...], \"n\": 2}，"
             "不要输出其他内容。\n\n"
             + "\n".join(lines)
         )
-        raw = await llm.complete(prompt=prompt, max_tokens=2000, temperature=0,
+        raw = await llm.complete(prompt=prompt, max_tokens=4000, temperature=0,
                                  thinking=False)
         obj = json.loads(re.search(r"\{.*\}", raw or "", re.S).group(0))
-        out = [{"q": True, "t": False, "topic": 0} for _ in rounds]
+        out = [{"q": True, "t": False, "topic": topic_base} for _ in rounds]
         for it in obj.get("rounds") or []:
             i = int(it.get("i", -1))
             if 0 <= i < len(out):
                 out[i] = {"q": bool(it.get("q", True)), "t": bool(it.get("t", False)),
                           "topic": max(0, int(it.get("topic", 0) or 0))}
-        # topic 编号归一化（按首次出现顺序重编，防 LLM 跳号乱序）+ type 随映射同步
+        # topic 编号归一化（按首次出现顺序重编，防 LLM 跳号乱序）+ type 随映射同步；
+        # 分窗续接：归一化从 topic_base 起编，跨窗编号天然递增不冲突
         ttype = {}
         for it in obj.get("topics") or []:
             try:
                 ttype[int(it.get("topic", -1))] = str(it.get("type", "其他"))[:12]
             except (TypeError, ValueError):
                 continue
-        remap, nxt, tmap = {}, 0, {}
+        remap, nxt, tmap = {}, topic_base, {}
         for o in out:
             if o["topic"] not in remap:
                 remap[o["topic"]] = nxt
@@ -111,6 +139,21 @@ def pts(s):
         return _dt.fromisoformat((s or "").split(".")[0])
     except ValueError:
         return None
+
+
+def _segments(cls):
+    """按相邻 topic 变化切段，返回每段的回合索引列表（与 dar_l3/检索判定/标注工具同规则）。
+
+    原按 topic 值归组会把「0,1,0」这类回头话题并成一段，真实组比下游少 7 段
+    （0909 实锤：归组 451 段/有问答 411 vs 变化 459 段/有问答 418）。
+    人工切分（--review）会把 topic 改写成 0..n-1 连续编号，按变化断出的边界与人工一致。
+    """
+    if not cls:
+        return []
+    starts = [0] + [i for i in range(1, len(cls))
+                    if cls[i].get("topic", 0) != cls[i - 1].get("topic", 0)]
+    return [list(range(s, starts[tid + 1] if tid + 1 < len(starts) else len(cls)))
+            for tid, s in enumerate(starts)]
 
 
 WINDOW = 1800  # 单归属到咨询回合的时间窗（秒）
@@ -146,8 +189,9 @@ async def main():
             async with sem:
                 res = await classify(c["rounds"])
                 done[0] += 1
-                if done[0] % 50 == 0:
-                    print(f"  {done[0]}/{len(convs)}（{time.time()-t0:.0f}s）")
+                if done[0] % 20 == 0 or done[0] == len(convs):
+                    print(f"  {done[0]}/{len(convs)}"
+                          f"（{done[0] / len(convs) * 100:.0f}%，{time.time()-t0:.0f}s）")
                 c["_cls"] = res[:len(c["rounds"])]
 
         await asyncio.gather(*(one(c) for c in convs))
@@ -183,6 +227,14 @@ async def main():
             if len(starts) != n_before:
                 n_fix += 1
         print(f"人工切分覆盖 {len(seg)} 个会话（其中段数有变化 {n_fix} 个）")
+        # 覆盖后写回 classified.jsonl（0915 修 bug：原先只在 LLM 判定后写盘、
+        # review 覆盖仅改内存且 replay 模式不写——落盘文件永远是 LLM 原始切分，
+        # 漏斗等下游读到的边界与人工核对的不一致，人工标签按段首匹配大面积错位）
+        with open(cls_path, "w", encoding="utf-8") as fh:
+            for c in convs:
+                fh.write(json.dumps({"conversation_id": c["conversation_id"],
+                                     "cls": c["_cls"]}, ensure_ascii=False) + "\n")
+        print(f"人工边界版 classified 已落盘: {cls_path}")
     print("聚合…")
 
     # ---------------- 聚合 ----------------
@@ -198,11 +250,13 @@ async def main():
         if not rounds:
             continue
         stats[(grp, month)]["courtesy"] += sum(1 for k in cls if not k["q"])
-        # 段分组（topic 已归一化，按首次出现顺序）
-        segs = {}
-        for i, k in enumerate(cls):
-            segs.setdefault(k.get("topic", 0), []).append(i)
-        seg_ids = sorted(segs)
+        if not cls or len(cls) != len(rounds):
+            continue
+        # 段分组：相邻 topic 变化即断段（与 dar_l3/检索判定/标注工具/工作台同规则，
+        # 见 _segments——原按 topic 值归组会把「0,1,0」这类回头话题并成一段，
+        # 真实组比下游少 7 段：0909 实锤 451 段/有问答 411 vs 459 段/有问答 418）
+        segs = dict(enumerate(_segments(cls)))
+        seg_ids = list(segs)
         seg_span = {s: (pts(rounds[segs[s][0]]["at"]), pts(rounds[segs[s][-1]]["at"]))
                     for s in seg_ids}
         # 每段咨询回合索引（先算，归属要用）
@@ -280,7 +334,9 @@ async def main():
         return f"{a/b*100:.1f}%" if b else "—"
 
     print("\n" + "=" * 72)
-    print("L1 直答率（1 − 转工单率，上界近似；话题段=LLM 按内容+时间切分）")
+    print("L1 直答率（1 − 转工单率，上界近似；话题段="
+          + ("人工边界已覆盖（--review）" if args.review and os.path.exists(args.review)
+             else "LLM 按内容+时间切分") + "）")
     print("-" * 72)
     print(f"{'组':　<4} {'月':<8} {'有效会话':>6} {'有单会话':>6} {'会话级':>7} "
           f"{'有效话题':>6} {'转单话题':>6} {'话题级':>7}")

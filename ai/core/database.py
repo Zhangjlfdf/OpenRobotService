@@ -7,7 +7,7 @@
 """
 import os
 from pathlib import Path
-from sqlalchemy import create_engine, Column, String, Integer, BigInteger, Text, DateTime, JSON, Index, UniqueConstraint, Enum as SQLEnum
+from sqlalchemy import Boolean, create_engine, Column, String, Integer, BigInteger, Text, DateTime, JSON, Index, UniqueConstraint, Enum as SQLEnum
 from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy.sql import func
 
@@ -173,9 +173,11 @@ class Conversation(Base):
     id = Column(Integer, primary_key=True, index=True)
     title = Column(String(255), nullable=False, default="新会话", comment="会话标题")
     user_id = Column(String(255), nullable=False, default="", comment="用户ID")
-    scene_type = Column(String(255), nullable=False, default="chat", comment="场景类型: chat/faq/support/consultation/other")
+    scene_type = Column(String(255), nullable=False, default="chat", comment="场景类型: chat/faq/support/consultation/other/dataqa")
     service_ticket_id = Column(String(255), nullable=False, default="", comment="关联工单ID")
     metadata_ = Column(Text, nullable=True, comment="元数据")
+    is_deleted = Column(Boolean, nullable=False, default=False, server_default="0", comment="逻辑删除：1=用户已删除（列表隐藏，数据保留供统计）")
+    deleted_at = Column(DateTime, nullable=True, comment="逻辑删除时间（UTC）")
     created_at = Column(DateTime, server_default=func.now(), comment="创建时间")
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), comment="更新时间")
 

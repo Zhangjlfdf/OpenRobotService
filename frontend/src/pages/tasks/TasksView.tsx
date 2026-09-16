@@ -21,13 +21,14 @@ import { normalizeStatus, STATUS_DISPLAY_MAP, PRIORITY_DISPLAY_MAP, TICKET_TYPE_
 import { formatDateTime } from '@/shared/utils/url';
 // 相关性分类过滤条件：列表查询与分类角标计数共用（底部导航「待我处理」角标复用同一口径）
 import { buildRelevanceFilters, type TicketFilterCondition } from '@/shared/utils/ticketFilters';
-import { Search, ArrowRight, Calendar, SlidersHorizontal, ChevronDown } from 'lucide-react';
+import { Search, ArrowRight, Calendar, SlidersHorizontal, ChevronDown, Star } from 'lucide-react';
 import { isSameUser } from '@/shared/utils/userIdentity';
 import { avatarUrl } from '@/api/profile';
 import { useHorizontalScroll } from '@/shared/hooks/useHorizontalScroll';
 import SubscriptionReminder from '@/shared/components/SubscriptionReminder';
 import { getMyProjects, type ProjectItem } from '@/api/projects';
 import { uploadCommentAttachment } from '@/api/ticket';
+import { toggleTaskFollow } from '@/api/taskFollow';
 
 /** 远程方式选项：默认空（无需填），可选 ToDesk / 向日葵 / 其他 */
 const REMOTE_TYPE_OPTIONS: { value: string; label: string }[] = [
@@ -49,6 +50,8 @@ interface Ticket {
   curr_step_name?: string | null;
   curr_step_agreed?: boolean;
   step_last_updated_by?: 'assigned' | 'creator' | null;
+  // 当前登录用户是否已关注（卡片星标）
+  is_followed?: boolean;
 }
 
 /** username / user_id → avatar_resource_id 的查找表；缺失时回退为首字母头像 */
@@ -56,7 +59,7 @@ type AvatarMap = Map<string, number>;
 
 const pageSize = 20;
 
-// 默认选中的任务状态：新建 / 进行中 / 已挂起 / 已解决（排除 已取消 / 已关闭）
+// 默认选中的任务状态：待处理 / 进行中 / 已挂起 / 已解决（排除 已取消 / 已关闭）
 const DEFAULT_STATUS_VALUES: string[] = ['new', 'in_progress', 'pending', 'resolved'];
 const ALL_STATUS_VALUES: string[] = Object.keys(STATUS_DISPLAY_MAP);
 // 优先级默认全选（low / medium / high / urgent）
@@ -132,7 +135,8 @@ const sameTicketItems = (a: Ticket[], b: Ticket[]) =>
   a.every((t, i) => {
     const o = b[i];
     return t.id === o.id && t.updated_at === o.updated_at && t.status === o.status
-      && t.curr_step_id === o.curr_step_id && t.curr_step_agreed === o.curr_step_agreed;
+      && t.curr_step_id === o.curr_step_id && t.curr_step_agreed === o.curr_step_agreed
+      && !!t.is_followed === !!o.is_followed;
   });
 
 // 角标计数浅比较：键集与值完全一致即视为未变化
@@ -260,7 +264,7 @@ const buildFilterParams = (filter: {
 // 头像统一灰底白字（无头像时）/ 圆形头像图片（有 avatar_resource_id 时），
 // 信息层级靠字号与字重区分（参考 macaron-minimal-ui 设计）。
 // memo 包装：轮询回包数据不变时（sameTicketItems 复用旧引用）跳过卡片重渲染。
-const TicketCard = memo(function TicketCard({ t, onOpen, avatarMap, currentUserId, currentUsername }: { t: Ticket; onOpen: (id: string) => void; avatarMap?: AvatarMap; currentUserId?: string; currentUsername?: string }) {
+const TicketCard = memo(function TicketCard({ t, onOpen, avatarMap, currentUserId, currentUsername, onToggleFollow }: { t: Ticket; onOpen: (id: string) => void; avatarMap?: AvatarMap; currentUserId?: string; currentUsername?: string; onToggleFollow?: (id: string, follow: boolean) => void }) {
   const creator = t.created_by_name || t.created_by || '-';
   const assignee = t.assigned_to_name || t.assigned_to || '-';
   const participants = (t.participants || []).filter(Boolean);
@@ -297,13 +301,13 @@ const TicketCard = memo(function TicketCard({ t, onOpen, avatarMap, currentUserI
               style={{
                 display: 'inline-flex', alignItems: 'center', gap: 4,
                 padding: '2px 8px', borderRadius: 999, fontSize: 12, fontWeight: 600,
-                color: '#b45309', background: 'rgba(245,158,11,0.14)',
-                border: '1px solid rgba(245,158,11,0.45)',
+                color: 'var(--apricot)', background: 'var(--apricot-soft)',
+                border: '1px solid var(--border)',
               }}
             >
               <span
                 style={{
-                  width: 6, height: 6, borderRadius: '50%', background: '#f59e0b',
+                  width: 6, height: 6, borderRadius: '50%', background: 'var(--apricot)',
                   animation: 'task-card2-pulse 1.2s ease-in-out infinite',
                 }}
               />
@@ -313,6 +317,19 @@ const TicketCard = memo(function TicketCard({ t, onOpen, avatarMap, currentUserI
           )}
         </div>
         <span className="task-card2__type">{TICKET_TYPE_DISPLAY_MAP[t.ticket_type] || t.ticket_type || '其他'}</span>
+        {/* 关注星标：stopPropagation 阻止冒泡到卡片 onClick（避免误开详情）；乐观更新由父层处理 */}
+        {onToggleFollow && (
+          <button
+            type="button"
+            className={`task-card2__star${t.is_followed ? ' is-followed' : ''}`}
+            aria-label={t.is_followed ? '取消关注' : '添加关注'}
+            title={t.is_followed ? '取消关注' : '添加关注'}
+            aria-pressed={!!t.is_followed}
+            onClick={(e) => { e.stopPropagation(); onToggleFollow(t.id, !t.is_followed); }}
+          >
+            <Star size={17} strokeWidth={2} fill={t.is_followed ? 'currentColor' : 'none'} />
+          </button>
+        )}
       </div>
 
       <div className="task-card2__title">
@@ -399,6 +416,8 @@ function ChipDropdown({
   const triggerRef = useRef<HTMLButtonElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
+  // 面板打开时间戳：用于忽略打开瞬间移动端软键盘弹起引发的首批 scroll/resize
+  const openedAtRef = useRef(0);
 
   const filtered = useMemo(() => {
     const kw = keyword.trim().toLowerCase();
@@ -428,6 +447,7 @@ function ChipDropdown({
     setCoords({ top, left, minWidth, maxHeight });
     setKeyword('');
     setOpen(true);
+    openedAtRef.current = Date.now();
   }, []);
 
   // 面板展开时聚焦搜索框（延迟一帧，避免与打开面板的 click 冲突）
@@ -440,6 +460,9 @@ function ChipDropdown({
   // 点击外部 / Esc / 滚动 / 窗口尺寸变化 关闭面板
   useEffect(() => {
     if (!open) return;
+    // 移动端面板打开即自动聚焦搜索框 → 软键盘弹起，浏览器会把输入框滚入视口并触发 resize；
+    // 宽限期内的首批 scroll/resize 属于键盘动画，不关闭面板（否则下拉与系统键盘会「一闪即关」）。
+    const OPEN_GRACE_MS = 500;
     const onDown = (e: MouseEvent) => {
       const t = e.target as Node;
       if (triggerRef.current?.contains(t)) return;
@@ -447,16 +470,27 @@ function ChipDropdown({
       setOpen(false);
     };
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false); };
-    const close = () => setOpen(false);
+    // 焦点仍在面板内（用户正在搜索框输入）时，软键盘弹起/收起引发的视口变化不关闭面板
+    const isKeyboardInduced = () =>
+      Date.now() - openedAtRef.current < OPEN_GRACE_MS
+      || !!panelRef.current?.contains(document.activeElement);
+    // 页面滚动才关闭；面板内部（选项列表）滚动不关闭
+    const onScroll = (e: Event) => {
+      const t = e.target;
+      if (t instanceof Node && panelRef.current?.contains(t)) return;
+      if (isKeyboardInduced()) return;
+      setOpen(false);
+    };
+    const onResize = () => { if (!isKeyboardInduced()) setOpen(false); };
     document.addEventListener('mousedown', onDown);
     document.addEventListener('keydown', onKey);
-    window.addEventListener('scroll', close, true);
-    window.addEventListener('resize', close);
+    window.addEventListener('scroll', onScroll, true);
+    window.addEventListener('resize', onResize);
     return () => {
       document.removeEventListener('mousedown', onDown);
       document.removeEventListener('keydown', onKey);
-      window.removeEventListener('scroll', close, true);
-      window.removeEventListener('resize', close);
+      window.removeEventListener('scroll', onScroll, true);
+      window.removeEventListener('resize', onResize);
     };
   }, [open]);
 
@@ -877,6 +911,23 @@ export default function TasksView() {
 
   fetchTicketsRef.current = fetchTickets;
 
+  // 星标关注切换：乐观更新星标，失败回滚 + 提示；关注变化会影响「我关注的」角标数。
+  const handleToggleFollow = useCallback(async (id: string, follow: boolean) => {
+    setTickets((prev) => prev.map((t) => (t.id === id ? { ...t, is_followed: follow } : t)));
+    const ok = await toggleTaskFollow(id, follow);
+    if (!ok) {
+      setTickets((prev) => prev.map((t) => (t.id === id ? { ...t, is_followed: !follow } : t)));
+      Toast({ message: follow ? '关注失败，请重试' : '取消关注失败，请重试', theme: 'error' });
+      return;
+    }
+    // 刷新分类角标（不整表重拉，避免打断滚动位置）
+    fetchCountsRef.current();
+    // 正在「我关注的」视图取消关注：该卡片应从列表消失，静默重拉一次
+    if (relevanceFilter === 'followed' && !follow) {
+      fetchTicketsRef.current(true);
+    }
+  }, [relevanceFilter]);
+
   // 筛选状态变化时同步到 URL（搜索用即时值 searchInput，列表请求用防抖后的 search）
   useEffect(() => {
     const newParams = buildFilterParams({
@@ -949,6 +1000,7 @@ export default function TasksView() {
       { value: 'all', label: '项目相关' },
       { value: 'mine', label: '待我处理' },
       { value: 'related', label: '与我相关' },
+      { value: 'followed', label: '我关注的' },
     ];
     return canViewAllTasks
       ? [{ value: 'global', label: '全部' }, ...base]
@@ -1211,7 +1263,7 @@ export default function TasksView() {
     }
     return { ...d, type: [...d.type, value] };
   });
-  // 清空草稿（弹窗内「清空选择」）：相关性回默认、状态回默认集（新建/进行中/已挂起/已解决）、
+  // 清空草稿（弹窗内「清空选择」）：相关性回默认、状态回默认集（待处理/进行中/已挂起/已解决）、
   // 优先级回「全部」、项目/处理人回「全部」、创建时间清空。仅作用于草稿，未点「确定」前不生效。
   const draftClear = () => setDraft({
     relevance: 'mine',
@@ -1565,7 +1617,7 @@ export default function TasksView() {
             <div className="tasks-empty">暂无工单</div>
           ) : (
             tickets.map((t) => (
-              <TicketCard key={t.id} t={t} onOpen={openDetail} avatarMap={avatarMap} currentUserId={userId} currentUsername={username} />
+              <TicketCard key={t.id} t={t} onOpen={openDetail} avatarMap={avatarMap} currentUserId={userId} currentUsername={username} onToggleFollow={handleToggleFollow} />
             ))
           )}
           <Pagination current={page} total={total} pageSize={pageSize} onChange={setPage} />

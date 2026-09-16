@@ -9,7 +9,8 @@ import logging
 
 from fastapi import APIRouter, HTTPException, Depends, Query, Request, UploadFile, File, Form, Body
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
+from sqlalchemy import select, func, delete
+from sqlalchemy.dialects.mysql import insert as mysql_insert
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timedelta
 
@@ -24,12 +25,12 @@ from app.modules.tasks.schemas.ticket import (
     TicketCommentCreate, TicketCommentUpdate, TicketCommentResponse,
     TicketQueryParams, TicketCuibanNotification, TicketFilterRequest,
     TicketBatchCountRequest,
-    TicketCreateNotificationRequest, ProjectMemberResponse
+    TicketCreateNotificationRequest, RobotAlarmNotificationRequest, ProjectMemberResponse
 )
 from app.modules.tasks.models.ticket import TicketStatus, TicketPriority, TicketType
 from app.modules.tasks.services.ticket_service import TicketService, convert_to_shanghai_time
 from app.modules.tasks.services.operation_log_service import OperationLogService, get_role_prefix
-from app.models.task import OperationType, TaskStep
+from app.models.task import OperationType, TaskStep, TaskFollower, TaskParticipant, Task
 from app.modules.tasks.api.ws import (
     ws_broadcast_comment,
     ws_broadcast_comment_deleted,
@@ -39,7 +40,8 @@ from app.modules.tasks.api.ws import (
 )
 from app.utils.minio_client import minio_client
 from app.utils.notification_utils import NotificationUtils, _format_shanghai
-from app.integrations.api import verify_sync_api_key
+from app.integrations.api import verify_sync_api_key, verify_robot_alarm_api_key
+from app.services.identity_service import IdentityService
 from app.core.config import settings
 from app.core.user_identity import user_matches, is_admin_user, to_user_id, actor_username, identity_keys
 from app.services.redispatch_tip_service import (  # 派单说明：列表/气泡/详情同一出口
@@ -55,9 +57,9 @@ logger_task = logging.getLogger(__name__)
 
 # 状态中文映射（用于操作日志描述）
 STATUS_LABEL = {
-    "new": "新建",
+    "new": "待处理",
     "in_progress": "处理中",
-    "pending": "待处理",
+    "pending": "已挂起",
     "resolved": "已解决",
     "canceled": "已取消",
     "closed": "已关闭",
@@ -449,18 +451,22 @@ async def get_tasks(
 async def filter_tasks(
     filter_request: TicketFilterRequest,
     request: Request,
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_active_user_from_token),
 ):
     import logging
     logger = logging.getLogger(__name__)
-    
+
     try:
         logger.debug(f"开始复合过滤查询任务列表, filters_count={len(filter_request.filters) if filter_request.filters else 0}, page={filter_request.page}, size={filter_request.size}")
 
         auth_header = request.headers.get("Authorization")
         token = auth_header[7:] if auth_header and auth_header.startswith("Bearer ") else None
 
-        result = await TicketService.filter_tickets(db, filter_request, token)
+        # 当前用户 username：供「我关注的」(followedBy) 过滤与列表 is_followed 回填
+        current_username = actor_username(current_user)
+
+        result = await TicketService.filter_tickets(db, filter_request, token, current_username)
         logger.debug(f"复合过滤查询任务列表成功, total={result.get('total', 0)}")
         return result
     except Exception as e:
@@ -472,25 +478,72 @@ async def filter_tasks(
 async def filter_tasks_counts(
     batch_request: TicketBatchCountRequest,
     request: Request,
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_active_user_from_token),
 ):
     """批量计数：每组 queries 独立统计 total，一次网络往返返回多组角标数。
 
-    供系统任务页「全部/项目相关/待我处理/与我相关」分类角标使用，
+    供系统任务页「全部/项目相关/待我处理/与我相关/我关注的」分类角标使用，
     替代前端并发多次 POST /filter（减少认证/中间件开销与连接占用）。
     """
     try:
         auth_header = request.headers.get("Authorization")
         token = auth_header[7:] if auth_header and auth_header.startswith("Bearer ") else None
 
+        # 当前用户 username：供「我关注的」(followedBy) 角标计数
+        current_username = actor_username(current_user)
+
         totals = []
         for q in batch_request.queries:
-            totals.append(await TicketService.count_tickets(db, q, token))
+            totals.append(await TicketService.count_tickets(db, q, token, current_username))
         return totals
     except Exception as e:
         logger = logging.getLogger(__name__)
         logger.error(f"批量计数失败: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"批量计数失败: {str(e)}")
+
+
+@router.post("/{task_id}/follow", response_model=dict)
+async def follow_task(
+    task_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_active_user_from_token),
+):
+    """关注工单（卡片星标）。幂等：重复关注只刷新 created_at，不报错。
+
+    归属人由服务端 token 解析（actor_username），前端无法替他人关注。
+    """
+    exists = await db.execute(select(Task.id).where(Task.id == task_id))
+    if exists.scalar_one_or_none() is None:
+        raise HTTPException(status_code=404, detail="任务未找到")
+
+    username = actor_username(current_user)
+    # MySQL INSERT ... ON DUPLICATE KEY UPDATE：多端并发点星标不撞唯一键回滚
+    stmt = mysql_insert(TaskFollower).values(task_id=task_id, username=username)
+    stmt = stmt.on_duplicate_key_update(created_at=func.now())
+    await db.execute(stmt)
+    await db.commit()
+
+    return {"ok": True, "task_id": task_id, "followed": True}
+
+
+@router.delete("/{task_id}/follow", response_model=dict)
+async def unfollow_task(
+    task_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_active_user_from_token),
+):
+    """取消关注（取消星标）。幂等：未关注时返回 0 行影响，不报错。"""
+    username = actor_username(current_user)
+    await db.execute(
+        delete(TaskFollower).where(
+            TaskFollower.task_id == task_id,
+            TaskFollower.username == username,
+        )
+    )
+    await db.commit()
+
+    return {"ok": True, "task_id": task_id, "followed": False}
 
 
 @router.get("/stats/overview", response_model=dict)
@@ -1060,6 +1113,16 @@ async def add_comment(
             .where(Ticket.id == task_id)
             .values(updated_at=func.now())
         )
+
+        # ── 写入参与人（幂等 upsert） ──
+        # 评论/附件是参与工单的核心行为，成功后把当前用户记入 task_participants。
+        # 同事务：评论失败则参与人不写入，原子性保证。
+        # ON DUPLICATE KEY UPDATE 刷新 last_active_at，重复评论只更新时间不产生脏数据。
+        participant_stmt = mysql_insert(TaskParticipant).values(
+            task_id=task_id, username=username,
+        ).on_duplicate_key_update(last_active_at=func.now())
+        await db.execute(participant_stmt)
+
         await db.commit()
 
         # ── 记录评论操作日志 ──
@@ -1163,7 +1226,7 @@ def _maybe_notify_mentions(
             try:
                 # 取工单真实状态的中文名
                 status_text_map = {
-                    "new": "新建", "in_progress": "处理中", "pending": "待处理",
+                    "new": "待处理", "in_progress": "处理中", "pending": "已挂起",
                     "resolved": "已解决", "closed": "已关闭", "canceled": "已取消",
                 }
                 raw_status = (ticket.status.value if hasattr(ticket.status, 'value')
@@ -2691,6 +2754,101 @@ async def send_ticket_create_notification(
     except Exception as e:
         logger.error(f"发送新建工单通知失败 task_id={body.task_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"发送新建工单通知失败: {str(e)}")
+
+
+@router.post("/robot-alarm-notification")
+async def send_robot_alarm_notification(
+    body: RobotAlarmNotificationRequest,
+    key: str = Depends(verify_robot_alarm_api_key),
+):
+    """设备报警提醒对外接口（供内部其他后端服务调用）。
+
+    调用方直接传入报警字段，后端按 template.yaml 模板 10 组装后发送微信模板消息。
+    鉴权仿企业微信 webhook，URL 携带 ?key=，需与后端 ROBOT_ALARM_API_KEY 一致。
+
+    模板字段顺序：[报警机型, 设备编号, 报警原因, 告警级别, 告警时间]
+
+    收件人解析（重要）：
+      - `project_code` 实际是 `project.id`，先据此查 user_project_roles 拿到项目全部关联用户。
+      - `users` 列表传入的不是 user.username，而是 user.external_credentials.usp.username 值；
+        后端将 `users` 与项目成员的 usp.username 比对，命中者用其真实 user.username 发通知。
+      - 未命中项目成员的入参会被丢弃（防止跨项目越权通知），并记录 warning 日志。
+      - 全部未命中或项目无成员 → 400。
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    try:
+        if not body.users:
+            raise HTTPException(status_code=400, detail="users 不能为空")
+
+        # 1. 通过 project_id (= project_code) 查询项目成员，含 external_credentials
+        members = await run_in_threadpool(
+            IdentityService.get_project_members,
+            body.project_code,
+            True,  # include_usp=True
+        )
+        if not members:
+            raise HTTPException(
+                status_code=404,
+                detail=f"项目 {body.project_code} 无关联成员或项目不存在",
+            )
+
+        # 2. 构建 usp_username -> user.username 映射（仅项目成员）
+        usp_to_username: Dict[str, str] = {}
+        for m in members:
+            ext = m.get("external_credentials") or {}
+            if not isinstance(ext, dict):
+                continue
+            usp_username = (ext.get("usp") or {}).get("username") or ""
+            usp_username = usp_username.strip()
+            if usp_username and m.get("username"):
+                usp_to_username[usp_username] = m["username"]
+
+        # 3. 比对入参 users 与项目成员，得到真实通知目标 username
+        requested = [u.strip() for u in body.users if u and u.strip()]
+        recipients: List[str] = []
+        unmatched: List[str] = []
+        seen: set = set()
+        for usp_name in requested:
+            real_username = usp_to_username.get(usp_name)
+            if real_username and real_username not in seen:
+                seen.add(real_username)
+                recipients.append(real_username)
+            else:
+                unmatched.append(usp_name)
+
+        if unmatched:
+            logger.warning(
+                f"设备报警通知: project_code={body.project_code} 存在未匹配项目成员的入参 users={unmatched}，已丢弃"
+            )
+
+        if not recipients:
+            raise HTTPException(
+                status_code=400,
+                detail=f"users 中无任何值匹配项目 {body.project_code} 成员的 external_credentials.usp.username",
+            )
+
+        # 4. 发送通知（传入真实 username，send_robot_alarm_notification 内部经 to_usernames 再归一）
+        result = await NotificationUtils.send_robot_alarm_notification(
+            robot_type=body.robot_type,
+            robot_id=body.robot_id,
+            content=body.content,
+            level=body.level,
+            start_time=body.start_time,
+            user_names=recipients,
+            token=None,
+            project_code=body.project_code,
+        )
+        logger.info(
+            f"设备报警通知已发送: project_code={body.project_code}, robot_type={body.robot_type}, "
+            f"robot_id={body.robot_id}, level={body.level}, recipients={recipients}, unmatched={unmatched}"
+        )
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"发送设备报警通知失败 project_code={body.project_code}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"发送设备报警通知失败: {str(e)}")
 
 
 @router.post("/{task_id}/internal/broadcast-comment")

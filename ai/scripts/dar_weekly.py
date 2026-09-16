@@ -1,14 +1,23 @@
 # -*- coding: utf-8 -*-
-"""直答率周流程单入口：export → prepare → l1 → retrieval → l3 → tool → report。
+"""直答率周流程单入口：export → prepare → l1 → tool0 → l1r/retrieval/l3/tool → report。
 
 每周流程（步骤名按需组合，缺省全跑除 export 外的本地步骤）：
+  全流程    导数据(export prepare) → L1(l1) → 人工切题(浏览器改边界、保存到工作台
+            =export_dar/{env}/manual_segmentation.json，自动重算 L1) → L3 预标
+            (l1r retrieval l3 tool，按人工边界判) → 人工标注(浏览器打标签、保存到
+            工作台) → 吸收出周报(l1r retrieval l3 report)。
+            先人工定边界再判定：judge/检索重放的输入就是人工认可的话题段，
+            标注轮预标全部有效。
   export     ssh 到测试服务器导出四表 csv.gz → export_dar/（凭据只在服务器端解析，
              不回传不落日志；首次跑或 ssh key 不在时先手动验证 ssh 通）
   prepare    csv.gz → processed/conversations_split.jsonl（dar_prepare）
-  l1         LLM 批判 + L1/L2 统计（dar_l1 --replay 不存在时自动跑批判）
-  retrieval  全段检索判定（dar_retrieval_check，增量：已判段复用）
-  l3         全段四类预标（dar_l3 --all，供标注工具注入）
-  tool       生成 segmentation_tool.html（build_segmentation_tool）
+  l1         LLM 批判 + L1 统计（有人工标注文件时带 --review 出 L2）
+  tool0      生成切题版标注工具（--bounds-only：无预标，只定边界）
+  l1r        L1 重算：--replay --review 吸收人工切分/标签（不调 LLM 秒出；
+             无人工文件时跳过，判定产物落后于新导出时回退 l1 全量）
+  retrieval  全段检索判定（dar_retrieval_check，增量：已判段复用；人工边界优先）
+  l3         全段四类预标（dar_l3 --all，供标注工具注入；人工边界优先）
+  tool       生成标注版工具（注入预标 + 人工边界）
   report     聚合周报：L1/L2 + 检索交叉 + 预标分布 + 人工标注进度 + 与上周对比，
              落盘 processed/weekly_YYYYMMDD.json
 
@@ -18,7 +27,16 @@
   python ai/scripts/dar_weekly.py --env prod export         # 连生产导数据（目录隔离到 export_dar/prod/）
   python ai/scripts/dar_weekly.py --env prod --note 上线v2 prepare l1 ...   # 附注随周报落盘
 环境：--env test（缺省）| prod。两环境数据/人工标注/周报完全隔离；
-模型：l1/l3/retrieval 三步共用 INTENT_MODEL（分段与审核判定，轻量无思考）。
+模型：l1/l3/retrieval 三步的判定用 DAR_MODEL（缺省 deepseek-flash，
+0910 起——旧别名 v4.1-flash-expires-on-0910 已失效；温度 0 无思考）；
+检索词改写走 pipeline 内部 get_intent_client（INTENT_MODEL）。
+
+环境规定（用户 0910 定调，固定不再变）：
+  1) 指标生成的数据从生产拿：对话记录走 --env prod（export 连生产库）；测试库数据
+     只用于校准考卷/内部验证（--env test）。
+  2) L1/L3/retrieval 等一切用到检索的步骤，去服务器的测试环境测（DAR_QDRANT 缺省
+     test：隧道 + 测试服务指针）；本地快照又旧又慢，只作 DAR_QDRANT=local 应急。
+  3) 在线测试也从测试环境测；生产库/生产服务只读，写操作绝不碰生产。
 """
 import glob
 import io
@@ -49,17 +67,16 @@ ENVS = {
 ENV = "test"
 DATA = os.path.join(DATA_ROOT, "test")
 OUT = os.path.join(DATA, "processed")
-# 人工标注按环境分文件：test 沿用历史名，prod 加后缀（两环境数据集不同，标注不可混用）
-MANUAL_NAME = {"test": "manual_segmentation.json",
-               "prod": "manual_segmentation_prod.json"}
-MANUAL = os.path.join(r"C:/Users/PAJ26020/Downloads", MANUAL_NAME["test"])
+# 人工切分/标注：随数据集放 export_dar/{env}/manual_segmentation.json
+# （0910-6 迁出 Downloads——下载列表清理会误删；工具「保存到工作台」直写这里）
+MANUAL = os.path.join(DATA, "manual_segmentation.json")
 SPLIT = os.path.join(OUT, "conversations_split.jsonl")
 
 # 四表导出列（与 dar_prepare.load 的读取字段对齐；列名=服务器库实际列名）
 EXPORT_TABLES = {
     "users": "id,username,name",
     "conversations": "id,user_id,title,created_at,service_ticket_id,metadata_",
-    "messages": "id,conversation_id,role,message_type,sequence,created_at,content",
+    "messages": "id,conversation_id,role,message_type,sequence,created_at,content,file_urls",
     "tasks": ("id,title,task_type,status,created_by,project_name,source,"
               "external_id,created_at,metadata_info"),
 }
@@ -156,6 +173,25 @@ def step_export():
 def step(name, script, args=()):
     print(f"\n{'=' * 72}\n== {name}：{script} {' '.join(args)}\n{'=' * 72}")
     sh([sys.executable, os.path.join(HERE, script), *args])
+
+
+def step_l1_replay():
+    """L1 重算：--replay --review 吸收人工切分/标签（读已落盘判定，不调 LLM）。
+    无人工文件/无对话数据时跳过；classified 落后于新导出时回退 l1 全量重判（带 --review）。"""
+    if not os.path.exists(MANUAL):
+        print("l1r：无人工切分/标注文件，跳过（L1 维持 LLM 切分口径）")
+        return
+    cls = os.path.join(OUT, "conversations_classified.jsonl")
+    fresh = (os.path.exists(cls) and os.path.exists(SPLIT)
+             and os.path.getmtime(cls) >= os.path.getmtime(SPLIT))
+    if not os.path.exists(SPLIT):
+        print("l1r：无对话数据（先跑 export/prepare），跳过")
+        return
+    if fresh:
+        step("l1 重算（吸收人工切分）", "dar_l1.py",
+             ("--out", OUT, "--replay", "--review", MANUAL))
+    else:
+        STEPS["l1"]()
 
 
 def _same_denominator_compare(judge_rows):
@@ -280,7 +316,10 @@ def _drilldown_matrix(csv_rows):
 
 
 def _fail_items(j_rows):
-    """L3 预标「未直答/未覆盖」段全量清单（不截断），供工作台按周浏览。
+    """未直答/未覆盖段全量清单（不截断），供工作台按周浏览。
+    **人工标签优先于 AI 预标**（0910 实锤：用户标了「直接提单」的段仍进清单——
+    原先只看 pre，人工纠正被无视）。段上有人工标签（含预填）按标签计，
+    无标签段才按 AI 预标计。
     每条含问题/type/判定/理由/用户/时间/所在周（周一日期）——
     周增量=按 week 分组后的各组条数。
     纯问候/寒暄段（段内无 L1 咨询回合，如整段只有「你好」）不进清单；
@@ -288,8 +327,20 @@ def _fail_items(j_rows):
     if not j_rows or not os.path.exists(SPLIT) or not os.path.exists(
             os.path.join(OUT, "conversations_classified.jsonl")):
         return []
-    bad = [r for r in j_rows if r.get("pre") in ("未直答", "未覆盖")
-           and r.get("grp") == "真实组"]  # 测试组是自测流量，不进缺口清单
+    labs_man = {}
+    if os.path.exists(MANUAL):
+        legacy = {"直答错误": "未直答", "直答不完整": "未直答", "转工单正确": "建议转单"}
+        for cid, lm in (json.load(open(MANUAL, encoding="utf-8"))
+                        .get("labels") or {}).items():
+            labs_man[str(cid)] = {int(k): legacy.get(v, v) for k, v in lm.items()
+                                  if str(k).isdigit()}
+    bad = []
+    for r in j_rows:
+        if r.get("grp") != "真实组":
+            continue  # 测试组是自测流量，不进缺口清单
+        eff = labs_man.get(str(r["cid"]), {}).get(r.get("astart")) or r.get("pre")
+        if eff in ("未直答", "未覆盖"):
+            bad.append((r, eff))
     if not bad:
         return []
     convs = {str(c["conversation_id"]): c for c in
@@ -303,7 +354,7 @@ def _fail_items(j_rows):
         if r.get("astart") is not None:
             starts.setdefault(str(r["cid"]), set()).add(r["astart"])
     items = []
-    for r in bad:
+    for r, eff in bad:
         c, cl = convs.get(str(r["cid"])), cls_by.get(str(r["cid"]))
         a = r.get("astart")
         if not c or not cl or a is None or a >= len(c["rounds"]) or a >= len(cl):
@@ -321,7 +372,7 @@ def _fail_items(j_rows):
         at = (c["rounds"][qi].get("at") or "")[:16]
         t = _dt.fromisoformat(at) if at else None
         week = (t - _td(days=t.weekday())).strftime("%Y-%m-%d") if t else ""
-        items.append({"pre": r["pre"], "q": q, "type": cl[qi].get("type") or "未分类",
+        items.append({"pre": eff, "q": q, "type": cl[qi].get("type") or "未分类",
                       "reason": (r.get("reason") or "")[:60],
                       "user": (c.get("name") or c.get("user_id") or "?"),
                       "cid": r["cid"], "astart": a, "at": at, "week": week})
@@ -499,7 +550,8 @@ def _write_md(rep, path):
                         [[k, v] for k, v in rep["l1_真实组"].items()]), ""]
     if rep.get("kb_gap") is not None:
         L += [f"## KB 缺口率：{rep['kb_gap']}",
-              "（真实组检索判定 no 占比=知识库没有答案的段比例，本地重放近似）", ""]
+              "（真实组检索重放 no 占比：资料层上界，含直接提单段；"
+              "补库可救的实际缺口看 L3 未覆盖）", ""]
     if rep.get("matrix"):
         mx = rep["matrix"]
         L += ["## 下钻矩阵：用户 × 话题类型（L1 段级直答率=未出单段/段数）", "",
@@ -544,6 +596,27 @@ def _write_md(rep, path):
         fh.write("\n".join(L))
 
 
+def _overlay_manual_labels(rows):
+    """人工标签覆盖进判定行（lab ← MANUAL 的标签，无标签行保持原值）。
+
+    0910 实锤：判定行是增量复用的，行内 lab 停在判定时刻——用户其后改的
+    标签（含直接提单改判）永远进不了周报；precision/一致率/未直答清单
+    全部失真。凡吃 j_rows 的统计必须先过这一层。"""
+    if not os.path.exists(MANUAL):
+        return rows
+    legacy = {"直答错误": "未直答", "直答不完整": "未直答", "转工单正确": "建议转单"}
+    labs_man = {}
+    for cid, lm in (json.load(open(MANUAL, encoding="utf-8"))
+                    .get("labels") or {}).items():
+        labs_man[str(cid)] = {int(k): legacy.get(v, v) for k, v in lm.items()
+                              if str(k).isdigit()}
+    for r in rows:
+        lab = labs_man.get(str(r.get("cid")), {}).get(r.get("astart"))
+        if lab:
+            r["lab"] = lab
+    return rows
+
+
 def step_report():
     def latest_one(pattern):
         files = sorted(glob.glob(os.path.join(OUT, pattern)))
@@ -581,7 +654,8 @@ def step_report():
     # 预标分布 + 已标段一致率
     j_path = latest_one("l3_judge_all_*.json")
     if j_path:
-        rows = json.load(open(j_path, encoding="utf-8"))
+        rows = _overlay_manual_labels(
+            json.load(open(j_path, encoding="utf-8")))
         rep["pre_source"] = os.path.basename(j_path)
         for g in ("真实组", "测试组"):
             sub = [r for r in rows if r.get("grp") == g]
@@ -606,7 +680,10 @@ def step_report():
         rep["manual_progress"] = f"{n_lab}/{n_seg} 段已标"
 
     # AI 判定 vs 人工标签（校准 judge：人工段考卷的四类混淆矩阵）
-    cal_files = sorted(glob.glob(os.path.join(OUT, "l3_judge_[0-9]*.json")))
+    # 只认规范名 l3_judge_YYYYMMDD.json：_vN 是历史轮次归档，按名排序会排在规范名之后，
+    # 取 [-1] 会取到被弃的那一轮（0910 实锤：r4 试跑归档后成了「最新」）
+    cal_files = [f for f in sorted(glob.glob(os.path.join(OUT, "l3_judge_[0-9]*.json")))
+                 if os.path.basename(f)[len("l3_judge_"):-len(".json")].isdigit()]
     if cal_files:
         cal_path = cal_files[-1]
         cal = json.load(open(cal_path, encoding="utf-8"))
@@ -678,8 +755,8 @@ def step_report():
     ok, bad, unc = l2.get("直答正确", 0), l2.get("未直答", 0), l2.get("未覆盖", 0)
     if ok + bad:
         rates["L2_人工"] = (
-            f"确定 {ok / (ok + bad) * 100:.1f}%（{ok}/{ok + bad}）"
-            f"｜端到端 {ok / (ok + bad + unc) * 100:.1f}%（{ok}/{ok + bad + unc}）"
+            f"端到端 {ok / (ok + bad + unc) * 100:.1f}%（{ok}/{ok + bad + unc}）"
+            f"｜确定 {ok / (ok + bad) * 100:.1f}%（{ok}/{ok + bad}）"
             f"｜已标 {ok + bad + unc} 段")
     if j_path:
         sub = [r for r in rows if r.get("grp") == "真实组"]
@@ -687,13 +764,13 @@ def step_report():
         ok, bad, unc = p.get("直答正确", 0), p.get("未直答", 0), p.get("未覆盖", 0)
         if ok + bad:
             rates["L3_AI预标"] = (
-                f"确定 {ok / (ok + bad) * 100:.1f}%（{ok}/{ok + bad}）"
-                f"｜端到端 {ok / (ok + bad + unc) * 100:.1f}%（{ok}/{ok + bad + unc}）"
+                f"端到端 {ok / (ok + bad + unc) * 100:.1f}%（{ok}/{ok + bad + unc}）"
+                f"｜确定 {ok / (ok + bad) * 100:.1f}%（{ok}/{ok + bad}）"
                 f"｜全段 {len(sub)}（judge 偏宽仅供参考）")
     if rates:
         rep["dar_rates"] = rates
-        # 分母纯化口径：L1 只计有实质咨询段的会话（纯提单/纯问候会话不进分母）
-        rep["l1_note"] = "分母=有实质咨询段的会话（convs_q）；纯提单/纯问候已剔除"
+        # 分母纯化口径：L1 只计有实质咨询回合的话题段（纯提单/纯问候段不进分母）
+        rep["l1_note"] = "分母=有实质咨询回合的话题段（segs_q，段级）；纯提单/纯问候段已剔除"
         print("\n== 直答率三口径对比（真实组；L1 分母已剔除非咨询会话）==")
         for k, v in rates.items():
             print(f"  {k}：{v}")
@@ -710,7 +787,8 @@ def step_report():
     # ---- 六项指标增强：KB 缺口 / 下钻矩阵 / 解决轮次 / 转单质量 / 预标 precision / 失败清单 ----
     kb = (rep.get("retrieval_no_rate") or {}).get("真实组")
     if kb is not None:
-        rep["kb_gap"] = f"{kb * 100:.1f}%（真实组检索判定 no 占比，本地重放近似）"
+        rep["kb_gap"] = (f"{kb * 100:.1f}%（真实组检索重放 no 占比，资料层上界；"
+                         "含直接提单段，≠L3 未覆盖）")
         print(f"\nKB 缺口率：{rep['kb_gap']}")
     csv_rows, csv_name = _load_csv_rows()
     if csv_rows:
@@ -734,10 +812,8 @@ def step_report():
         tk_rows = [r for r in real if r["seg_ticketed"] == "1"]
         if tk_rows:
             tk_lab = Counter(r["l2_label"] or "未标" for r in tk_rows)
-            sug = sum(1 for r in real if r["suggest_no_ticket"] == "1")
             rep["ticket_quality"] = {
-                "出单段L2构成": dict(tk_lab.most_common()),
-                "建议转单未提单": f"{sug} 段（AI 建议了但用户没提）"}
+                "出单段L2构成": dict(tk_lab.most_common())}
             print(f"转单质量：{rep['ticket_quality']}")
     if j_path:
         prec = _precision_by_label(rows)
@@ -816,6 +892,9 @@ STEPS = {
     # dar_l1 --out 默认 Desktop（非 processed），显式传；有人工标注带上 --review 出 L2
     "l1": lambda: step("l1", "dar_l1.py", ("--out", OUT) +
                        (("--review", MANUAL) if os.path.exists(MANUAL) else ())),
+    "tool0": lambda: step("tool 切题（无预标）", "build_segmentation_tool.py",
+                          ("--bounds-only",)),
+    "l1r": lambda: step_l1_replay(),
     "retrieval": lambda: step("retrieval", "dar_retrieval_check.py"),
     "l3": lambda: step("l3 预标", "dar_l3.py", ("--all",)),
     "tool": lambda: step("tool", "build_segmentation_tool.py"),
@@ -867,10 +946,11 @@ def main():
     os.environ["DAR_ENV"] = env  # 子脚本按环境变量取数据目录（subprocess 继承）
     DATA = os.path.join(DATA_ROOT, ENV)
     OUT = os.path.join(DATA, "processed")
-    MANUAL = os.path.join(r"C:/Users/PAJ26020/Downloads", MANUAL_NAME[ENV])
+    MANUAL = os.path.join(DATA, "manual_segmentation.json")
     SPLIT = os.path.join(OUT, "conversations_split.jsonl")
-    # retrieval 检索源跟随数据环境（prod=连生产 qdrant 只读重放）；显式 DAR_QDRANT 可覆盖
-    os.environ.setdefault("DAR_QDRANT", "prod" if ENV == "prod" else "local")
+    # 检索源（规定，用户 0910 定调）：L1/L3/retrieval 一律走服务器测试环境；
+    # 本地快照又旧又慢，仅 DAR_QDRANT=local 应急。数据由 --env 决定，与检索源无关。
+    os.environ.setdefault("DAR_QDRANT", "test")
     if ENV == "test":
         _migrate_legacy()
     if not names:

@@ -9,6 +9,7 @@ from sqlalchemy.orm.attributes import set_committed_value
 from starlette.concurrency import run_in_threadpool
 
 from app.modules.tasks.models.ticket import Ticket, TicketComment, TicketStatus, TicketPriority, TicketType
+from app.models.task import TaskFollower, TaskParticipant
 from app.models.identity import UserDB
 from app.modules.tasks.schemas.ticket import TicketCreate, TicketUpdate, TicketCommentCreate, TicketCommentUpdate, TicketQueryParams, TicketFilterRequest, QuotedComment
 from app.core.config import settings
@@ -420,7 +421,7 @@ class TicketService:
         }
 
     @staticmethod
-    async def _build_single_filter(query, f, FIELD_MAPPING, NUMBER_OPS, TEXT_OPS, ENUM_OPS, DATETIME_OPS, token):
+    async def _build_single_filter(query, f, FIELD_MAPPING, NUMBER_OPS, TEXT_OPS, ENUM_OPS, DATETIME_OPS, token, current_username=None):
         field = f.field
         op = f.op
         value = f.value
@@ -429,6 +430,28 @@ class TicketService:
             return query
 
         column, field_type = FIELD_MAPPING[field]
+
+        # 「我关注的」：不映射到 Task 列，按当前登录用户走关注表子查询。
+        # 安全：忽略前端 value，统一用服务端解析的 current_username，杜绝越权看他人关注列表。
+        # 必须在 is_null/not_null 之前拦截（此处 column 为 None）。
+        if field_type == 'followed':
+            if not current_username:
+                # 无用户上下文（理论上不会发生）则不命中任何工单
+                return query.where(Ticket.id.is_(None))
+            follower_subq = select(TaskFollower.task_id).where(
+                TaskFollower.username == current_username
+            )
+            return query.where(Ticket.id.in_(follower_subq))
+
+        # 「我参与的」：同上，走 task_participants 表子查询。
+        # 用于「与我相关」过滤纳入参与工单的场景。
+        if field_type == 'participated':
+            if not current_username:
+                return query.where(Ticket.id.is_(None))
+            participant_subq = select(TaskParticipant.task_id).where(
+                TaskParticipant.username == current_username
+            )
+            return query.where(Ticket.id.in_(participant_subq))
 
         if op == 'is_null':
             return query.where(column.is_(None))
@@ -514,18 +537,18 @@ class TicketService:
         return query
 
     @staticmethod
-    async def _apply_nested_filter(query, filter_item, FIELD_MAPPING, NUMBER_OPS, TEXT_OPS, ENUM_OPS, DATETIME_OPS, token):
+    async def _apply_nested_filter(query, filter_item, FIELD_MAPPING, NUMBER_OPS, TEXT_OPS, ENUM_OPS, DATETIME_OPS, token, current_username=None):
         if filter_item.or_conditions:
             or_conditions = []
             for or_item in filter_item.or_conditions:
                 if or_item.and_conditions:
                     and_query = select(Ticket).where(Ticket.id.isnot(None))
                     for and_item in or_item.and_conditions:
-                        and_query = await TicketService._apply_nested_filter(and_query, and_item, FIELD_MAPPING, NUMBER_OPS, TEXT_OPS, ENUM_OPS, DATETIME_OPS, token)
+                        and_query = await TicketService._apply_nested_filter(and_query, and_item, FIELD_MAPPING, NUMBER_OPS, TEXT_OPS, ENUM_OPS, DATETIME_OPS, token, current_username)
                     or_conditions.append(and_query.whereclause)
                 elif or_item.field:
                     simple_query = select(Ticket).where(Ticket.id.isnot(None))
-                    simple_query = await TicketService._build_single_filter(simple_query, or_item, FIELD_MAPPING, NUMBER_OPS, TEXT_OPS, ENUM_OPS, DATETIME_OPS, token)
+                    simple_query = await TicketService._build_single_filter(simple_query, or_item, FIELD_MAPPING, NUMBER_OPS, TEXT_OPS, ENUM_OPS, DATETIME_OPS, token, current_username)
                     if simple_query.whereclause is not None:
                         or_conditions.append(simple_query.whereclause)
             if or_conditions:
@@ -534,16 +557,16 @@ class TicketService:
 
         if filter_item.and_conditions:
             for and_item in filter_item.and_conditions:
-                query = await TicketService._apply_nested_filter(query, and_item, FIELD_MAPPING, NUMBER_OPS, TEXT_OPS, ENUM_OPS, DATETIME_OPS, token)
+                query = await TicketService._apply_nested_filter(query, and_item, FIELD_MAPPING, NUMBER_OPS, TEXT_OPS, ENUM_OPS, DATETIME_OPS, token, current_username)
             return query
 
         if filter_item.field:
-            return await TicketService._build_single_filter(query, filter_item, FIELD_MAPPING, NUMBER_OPS, TEXT_OPS, ENUM_OPS, DATETIME_OPS, token)
+            return await TicketService._build_single_filter(query, filter_item, FIELD_MAPPING, NUMBER_OPS, TEXT_OPS, ENUM_OPS, DATETIME_OPS, token, current_username)
 
         return query
 
     @staticmethod
-    async def _build_filter_query(filter_request: TicketFilterRequest, token: Optional[str] = None):
+    async def _build_filter_query(filter_request: TicketFilterRequest, token: Optional[str] = None, current_username: Optional[str] = None):
         """构建复合过滤查询（含排序），供列表查询与纯计数（角标）共用。"""
         query = select(Ticket).where(Ticket.id.isnot(None))
 
@@ -573,6 +596,10 @@ class TicketService:
             'stepUpdatedBy': (Ticket.step_last_updated_by, 'enum'),
             # 当前协商节点是否已协商一致：用于"待我处理"按回合精确过滤
             'currStepAgreed': (Ticket.curr_step_agreed, 'enum'),
+            # 「我关注的」：column 留空，特殊类型 followed 走关注表子查询（见 _build_single_filter）
+            'followedBy': (None, 'followed'),
+            # 「我参与的」：column 留空，特殊类型 participated 走参与人表子查询
+            'participatedBy': (None, 'participated'),
         }
 
         NUMBER_OPS = {'gt', 'lt', 'ge', 'le', 'eq', 'ne', 'is_null', 'not_null'}
@@ -581,7 +608,7 @@ class TicketService:
         DATETIME_OPS = {'gt', 'lt', 'ge', 'le', 'eq', 'ne', 'is_null', 'not_null'}
 
         for f in filter_request.filters:
-            query = await TicketService._apply_nested_filter(query, f, FIELD_MAPPING, NUMBER_OPS, TEXT_OPS, ENUM_OPS, DATETIME_OPS, token)
+            query = await TicketService._apply_nested_filter(query, f, FIELD_MAPPING, NUMBER_OPS, TEXT_OPS, ENUM_OPS, DATETIME_OPS, token, current_username)
 
         if filter_request.sorts:
             for sort in filter_request.sorts:
@@ -592,6 +619,9 @@ class TicketService:
                     continue
 
                 column, _ = FIELD_MAPPING[field]
+                # followedBy 等无真实列的特殊字段仅用于过滤，不可排序
+                if column is None:
+                    continue
 
                 if field == 'priority':
                     # 优先级枚举列存字符串，直接 order by 是字母序（high<low<medium<urgent），
@@ -623,14 +653,14 @@ class TicketService:
         return total_result.scalar_one()
 
     @classmethod
-    async def count_tickets(cls, db: AsyncSession, filter_request: TicketFilterRequest, token: Optional[str] = None) -> int:
+    async def count_tickets(cls, db: AsyncSession, filter_request: TicketFilterRequest, token: Optional[str] = None, current_username: Optional[str] = None) -> int:
         """纯计数：只统计复合过滤命中的总数，不取明细、不拼用户名（批量角标接口复用）。"""
-        query = await cls._build_filter_query(filter_request, token)
+        query = await cls._build_filter_query(filter_request, token, current_username)
         return await cls._count_by_query(db, query)
 
     @staticmethod
-    async def filter_tickets(db: AsyncSession, filter_request: TicketFilterRequest, token: Optional[str] = None) -> Dict[str, Any]:
-        query = await TicketService._build_filter_query(filter_request, token)
+    async def filter_tickets(db: AsyncSession, filter_request: TicketFilterRequest, token: Optional[str] = None, current_username: Optional[str] = None) -> Dict[str, Any]:
+        query = await TicketService._build_filter_query(filter_request, token, current_username)
 
         total = await TicketService._count_by_query(db, query)
 
@@ -644,7 +674,7 @@ class TicketService:
         tickets = result.scalars().all()
 
         user_map = await TicketService._get_user_map(token)
-        
+
         for ticket in tickets:
             setattr(ticket, "created_by_name", user_map.get(ticket.created_by, ticket.created_by))
             setattr(ticket, "reporter_name", user_map.get(ticket.created_by, ticket.created_by))
@@ -653,6 +683,18 @@ class TicketService:
                 setattr(ticket, "assignee_name", user_map.get(ticket.assigned_to, ticket.assigned_to))
             if ticket.customer:
                 setattr(ticket, "customer_name", user_map.get(ticket.customer, ticket.customer))
+
+        # 批量回填「当前用户是否已关注」：一次 IN 查询避免 N+1（列表规模通常 ≤20）
+        if current_username and tickets:
+            followed_rows = await db.execute(
+                select(TaskFollower.task_id).where(
+                    TaskFollower.username == current_username,
+                    TaskFollower.task_id.in_([t.id for t in tickets]),
+                )
+            )
+            followed_ids = set(followed_rows.scalars().all())
+            for ticket in tickets:
+                setattr(ticket, "is_followed", ticket.id in followed_ids)
 
         pages = (total + size - 1) // size
 
@@ -1080,7 +1122,7 @@ class TicketService:
         if not ticket:
             return None
 
-        # 派单只写 assigned_to，不改状态——工单保持「新建」，由处理人「首次响应」后才进入「处理中」
+        # 派单只写 assigned_to，不改状态——工单保持「待处理」，由处理人「首次响应」后才进入「处理中」
         ticket.assigned_to = to_user_id(user_id) or user_id
 
         await db.commit()
@@ -1234,7 +1276,7 @@ class TicketService:
                 ai_assigned_id = reverse_user_map.get(ai_assigned_name)
                 
                 if ai_assigned_id:
-                    # 派单只写 assigned_to，不改状态——工单保持「新建」，由处理人「首次响应」后才进入「处理中」
+                    # 派单只写 assigned_to，不改状态——工单保持「待处理」，由处理人「首次响应」后才进入「处理中」
                     ticket.assigned_to = ai_assigned_id
                     await db.commit()
                     operator = user_map.get(ticket.created_by, ticket.created_by)

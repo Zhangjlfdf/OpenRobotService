@@ -69,6 +69,7 @@ class NotificationUtils:
     REASSIGN_TICKET = 7
     MENTION_TICKET = 8
     OVERDUE_WARNING_TICKET = 9
+    ROBOT_ALARM = 10
     TICKET_HOST = "https://usp.ep-zl.com/p/app/tasks"
 
     @classmethod
@@ -352,15 +353,15 @@ class NotificationUtils:
                     'bug': 'Bug 报告',
                     'support': '技术支持',
                     'other': '其他',
-                    'TicketStatus.NEW': '新建',
+                    'TicketStatus.NEW': '待处理',
                     'TicketStatus.IN_PROGRESS': '处理中',
-                    'TicketStatus.PENDING': '待处理',
+                    'TicketStatus.PENDING': '已挂起',
                     'TicketStatus.RESOLVED': '已解决',
                     'TicketStatus.CANCELED': '已取消',
                     'TicketStatus.CLOSED': '已关闭',
-                    'new': '新建',
+                    'new': '待处理',
                     'in_progress': '处理中',
-                    'pending': '待处理',
+                    'pending': '已挂起',
                     'resolved': '已解决',
                     'canceled': '已取消',
                     'closed': '已关闭',
@@ -492,6 +493,44 @@ class NotificationUtils:
             except Exception as e:
                 logger.error(f"发送通知失败：{str(e)}")
         
+        asyncio.get_event_loop().run_in_executor(_executor, _send)
+        return {"code": 200, "message": "通知已发送"}
+
+    @staticmethod
+    async def send_robot_alarm_notification(
+        robot_type: str,
+        robot_id: str,
+        content: str,
+        level: str,
+        start_time: datetime,
+        user_names: List[str] = None,
+        token: Optional[str] = None,
+        project_code: str = "",
+    ) -> Dict[str, Any]:
+        """设备报警提醒（模板 10）。
+
+        供内部其他后端服务直接调用：调用方传入报警字段，本方法按
+        template.yaml 模板 10 组装后向 user_names 列表发送微信模板消息。
+        模板字段顺序：[报警机型, 设备编号, 报警原因, 告警级别, 告警时间]
+        project_code 不入模板，仅写入日志用于追溯项目来源。
+        """
+        def _send():
+            try:
+                start_time_str = _format_shanghai(start_time)
+                payload = NotificationUtils.instantiate_template(
+                    NotificationUtils.ROBOT_ALARM,
+                    robot_type, robot_id, content, level, start_time_str,
+                    user_names=user_names,
+                )
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    loop.run_until_complete(NotificationUtils.send_notification(payload, token))
+                finally:
+                    loop.close()
+            except Exception as e:
+                logger.error(f"发送设备报警通知失败：{str(e)}")
+
         asyncio.get_event_loop().run_in_executor(_executor, _send)
         return {"code": 200, "message": "通知已发送"}
 

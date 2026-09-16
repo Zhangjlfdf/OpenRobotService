@@ -899,12 +899,8 @@ class TestOldPathProjectPrefill:
 
         events = [ev async for ev in platform._agent_think_stream(request, state, memory)]
 
-        review = [e for e in events if e["event"] == "status" and e["data"].get("stage") == "review"]
-        assert review, "应发 review 弹窗"
-        draft = review[0]["data"]["draft"]
-        assert draft["project"] == "华大制造基地"
-        assert draft["project_id"] == "7"
-        assert state.pending_prefill_project == {"name": "华大制造基地", "code": "7"}
+        # 预填随 build_ticket 消费后清空（单向管道纪律：防陈旧预填泄漏后续轮）
+        assert state.pending_prefill_project is None
         # 预填播报单一信息源：服务端兜底话术说的是校验后的真实值
         tokens = "".join(e["data"] for e in events if e["event"] == "token")
         assert "项目已预填为「华大制造基地」" in tokens
@@ -930,11 +926,11 @@ class TestOldPathProjectPrefill:
 
         events = [ev async for ev in platform._agent_think_stream(request, state, memory)]
 
-        review = [e for e in events if e["event"] == "status" and e["data"].get("stage") == "review"]
-        assert review
-        draft = review[0]["data"]["draft"]
-        assert draft["project"] == ""
-        assert draft["project_id"] == ""
+        # 0916 行为对齐：幻觉 choice 被溯源门+精确匹配双重拒收后，submit 触发
+        # 项目闸门转出项目引导题（提单先引导项目），不再直达 review 弹窗——
+        # 宁拒勿错，绝不预填错误项目
+        ask_tok = [e for e in events if e["event"] == "token" and "关联项目" in e["data"]]
+        assert ask_tok, "应转项目引导题（而非直达 review）"
         assert state.pending_prefill_project is None
         tokens = "".join(e["data"] for e in events if e["event"] == "token")
         assert "项目已预填" not in tokens
@@ -973,6 +969,8 @@ class TestOldPathProjectPrefill:
         }, ensure_ascii=False))
         events = [ev async for ev in platform._agent_think_stream(req2, state, memory)]
 
+        # 0916 闸门补 submit 触发：轮 2 pending 已存在（条件 pending 非空排除）
+        # → 闸门不触发，submit 直达 review——预填跨轮保留不受影响
         review = [e for e in events if e["event"] == "status" and e["data"].get("stage") == "review"]
         assert review, "轮 2 字段齐应弹 review"
         draft = review[0]["data"]["draft"]
@@ -1045,7 +1043,7 @@ class TestRequiredFieldsGranularity:
         fake_mem = types.SimpleNamespace(turns=[])
         s = platform._build_diagnosis_prompt(state, fake_mem, "")
         assert "一项信息一个 key" in s
-        assert "禁止合并成一个字段" in s
+        assert "禁止打包" in s
 
     def test_main_prompt_has_rule(self):
         from ai.agents.AiDiagnosisPlatform.pipeline import DIAGNOSIS_PROMPT

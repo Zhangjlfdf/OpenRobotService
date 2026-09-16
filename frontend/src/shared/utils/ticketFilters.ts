@@ -9,7 +9,7 @@ export interface TicketFilterCondition {
   and?: TicketFilterCondition[];
 }
 
-// 相关性分类（全部/项目相关/待我处理/与我相关）的基础过滤条件，不含搜索/状态/优先级。
+// 相关性分类（全部/项目相关/待我处理/与我相关/我关注的）的基础过滤条件，不含搜索/状态/优先级。
 // 待我处理/与我相关在缺少用户名时回退为项目维度，与列表行为一致。
 export const buildRelevanceFilters = (
   relevance: string,
@@ -52,6 +52,12 @@ export const buildRelevanceFilters = (
       ],
     }];
   }
+  if (relevance === 'followed' && username) {
+    // 「我关注的」：命中当前用户在 task_followers 表中的工单。
+    // value 仅为占位，后端忽略前端 value、统一用 token 解析的当前用户，杜绝越权。
+    // 无用户名时返回空条件（后端同样以 current_username 兜底，未登录请求 401，不会泄漏全量）。
+    return [{ field: 'followedBy', op: 'eq', value: true }];
+  }
   if (relevance === 'related' && username) {
     const userRelatedFilters = [
       { field: 'createdBy', op: 'eq', value: username },
@@ -60,6 +66,8 @@ export const buildRelevanceFilters = (
       { field: 'assignedToName', op: 'contains', value: username },
       { field: 'customer', op: 'eq', value: username },
       { field: 'customerName', op: 'contains', value: username },
+      // 我参与的工单：当前用户在 task_participants 表中（评论/附件等行为触发写入）
+      { field: 'participatedBy', op: 'eq', value: true },
     ];
     return [{ or: userRelatedFilters }];
   }

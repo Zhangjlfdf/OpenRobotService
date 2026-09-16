@@ -25,6 +25,9 @@ import {
  */
 const MANUAL_LOGOUT_KEY = 'manual_logout';
 
+/** 主动预刷新阈值：token 剩余不足该时长即先刷新（与 api/client.ts 的策略保持一致） */
+const REFRESH_AHEAD_MS = 2 * 60 * 1000;
+
 /** 是否处于「手动登出」状态（同一会话内登出后、未重新登录前为 true） */
 export function isManualLogout(): boolean {
   try {
@@ -36,6 +39,18 @@ export function isManualLogout(): boolean {
 
 /** 拥有此权限的用户可查看全部项目和工单数据，不受「仅看自己关联项目」限制 */
 export const PERMISSION_VIEW_ALL = 'backend:project:all';
+
+/** 项目 licence 授权导出（导出 licence 授权 / 完整授权） */
+export const PERMISSION_LICENSE_EXPORT = 'backend:project:license:export';
+/** 项目人员授权导出（导出人员授权 / 完整授权） */
+export const PERMISSION_USER_EXPORT = 'backend:project:user:export';
+/** 申请项目 licence 授权 */
+export const PERMISSION_LICENSE_APPLY = 'backend:project:license:apply';
+
+/** 资源管理：查看资源/文件夹列表/搜索/统计 */
+export const PERMISSION_RESOURCE_READ = 'backend:resource:base:read';
+/** 资源管理：下载资源/获取分享链接（含缩略图、预览 URL） */
+export const PERMISSION_RESOURCE_DOWNLOAD = 'backend:resource:base:download';
 
 export interface AuthState {
   isLoggedIn: boolean;
@@ -58,6 +73,8 @@ export interface AuthState {
   checkLoginStatus: () => void;
   setProfile: (data: { name?: string; avatarResourceId?: number | null }) => void;
   hasPermission: (prefix: string) => boolean;
+  /** 主动预刷新：token 临近过期时先换新；失败静默（仍由 401 分支兜底） */
+  ensureFreshToken: () => Promise<void>;
 }
 
 export const useAuthStore = create<AuthState>((set, get) => ({
@@ -141,6 +158,41 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     } catch {
       get().logout();
       return false;
+    }
+  },
+
+  /**
+   * 主动预刷新：token 剩余不足 REFRESH_AHEAD_MS 时先换新。
+   *
+   * 与 refreshAuthToken 的区别：这里**失败静默**（不 logout、不清 token）。
+   * 预刷新只是优化——失败时旧 token 可能仍然可用，交给既有 401 → refreshAuthToken
+   * 分支兜底；若此处直接 logout，反而会把仍可用的登录态提前作废、扩大故障面。
+   */
+  ensureFreshToken: async () => {
+    try {
+      const raw = readStored('TOKEN_EXPIRES_AT');
+      if (!raw) return;
+      const expiresAt = Number(raw);
+      if (!Number.isFinite(expiresAt) || expiresAt <= 0) return;
+      if (expiresAt - Date.now() > REFRESH_AHEAD_MS) return;
+
+      const storedRefreshToken = readStored('REFRESH_TOKEN');
+      if (!storedRefreshToken) return;
+
+      const response = await fetch(`${API_CONFIG.AUTH.BASE_URL}/refresh`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ refresh_token: storedRefreshToken }),
+      });
+      if (!response.ok) return;
+      const data = await response.json();
+      if (!data.access_token) return;
+      const nextExpiresAt = Date.now() + data.expires_in * 1000;
+      setApiToken(data.access_token);
+      set({ token: data.access_token });
+      persistAuthTokens(data.access_token, data.refresh_token, nextExpiresAt);
+    } catch {
+      /* 静默：交给 401 分支兜底 */
     }
   },
 

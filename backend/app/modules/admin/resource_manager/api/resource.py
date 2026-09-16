@@ -7,15 +7,29 @@ from app.modules.admin.resource_manager.schemas.resource import SyncBuildDeployR
 from app.modules.admin.resource_manager.services.resource_service import ResourceService
 from app.modules.admin.resource_manager.models.resource import ResourceType, StorageType
 from app.utils.minio_client import minio_client
+from app.modules.admin.api.auth import require_permission
 
 router = APIRouter(prefix="/resources", tags=["resources"])
+
+# 权限码：基于 RBAC，对资源管理做接口级细粒度管控
+# read  = 查看/检索资源与统计
+# download = 下载资源/获取分享链接（含缩略图、预览 URL）
+# write  = 创建/更新资源
+# delete = 删除资源
+# sync   = OSS ↔ DB 同步、构建部署同步（仅管理员/同步权限持有者）
+PERM_READ = "backend:resource:base:read"
+PERM_DOWNLOAD = "backend:resource:base:download"
+PERM_WRITE = "backend:resource:base:write"
+PERM_DELETE = "backend:resource:base:delete"
+PERM_SYNC = "backend:resource:base:sync"
 
 
 @router.get("/", response_model=List[ResourceResponse])
 async def get_all_resources(
     skip: int = Query(0, ge=0, description="跳过的记录数"),
     limit: int = Query(100, ge=1, le=1000, description="返回的最大记录数"),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    current_user: Dict[str, Any] = require_permission(PERM_READ),
 ):
     return await ResourceService.get_all_resources(db, skip=skip, limit=limit)
 
@@ -23,26 +37,35 @@ async def get_all_resources(
 @router.get("/recent", response_model=List[ResourceResponse])
 async def get_recent_resources(
     limit: int = Query(10, ge=1, le=100, description="返回的最大记录数"),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    current_user: Dict[str, Any] = require_permission(PERM_READ),
 ):
     return await ResourceService.get_recent_resources(db, limit=limit)
 
 
 @router.get("/stats/summary", response_model=ResourceStats)
-async def get_resource_stats(db: AsyncSession = Depends(get_db)):
+async def get_resource_stats(
+    db: AsyncSession = Depends(get_db),
+    current_user: Dict[str, Any] = require_permission(PERM_READ),
+):
     return await ResourceService.get_resource_stats(db)
 
 
 @router.get("/stats/daily", response_model=Dict[str, Any])
 async def get_resource_stats_by_date(
     days: int = Query(14, ge=1, le=90, description="统计天数，默认14天，最多90天"),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    current_user: Dict[str, Any] = require_permission(PERM_READ),
 ):
     return await ResourceService.get_resource_stats_by_date(db, days=days)
 
 
 @router.get("/{resource_id}", response_model=ResourceResponse)
-async def get_resource(resource_id: int, db: AsyncSession = Depends(get_db)):
+async def get_resource(
+    resource_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: Dict[str, Any] = require_permission(PERM_READ),
+):
     resource = await ResourceService.get_resource_by_id(db, resource_id)
     if not resource:
         raise HTTPException(status_code=404, detail="资源未找到")
@@ -50,7 +73,11 @@ async def get_resource(resource_id: int, db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/hash/{hash_code}", response_model=ResourceResponse)
-async def get_resource_by_hash(hash_code: str, db: AsyncSession = Depends(get_db)):
+async def get_resource_by_hash(
+    hash_code: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: Dict[str, Any] = require_permission(PERM_READ),
+):
     resource = await ResourceService.get_resource_by_hash_code(db, hash_code)
     if not resource:
         raise HTTPException(status_code=404, detail="资源未找到")
@@ -62,7 +89,8 @@ async def get_resources_by_owner(
     owner_id: str,
     skip: int = Query(0, ge=0, description="跳过的记录数"),
     limit: int = Query(100, ge=1, le=1000, description="返回的最大记录数"),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    current_user: Dict[str, Any] = require_permission(PERM_READ),
 ):
     return await ResourceService.get_resources_by_owner(db, owner_id, skip=skip, limit=limit)
 
@@ -72,7 +100,8 @@ async def get_resources_by_type(
     resource_type: ResourceType,
     skip: int = Query(0, ge=0, description="跳过的记录数"),
     limit: int = Query(100, ge=1, le=1000, description="返回的最大记录数"),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    current_user: Dict[str, Any] = require_permission(PERM_READ),
 ):
     return await ResourceService.get_resources_by_type(db, resource_type, skip=skip, limit=limit)
 
@@ -82,7 +111,8 @@ async def get_resources_by_category(
     category: str,
     skip: int = Query(0, ge=0, description="跳过的记录数"),
     limit: int = Query(100, ge=1, le=1000, description="返回的最大记录数"),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    current_user: Dict[str, Any] = require_permission(PERM_READ),
 ):
     return await ResourceService.get_resources_by_category(db, category, skip=skip, limit=limit)
 
@@ -92,7 +122,8 @@ async def search_resources(
     q: str = Query(..., min_length=1, description="搜索关键词"),
     skip: int = Query(0, ge=0, description="跳过的记录数"),
     limit: int = Query(100, ge=1, le=1000, description="返回的最大记录数"),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    current_user: Dict[str, Any] = require_permission(PERM_READ),
 ):
     return await ResourceService.search_resources(db, q, skip=skip, limit=limit)
 
@@ -106,7 +137,8 @@ async def create_resource(
     resource_labels: Optional[str] = Form(None),
     owner_id: str = Form(...),
     resource_type: ResourceType = Form(...),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    current_user: Dict[str, Any] = require_permission(PERM_WRITE),
 ):
     try:
         import json
@@ -129,7 +161,8 @@ async def create_resource(
 async def update_resource(
     resource_id: int,
     resource_data: ResourceUpdate,
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    current_user: Dict[str, Any] = require_permission(PERM_WRITE),
 ):
     resource = await ResourceService.update_resource(db, resource_id, resource_data)
     if not resource:
@@ -138,7 +171,11 @@ async def update_resource(
 
 
 @router.delete("/{resource_id}")
-async def delete_resource(resource_id: int, db: AsyncSession = Depends(get_db)):
+async def delete_resource(
+    resource_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: Dict[str, Any] = require_permission(PERM_DELETE),
+):
     success = await ResourceService.delete_resource(db, resource_id)
     if not success:
         raise HTTPException(status_code=404, detail="资源未找到")
@@ -146,7 +183,11 @@ async def delete_resource(resource_id: int, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/{resource_id}/download-count")
-async def download_resource(resource_id: int, db: AsyncSession = Depends(get_db)):
+async def download_resource(
+    resource_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: Dict[str, Any] = require_permission(PERM_DOWNLOAD),
+):
     resource = await ResourceService.increment_download_count(db, resource_id)
     if not resource:
         raise HTTPException(status_code=404, detail="资源未找到")
@@ -156,7 +197,8 @@ async def download_resource(resource_id: int, db: AsyncSession = Depends(get_db)
 @router.get("/{resource_id}/download")
 async def proxy_download_resource(
     resource_id: int,
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    current_user: Dict[str, Any] = require_permission(PERM_DOWNLOAD),
 ):
     resource = await ResourceService.get_resource_by_id(db, resource_id)
     if not resource:
@@ -273,8 +315,9 @@ async def proxy_download_resource(
 @router.get("/{resource_id}/download-url")
 async def get_resource_download_url(
     resource_id: int,
-    expires_minutes: int = Query(5, ge=1, le=10080, description="URL有效期（分钟），默认5分钟，最大10080分钟（7天）"),
-    db: AsyncSession = Depends(get_db)
+    expires_minutes: int = Query(3, ge=1, le=10080, description="URL有效期（分钟），默认3分钟，最大10080分钟（7天）"),
+    db: AsyncSession = Depends(get_db),
+    current_user: Dict[str, Any] = require_permission(PERM_DOWNLOAD),
 ):
     resource = await ResourceService.get_resource_by_id(db, resource_id)
     if not resource:
@@ -293,7 +336,8 @@ async def get_resource_download_url(
 async def get_resource_thumbnail_url(
     resource_id: int,
     expires_minutes: int = Query(5, ge=1, le=10080, description="URL有效期（分钟），默认5分钟，最大10080分钟（7天）"),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    current_user: Dict[str, Any] = require_permission(PERM_DOWNLOAD),
 ):
     resource = await ResourceService.get_resource_by_id(db, resource_id)
     if not resource:
@@ -315,7 +359,8 @@ async def get_resource_thumbnail_url(
 async def get_resource_preview_url(
     resource_id: int,
     expires_minutes: int = Query(5, ge=1, le=10080, description="URL有效期（分钟），默认5分钟，最大10080分钟（7天）"),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    current_user: Dict[str, Any] = require_permission(PERM_DOWNLOAD),
 ):
     resource = await ResourceService.get_resource_by_id(db, resource_id)
     if not resource:
@@ -334,7 +379,11 @@ async def get_resource_preview_url(
 
 
 @router.post("/{resource_id}/like", response_model=Dict[str, Any])
-async def like_resource(resource_id: int, db: AsyncSession = Depends(get_db)):
+async def like_resource(
+    resource_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: Dict[str, Any] = require_permission(PERM_READ),
+):
     result = await ResourceService.toggle_like(db, resource_id)
     if not result:
         raise HTTPException(status_code=404, detail="资源未找到")
@@ -343,7 +392,8 @@ async def like_resource(resource_id: int, db: AsyncSession = Depends(get_db)):
 
 @router.post("/sync-build-deploy")
 async def sync_build_deploy(
-    request: SyncBuildDeployRequest
+    request: SyncBuildDeployRequest,
+    current_user: Dict[str, Any] = require_permission(PERM_SYNC),
 ):
     try:
         return await ResourceService.sync_md_files_and_build(
@@ -357,7 +407,8 @@ async def sync_build_deploy(
 async def sync_oss_resources(
     folder_id: Optional[int] = Query(None, description="文件夹ID，如果为None则同步所有OSS文件"),
     owner_id: str = Query("system", description="资源所有者ID，默认为system"),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    current_user: Dict[str, Any] = require_permission(PERM_SYNC),
 ):
     try:
         return await ResourceService.sync_oss_resources(db, folder_id=folder_id, owner_id=owner_id)
