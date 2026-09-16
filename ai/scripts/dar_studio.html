@@ -420,6 +420,36 @@ kbd{background:#f1f5f9;border:1px solid var(--line);border-bottom-width:2px;bord
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .kbtree .file .kc{margin-left:auto;color:var(--ink3);font-size:11px;font-variant-numeric:tabular-nums}
 .kbtree .hit{background:#fef3c7;border-radius:6px}
+
+/* ── 知识库树图 ── */
+.kbgraph{height:720px;background:#fff;
+  border:1px solid var(--line);border-radius:12px;margin-bottom:8px}
+.kbgraph:active{cursor:grabbing}
+.kbfiles-tog{display:inline-flex;align-items:center;gap:5px;font-size:12.5px;color:var(--ink2);cursor:pointer;user-select:none}
+.kbfiles-tog input{margin:0}
+.kbprev{display:none;position:fixed;right:0;top:0;bottom:0;width:min(720px,62vw);
+  background:#fff;box-shadow:-6px 0 24px rgba(15,23,42,.18);z-index:60;
+  flex-direction:column}
+.kbprev.on{display:flex}
+.kbprev-hd{display:flex;align-items:center;gap:10px;padding:12px 16px;
+  border-bottom:1px solid var(--line);flex-shrink:0}
+.kbprev-hd b{font-size:14px}
+.kbprev-hd .mono{color:var(--ink3);font-size:11.5px}
+.kbprev-body{flex:1;overflow:auto;padding:18px 22px;font-size:13.5px;line-height:1.85;color:var(--ink)}
+.kbprev-body h1{font-size:20px;margin:14px 0 10px}
+.kbprev-body h2{font-size:16.5px;margin:18px 0 8px;padding-top:10px;border-top:1px dashed var(--line)}
+.kbprev-body h3,.kbprev-body h4{font-size:14px;margin:14px 0 6px}
+.kbprev-body table{border-collapse:collapse;margin:8px 0;width:100%}
+.kbprev-body th,.kbprev-body td{border:1px solid var(--line);padding:5px 9px;font-size:12.5px;text-align:left;vertical-align:top}
+.kbprev-body th{background:var(--bg);font-weight:600}
+.kbprev-body code{background:var(--bg);border-radius:4px;padding:1px 5px;font-size:12px;font-family:ui-monospace,Consolas,monospace}
+.kbprev-body pre{background:#0b1020;color:#a8b8d0;border-radius:8px;padding:12px 14px;overflow:auto;font-size:12px;line-height:1.6}
+.kbprev-body pre code{background:none;padding:0;color:inherit}
+.kbprev-body blockquote{border-left:3px solid var(--brand2);background:var(--brand-soft);
+  padding:6px 12px;margin:8px 0;border-radius:0 8px 8px 0;color:var(--ink2)}
+.kbprev-body img{max-width:100%;border:1px solid var(--line);border-radius:8px;margin:6px 0}
+.kbprev-body .kbmd-imgfail{color:var(--ink3);font-size:11.5px;border:1px dashed var(--line);border-radius:6px;padding:2px 8px}
+.fn.en{color:var(--ink3);font-size:10.5px;margin-left:6px;font-weight:400}
 </style>
 </head>
 <body>
@@ -653,6 +683,15 @@ kbd{background:#f1f5f9;border:1px solid var(--line);border-bottom-width:2px;bord
       <div class="kbtree" id="kbtree" style="display:none"><div class="empty">加载中…</div></div>
     </section>
   </main>
+</div>
+<div id="kbprev" style="display:none">
+  <div class="kbprev-hd">
+    <b id="kbprev-title"></b>
+    <span class="mono" id="kbprev-en"></span>
+    <span style="flex:1"></span>
+    <button class="btn sm" id="kbprev-close">关闭 ✕</button>
+  </div>
+  <div class="kbprev-body" id="kbprev-body"></div>
 </div>
 <div id="toasts"></div>
 
@@ -1138,28 +1177,32 @@ async function loadKB(refresh){
           ${d.collection ? `<br>集合 <span class="mono">${esc(d.collection)}</span>${d.ingest_at ? ` · 入库 ${d.ingest_at}` : ""}` : "<br>暂无内容/集合"}
         </div>
       </div>`).join("");
-    renderKBTree();
+    kbSetMode(kbMode);  // 按当前模式渲染（默认树图；数据就绪后再渲染）
   }catch(e){
     $("#kbtree").innerHTML = `<div class="empty">加载失败：${esc(String(e.message || e))}</div>`;
   }
 }
 
-function kbRender(n, q, depth){
+function kbRender(n, q, depth, prefix){
+  prefix = prefix || "";
+  const disp = n.cn || n.name;
   if(n.dir){
     const kids = [...(n.children || [])].sort((a,b)=>(b.dir?1:0)-(a.dir?1:0)||a.name.localeCompare(b.name));
-    // 目录名本身命中 → 整棵子树不过滤直接展示
-    const selfMatch = q && n.name.toLowerCase().includes(q);
-    const inner = kids.map(c=>kbRender(c, selfMatch ? "" : q, depth+1)).filter(h=>h!==null).join("");
+    // 目录名或中文名命中 → 整棵子树不过滤直接展示
+    const selfMatch = q && (n.name.toLowerCase().includes(q) || disp.toLowerCase().includes(q));
+    const inner = kids.map(c=>kbRender(c, selfMatch ? "" : q, depth+1, prefix + n.name + "/")).filter(h=>h!==null).join("");
     if(q && !inner) return null;
     const open = q || depth < 2 || (n.files || 0) <= 30 ? " open" : "";
     const lbl = n.label ? ` <span class="lb">${n.label}</span>` : "";
     return `<details${open}><summary><span class="tw">▶</span><span class="fo">📁</span>
-      <span class="kn">${esc(n.name)}</span>${lbl}
+      <span class="kn">${esc(disp)}</span>${n.cn && n.cn !== n.name ? `<span class="fn en">${esc(n.name)}</span>` : ""}${lbl}
       <span class="kc">${n.chunks} chunks · ${n.files} 文件</span></summary>
       <div class="kids">${inner}</div></details>`;
   }
-  if(q && !n.name.toLowerCase().includes(q)) return null;
-  return `<div class="file"><span class="fo">📄</span><span class="fn">${esc(n.name)}</span>
+  if(q && !(n.name.toLowerCase().includes(q) || disp.toLowerCase().includes(q))) return null;
+  return `<div class="file" onclick="openKBPreview('${esc(prefix + n.name)}','${esc(disp).replace(/'/g,"&#39;")}')"
+    style="cursor:pointer" title="点击预览"><span class="fo">📄</span>
+    <span class="fn">${esc(disp)}</span>${n.cn ? `<span class="fn en">${esc(n.name)}</span>` : ""}
     <span class="kc">${n.chunks}</span></div>`;
 }
 
@@ -1178,6 +1221,101 @@ function renderKBTree(){
 
 $("#kbrefresh").onclick = ()=>loadKB(true);
 $("#kbfilter").oninput = ()=>{ if(kbData) renderKBTree(); };
+
+/* ── 知识库树图（ECharts）── */
+let kbChart = null, kbMode = "graph", kbFilesMode = false;
+const KB_COLORS = {industry:"#7c5cbf", company:"#1f7a5c", team:"#1d6fb8",
+                   project:"#98680b", personal:"#98680b"};
+
+function kbToEcharts(n, depth, domain, prefix){
+  prefix = prefix || "";
+  const isDom = depth === 0;
+  const disp = (n.cn || n.name) + (n.dir && depth > 0 ? " · " + n.chunks : "");
+  const node = {
+    name: disp,
+    en: n.name,
+    cn: n.cn || "",
+    rel: prefix + n.name,
+    dir: !!n.dir,
+    value: n.chunks,
+    collapsed: n.dir && depth >= 1 && !(kbFilesMode && (n.files||0) <= 30),
+    itemStyle: n.dir
+      ? {color: isDom ? (KB_COLORS[domain] || "#64748b") : "#64748b", borderWidth: isDom ? 2 : 1}
+      : {color: KB_COLORS[domain] || "#64748b", opacity: .45},
+    label: {fontWeight: n.dir ? 600 : 400},
+    symbolSize: isDom ? 22 : (n.dir ? 11 : 6),
+  };
+  if(n.dir){
+    node.files = n.files;
+    node.children = [...(n.children||[])]
+      .sort((a,b)=>(b.dir?1:0)-(a.dir?1:0)||a.name.localeCompare(b.name))
+      .map(c=>kbToEcharts(c, depth+1, domain, prefix + n.name + "/"));
+  }
+  return node;
+}
+
+function renderKBGraph(){
+  if(!kbData) return;
+  if(!window.echarts){
+    $("#kbgraph").innerHTML = '<div class="empty">echarts 加载失败（/vendor/echarts.min.js）</div>';
+    return;
+  }
+  const root = {
+    name: `知识库全景（${kbData.total_files} 文件 · ${kbData.total_chunks} chunks）`,
+    children: kbData.domains.filter(d=>d.files>0).map(d=>{
+      const node = kbToEcharts({...d.tree}, 0, d.domain, "");
+      node.label = {...node.label, color: KB_COLORS[d.domain]};
+      return node;
+    })
+  };
+  if(kbChart){ kbChart.dispose(); kbChart = null; }
+  kbChart = echarts.init($("#kbgraph"));
+  kbChart.setOption({
+    tooltip: {trigger:"item", formatter: p=>{
+      const d = p.data;
+      return d.files !== undefined
+        ? `<b>${p.name}</b><br/>${d.value} chunks · ${d.files} 文件`
+        : `<b>${p.name}</b><br/>${d.value} chunks`;
+    }},
+    series: [{
+      type: "tree", data: [root], roam: true, orient: "TB",
+      symbol: "circle", edgeShape: "curve", initialTreeDepth: -1,
+      lineStyle: {color:"#dbe1ea", width:1.2},
+      label: {position:"top", distance:6, fontSize:11.5, color:"#0f172a",
+              overflow:"truncate", width:130},
+      leaves: {label:{position:"bottom", distance:5, fontSize:11, color:"#475569",
+              overflow:"truncate", width:130}},
+      expandAndCollapse: true,
+      animationDuration: 280, animationDurationUpdate: 280,
+      top:"2%", left:"2%", right:"14%", bottom:"2%",
+    }],
+    toolbox: {feature:{saveAsImage:{name:"kb-结构图", pixelRatio:2, title:"导出图片"}},
+              iconStyle:{borderColor:"#94a3b8"}},
+  });
+  kbChart.off("click");
+  kbChart.on("click", p=>{
+    const d = p.data || {};
+    if(d.dir === false) openKBPreview(d.rel, d.cn || d.name);
+  });
+  requestAnimationFrame(()=>{ kbChart && kbChart.resize(); });
+  setTimeout(()=>{ kbChart && kbChart.resize(); }, 120);
+}
+
+function kbSetMode(m){
+  kbMode = m;
+  document.querySelectorAll("#kbmode button").forEach(b=>b.classList.toggle("on", b.dataset.m===m));
+  $("#kbtree").style.display = m==="tree" ? "" : "none";
+  $("#kbgraph").style.display = m==="graph" ? "" : "none";
+  $("#kbfilter").disabled = m!=="tree";
+  $("#kbfiles-tog").style.display = m==="graph" ? "" : "none";
+  if(m==="graph") renderKBGraph();
+  else renderKBTree();
+}
+$("#kbmode").onclick = e=>{
+  const b = e.target.closest("button[data-m]");
+  if(b) kbSetMode(b.dataset.m);
+};
+$("#kbgraphfiles").onchange = ()=>{ kbFilesMode = $("#kbgraphfiles").checked; renderKBGraph(); };
 
 /* ══ 页签2 在线测试 ══ */
 function setConn(user){

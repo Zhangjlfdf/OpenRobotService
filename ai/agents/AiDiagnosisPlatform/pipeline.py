@@ -1790,6 +1790,33 @@ class AiDiagnosisPlatform:
                     f"→ 缺失字段的值优先从这里提取写入 collected_info；"
                     f"其中确实没有的直接记'无'跳过，不要再问用户。\n"
                 )
+            # 用户已上传图片资料块（0916）：收集轮 sanitize 屏蔽了对话里的图片
+            # 描述（防 UI 文本污染字段），但用户发图本身就是提供信息——车型/
+            # 车编号/任务编号常在截图里，全屏蔽会让 AI 对着图瞎追问（用户实测
+            # 两起：诊断轮图里有车型被追问车型、补充轮发截图车编号没被识别）。
+            # 解法：对话流保持屏蔽，图片描述单独以资料块注入 + 使用规则——
+            # 客观信息可采信、UI 系统文案禁止当字段值（污染防线保留）。
+            _img_info_block = ""
+            if state.ticket_collecting:
+                _img_descs = []
+                for t in memory.turns:
+                    c = str(t.get("content") or "")
+                    if "图片主要内容为：" in c:
+                        _d = c.split("图片主要内容为：", 1)[1]
+                        _img_descs.append(_d.split("【回应】")[0].strip()[:300])
+                if _img_descs:
+                    _imgs_txt = "\n".join(
+                        f"【图{i}】{d}" for i, d in enumerate(_img_descs[-3:], 1))
+                    _img_info_block = (
+                        f"\n## 用户已上传的图片（VLM 识别内容，非用户原话）\n"
+                        f"{_imgs_txt}\n"
+                        f"→ 使用规则：图片是用户主动上传的现场/界面信息——其中的"
+                        f"**客观信息**（车型、车编号、任务编号、故障码、现场状况等）"
+                        f"可直接采信写入对应字段，不需要再追问用户；但界面上的"
+                        f"**系统文案**（按钮文字、标签名、状态栏字段名等）禁止当作"
+                        f"字段值或项目名。图片内容与用户文字陈述冲突时，以用户"
+                        f"文字为准。\n"
+                    )
             # 歧义挂起反问块（0829 印尼实锤）：收集轮无规划器/检索通道，
             # 项目待确认状态只能进 prompt——列候选让 LLM 自然反问。
             _amb_ask_block = ""
@@ -1824,7 +1851,7 @@ class AiDiagnosisPlatform:
             return (
                 f"你是工单填写助手。用户正在补充工单所需信息，请把对话里出现的信息记录到 collected_info。\n\n"
                 f"{ticket_collecting_context}\n\n"
-                f"{_user_block}{_ref_block}{_proj_pick_block}{_amb_ask_block}\n"
+                f"{_user_block}{_ref_block}{_proj_pick_block}{_amb_ask_block}{_img_info_block}\n"
                 f"{_proj_block}\n"
                 f"## 对话\n{conversation_text}\n\n"
                 f"---\n"
