@@ -820,9 +820,11 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
         'display', 'position', 'flex-direction', 'flex', 'flex-shrink', 'align-items',
         'justify-content', 'background', 'background-color', 'color', 'border',
         'border-radius', 'padding', 'margin', 'font-family', 'font-size', 'font-weight',
-        'line-height', 'text-align', 'width', 'height', 'max-width', 'min-height',
-        'box-shadow', 'opacity', 'overflow', 'box-sizing', 'letter-spacing',
-        'white-space', 'word-break', 'text-decoration', 'list-style',
+        'line-height', 'text-align', 'max-width', 'min-height', 'min-width',
+        'box-shadow', 'opacity', 'overflow', 'overflow-x', 'overflow-y', 'box-sizing',
+        'letter-spacing', 'white-space', 'word-break', 'text-decoration', 'list-style',
+        // 0916：不内联 width/height——克隆节点从原消息容器挪进 375px 快照容器，
+        // 内联原容器宽会把布局写死（长代码被截断/文本溢出重叠），让新容器自适应
       ];
       const inlineComputed = (el: Element) => {
         if (!(el instanceof HTMLElement)) return;
@@ -858,6 +860,11 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
             if (!el) continue;
             const cs = getComputedStyle(el);
             if (cs.display === 'none' || cs.visibility === 'hidden') continue;
+            // 0916：行内元素（如 md-inline-code）不栅格化——inline 盒跨行时
+            // getBoundingClientRect 返回整行包围盒，availW 失真导致自绘 img
+            // 超宽溢出/与相邻文字重叠（转发长图乱版实锤）；退回 html2canvas
+            // 原生画，代价仅 code 内英文数字基线沉 6px（远轻于版面崩坏）
+            if (cs.display === 'inline') continue;
             const raw = node.textContent ?? '';
             const fontSize = parseFloat(cs.fontSize) || 13;
             const font = `${cs.fontStyle} ${cs.fontWeight} ${fontSize}px ${cs.fontFamily}`;
@@ -881,6 +888,9 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
             const dpr = 2;
             const w = Math.ceil(Math.max(...lines.map((l) => meas.measureText(l).width), 1)) + 2;
             const h = Math.ceil(lines.length * lh) + 2;
+            // 0916 宽度安全阀：自绘后仍超可用宽（无断点长路径/URL 等）→ 不替换，
+            // 保留原生文本交给浏览器 overflow 规则，防 inline-block 超宽溢出叠字
+            if (w > availW + 2) continue;
             const c = document.createElement('canvas');
             c.width = Math.ceil(w * dpr);
             c.height = Math.ceil(h * dpr);
@@ -888,6 +898,13 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
             if (!g) continue;
             g.scale(dpr, dpr);
             g.font = font;
+            // 0916：先画背景再画字——行内代码/pre 的灰底不丢（此前 canvas 只画
+            // 文字，栅格化后灰底消失，截图呈「空白灰块」）
+            const _bg = cs.backgroundColor;
+            if (_bg && _bg !== 'rgba(0, 0, 0, 0)' && _bg !== 'transparent') {
+              g.fillStyle = _bg;
+              g.fillRect(0, 0, w, h);
+            }
             g.fillStyle = cs.color;
             g.textBaseline = 'alphabetic';
             lines.forEach((l, i) => g.fillText(l, 1, i * lh + (lh + fontSize * 0.72) / 2));
