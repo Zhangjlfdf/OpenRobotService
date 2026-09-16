@@ -904,9 +904,10 @@ class DispatchFlow:
         except Exception:
             return prev
 
-    # ── Step 0 实现: 识别提单人期望接单人（强信号 + LLM 兜底）──
-    # 强信号：提单 Agent 结构化输出的"[指定处理人：贾爽]"等格式
+    # 强信号：指定处理人：X / 建议由X处理 / X才是负责…
     _PREFERRED_STRONG_RE = None
+    _PREFERRED_SUGGEST_RE = None
+    _PREFERRED_OWNER_RE = None
 
     @staticmethod
     def _loads_llm_json(raw: Optional[str]) -> Optional[dict]:
@@ -928,26 +929,99 @@ class DispatchFlow:
             return None
         return data if isinstance(data, dict) else None
 
-    @staticmethod
-    def _split_preferred_names(raw: str) -> List[str]:
+    # 人名两侧常见句读/括号，抽取后剥掉，避免「罗昊。」走拼音兜底
+    _PREFERRED_NAME_EDGE_RE = re.compile(
+        r"^[\s\.。．!！?？…~～、，,；;:：\-—_【\[（(「『]+"
+        r"|[\s\.。．!！?？…~～、，,；;:：\-—_】\]）)」』]+$"
+    )
+
+    @classmethod
+    def _clean_preferred_name(cls, name: str) -> str:
+        """去掉人名首尾空白与句读标点。"""
+        s = (name or "").strip()
+        while s:
+            n = cls._PREFERRED_NAME_EDGE_RE.sub("", s)
+            if n == s:
+                break
+            s = n.strip()
+        return s
+
+    @classmethod
+    def _split_preferred_names(cls, raw: str) -> List[str]:
         """把「张三、李四」拆成多个人名；每人仍按 2～6 字。"""
-        parts = [p.strip() for p in re.split(r"[、，,；;]+", raw or "") if p.strip()]
+        parts = [
+            cls._clean_preferred_name(p)
+            for p in re.split(r"[、，,；;]+", raw or "")
+            if p.strip()
+        ]
         return [p for p in parts if 2 <= len(p) <= 6]
 
     @classmethod
     def _parse_strong_preferred_names(cls, text: str) -> List[str]:
-        """强信号抽出全部人名，按书写顺序。无人则空列表。"""
+        """强信号抽出全部人名，按书写顺序。无人则空列表。
+
+        覆盖：
+        - 指定处理人/人/人员：XXX（可多人顿号分隔）
+        - 建议由/让/请/交给…XXX（处理）——口语指定，不调 LLM
+        - XXX才是负责… / 应该是XXX负责——重新派单备注常见
+        """
         if not text:
             return []
         if cls._PREFERRED_STRONG_RE is None:
-            # 捕获到 ] / 空白 / 冒号为止；顿号逗号留在组内再拆
+            # 捕获到 ] / 空白 / 冒号 / 句末标点为止；顿号逗号留在组内再拆
             cls._PREFERRED_STRONG_RE = re.compile(
-                r"指定(?:处理人|人|人员)[:：]\s*([^\]\s:：）)】]{2,40})"
+                r"指定(?:处理人|人|人员)[:：]\s*"
+                r"([^\]\s:：）)】。．.!！?？…]{2,40})"
             )
         m = cls._PREFERRED_STRONG_RE.search(text)
-        if not m:
+        if m:
+            names = cls._split_preferred_names(m.group(1))
+            if names:
+                return names
+
+        if cls._PREFERRED_SUGGEST_RE is None:
+            # 建议由罗昊处理 / 建议让张三跟进：人名后须有动作词，避免「罗昊处理」整段当姓名
+            # 建议交给王五：交给/派给后可直接跟人名
+            cls._PREFERRED_SUGGEST_RE = re.compile(
+                r"建议(?:由|让|请)\s*([一-龥]{2,4})"
+                r"(?:来)?(?:负责|处理一下|处理|跟进|接手|对接|看一下|看下)"
+                r"|建议(?:交给|安排给|派给|转给)\s*([一-龥]{2,4})"
+            )
+        sm = cls._PREFERRED_SUGGEST_RE.search(text)
+        if sm:
+            name = cls._finalize_preferred_name(
+                sm.group(1) or sm.group(2) or "",
+            )
+            if name:
+                return [name]
+
+        if cls._PREFERRED_OWNER_RE is None:
+            # 罗昊才是负责这个的 / 应该是张三负责 / 是李四负责的
+            # 「应该由王五来负责」里人名用非贪婪，避免把「来」吞进姓名
+            cls._PREFERRED_OWNER_RE = re.compile(
+                r"([一-龥]{2,4})才是负责"
+                r"|应该(?:是|由)\s*([一-龥]{2,4}?)(?:来)?负责"
+                r"|(?:其实|本来|明明)?是\s*([一-龥]{2,4})负责的"
+            )
+        om = cls._PREFERRED_OWNER_RE.search(text)
+        if not om:
             return []
-        return cls._split_preferred_names(m.group(1).strip())
+        name = cls._finalize_preferred_name(
+            om.group(1) or om.group(2) or om.group(3) or "",
+        )
+        return [name] if name else []
+
+    @classmethod
+    def _finalize_preferred_name(cls, raw: str) -> str:
+        """清洗人名；剥掉误吞的动作词尾。空或不在 2～6 字则返回空串。"""
+        name = cls._clean_preferred_name(raw or "")
+        name = re.sub(
+            r"(?:来)?(?:负责|处理一下|处理|跟进|接手|对接|看一下|看下)$",
+            "",
+            name,
+        )
+        name = cls._clean_preferred_name(name)
+        return name if 2 <= len(name) <= 6 else ""
 
     @classmethod
     def _parse_strong_preferred(cls, text: str) -> Tuple[Optional[str], bool]:
@@ -1013,7 +1087,7 @@ class DispatchFlow:
         """识别提单人是否明确指定了期望接单人。
 
         两级策略：
-        1. 强信号：提单 Agent 结构化输出的"指定处理人：XXX"，直接提取人名匹配（不调 LLM）。
+        1. 强信号：「指定处理人：XXX」或「建议由XXX处理」等，直接提取人名匹配（不调 LLM）。
         2. 弱信号兜底：自由文本（"这个给张三看一下"等）经轻量预判命中后，用 LLM 识别。
 
         Returns:
@@ -1141,13 +1215,17 @@ class DispatchFlow:
             return False
         if cls._PREFERRED_INTENT_RE is None:
             import re
-            # 动作词 + 2~4 中文人名；或 人名 + 归属/处理词
+            # 动作词 + 2~4 中文人名；或 人名 + 归属/处理词；或「建议由/让…某人」
             cls._PREFERRED_INTENT_RE = re.compile(
                 r"(?:给|让|转给|派给|找|安排给|提给|请|交由|交予)?"
                 r"[一-龥]{2,4}"
                 r"(?:负责|比较熟|熟悉|来搞|来处理|处理|看下|看一下|有空|跟进|接手|对接|处理一下|来跟进)"
                 r"|(?:给|让|转给|派给|找|安排给|提给|请|交由|交予)"
                 r"[一-龥]{2,4}"
+                r"|建议(?:由|让|请|交给|安排给|派给|转给)\s*[一-龥]{2,4}"
+                r"|[一-龥]{2,4}才是负责"
+                r"|应该(?:是|由)\s*[一-龥]{2,4}(?:来)?负责"
+                r"|是\s*[一-龥]{2,4}负责的"
             )
         return bool(cls._PREFERRED_INTENT_RE.search(text))
 

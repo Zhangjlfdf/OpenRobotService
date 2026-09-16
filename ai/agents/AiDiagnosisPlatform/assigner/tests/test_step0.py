@@ -141,6 +141,9 @@ class TestStep0StrongPhrases:
 
     def test_extract_variants(self):
         """正常流程：指定处理人 / 指定人 / 半角冒号 / 方括号。"""
+        # 热更正则后清缓存，避免同进程旧 pattern
+        DispatchFlow._PREFERRED_STRONG_RE = None
+        DispatchFlow._PREFERRED_SUGGEST_RE = None
         extract = DispatchFlow._extract_strong_preferred
         assert extract("指定处理人：张三") == "张三"
         assert extract("指定处理人:张三") == "张三"
@@ -151,6 +154,70 @@ class TestStep0StrongPhrases:
         assert extract("[指定处理人：张三、李四、王五]") == "张三"
         assert extract("车辆定位漂移") is None
         assert extract("转给张三") is None
+
+    def test_extract_strips_trailing_period(self):
+        """边界：人名后粘了句号/叹号时剥掉，避免『罗昊。』走拼音。"""
+        DispatchFlow._PREFERRED_STRONG_RE = None
+        DispatchFlow._PREFERRED_SUGGEST_RE = None
+        extract = DispatchFlow._extract_strong_preferred
+        assert extract("用户指定处理人：罗昊。") == "罗昊"
+        assert extract(
+            "可通过不同的人更新进信息树。用户指定处理人：罗昊。"
+        ) == "罗昊"
+        assert extract("指定处理人：张三！") == "张三"
+        assert extract("指定处理人：李四...") == "李四"
+        assert extract("[指定处理人：王五。]") == "王五"
+
+    def test_extract_suggest_by_someone(self):
+        """正常流程：建议由/让/请某人处理 → 当强信号抽人名，不调 LLM。"""
+        DispatchFlow._PREFERRED_STRONG_RE = None
+        DispatchFlow._PREFERRED_SUGGEST_RE = None
+        DispatchFlow._PREFERRED_OWNER_RE = None
+        extract = DispatchFlow._extract_strong_preferred
+        assert extract("这个问题建议由罗昊处理") == "罗昊"
+        assert extract("建议让张三跟进一下") == "张三"
+        assert extract("建议请李四看一下地图") == "李四"
+        assert extract("建议交给王五") == "王五"
+        assert extract("建议安排给赵六负责") == "赵六"
+        # 无「由/让…」的纯版本建议，不误抽
+        assert extract("建议最早2.5.0要更新掉") is None
+
+    def test_extract_owner_phrase(self):
+        """正常流程：某某才是负责… / 应该是某某负责（重派备注常见）。"""
+        DispatchFlow._PREFERRED_STRONG_RE = None
+        DispatchFlow._PREFERRED_SUGGEST_RE = None
+        DispatchFlow._PREFERRED_OWNER_RE = None
+        extract = DispatchFlow._extract_strong_preferred
+        assert extract("罗昊才是负责这个的") == "罗昊"
+        assert extract("张三才是负责地图编辑的") == "张三"
+        assert extract("应该是李四负责") == "李四"
+        assert extract("应该由王五来负责这块") == "王五"
+        assert extract("其实是赵六负责的") == "赵六"
+        assert extract("【重新派单备注】钱七才是负责人") == "钱七"
+
+    def test_owner_phrase_assigns_on_redispatch_remark(self):
+        """正常流程：重派备注写『某某才是负责的』→ 直接派此人。"""
+        result, unresolved = _run_detect(
+            "后台页面优化",
+            [_complete()],
+            description="原描述。\n【重新派单备注】张三才是负责这个模块的",
+        )
+        assert result is not None
+        assert result.engineer_id == "u-zhang"
+        assert result.matched_pref is True
+        assert unresolved is None
+
+    def test_suggest_assigns_without_llm(self):
+        """正常流程：建议由张三处理 → 直接派张三。"""
+        result, unresolved = _run_detect(
+            "后台页面优化",
+            [_complete()],
+            description="用户提出需求优化信息树。建议由张三处理。",
+        )
+        assert result is not None
+        assert result.engineer_id == "u-zhang"
+        assert result.matched_pref is True
+        assert unresolved is None
 
     def test_parse_multi_flag(self):
         """边界：多人强信号只认第一个，并打 specified_multi。"""
@@ -225,6 +292,7 @@ class TestStep0WeakPhrases:
 
     def test_maybe_has_preferred_triggers(self):
         """正常流程：常见口语能进弱信号；纯报障不进。"""
+        DispatchFlow._PREFERRED_INTENT_RE = None
         maybe = DispatchFlow._maybe_has_preferred
         assert maybe("转给张三")
         assert maybe("这个给张三看一下")
@@ -233,6 +301,10 @@ class TestStep0WeakPhrases:
         assert maybe("派给赵六")
         assert maybe("安排给钱七")
         assert maybe("找周八跟进")
+        assert maybe("建议由罗昊处理")
+        assert maybe("建议让张三跟进")
+        assert maybe("罗昊才是负责这个的")
+        assert maybe("应该是张三负责")
         assert not maybe("车辆定位漂移，任务下发失败")
 
     def test_weak_hit_assigns(self):
