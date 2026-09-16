@@ -51,6 +51,9 @@
   --destructive: oklch(0.55 0.02 220);
   --destructive-foreground: oklch(0.99 0.003 200);
 
+  /* 必填星号 / 危险文字：全站唯一出处（此前散落硬编码 #e34d59 / #d54941，已收敛） */
+  --danger: #e34d59;
+
   --border: oklch(0.935 0.002 210);
   --input: oklch(0.95 0.002 210);
   --ring: oklch(0.76 0.07 230);
@@ -100,6 +103,8 @@
   --td-brand-color: var(--primary);
   --td-brand-color-light: var(--primary-soft);
   --td-brand-color-active: var(--sky);
+  /* 禁用态：不映射会落回 TDesign 默认 --td-brand-color-3 靛蓝 #b5c7ff（白字），改为主色同色相浅蓝 */
+  --td-brand-color-disabled: oklch(0.84 0.07 230);
   --td-warning-color: var(--apricot);
   --td-error-color: var(--destructive);
   --td-success-color: var(--sky);
@@ -450,7 +455,7 @@ html, body, #root {
 /* 标签文字（设计稿：深蓝字，常显） */
 .chat-ticket-btn__label {
   font-size: 10px;
-  color: #0a4a8c;
+  color: var(--blue-1);
   font-weight: 600;
   letter-spacing: 0.5px;
   user-select: none;
@@ -628,7 +633,7 @@ html, body, #root {
   margin-left: auto;
   font-size: 20px;
   line-height: 1;
-  color: #c5c5c5;
+  color: var(--gray-light);
   font-weight: 600;
   transition: color 0.15s ease, transform 0.15s ease;
 }
@@ -986,8 +991,8 @@ html, body, #root {
 .chat-ticket-overview__redispatch {
   margin-left: auto;
   flex-shrink: 0;
-  border: 1px solid var(--blue-1);
-  background: var(--blue-1);
+  border: 1px solid var(--blue-2);
+  background: var(--blue-2);
   color: #fff;
   font-size: 12px;
   font-weight: 500;
@@ -995,7 +1000,7 @@ html, body, #root {
   padding: 4px 10px;
   cursor: pointer;
 }
-.chat-ticket-overview__redispatch:active { background: var(--blue-2); border-color: var(--blue-2); }
+.chat-ticket-overview__redispatch:active { background: var(--blue-1); border-color: var(--blue-1); }
 /* 派单提醒单行：标签蓝、正文灰，与详情 DispatchFold 同口径 */
 .chat-ticket-overview__tip {
   display: flex;
@@ -1521,7 +1526,7 @@ html, body, #root {
 .chat-bubble-wrap.is-right .chat-bubble { border-bottom-right-radius: var(--radius-sm); }
 .chat-bubble-wrap.is-left .chat-bubble { border-bottom-left-radius: var(--radius-sm); }
 .chat-bubble.is-user {
-  background: #86CAE9;
+  background: var(--blue-3);
   color: #fff;
   box-shadow: var(--shadow-soft);
 }
@@ -2738,6 +2743,8 @@ html, body, #root {
   align-items: center;
   gap: 6px;
   min-width: 0;
+  /* 占满头部剩余空间，把「类型 + 关注星标」推到右侧 */
+  flex: 1;
 }
 /* 「待你确认」标识的呼吸圆点：阶段性协商轮到我且未达成一致 */
 @keyframes task-card2-pulse {
@@ -2763,6 +2770,34 @@ html, body, #root {
   flex-shrink: 0;
   font-size: 11.5px;
   color: var(--muted-foreground);
+}
+/* 关注星标：头部最右侧；未关注描边灰，已关注金色实心（内联 lucide Star 用 fill=currentColor） */
+.task-card2__star {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  margin-left: 2px;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: #c0c4cc;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+  -webkit-tap-highlight-color: transparent;
+}
+.task-card2__star:hover {
+  background: rgba(245, 166, 35, 0.14);
+  color: #f5a623;
+}
+.task-card2__star:active {
+  background: rgba(245, 166, 35, 0.22);
+}
+.task-card2__star.is-followed {
+  color: #f5a623;
 }
 /* 优先级：蓝阶色块 */
 .task-card2__priority {
@@ -3520,12 +3555,12 @@ html, body, #root {
   margin-bottom: 4px;
 }
 .ticket-edit { padding: 20px 16px; max-height: 85vh; overflow: auto; }
-.ticket-edit__title { margin: 0 0 16px; font-size: 16px; font-weight: 600; color: #222; padding-bottom: 12px; border-bottom: 1px solid #f0f0f0; }
+.ticket-edit__title { margin: 0 0 16px; font-size: 16px; font-weight: 600; color: var(--foreground); padding-bottom: 12px; border-bottom: 1px solid var(--border); }
 .ticket-edit .t-form { padding: 0; }
 .ticket-edit .t-form__item { margin-bottom: 4px; }
 .ticket-edit .t-form__item::after { display: none !important; }
 .ticket-edit .t-button::after { display: none !important; content: none !important; }
-.ticket-edit__btns { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; padding-top: 12px; border-top: 1px solid #f0f0f0; }
+.ticket-edit__btns { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--border); }
 /* 让 FormItem 内的输入控件撑满宽度（修复变更原因等只占左半屏） */
 .ticket-edit .t-form__controls { width: 100%; }
 .ticket-edit .t-input,
@@ -3631,10 +3666,10 @@ html, body, #root {
 .markdown-body pre {
   margin: 0 0 10px;
   padding: 12px 14px;
-  background: #f6f8fa;
-  border: 1px solid #e8ecf0;
-  color: #24292e;
-  border-radius: 8px;
+  background: var(--muted);
+  border: 1px solid var(--border);
+  color: var(--foreground);
+  border-radius: var(--radius-sm);
   overflow-x: auto;
   font-size: 0.85em;
   line-height: 1.55;
@@ -3671,7 +3706,7 @@ html, body, #root {
   white-space: nowrap;
 }
 .markdown-body table tr:nth-child(even) td {
-  background: #fafbfc;
+  background: var(--muted);
 }
 
 /* 链接 */
@@ -3692,18 +3727,18 @@ html, body, #root {
   display: inline;
   padding: 1px 7px;
   margin: 0 1px;
-  border-radius: 6px;
-  background: rgba(86, 177, 218, 0.13);
-  color: #1f6fb2;
+  border-radius: var(--radius-sm);
+  background: var(--blue-soft);
+  color: var(--blue-1);
   font-weight: 500;
   word-break: break-all;
   -webkit-box-decoration-break: clone;
   box-decoration-break: clone;
 }
 .markdown-body a.md-ticket-ref:hover {
-  background: rgba(86, 177, 218, 0.24);
+  background: var(--blue-5);
   text-decoration: none;
-  color: #175a96;
+  color: var(--blue-1);
 }
 
 /* 图片/视频容器 */
@@ -7162,8 +7197,8 @@ html, body, #root {
 .ticket-confirm__title { margin: 0 0 12px; font-size: 16px; font-weight: 600; color: var(--foreground); }
 .ticket-confirm__body { display: flex; flex-direction: column; gap: 4px; }
 .ticket-confirm__tags { display: flex; gap: 8px; margin-bottom: 8px; }
-.ticket-confirm__banner { background: #fff3e0; border: 1px solid #ffb74d; color: #b26500; font-size: 12px; padding: 8px 10px; border-radius: 6px; margin-bottom: 8px; line-height: 1.4; }
-.ticket-confirm__banner--info { background: #e8f3ff; border-color: #9fc2ff; color: var(--primary); }
+.ticket-confirm__banner { background: var(--apricot-soft); border: 1px solid var(--border); color: var(--apricot); font-size: 12px; padding: 8px 10px; border-radius: var(--radius-sm); margin-bottom: 8px; line-height: 1.4; }
+.ticket-confirm__banner--info { background: var(--blue-soft); border-color: var(--border); color: var(--primary); }
 .ticket-confirm__checkbox { display: flex; align-items: flex-start; gap: 8px; margin-top: 12px; font-size: 13px; color: var(--foreground); cursor: pointer; }
 .ticket-confirm__checkbox input { margin-top: 2px; cursor: pointer; }
 .ticket-confirm__label { font-size: 13px; color: var(--muted-foreground); margin-top: 8px; }
@@ -7171,7 +7206,7 @@ html, body, #root {
 .ticket-confirm__textarea,
 .ticket-confirm__select {
   width: 100%; box-sizing: border-box; padding: 10px 12px;
-  border: 1px solid #e7e7e7; border-radius: 6px; font-size: 14px;
+  border: 1px solid var(--border); border-radius: var(--radius-sm); font-size: 14px;
   color: var(--foreground); background: var(--card); outline: none;
 }
 .ticket-confirm__input:focus,
@@ -7183,13 +7218,13 @@ html, body, #root {
   display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px;
 }
 .ticket-confirm__quick-option {
-  padding: 6px 14px; font-size: 13px; border: 1px solid #e7e7e7;
+  padding: 6px 14px; font-size: 13px; border: 1px solid var(--border);
   border-radius: 999px; background: var(--card); color: var(--foreground);
   cursor: pointer; outline: none;
 }
 .ticket-confirm__quick-option--active {
   border-color: var(--primary); color: var(--primary);
-  background: rgba(var(--primary-rgb, 0, 0, 0), 0.06);
+  background: var(--primary-soft);
 }
 
 /* 转工单确认弹窗：远程方式截图上传区（与 TasksView 新建弹窗 .tasks-create-modal__remote* 对齐） */
@@ -7199,8 +7234,8 @@ html, body, #root {
   gap: 10px;
   margin-top: 8px;
   padding: 10px 12px;
-  background: var(--muted, #f5f5f5);
-  border-radius: 8px;
+  background: var(--muted);
+  border-radius: var(--radius-md);
 }
 .ticket-confirm__remote-tip {
   margin: 0;
@@ -7223,8 +7258,8 @@ html, body, #root {
   gap: 8px;
   padding: 6px 10px;
   font-size: 13px;
-  background: var(--card, #fff);
-  border-radius: 6px;
+  background: var(--card);
+  border-radius: var(--radius-sm);
 }
 .ticket-confirm__remote-name {
   flex: 1;
@@ -7238,7 +7273,7 @@ html, body, #root {
   flex-shrink: 0;
   padding: 2px 8px;
   font-size: 12px;
-  color: #e34d59;
+  color: var(--danger);
   background: transparent;
   border: none;
   cursor: pointer;
@@ -7247,13 +7282,13 @@ html, body, #root {
   align-self: flex-start;
   padding: 6px 14px;
   font-size: 13px;
-  color: var(--primary, #0052d9);
-  background: var(--card, #fff);
-  border: 1px dashed var(--border, #e7e7e7);
-  border-radius: 6px;
+  color: var(--primary);
+  background: var(--card);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-sm);
   cursor: pointer;
 }
-.ticket-confirm__remote-upload:hover { border-color: var(--primary, #0052d9); }
+.ticket-confirm__remote-upload:hover { border-color: var(--primary); }
 .ticket-confirm__remote-upload:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .ticket-confirm__btns { display: flex; gap: 12px; margin-top: 20px; }
@@ -7613,6 +7648,9 @@ html, body, #root {
 
   --destructive: oklch(0.55 0.02 220);
   --destructive-foreground: oklch(0.99 0.003 200);
+
+  /* 必填星号 / 危险文字：全站唯一出处（此前散落硬编码 #e34d59 / #d54941，已收敛） */
+  --danger: #e34d59;
 
   --border: oklch(0.935 0.002 210);
   --input: oklch(0.95 0.002 210);
@@ -7990,18 +8028,18 @@ html, body, #root {
   background: rgba(255, 255, 255, .96); backdrop-filter: blur(6px);
   border-radius: 10px; box-shadow: 0 1px 6px rgba(15, 23, 42, .08);
 }
-.chat-select-bar__info { font-size: 12.5px; color: #6b7280; }
-.chat-select-bar__btn { all: unset; font-size: 13px; color: #4f6ef7; cursor: pointer; padding: 4px 8px; border-radius: 6px; }
-.chat-select-bar__btn:active { background: rgba(79, 110, 247, .1); }
+.chat-select-bar__info { font-size: 12.5px; color: var(--muted-foreground); }
+.chat-select-bar__btn { all: unset; font-size: 13px; color: var(--blue-2); cursor: pointer; padding: 4px 8px; border-radius: var(--radius-sm); }
+.chat-select-bar__btn:active { background: var(--blue-soft); }
 /* 底部转发操作条（多选时出现在输入栏上方） */
 .chat-forward-bar { display: flex; gap: 10px; padding: 10px 12px; }
 .chat-forward-bar__btn {
-  flex: 1; border: 1px solid #d7dbe4; background: #fff; color: #374151;
-  border-radius: 10px; padding: 11px 0; font-size: 14px; cursor: pointer;
+  flex: 1; border: 1px solid var(--border); background: var(--card); color: var(--foreground);
+  border-radius: var(--radius-md); padding: 11px 0; font-size: 14px; cursor: pointer;
 }
 .chat-forward-bar__btn:disabled { opacity: .45; cursor: not-allowed; }
 .chat-forward-bar__btn.is-primary {
-  flex: 1.6; background: #3d9be6; border: none; color: #fff; font-weight: 600;
+  flex: 1.6; background: var(--blue-2); border: none; color: #fff; font-weight: 600;
 }
 .chat-input-bar.is-select-disabled { opacity: .45; pointer-events: none; }
 /* 转发图预览弹层（min-height:0 是关键：flex 子项默认 min-height:auto，
@@ -8011,12 +8049,12 @@ html, body, #root {
   display: flex; align-items: center; justify-content: center; padding: 16px;
 }
 .chat-forward-preview__panel {
-  background: #fff; border-radius: 14px; max-width: 420px; width: 100%;
+  background: var(--card); border-radius: var(--radius-xl); max-width: 420px; width: 100%;
   max-height: 86vh; display: flex; flex-direction: column; overflow: hidden;
 }
-.chat-forward-preview__hint { padding: 10px 14px 6px; font-size: 12.5px; color: #6b7280; text-align: center; flex-shrink: 0; }
+.chat-forward-preview__hint { padding: 10px 14px 6px; font-size: 12.5px; color: var(--muted-foreground); text-align: center; flex-shrink: 0; }
 .chat-forward-preview__img-wrap { flex: 1; min-height: 0; overflow-y: auto; padding: 0 12px; }
-.chat-forward-preview__img-wrap img { width: 100%; display: block; border-radius: 8px; }
+.chat-forward-preview__img-wrap img { width: 100%; display: block; border-radius: var(--radius-sm); }
 .chat-forward-preview__ops { display: flex; gap: 10px; padding: 12px; flex-shrink: 0; }
 /* 品牌化截图容器（挂在 body 下 off-screen，html2canvas 截图目标）。
    整树统一短字体栈：html2canvas 解析页面全局长栈（SF Pro 等十余候选）时中英文
@@ -8028,7 +8066,7 @@ html, body, #root {
 }
 .forward-snapshot__head {
   display: flex; align-items: center; gap: 10px; padding: 18px 16px 14px;
-  background: #3d9be6; color: #fff;
+  background: var(--blue-2); color: #fff;
 }
 .forward-snapshot__logo {
   width: 42px; height: 42px; border-radius: 12px; object-fit: cover;
@@ -8052,9 +8090,9 @@ html, body, #root {
 }
 .forward-snapshot__body { padding: 12px 12px 4px; display: flex; flex-direction: column; gap: 10px; }
 .forward-snapshot__foot { padding: 4px 16px 16px; text-align: center; }
-.forward-snapshot__foot-line { width: 56px; height: 3px; border-radius: 2px; background: #3d9be6; margin: 0 auto 8px; opacity: .55; }
+.forward-snapshot__foot-line { width: 56px; height: 3px; border-radius: 2px; background: var(--blue-2); margin: 0 auto 8px; opacity: .55; }
 .forward-snapshot__foot-text {
-  font-size: 12px; color: #5d6572; line-height: 1.5;
+  font-size: 12px; color: var(--muted-foreground); line-height: 1.5;
   font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
 }
 /* 截图里隐藏气泡操作按钮/多选残留/项目按钮等一切交互件 */

@@ -44,8 +44,11 @@ DDL = [
       `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
       `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
       `metadata_` TEXT NULL,
+      `is_deleted` TINYINT(1) NOT NULL DEFAULT 0 COMMENT '逻辑删除：1=用户已删除（列表隐藏，数据保留供 AI 统计）',
+      `deleted_at` DATETIME NULL COMMENT '逻辑删除时间（UTC）',
       PRIMARY KEY (`id`),
-      KEY `ix_dataqa_conversations_id` (`id`)
+      KEY `ix_dataqa_conversations_id` (`id`),
+      KEY `ix_dataqa_conversations_is_deleted` (`is_deleted`)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
       COMMENT='AI 数据助手会话（独立于摇人 conversations）'
     """,

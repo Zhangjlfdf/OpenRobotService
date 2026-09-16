@@ -16,6 +16,7 @@ import SafeHtml from '@/shared/components/SafeHtml';
 import DiscussionPanel from '@/shared/components/DiscussionPanel';
 import TicketDynamicsCard from '@/shared/components/TicketDynamicsCard';
 import StepNegotiationCard from '@/shared/components/StepNegotiationCard';
+import SpecDocCard from '@/shared/components/SpecDocCard';
 import { useStepNegotiation } from '@/shared/hooks/useStepNegotiation';
 import { useResolveTicket } from '@/shared/hooks/useResolveTicket';
 import AttachmentViewer, { type AttachmentViewItem } from '@/shared/components/AttachmentViewer';
@@ -37,7 +38,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { urlTransformAllowDataImage } from '@/shared/utils/markdown';
 
-// 状态文字色（设计稿 statusText 蓝阶：新建 blue-3 / 处理中·进行中 blue-2 / 已解决 blue-1 / 关闭·取消 muted）
+// 状态文字色（设计稿 statusText 蓝阶：待处理 blue-3 / 处理中·进行中 blue-2 / 已解决 blue-1 / 关闭·取消 muted）
 const STATUS_TEXT_COLOR_MAP: Record<string, string> = {
   new: 'var(--blue-3)',
   in_progress: 'var(--blue-2)',
@@ -422,7 +423,13 @@ export default function TaskDetailPage() {
         { label: '暂停任务', nextStatus: 'pending', theme: 'warning', customStyle: BTN_SECONDARY },
         { label: '处理完成', nextStatus: 'resolved', theme: 'success', customStyle: BTN_PRIMARY },
       ],
-      pending: [{ label: '继续处理', nextStatus: 'in_progress', theme: 'primary', actionType: 'resume', customStyle: BTN_PRIMARY }],
+      pending: (isAssignee && isReporter)
+        ? [
+            // 工单退回发起人后：发起人可重新发起（继续处理）或关闭工单
+            { label: '重新发起', nextStatus: 'in_progress', theme: 'primary', actionType: 'resume', customStyle: BTN_PRIMARY },
+            { label: '关闭工单', nextStatus: 'closed', theme: 'default', customStyle: BTN_SECONDARY },
+          ]
+        : [{ label: '继续处理', nextStatus: 'in_progress', theme: 'primary', actionType: 'resume', customStyle: BTN_PRIMARY }],
       resolved: [
         { label: '未解决', nextStatus: 'in_progress', theme: 'warning', actionType: 'reopen', customStyle: BTN_SECONDARY },
         { label: '确认关闭', nextStatus: 'closed', theme: 'default', customStyle: BTN_PRIMARY },
@@ -1071,9 +1078,12 @@ export default function TaskDetailPage() {
   if (!detail) return (
     <div>
       <Navbar title="工单详情" fixed leftArrow onLeftClick={handleBack} />
-      <div style={{ padding: 32, textAlign: 'center', color: '#999', marginTop: 56 }}>工单不存在</div>
+      <div style={{ padding: 32, textAlign: 'center', color: 'var(--muted-foreground)', marginTop: 56 }}>工单不存在</div>
     </div>
   );
+
+  const specDocRoles = getCurrentUserRoles();
+  const canEditSpecDoc = isAdmin || specDocRoles.isAssignee || specDocRoles.isReporter;
 
   return (
     <div className="task-detail-page" style={{ paddingBottom: 72 }}>
@@ -1260,6 +1270,9 @@ export default function TaskDetailPage() {
           <h4 className="detail-card__h">问题描述</h4>
           <SafeHtml className="detail-card__body detail-card__body--pre" html={detail.description || '<p style="color:var(--muted-foreground)">无描述</p>'} />
         </div>
+
+        {/* 问题文档：提单人结构化描述 + 接单人补充（md 在线编辑） */}
+        <SpecDocCard taskId={detail.id} canEdit={canEditSpecDoc} />
 
         {/* 工单阶段性处理（协商节点）：抽到共享组件 StepNegotiationCard，与历史工单详情页复用 */}
         <StepNegotiationCard
@@ -1475,6 +1488,9 @@ export default function TaskDetailPage() {
           const canOperate = hasPermission('backend:tasks:operate');
           const assigneeOnlyStatuses = ['new', 'in_progress', 'pending', 'paused'];
           const showRoleActions = canOperate || (assigneeOnlyStatuses.includes(status) ? isAssignee : (status === 'resolved' ? isReporter : false));
+          // 已解决状态：提单人仅可修改工单/升级上报，不应退回工单或重新指派
+          // 退回工单/重新指派应由处理人在非已解决状态下操作
+          const isResolved = status === 'resolved';
           // 达到最大回合：升级上报强制可见（提单人/接单人任一），替代管理员介入
           const round = detail.step_negotiation_round ?? 0;
           const maxRound = detail.step_neg_max_rounds ?? 3;
@@ -1489,8 +1505,12 @@ export default function TaskDetailPage() {
                 {showRoleActions && (
                   <>
                     <Button size="small" theme="default" onClick={startEdit}>修改工单</Button>
-                    <Button size="small" theme="default" onClick={() => { setReturnReason(''); setShowReturnConfirmPopup(true); }}>退回工单</Button>
-                    <Button size="small" theme="default" onClick={() => { setReassignUser(null); setReassignReason(''); setShowReassignPopup(true); }}>重新指派</Button>
+                    {!isResolved && (
+                      <Button size="small" theme="default" onClick={() => { setReturnReason(''); setShowReturnConfirmPopup(true); }}>退回工单</Button>
+                    )}
+                    {!isResolved && (
+                      <Button size="small" theme="default" onClick={() => { setReassignUser(null); setReassignReason(''); setShowReassignPopup(true); }}>重新指派</Button>
+                    )}
                     <Button
                       size="small"
                       theme={reachedMax ? 'danger' : 'default'}
@@ -1615,7 +1635,7 @@ export default function TaskDetailPage() {
       <Popup visible={showEscalatePopup} onClose={() => { setShowEscalatePopup(false); setEscalateReason(''); }} placement="bottom" showOverlay destroyOnClose>
         <div className="ticket-edit">
           <h4 className="ticket-edit__title">升级上报</h4>
-          <p style={{ color: '#999', fontSize: '13px', marginBottom: '12px' }}>请选择升级对象</p>
+          <p style={{ color: 'var(--muted-foreground)', fontSize: '13px', marginBottom: '12px' }}>请选择升级对象</p>
           <UserSelect value={escalateUser?.id ?? null} onChange={setEscalateUser} title="选择升级对象" />
           <Form initialData={{}}>
             <FormItem label="变更原因" name="escalateReason" labelAlign="top" requiredMark>
@@ -1637,8 +1657,8 @@ export default function TaskDetailPage() {
 
       <Popup visible={showResumePopup} onClose={() => { setShowResumePopup(false); setResumeUser(null); }} placement="bottom" showOverlay>
         <div className="ticket-edit">
-          <h4>继续处理</h4>
-          <p style={{ color: '#999', fontSize: '13px', marginBottom: '12px' }}>选择新的受理人（可不选，直接确认则保持原处理人）</p>
+          <h4 className="ticket-edit__title">继续处理</h4>
+          <p style={{ color: 'var(--muted-foreground)', fontSize: '13px', marginBottom: '12px' }}>选择新的受理人（可不选，直接确认则保持原处理人）</p>
           <UserSelect value={resumeUser?.id ?? null} onChange={setResumeUser} placeholder="请选择受理人（可选）" title="选择受理人" />
           <div className="ticket-edit__btns">
             <Button theme="default" onClick={() => { setShowResumePopup(false); setResumeUser(null); }}>取消</Button>
@@ -1658,12 +1678,12 @@ export default function TaskDetailPage() {
             {/* 工单问题 */}
             <div className="ticket-edit-form__field">
               <span className="ticket-edit-form__label">📌 工单问题</span>
-              <div style={{ fontSize: '14px', fontWeight: 600, color: '#1a1a1a', marginBottom: '4px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{detail?.title}</div>
+              <div style={{ fontSize: '14px', fontWeight: 600, color: 'var(--foreground)', marginBottom: '4px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{detail?.title}</div>
               <div style={{
-                fontSize: '13px', color: '#888', lineHeight: 1.6, whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+                fontSize: '13px', color: 'var(--muted-foreground)', lineHeight: 1.6, whiteSpace: 'pre-wrap', wordBreak: 'break-word',
                 display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden',
               }}>
-                {detail?.description || <span style={{ color: '#bbb' }}>（无描述）</span>}
+                {detail?.description || <span style={{ color: 'var(--gray-light)' }}>（无描述）</span>}
               </div>
             </div>
 
@@ -1672,11 +1692,11 @@ export default function TaskDetailPage() {
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
                 <span className="ticket-edit-form__label" style={{ marginBottom: 0 }}>✅ 工单解决方式</span>
                 {resolve.resolutionFailed && (
-                  <span style={{ color: '#faad14', fontSize: '12px' }}>自动总结出错，请手动补充</span>
+                  <span style={{ color: 'var(--apricot)', fontSize: '12px' }}>自动总结出错，请手动补充</span>
                 )}
               </div>
               {resolve.resolutionLoading || resolve.resolutionPolling ? (
-                <div style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '20px 0', color: '#666', fontSize: '13px', justifyContent: 'center' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '20px 0', color: 'var(--muted-foreground)', fontSize: '13px', justifyContent: 'center' }}>
                   <Loading size="20px" /> 正在生成解决方式…
                 </div>
               ) : (
@@ -1721,9 +1741,9 @@ export default function TaskDetailPage() {
       <Popup visible={showReassignPopup} onClose={() => { setShowReassignPopup(false); setReassignUser(null); setReassignReason(''); setReassignKind(''); }} placement="bottom" showOverlay destroyOnClose>
         <div className="ticket-edit">
           <h4 className="ticket-edit__title">重新指派</h4>
-          <p style={{ color: '#999', fontSize: '13px', marginBottom: '12px' }}>选择新的处理人</p>
+          <p style={{ color: 'var(--muted-foreground)', fontSize: '13px', marginBottom: '12px' }}>选择新的处理人</p>
           <UserSelect value={reassignUser?.id ?? null} onChange={setReassignUser} placeholder="请选择处理人" title="选择处理人" />
-          <div style={{ margin: '12px 0 8px', fontSize: '14px', color: '#333' }}>转派类型<span style={{ color: '#d54941' }}> *</span></div>
+          <div style={{ margin: '12px 0 8px', fontSize: '14px', color: 'var(--foreground)' }}>转派类型<span style={{ color: 'var(--danger)' }}> *</span></div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginBottom: '12px' }}>
             {([
               { id: 'misassign' as const, label: '派错了', hint: '不该派给当前处理人，同类单会学习' },
@@ -1739,14 +1759,14 @@ export default function TaskDetailPage() {
                   style={{
                     textAlign: 'left',
                     padding: '10px 12px',
-                    borderRadius: '8px',
-                    border: on ? '1px solid #0052d9' : '1px solid #e7e7e7',
-                    background: on ? '#f2f3ff' : '#fff',
+                    borderRadius: 'var(--radius-md)',
+                    border: on ? '1px solid var(--primary)' : '1px solid var(--border)',
+                    background: on ? 'var(--primary-soft)' : 'var(--card)',
                     cursor: 'pointer',
                   }}
                 >
-                  <div style={{ fontSize: '14px', fontWeight: 600, color: '#222' }}>{opt.label}</div>
-                  <div style={{ fontSize: '12px', color: '#888', marginTop: '2px' }}>{opt.hint}</div>
+                  <div style={{ fontSize: '14px', fontWeight: 600, color: 'var(--foreground)' }}>{opt.label}</div>
+                  <div style={{ fontSize: '12px', color: 'var(--muted-foreground)', marginTop: '2px' }}>{opt.hint}</div>
                 </button>
               );
             })}
@@ -1778,7 +1798,7 @@ export default function TaskDetailPage() {
       >
         <div className="ticket-edit">
           <h4 className="ticket-edit__title">设置创建人姓名</h4>
-          <p style={{ color: '#666', fontSize: '13px', marginBottom: '12px', lineHeight: 1.6 }}>
+          <p style={{ color: 'var(--muted-foreground)', fontSize: '13px', marginBottom: '12px', lineHeight: 1.6 }}>
             修改创建人（{(detail?.created_by_name || detail?.reporter_name || detail?.created_by || '-')}）的姓名，保存后工单创建人将显示新姓名。
           </p>
           <Form initialData={{}}>
@@ -1807,7 +1827,7 @@ export default function TaskDetailPage() {
       >
         <div className="ticket-edit">
           <h4 className="ticket-edit__title">修改当前阶段截止时间</h4>
-          <p style={{ color: '#666', fontSize: '13px', marginBottom: '12px', lineHeight: 1.6 }}>
+          <p style={{ color: 'var(--muted-foreground)', fontSize: '13px', marginBottom: '12px', lineHeight: 1.6 }}>
             仅调整本工单的当前阶段截止时间，不影响其他字段；清空后表示不设置截止时间。
           </p>
           {(() => {
@@ -1843,9 +1863,9 @@ export default function TaskDetailPage() {
       <Popup visible={showReturnConfirmPopup} onClose={() => { setShowReturnConfirmPopup(false); setReturnReason(''); }} placement="bottom" showOverlay destroyOnClose>
         <div className="ticket-edit">
           <h4 className="ticket-edit__title">退回工单</h4>
-          <p style={{ color: '#666', fontSize: '13px', marginBottom: '12px', lineHeight: 1.6 }}>
+          <p style={{ color: 'var(--muted-foreground)', fontSize: '13px', marginBottom: '12px', lineHeight: 1.6 }}>
             确定要将此工单退回吗？<br />
-            退回后工单状态将变更为<span style={{ color: '#faad14', fontWeight: 500 }}>挂起</span>，处理人变更为创建人。
+            退回后工单状态将变更为<span style={{ color: 'var(--apricot)', fontWeight: 500 }}>挂起</span>，处理人变更为创建人。
           </p>
           <Form initialData={{}}>
             <FormItem label="变更原因" name="returnReason" labelAlign="top" requiredMark>
@@ -1875,20 +1895,20 @@ export default function TaskDetailPage() {
       >
         <div className="ticket-edit">
           <h4 className="ticket-edit__title">标记未解决</h4>
-          <p style={{ color: '#666', fontSize: '13px', marginBottom: '12px', lineHeight: 1.6 }}>
+          <p style={{ color: 'var(--muted-foreground)', fontSize: '13px', marginBottom: '12px', lineHeight: 1.6 }}>
             工单将打回到「处理中」，阶段性处理从头再开始：请选择重新开始的阶段及节点结束时间（SLA），打回后等待处理人确认。
           </p>
           <div style={{ marginBottom: 12 }}>
-            <label style={{ display: 'block', fontSize: 13, color: '#666', marginBottom: 4 }}>
-              重新开始的阶段<span style={{ color: '#e34d59' }}>*</span>
+            <label style={{ display: 'block', fontSize: 13, color: 'var(--muted-foreground)', marginBottom: 4 }}>
+              重新开始的阶段<span style={{ color: 'var(--danger)' }}>*</span>
             </label>
             <select
               value={negotiation.reopenStepId ?? ''}
               onChange={(e) => negotiation.setReopenStepId(e.target.value ? Number(e.target.value) : null)}
               style={{
                 width: '100%', padding: '8px 10px', fontSize: 14,
-                border: '1px solid var(--component-border, #dcdcdc)', borderRadius: 6,
-                background: '#fff',
+                border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)',
+                background: 'var(--card)', color: 'var(--foreground)',
               }}
             >
               {[...negotiation.stepTemplate].sort((a, b) => a.sequence - b.sequence).map((s) => (
@@ -1935,7 +1955,7 @@ export default function TaskDetailPage() {
       >
         <div className="ticket-edit">
           <h4 className="ticket-edit__title">驳回审核</h4>
-          <p style={{ color: '#666', fontSize: '13px', marginBottom: '12px', lineHeight: 1.6 }}>
+          <p style={{ color: 'var(--muted-foreground)', fontSize: '13px', marginBottom: '12px', lineHeight: 1.6 }}>
             确定要驳回{approvalInfo?.type === 'new_company' ? '公司' : '部门'}「{approvalInfo?.targetName}」的录入申请吗？
           </p>
           <Form initialData={{}}>
@@ -1965,7 +1985,7 @@ export default function TaskDetailPage() {
       >
         <div className="ticket-edit">
           <h4 className="ticket-edit__title">调整名称</h4>
-          <p style={{ color: '#666', fontSize: '13px', marginBottom: '12px', lineHeight: 1.6 }}>
+          <p style={{ color: 'var(--muted-foreground)', fontSize: '13px', marginBottom: '12px', lineHeight: 1.6 }}>
             修改{approvalInfo?.type === 'new_company' ? '公司' : '部门'}名称后审核通过：
           </p>
           <Form initialData={{}}>

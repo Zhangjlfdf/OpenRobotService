@@ -43,6 +43,14 @@ PATCHES = {
     "tasks": [
         ("step_phase_round", "INT NOT NULL DEFAULT 0 COMMENT '阶段回合数：complete-step 推进+1，初始0=第一轮；0时协商节点不受sequence下限限制'", None),
     ],
+    "conversations": [
+        ("is_deleted", "TINYINT(1) NOT NULL DEFAULT 0 COMMENT '逻辑删除：1=用户已删除（列表隐藏，数据保留供 AI 统计）'", "ix_conversations_is_deleted"),
+        ("deleted_at", "DATETIME NULL COMMENT '逻辑删除时间（UTC）'", None),
+    ],
+    "dataqa_conversations": [
+        ("is_deleted", "TINYINT(1) NOT NULL DEFAULT 0 COMMENT '逻辑删除：1=用户已删除（列表隐藏，数据保留供 AI 统计）'", "ix_dataqa_conversations_is_deleted"),
+        ("deleted_at", "DATETIME NULL COMMENT '逻辑删除时间（UTC）'", None),
+    ],
 }
 
 

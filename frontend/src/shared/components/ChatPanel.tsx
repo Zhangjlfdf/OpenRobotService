@@ -15,6 +15,7 @@ import { qaUploadStream, generateSessionId, trackSession, fetchWithAuth, qaPrepa
 import ProjectSelect from '@/shared/components/ProjectSelect';
 import UserSelect from '@/shared/components/UserSelect';
 import RedispatchCandidateList from '@/shared/components/RedispatchCandidateList';
+import SpecDocField, { type SpecDocDraft } from '@/shared/components/SpecDocField';
 import { createTicket, reDispatchTicket, uploadCommentAttachment, fetchRedispatch, type RedispatchCandidate } from '@/api/ticket';
 
 /** 远程方式选项（摇人→转工单确认弹窗 与 系统任务新建弹窗 共用）：
@@ -989,6 +990,8 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
   // 远程方式截图（object_path 数组）：弹窗内选择远程方式后才出现，上传即本地暂存、关闭弹窗清空。
   // 走 uploadCommentAttachment 拿到 object_path → 提交时塞 overrides.attachments 透传至后端。
   const [remoteShots, setRemoteShots] = useState<{ objectPath: string; fileName: string }[]>([]);
+  // 问题文档草稿（选填）：随 overrides.spec_doc 透传后端落 task_spec_doc
+  const [specDoc, setSpecDoc] = useState<SpecDocDraft | null>(null);
   const [uploadingShot, setUploadingShot] = useState(false);
   const remoteShotInputRef = useRef<HTMLInputElement | null>(null);
   // 转工单信息不足引导（方案A）：prepare 返回 not_ready 时，
@@ -2604,6 +2607,7 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
     const sid = ticketConfirm.draft?.source_conversation_id ?? sessionId;
     setTicketSteps([]); // 关闭弹窗即清空阶段列表
     setRemoteShots([]); // 关闭弹窗即清空已上传的远程截图
+    setSpecDoc(null); // 关闭弹窗即清空问题文档草稿
     setTicketConfirm({ visible: false, draft: null, overrides: {}, submitting: false, force_submit: false, dualTicket: false, projectOwner: null });
     if (sid) {
       qaClearDraft(String(sid)).catch(() => { /* 清草稿失败不阻塞，本地已重置 */ });
@@ -2670,6 +2674,7 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
         project_id: isDual ? '' : projectIdVal,
         ...(finalRemoteType ? { remote_type: finalRemoteType } : {}),
         ...(finalAttachments.length > 0 ? { attachments: finalAttachments } : {}),
+        ...(specDoc ? { spec_doc: specDoc } : {}),
       };
       const res = await qaConfirmTicket(sessionId, overrides);
       if (res?.code !== 0) {
@@ -2734,6 +2739,7 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
       setTicketSteps([]); // 提交完成清空阶段列表
       setRemoteShots([]); // 提交完成清空本地远程截图暂存
       setTicketConfirm({ visible: false, draft: null, overrides: {}, submitting: false, force_submit: false, dualTicket: false, projectOwner: null });
+      setSpecDoc(null); // 提交成功后清空问题文档草稿
       resumeFollowBottom(); // 用户主动提交：工单概览气泡追加后立即贴底展示
 
       // 工单1 落库 + 气泡 + 轮询
@@ -3223,6 +3229,9 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
                   placeholder="问题描述"
                   rows={3}
                 />
+                {/* 问题文档（选填）：上传 .md/.doc/.docx 或在线编写，接单人可在此基础上补充 */}
+                <label className="ticket-confirm__label">完整问题文档（选填）</label>
+                <SpecDocField value={specDoc} onChange={setSpecDoc} disabled={ticketConfirm.submitting} />
                 <label className="ticket-confirm__label">优先级</label>
                 <select
                   className="ticket-confirm__select"
@@ -3332,7 +3341,7 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
                     </button>
                   </div>
                 )}
-                <label className="ticket-confirm__label">绑定项目 {!ticketConfirm.dualTicket && <span style={{ color: '#e34d59' }}>*</span>}</label>
+                <label className="ticket-confirm__label">绑定项目 {!ticketConfirm.dualTicket && <span style={{ color: 'var(--danger)' }}>*</span>}</label>
                 <ProjectSelect
                   value={draftField('project_id') || null}
                   nameHint={draftField('project') || null}
@@ -3358,7 +3367,7 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
                     <div className="ticket-confirm__banner ticket-confirm__banner--info">
                       项目不在项目集中，将默认提单至「摇人吧服务号提单」项目，同时向项目负责人发送申请工单
                     </div>
-                    <label className="ticket-confirm__label">项目负责人 <span style={{ color: '#e34d59' }}>*</span></label>
+                    <label className="ticket-confirm__label">项目负责人 <span style={{ color: 'var(--danger)' }}>*</span></label>
                     <UserSelect
                       value={ticketConfirm.projectOwner?.id ?? null}
                       onChange={(u) => setTicketConfirm((s) => ({ ...s, projectOwner: u }))}
@@ -3437,7 +3446,7 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
             <div
               onClick={(e) => e.stopPropagation()}
               style={{
-                background: '#fff', borderRadius: 14, maxWidth: 420, width: '100%',
+                background: 'var(--card)', borderRadius: 'var(--radius-xl)', maxWidth: 420, width: '100%',
                 maxHeight: '80vh', display: 'flex', flexDirection: 'column',
                 overflow: 'hidden', boxSizing: 'border-box',
               }}
@@ -3445,7 +3454,7 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
               <div
                 onContextMenu={(e) => e.preventDefault()}
                 style={{
-                  padding: '10px 14px 6px', fontSize: '12.5px', color: '#6b7280', textAlign: 'center', flexShrink: 0,
+                  padding: '10px 14px 6px', fontSize: '12.5px', color: 'var(--muted-foreground)', textAlign: 'center', flexShrink: 0,
                   // 禁长按弹原生菜单（只设在文本上，不设在容器——安卓长按图片的
                   // 保存/转发菜单走 contextmenu，容器级拦截会杀掉它）
                   WebkitTouchCallout: 'none', userSelect: 'none', WebkitUserSelect: 'none',
@@ -3454,7 +3463,7 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
                 长按图片可直接发送给朋友，或保存图片
               </div>
               <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '0 12px', WebkitOverflowScrolling: 'touch' }}>
-                <img src={forwardImage} alt="转发图" style={{ width: '100%', display: 'block', borderRadius: 8 }} />
+                <img src={forwardImage} alt="转发图" style={{ width: '100%', display: 'block', borderRadius: 'var(--radius-sm)' }} />
               </div>
               <div
                 style={{ display: 'flex', gap: 10, padding: 12, flexShrink: 0, WebkitTouchCallout: 'none', userSelect: 'none', WebkitUserSelect: 'none' }}
@@ -3462,8 +3471,8 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
               >
                 <button
                   style={{
-                    flex: 1.6, background: '#3d9be6', border: 'none', color: '#fff',
-                    fontWeight: 600, borderRadius: 10, padding: '11px 0', fontSize: 14, cursor: 'pointer',
+                    flex: 1.6, background: 'var(--blue-2)', border: 'none', color: '#fff',
+                    fontWeight: 600, borderRadius: 'var(--radius-md)', padding: '11px 0', fontSize: 14, cursor: 'pointer',
                   }}
                   onClick={() => {
                     const a = document.createElement('a');
@@ -3476,8 +3485,8 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
                 </button>
                 <button
                   style={{
-                    flex: 1, background: '#fff', border: '1px solid #d7dbe4', color: '#374151',
-                    borderRadius: 10, padding: '11px 0', fontSize: 14, cursor: 'pointer',
+                    flex: 1, background: 'var(--card)', border: '1px solid var(--border)', color: 'var(--foreground)',
+                    borderRadius: 'var(--radius-md)', padding: '11px 0', fontSize: 14, cursor: 'pointer',
                   }}
                   onClick={() => setForwardImage(null)}
                 >
