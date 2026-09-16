@@ -1,4 +1,4 @@
-"""项目信息树节点 API（逐节点 CRUD + 树查询 + 批量导入 + 文件 AI 识别导入预览 + 详情模板 + 编辑历史）。
+"""项目信息树节点 API（逐节点 CRUD + 树查询 + 批量导入 + 文件 AI 识别导入预览 + 详情模板 + 编辑历史 + 关注/项目动态）。
 
 路由前缀 /info-nodes，挂载到 admin_router 后实际路径为
 /api/admin/info-nodes/projects/{project_id}/...。
@@ -14,6 +14,7 @@ from app.modules.admin.api.auth import get_request_actor_optional
 from app.modules.admin.api.permissions import get_current_admin_user
 from app.modules.admin.services.info_node_service import info_node_service
 from app.modules.admin.services.info_node_change_service import info_node_change_service
+from app.modules.admin.services.info_node_mark_service import info_node_mark_service
 from app.modules.admin.services import info_node_import_service
 from app.modules.admin.services.info_template_service import info_template_service
 
@@ -175,6 +176,62 @@ async def get_info_node_change_summary(project_id: str):
     与 changes 接口同口径：子节点的删除记录计入其上级节点。
     """
     return {"latest": info_node_change_service.latest_by_node(project_id)}
+
+
+# ── 关注（标注）与项目动态（按当前登录人隔离） ────────────
+
+def _require_operator(actor: Dict[str, Optional[str]]) -> str:
+    """关注列表是「每人一份」，识别不到操作人就无法读写个人列表 → 401。
+
+    正常前端请求带 Bearer token（JWT sub 即登录名）；401 会触发前端的
+    刷新重试链路，token 过期场景可自愈。
+    """
+    username = actor.get("username")
+    if not username:
+        raise HTTPException(status_code=401, detail="无法识别当前用户，请重新登录后再关注")
+    return username
+
+
+@info_node_router.get("/projects/{project_id}/marks", summary="获取当前用户关注的节点ID列表")
+async def get_info_node_marks(project_id: str,
+                              actor: Dict[str, Optional[str]] = Depends(get_request_actor_optional)):
+    """返回当前登录人在该项目关注的节点 id（「项目信息管理」卡据它点亮星标）。
+
+    关注按人隔离：自己关注的自己才能看到，各人的星标互不影响。
+    """
+    operator = _require_operator(actor)
+    return {"node_ids": info_node_mark_service.list_for_project(project_id, operator)}
+
+
+@info_node_router.post("/nodes/{node_id}/mark", summary="切换当前用户的节点关注状态")
+async def toggle_info_node_mark(node_id: str,
+                                actor: Dict[str, Optional[str]] = Depends(get_request_actor_optional)):
+    """点星标：未关注→关注，已关注→取消。返回 {"marked": 切换后是否被关注}。
+
+    只动当前登录人自己的关注，别人对同一节点的关注不受影响。
+    """
+    operator = _require_operator(actor)
+    try:
+        marked = info_node_mark_service.toggle(
+            node_id, operator=operator, operator_name=actor.get("name"),
+        )
+    except LookupError:
+        raise HTTPException(status_code=404, detail="节点不存在")
+    return {"marked": marked}
+
+
+@info_node_router.get("/projects/{project_id}/activity",
+                      summary="项目动态（当前用户被关注节点的最新变动）")
+async def get_project_activity(project_id: str,
+                               actor: Dict[str, Optional[str]] = Depends(get_request_actor_optional)):
+    """当前登录人关注的每个节点只返回其**最新一条**变动（整体最新在前）。
+
+    与前端「项目动态」卡一致：只给变动内容（detail，服务端拼好的人话描述），
+    时间/人员字段存在但前端不展示（用户要求动态里不出现修改时间与人员）。
+    没记过任何操作的被关注节点不出现（无变动可展示）。
+    """
+    operator = _require_operator(actor)
+    return {"activity": info_node_mark_service.marked_activity(project_id, operator)}
 
 
 @info_node_router.post("/projects/{project_id}/parse-file",

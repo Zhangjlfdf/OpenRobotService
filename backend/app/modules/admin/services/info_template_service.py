@@ -29,6 +29,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from app.models.delivery import PROJECT_DELETED
 from app.modules.admin.models_das.models import Project, ProjectInfoNode, ProjectInfoTemplate
 from app.modules.admin.services import info_node_change_service as change_log
+from app.modules.admin.services import info_node_mark_service as node_marks
 from app.modules.admin.services.info_node_service import SessionLocal
 
 TEMPLATE_ID = "default"
@@ -462,6 +463,7 @@ class InfoTemplateService:
         by_id = {n.id: n for n in rows}
 
         # 1) 删除：模板已删除锚点的节点及子树（锚点有效的节点不在此列，会被下面移走）
+        node_marks.remove_marks(db, plan["delete_ids"])
         for node_id in plan["delete_ids"]:
             obj = by_id.get(node_id)
             if obj is not None:

@@ -1,12 +1,12 @@
 # 项目扩展信息（ext_info）与项目信息树（info_nodes）后端接口变更说明
 
-> 变更日期：2026-09-14（初版）；2026-09-15 新增 5.8 文件识别接口；2026-09-16 新增 4.4 AI 项目摘要接口、5.9 / 5.10 节点操作记录（编辑历史）接口
+> 变更日期：2026-09-14（初版）；2026-09-15 新增 5.8 文件识别接口；2026-09-16 新增 4.4 AI 项目摘要接口、5.9 / 5.10 节点操作记录（编辑历史）接口、5.11～5.13 节点关注与项目动态接口
 > 模块：`app/modules/admin`（后台管理）
 > 路由公共前缀：`/api/admin`（`/api` 来自 `API_V1_STR`，`/admin` 来自 `admin_router`）
 
 ## 一、功能概述
 
-本次为支撑「项目信息页」改造，后端做了四项变更：
+本次为支撑「项目信息页」改造，后端做了五项变更：
 
 | # | 变更 | 存储位置 | 目的 |
 |---|------|----------|------|
@@ -14,6 +14,7 @@
 | 2 | `project` 表新增 `version` 乐观锁列 | 主表 | 防止整文档读改写模式下多人并发编辑互相覆盖 |
 | 3 | 新增 `project_info_node` 表及 6 个接口 | 独立子表 | 用户可自由增删/拖拽/编辑的信息大纲树，逐节点 CRUD 互不干扰 |
 | 4 | 新增 `project_info_node_change` 表及 2 个查询接口（5.9 / 5.10） | 独立子表 | 每个节点操作留痕（时间/人员/节点/具体变动），编辑页「历史」可查、有未读新变动出小红点 |
+| 5 | 新增 `project_info_node_mark` 表及 3 个接口（5.11～5.13） | 独立子表 | 展示页「项目信息管理」子节点可点星标关注（**按人隔离，每人一份**）；被关注节点的**最新**变动聚合进「项目动态」卡 |
 
 **职责边界（重要）**
 
@@ -97,6 +98,28 @@ ORM 定义：[delivery.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/mode
 **展示归属**：节点 X 的编辑历史 = `node_id = X` 的记录 + 「`parent_id = X` 且 `action = delete`」的记录。删除记录挂在**上级节点**上——节点删掉后自身查询入口没了，用户要求「删除节点在其上级节点显示删除记录」。整树级记录（node_id 为 NULL）入库但不进任何单节点历史，只在项目级查询里可见。
 
 **人员识别**：写接口用 `get_request_actor_optional`（`api/auth.py`）尽力解析 `Authorization: Bearer <token>`（`decode_token` → `get_user_with_roles`，取 `username` / `name`）。**不强制鉴权**：解析失败/无 token 一律按匿名记录（operator 为 NULL），保持本组路由「网关管控」的现状不被破坏。
+
+### 2.5 project_info_node_mark 新表（节点关注标注）
+
+展示页「项目信息管理」卡每个子节点（一级标签之下的节点）右侧有星标，点击即写入/删除一行——**关注列表就是这张表**，「项目动态」卡按它聚合。表由 `Base.metadata.create_all` 在启动时自动创建，无需迁移脚本。
+
+| 列 | 类型 | 约束 | 说明 |
+|----|------|------|------|
+| `node_id` | VARCHAR(64) | **PK（联合）** | 被关注的节点 ID |
+| `operator` | VARCHAR(64) | **PK（联合）** | 关注人登录名（JWT sub）—— 同一节点可被多人各存一行 |
+| `project_id` | VARCHAR(64) | NOT NULL | 所属项目 ID（按项目查列表用） |
+| `operator_name` | VARCHAR(64) | NULL | 关注人显示名（识别不到时为登录名；产品上不展示，仅追溯用） |
+| `created_at` | VARCHAR(30) | NOT NULL | 字符串时间戳 `YYYY-MM-DD HH:MM:SS` |
+
+索引：`idx_pnm_project_user (project_id, operator)`。
+
+ORM 定义：[delivery.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/models/delivery.py)（`ProjectInfoNodeMark` 类）；读写与聚合集中在 [info_node_mark_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/services/info_node_mark_service.py)。
+
+**按人隔离（用户明确要求）**：「自己关注的自己才能看到，每个人可能关注的节点不一样」。星标状态（5.11）、切换（5.12）、项目动态（5.13）都按当前登录人过滤，别人的关注互不可见、互不影响；服务端以主键里的 `operator` 区分，不存「共享关注」。因此这三个接口**必须能识别出登录人**（Bearer token 的 `sub`），取不到返回 401（见 5.11 备注）。
+
+> 建表沿革：本表 2026-09-16 上午的初版是「整项目共享」（单主键 `node_id` + `created_by` 列）；同日调整为用户口径的「每人一份」（联合主键 `node_id + operator`）。存量库若已有旧结构空表，直接 `DROP TABLE project_info_node_mark` 后重启即可（`create_all` 会按新模型重建）；旧表里有数据时先 `UPDATE ... SET operator = COALESCE(created_by, '')` 之类的口径确认再迁移。
+
+**级联清理**：节点（含子树）被删除（5.5）、整树被导入替换（5.6 / 5.7 import-template）、详情模板同步（`sync`）删除节点时，标注随节点在同一事务里删除（`remove_marks` / `clear_project_marks`，按节点全量删、不区分人），避免留下点不开的孤儿关注。`project_info_node_change` 里的历史记录**不清理**（历史要可追溯）。
 
 ## 三、YAML 模板初始化机制
 
@@ -209,7 +232,7 @@ Service 逻辑（`update_project`）：
 - `ProjectUpdate`：新增 `ext_info`、`version: Optional[int]`
 - `ProjectResponse`：新增 `ext_info`、`version: int = 1`
 
-## 五、项目信息树接口（新增，10 个）
+## 五、项目信息树接口（新增，13 个）
 
 路由文件：[info_nodes.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/api/info_nodes.py)
 Service：[info_node_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/services/info_node_service.py)、[info_node_import_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/services/info_node_import_service.py)（仅 5.8）
@@ -344,11 +367,42 @@ Service：[info_node_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/ap
 - **为什么返回记录 id 而不是时间**：记录 id 是时间有序的 UUIDv7（见 2.4），`max(id)` 即最新一条；`created_at` 只到秒，用户「点开历史」与「同一秒内又产生一条记录」相遇时，按时间比较会判成已读而漏掉红点，按 id 相等比较则不会。前端只做 `latest[node] === seen[node]` 的相等判断。
 - 备注：小红点语义是「该用户没点开过」——已读状态按「项目 + 登录用户」存浏览器（localStorage），服务端不存个人已读；同一台机器换个账号登录、或换设备/清缓存，水位各算各的（本机没记过即视为没看过，会出点，可接受）。
 
+### 5.11 GET /info-nodes/projects/{project_id}/marks —— 获取当前用户关注的节点 ID 列表
+
+- 请求：无参数；**按当前登录人过滤**（Bearer token 的 `sub`，见 2.5 的按人隔离）。
+- 用途：展示页进页面（及关注操作成功后）拉取，前端据此点亮「项目信息管理」卡里对应子节点的星标（`aria-pressed`）——点亮的是**自己**的关注。
+- 响应 `200`：`{"node_ids": ["节点id", ...]}`；本人无关注返回 `{"node_ids": []}`。
+- 错误：`401` —— 请求不带/带无效 token，识别不到登录人（关注列表是「每人一份」，没有身份就无法确定读谁的列表）。前端 api client 对 401 有刷新重试链路，token 过期可自愈。
+
+### 5.12 POST /info-nodes/nodes/{node_id}/mark —— 切换当前用户的节点关注状态
+
+- 请求：无 body。**幂等方向明确**：接口是「切换」——未关注→关注、已关注→取消（前端不需要传目标状态）。
+- 人员：以 `get_request_actor_optional` 解析出的登录名（JWT `sub`）为准，**只写/删自己那一行**（主键 `node_id + operator`），别人对同一节点的关注不受影响。
+- 响应 `200`：`{"marked": true|false}`（true = 切换后处于关注中）。
+- 错误：节点不存在返回 `404`（前端树可能已过期——比如别人刚删了这个节点）；识别不到登录人返回 `401`（同 5.11）。
+- 说明：星标只出现在**一级标签之下的子节点**上（前端行为，接口不限制层级——根节点调它也能成功、也会出现在动态里，只是 UI 没入口）。
+
+### 5.13 GET /info-nodes/projects/{project_id}/activity —— 项目动态（当前用户被关注节点的最新变动）
+
+- 请求：无参数；**只看当前登录人自己的关注**（同 5.11）。
+- 用途：「项目动态」卡的数据源。**每个被关注节点只返回其最新一条变动**（来自 2.4 的 `project_info_node_change`，不另存一份变动），整体最近在前。
+- Service 逻辑（`info_node_mark_service.marked_activity`）：先取当前人在该项目的关注 `node_id` 列表；查这些节点的全部记录按 `created_at DESC, id DESC`（同秒用时间有序的 UUIDv7 兜底），**Python 侧按节点去重取首条**；节点/根节点标题用**当前**树的标题（记录里的 `node_title` 只是当时的快照）。上限 50 条（每节点至多一条，正常远达不到）。没记过任何操作的被关注节点不出现（无变动可展示）。
+- 错误：`401` 同 5.11。
+- 响应 `200`：
+
+```json
+{ "activity": [ { "node_id": "n1", "node_title": "客户信息", "root_title": "基础信息",
+  "action": "update", "detail": "把内容从「空」改为「中力」", "created_at": "2026-09-16 14:42:13" } ] }
+```
+
+- 说明：**前端只展示 `root_title · node_title` + `detail`**，不展示 `created_at` 与人员（用户明确要求「只展示该节点的变动内容」）；`created_at` / `action` 仍返回，供将来扩展。`root_title` 沿当前树 `parent_id` 走到根（纯函数 `root_title_of`，链断/成环/超 32 层回退为节点自身标题）。取消关注后该节点的条目立即从动态里消失。
+
 ## 六、并发与一致性小结
 
 1. **ext_info 并发编辑**：靠 `version` 乐观锁（冲突 409）+ 更新瞬间行锁串行化；内部系统写入不带 version，显式绕过乐观锁。
 2. **信息树并发编辑**：逐节点独立 CRUD，天然缩小冲突粒度；移动/删除不做跨节点协同锁，后写覆盖先写。
 2.1 **操作记录与业务同事务**：`add_change` 只 `db.add`，由调用方（info_node_service / info_template_service）统一 commit —— 业务失败即回滚，记录不会凭空多出；模板同步按项目逐个事务提交，某项目失败只影响该项目（记录也不会留下）。
+2.2 **关注标注的清理也走同一事务**：`remove_marks` / `clear_project_marks` 接收调用方的 `db`（只 delete 不 commit），节点删除 / 整树替换与标注清理要么一起成功、要么一起回滚，不会出现「节点没了标注还在」。
 3. **创建初始化的一致性**：project 插入与 info_nodes 初始化在同一 Session 内分两次 commit；模板实例化每节点生成独立 UUID，保证同源模板的多个项目不发生主键冲突。
 4. **老数据兼容**：`ext_info` 为 NULL 的存量项目读取时按模板 lazy 填充（仅响应、不落库）；`version` 为 NULL 时按 1 参与校验与自增。
 
@@ -357,8 +411,8 @@ Service：[info_node_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/ap
 | 状态码 | 场景 | 来源 |
 |--------|------|------|
 | 400 | 更新节点时无任何有效字段；授权接口 type 参数非法；AI 摘要时信息树无节点 | info-nodes / licenses / projects（ai-summary） |
-| 401 | 未提供/无效 token、token 缺用户信息（/me 类接口） | projects |
-| 404 | 项目/节点不存在（含软删除项目） | projects、info-nodes |
+| 401 | 未提供/无效 token、token 缺用户信息（/me 类接口）；关注/项目动态接口识别不到登录人（5.11～5.13，关注列表按人隔离） | projects、info-nodes |
+| 404 | 项目/节点不存在（含软删除项目）；对不存在的节点点关注（5.12） | projects、info-nodes |
 | 409 | 项目编号/名称重复；**乐观锁版本冲突** | projects（PUT） |
 | 422 | 请求体字段非法：`changes` 的 `limit` 越界（1～500）、`limit` 非整数 | info-nodes（changes） |
 | 500 | 权限服务联动失败、删除项目外键残留等 | projects |
@@ -369,11 +423,11 @@ Service：[info_node_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/ap
 | 类型 | 文件 |
 |------|------|
 | 迁移 | [a7b8c9d0e1f2_add_project_ext_info.py](file:///d:/CODE/9_9/OpenRobotService/backend/alembic/versions/a7b8c9d0e1f2_add_project_ext_info.py)、[b2c3d4e5f6a7_add_project_info_node.py](file:///d:/CODE/9_9/OpenRobotService/backend/alembic/versions/b2c3d4e5f6a7_add_project_info_node.py) |
-| 模型 | [app/models/delivery.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/models/delivery.py)（Project / ProjectInfoNode / ProjectInfoNodeChange）、[models_das/models.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/models_das/models.py)（再导出） |
+| 模型 | [app/models/delivery.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/models/delivery.py)（Project / ProjectInfoNode / ProjectInfoNodeChange / ProjectInfoNodeMark）、[models_das/models.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/models_das/models.py)（再导出） |
 | Schema | [schemas_das/request_models.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/schemas_das/request_models.py) |
 | API | [api/projects.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/api/projects.py)、[api/info_nodes.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/api/info_nodes.py) |
-| Service | [services/project_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/services/project_service.py)、[services/info_node_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/services/info_node_service.py)、[services/info_node_import_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/services/info_node_import_service.py)、[services/project_ai_summary_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/services/project_ai_summary_service.py)（4.4）、[services/info_node_change_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/services/info_node_change_service.py)（2.4 / 5.9 / 5.10，另被 info_node_service、info_template_service 调用写记录） |
-| 测试 | [tests/test_info_node_import.py](file:///d:/CODE/9_9/OpenRobotService/backend/tests/test_info_node_import.py)（文本抽取/目录与 prompt 构造/LLM 返回解析/0.9 阈值匹配/select 校验/归属解析，13 用例）、[tests/test_project_ai_summary.py](file:///d:/CODE/9_9/OpenRobotService/backend/tests/test_project_ai_summary.py)（节点内容解码/信息树渲染/prompt 组装/输出清洗，10 用例）、[tests/test_info_node_change.py](file:///d:/CODE/9_9/OpenRobotService/backend/tests/test_info_node_change.py)（节点值→人话/逐字段变动文案/各操作类型文案/记录 id 时间有序，26 用例） |
+| Service | [services/project_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/services/project_service.py)、[services/info_node_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/services/info_node_service.py)、[services/info_node_import_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/services/info_node_import_service.py)、[services/project_ai_summary_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/services/project_ai_summary_service.py)（4.4）、[services/info_node_change_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/services/info_node_change_service.py)（2.4 / 5.9 / 5.10，另被 info_node_service、info_template_service 调用写记录）、[services/info_node_mark_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/services/info_node_mark_service.py)（2.5 / 5.11～5.13，另被 info_node_service、info_template_service 调用清理标注） |
+| 测试 | [tests/test_info_node_import.py](file:///d:/CODE/9_9/OpenRobotService/backend/tests/test_info_node_import.py)（文本抽取/目录与 prompt 构造/LLM 返回解析/0.9 阈值匹配/select 校验/归属解析，13 用例）、[tests/test_project_ai_summary.py](file:///d:/CODE/9_9/OpenRobotService/backend/tests/test_project_ai_summary.py)（节点内容解码/信息树渲染/prompt 组装/输出清洗，10 用例）、[tests/test_info_node_change.py](file:///d:/CODE/9_9/OpenRobotService/backend/tests/test_info_node_change.py)（节点值→人话/逐字段变动文案/各操作类型文案/记录 id 时间有序，26 用例）、[tests/test_info_node_mark.py](file:///d:/CODE/9_9/OpenRobotService/backend/tests/test_info_node_mark.py)（根标题回溯/关注切换按人过滤（假 session）/标注清理，15 用例） |
 | 模板 | [config/project_templates/default.yaml](file:///d:/CODE/9_9/OpenRobotService/backend/app/config/project_templates/default.yaml) |
 | 路由挂载 | [modules/admin/__init__.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/__init__.py) |
 
@@ -391,3 +445,6 @@ Service：[info_node_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/ap
 10. 小红点：进页面、以及**每次保存成功后**各调一次 `GET /changes/summary`，与**本机**已读水位（localStorage `project-info-tree:history-seen:{项目code}:{登录用户}`，只存个人未读状态、不上传）比较——`latest[node] !== seen[node]` 或该用户没记过即出点；**只有点开过该节点历史才推进水位**（打开弹层时把该节点最新记录的 id 写入）。因此任何人保存节点后该节点立即出点、包括保存者自己——谁没点开过，谁就看得见红点；看过之后不再出点，直到有新记录。
 11. 小红点还会**汇总到一级节点（根节点）**：某个下级节点有未读记录时，它所在的根节点同一位置也出点（中间层不出）。判定完全由前端根据第 10 条的未读集合往上归（按当前树的 parent_id 一路走到最外层，忽略已删除、树里没有对应行的节点），所以消失规则与子节点一致——点开某下级节点的历史后它不再贡献，该根节点下再没有别的未读变动时，根节点的点随之消失；根节点自己的记录没看过则仍然保留。服务端不需要为此加接口。
 12. summary / changes 接口失败要静默（红点只是辅助提示，不打扰主流程），历史弹层本身失败则给出重试入口。
+13. 展示页「项目信息管理」卡：一级标签**之下的子节点**右侧渲染星标（对照原型叶子星标，按用户口径落到全部子节点），进页面拉 `GET /marks` 点亮**自己**关注过的项（按人隔离，服务端按 token 过滤，前端无需传用户参数）；点击调 `POST /nodes/{id}/mark`（乐观翻转，失败回滚并 Toast），关注变化成功后通知外层刷新「项目动态」卡。响应体与共享版一致，前端每个登录人看到的列表各是各的。
+14. 「项目动态」卡 = `GET /activity`：每条只渲染 `root_title · node_title`（与根同名时不重复拼前缀）+ `detail`，**不展示时间与人员**；无关注/无变动给空态引导（「去信息卡点星标」），加载失败给重试入口。
+15. 项目详情页卡片裁剪（按用户要求）：只保留 项目概况 / 项目信息管理 / 项目动态 三张卡；原「项目生命周期」卡删除后**项目阶段**下拉挪进项目概况（仍可编辑）；基础画像 / 风险管理 / 责任体系等被删卡片的字段在前端本页不再有编辑入口（后端字段未动）。

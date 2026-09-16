@@ -141,6 +141,48 @@ export async function fetchInfoNodeChangeSummaryApi(projectId: string): Promise<
   return latest && typeof latest === 'object' ? latest : {};
 }
 
+// —— 关注（标注）与项目动态：星标 = 关注该节点，动态里展示其最新一条变动 ——
+
+/** 获取当前登录人在某项目关注的节点 id 列表（关注按人隔离：自己关注的自己才看得到） */
+export async function fetchInfoNodeMarksApi(projectId: string): Promise<string[]> {
+  const data = await request()<{ node_ids?: string[] }>(
+    `/info-nodes/projects/${encodeURIComponent(projectId)}/marks`,
+  );
+  return Array.isArray(data?.node_ids) ? data.node_ids : [];
+}
+
+/** 切换节点关注状态，返回切换后是否被关注（404 = 节点不存在） */
+export async function toggleInfoNodeMarkApi(nodeId: string): Promise<boolean> {
+  const data = await request()<{ marked?: boolean }>(
+    `/info-nodes/nodes/${encodeURIComponent(nodeId)}/mark`,
+    { method: 'POST' },
+  );
+  return !!data?.marked;
+}
+
+/** 项目动态里的一条：某被关注节点的最新变动（只展示 detail，不带时间与人员） */
+export interface ApiProjectActivityItem {
+  node_id: string;
+  /** 节点当前标题（改动改名后以最新为准） */
+  node_title: string;
+  /** 所在根节点标题，与 node_title 相同时前端不重复展示 */
+  root_title: string;
+  /** create / update / move / delete 等（前端暂不展示，留作后续按类型分组） */
+  action: string;
+  /** 变动内容的人话描述（服务端拼好，直接展示） */
+  detail: string;
+  /** 变动时间（仅排序/排查用，按需求不在动态里展示） */
+  created_at: string;
+}
+
+/** 项目动态：每个被关注节点只返回最新一条变动，整体最新在前 */
+export async function fetchProjectActivityApi(projectId: string): Promise<ApiProjectActivityItem[]> {
+  const data = await request()<{ activity?: ApiProjectActivityItem[] }>(
+    `/info-nodes/projects/${encodeURIComponent(projectId)}/activity`,
+  );
+  return Array.isArray(data?.activity) ? data.activity : [];
+}
+
 // —— 文件导入（AI 识别）：上传文档 → 后端调大模型识别 → 三类预览（不落库，确认后走上面的 CRUD） ——
 
 /** 匹配到现有节点的识别条目（将填写 / 将覆盖共用） */

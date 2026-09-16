@@ -18,6 +18,7 @@ from app.models.delivery import (
     ProjectTransportEfficiencyRobot,
     ProjectInfoNode,
     ProjectInfoNodeChange,
+    ProjectInfoNodeMark,
     ProjectInfoTemplate,
 )
 
@@ -34,5 +35,6 @@ __all__ = [
     "ProjectTransportEfficiencyRobot",
     "ProjectInfoNode",
     "ProjectInfoNodeChange",
+    "ProjectInfoNodeMark",
     "ProjectInfoTemplate",
 ]

@@ -18,6 +18,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.modules.admin.models_das.models import ProjectInfoNode, Project
 from app.modules.admin.services import info_node_change_service as change_log
+from app.modules.admin.services import info_node_mark_service as node_marks
 from app.models.delivery import PROJECT_DELETED
 from app.modules.admin.utils_das.config import DATABASE_URL
 from sqlalchemy import create_engine
@@ -258,6 +259,8 @@ class InfoNodeService:
                 detail=change_log.build_delete_detail(node.title, len(ids) - 1),
                 operator=operator, operator_name=operator_name,
             )
+            # 被删节点的「关注」随节点一起清掉（树里已无此节点，星标点不开）
+            node_marks.remove_marks(db, ids)
             db.query(ProjectInfoNode).filter(
                 ProjectInfoNode.id.in_(ids)
             ).delete(synchronize_session=False)
@@ -285,10 +288,11 @@ class InfoNodeService:
                 ProjectInfoNode.project_id == project_id
             ).count()
 
-            # 清空旧节点
+            # 清空旧节点（旧节点上的「关注」一并清掉，新树是全新的节点 id）
             db.query(ProjectInfoNode).filter(
                 ProjectInfoNode.project_id == project_id
             ).delete(synchronize_session=False)
+            node_marks.clear_project_marks(db, project_id)
 
             now = _now_str()
             flat = []

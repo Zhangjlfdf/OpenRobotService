@@ -291,6 +291,13 @@ export const MacHistory = ({ size }: { size?: number }) => (
   </Icon>
 );
 
+/* 星标（关注节点）：默认描边，选中态由外层 CSS 用 fill: currentColor 填充 */
+export const MacStar = ({ size }: { size?: number }) => (
+  <Icon size={size}>
+    <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" />
+  </Icon>
+);
+
 /* lucide trash-2（删除节点/文件） */
 export const MacTrash2 = ({ size }: { size?: number }) => (
   <Icon size={size}>

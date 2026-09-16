@@ -40,7 +40,7 @@ vi.mock('@/api/ai', () => ({
   aiGet: () => mockAiGet(),
 }));
 
-// 项目信息管理卡挂载后会异步拉取信息树：这里保持挂起（不 resolve），
+// 项目信息管理卡 / 项目动态卡挂载后会异步拉取：这里保持挂起（不 resolve），
 // 既不触发 act 警告，也不占用下面 mockCreateRequest 的请求桩与调用次数断言
 vi.mock('@/api/infoNodes', () => ({
   fetchInfoTree: () => new Promise(() => {}),
@@ -50,6 +50,10 @@ vi.mock('@/api/infoNodes', () => ({
   deleteInfoNodeApi: vi.fn(),
   importInfoTreeApi: vi.fn(),
   importInfoTemplateApi: vi.fn(),
+  fetchInfoNodeMarksApi: () => new Promise(() => {}),
+  toggleInfoNodeMarkApi: vi.fn(),
+  fetchProjectActivityApi: () => new Promise(() => {}),
+  fetchInfoNodeChangeSummaryApi: () => new Promise(() => {}),
 }));
 
 vi.mock('@/stores/auth', () => ({
@@ -135,7 +139,7 @@ describe('ProjectDetail（USP 项目新建）', () => {
 
   it('新建模式展示必填标记（项目名称/项目编号/项目状态）', () => {
     renderView();
-    expect(screen.getAllByText('*')).toHaveLength(5);
+    expect(screen.getAllByText('*')).toHaveLength(3);
   });
 
   it('未填必填字段点「创建」→ 提示先填写项目名称，且不发请求', () => {
@@ -156,8 +160,7 @@ describe('ProjectDetail（USP 项目新建）', () => {
     fireEvent.change(screen.getByRole('textbox'), { target: { value: '项目A' } });
     fireEvent.blur(screen.getByRole('textbox'));
 
-    // 填写项目编号（项目概况卡「项目编号」行：点值进入编辑，标签自身不可点；
-    // 项目基础画像里还有一个同名标签，所以按 meta 行定位）
+    // 填写项目编号（项目概况卡「项目编号」行：点值进入编辑，标签自身不可点）
     const codeRow = Array.from(document.querySelectorAll('.mac-meta-row'))
       .find((row) => row.textContent?.startsWith('项目编号'));
     expect(codeRow).toBeTruthy();
@@ -170,6 +173,46 @@ describe('ProjectDetail（USP 项目新建）', () => {
     await waitFor(() => {
       expect(mockToast).toHaveBeenCalledWith({ message: '项目编号「CODE-1」已存在，请重新输入', theme: 'warning' });
     });
+  });
+});
+
+describe('ProjectDetail（卡片裁剪）', () => {
+  const baseProject = {
+    id: 'p1',
+    project_code: 'P-001',
+    name: '测试项目A',
+    status: '正在实施',
+    category_basis: '重要紧急',
+    issues: 0,
+    risks: 0,
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    routeParams.id = 'p1';
+    mockCreateRequest.mockReset();
+    mockCreateRequest.mockResolvedValue({ ...baseProject });
+  });
+
+  it('只保留项目概况 / 项目信息管理 / 项目动态三张卡，其余卡片不再渲染', async () => {
+    renderView();
+    expect(await screen.findByText('项目概况')).toBeTruthy();
+    expect(screen.getByText('项目信息管理')).toBeTruthy();
+    expect(screen.getByText('项目动态')).toBeTruthy();
+    expect(screen.getByText('关注节点变动')).toBeTruthy();
+
+    ['项目基础画像', '项目生命周期', '风险管理', '责任体系'].forEach((title) => {
+      expect(screen.queryByText(title)).toBeNull();
+    });
+    // 项目阶段编辑入口随「项目生命周期」卡挪进概况（由它决定进度），仍在
+    expect(screen.getByText('项目阶段')).toBeTruthy();
+  });
+
+  it('新建模式不渲染「项目动态」（项目尚未落库）', () => {
+    routeParams.id = 'new';
+    renderView();
+    expect(screen.getByText('项目概况')).toBeTruthy();
+    expect(screen.queryByText('项目动态')).toBeNull();
   });
 });
 

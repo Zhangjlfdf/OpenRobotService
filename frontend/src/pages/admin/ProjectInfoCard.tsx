@@ -1,34 +1,54 @@
 // 项目信息管理卡（项目详细信息）—— 对照原型 components/project/ProjectDetailCard.tsx：
-// 「显示内容」标签池 + 勾选筛选 + Markdown 文档式浏览态，右上角「编辑」跳转独立编辑页。
+// 「显示内容」标签池 + 勾选筛选 + Markdown 文档式浏览态，右上角「编辑」跳转独立编辑页；
+// 标签角标：感叹号=该标签下有信息未填写，红点=该标签下有未读的操作记录（与编辑页行内
+// 红点同一套已读水位，看过「历史」即消）；标签下有对应图例说明两种角标；
+// 子节点右侧的星标 = 关注该节点（其最新变动会展示在「项目动态」卡，对照原型同款交互）。
 //
 // 数据源：后端 /api/admin/info-nodes/*（经 shared/utils/projectInfoTree.ts 数据层），异步加载；
+// 关注落到后端 project_info_node_mark（按登录人隔离，每人一份关注列表，服务端按 token 过滤）；
 // 标签筛选/折叠是个人界面偏好，仍存本机。
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { Toast } from 'tdesign-mobile-react';
 import API_CONFIG from '@/config/api';
+import { useAuthStore } from '@/stores/auth';
 import {
-  MacChevronDown, MacChevronUp, MacDownload, MacFileText, MacImage, MacPencil,
+  MacChevronDown, MacChevronUp, MacDownload, MacFileText, MacImage, MacPencil, MacStar,
 } from '@/shared/components/macaronIcons';
 import {
   computeInfoCompleteness,
   formatFileSize,
   isInfoNodeVisible,
   loadCardCollapsed,
+  loadHistoryLatest,
+  loadHistorySeen,
+  loadInfoNodeMarks,
   loadInfoNodes,
   loadSelectedTags,
   saveCardCollapsed,
   saveSelectedTags,
+  toggleInfoNodeMark,
+  unseenHistoryNodes,
+  unseenHistoryRoots,
   type ProjectInfoFileValue,
   type ProjectInfoNode,
   type ProjectInfoSelectValue,
 } from '@/shared/utils/projectInfoTree';
 
-export default function ProjectInfoCard({ projectId, canEdit }: { projectId: string; canEdit: boolean }) {
+export default function ProjectInfoCard({ projectId, canEdit, onMarkChange }: {
+  projectId: string;
+  canEdit: boolean;
+  /** 关注状态变化后通知外层（「项目动态」卡刷新用） */
+  onMarkChange?: () => void;
+}) {
   const navigate = useNavigate();
+  const username = useAuthStore((s) => s.username);
   const [nodes, setNodes] = useState<ProjectInfoNode[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
   const [reloadToken, setReloadToken] = useState(0);
+  const [marked, setMarked] = useState<Set<string>>(() => new Set());
+  const [latestByNode, setLatestByNode] = useState<Record<string, string>>({});
   const [selected, setSelected] = useState<Set<string>>(() => loadSelectedTags(projectId));
   const [collapsed, setCollapsed] = useState<boolean>(() => loadCardCollapsed(projectId));
 
@@ -43,6 +63,44 @@ export default function ProjectInfoCard({ projectId, canEdit }: { projectId: str
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
   }, [projectId, reloadToken]);
+
+  // 关注列表单独拉取：失败只影响星标显示（按未关注渲染），不挡正文
+  useEffect(() => {
+    let cancelled = false;
+    loadInfoNodeMarks(projectId)
+      .then((ids) => { if (!cancelled) setMarked(new Set(ids)); })
+      .catch(() => { if (!cancelled) setMarked(new Set()); });
+    return () => { cancelled = true; };
+  }, [projectId, reloadToken]);
+
+  // 各节点最新操作记录：只为标签池红点用（与编辑页同一份 summary 接口、同一套已读水位），
+  // 失败静默——红点只是辅助提示，按「无红点」渲染，不打扰正文
+  useEffect(() => {
+    let cancelled = false;
+    loadHistoryLatest(projectId)
+      .then((latest) => { if (!cancelled) setLatestByNode(latest); })
+      .catch(() => { if (!cancelled) setLatestByNode({}); });
+    return () => { cancelled = true; };
+  }, [projectId, reloadToken]);
+
+  // 点星标：先乐观切换，后端确认后以其返回值为准；失败回滚并提示
+  const toggleMark = useCallback(async (nodeId: string) => {
+    const wasMarked = marked.has(nodeId);
+    const flip = (value: boolean) => setMarked((prev) => {
+      const next = new Set(prev);
+      if (value) next.add(nodeId); else next.delete(nodeId);
+      return next;
+    });
+    flip(!wasMarked);
+    try {
+      const nowMarked = await toggleInfoNodeMark(nodeId);
+      flip(nowMarked);
+      onMarkChange?.();
+    } catch (err) {
+      flip(wasMarked);
+      Toast({ message: `关注操作失败: ${err instanceof Error ? err.message : ''}`, theme: 'error' });
+    }
+  }, [marked, onMarkChange]);
 
   useEffect(() => { setSelected(loadSelectedTags(projectId)); }, [projectId]);
 
@@ -62,6 +120,14 @@ export default function ProjectInfoCard({ projectId, canEdit }: { projectId: str
   const roots = byParent.get(null) ?? [];
   const visibleRoots = selected.size === 0 ? roots : roots.filter((node) => selected.has(node.id));
   const completeness = useMemo(() => computeInfoCompleteness(nodes), [nodes]);
+
+  // 标签池红点：该一级标签下（含标签自身）有本机没看过的操作记录。
+  // 与编辑页行内红点共用水位（项目+登录用户存本机的已读记录 id）——
+  // 在编辑页点开对应节点的「历史」推进水位后，回到本页红点即消失。
+  const rootDotIds = useMemo(() => {
+    const unseen = unseenHistoryNodes(latestByNode, loadHistorySeen(projectId, username));
+    return unseenHistoryRoots(nodes, unseen);
+  }, [nodes, latestByNode, projectId, username]);
 
   const toggleTag = (id: string) => setSelected((current) => {
     const next = new Set(current);
@@ -111,25 +177,45 @@ export default function ProjectInfoCard({ projectId, canEdit }: { projectId: str
         </div>
       )}
 
-      {/* 标签池（一级节点）：选中即只看该标签及其全部子内容；不选显示全部（对照原型） */}
+      {/* 标签池（一级节点）：选中即只看该标签及其全部子内容；不选显示全部（对照原型）。
+          角标两类：感叹号=该标签下有信息未填写（常显），红点=有本机没看过的操作记录（看过「历史」即消） */}
       {roots.length > 0 && (
         <div className="mac-tagpool">
-          {roots.map((node) => (
-            <button
-              key={node.id}
-              type="button"
-              className={`mac-tagpool__chip${selected.has(node.id) ? ' is-active' : ''}`}
-              onClick={() => toggleTag(node.id)}
-            >
-              {node.title}
-              {completeness.get(node.id)?.incomplete ? <span className="mac-tagpool__warn" aria-label="信息不全">!</span> : null}
-            </button>
-          ))}
+          {roots.map((node) => {
+            const incomplete = completeness.get(node.id)?.incomplete;
+            const hasDot = rootDotIds.has(node.id);
+            return (
+              <button
+                key={node.id}
+                type="button"
+                className={`mac-tagpool__chip${selected.has(node.id) ? ' is-active' : ''}`}
+                onClick={() => toggleTag(node.id)}
+              >
+                {node.title}
+                {incomplete ? <span className="mac-tagpool__warn" aria-label="信息不全">!</span> : null}
+                {hasDot ? (
+                  <span className={`mac-tagpool__dot${incomplete ? ' mac-tagpool__dot--on-warn' : ''}`} aria-label="有新变动" />
+                ) : null}
+              </button>
+            );
+          })}
         </div>
       )}
 
       {!collapsed && (
         <>
+          {roots.length > 0 && (
+            <p className="mac-info__legend">
+              <span className="mac-info__legend-item">
+                <span className="mac-tagpool__warn mac-tagpool__warn--static" aria-hidden="true">!</span>
+                标签下有信息未填写
+              </span>
+              <span className="mac-info__legend-item">
+                <span className="mac-tagpool__dot mac-tagpool__dot--static" aria-hidden="true" />
+                标签下有新变动，点开对应节点的「历史」后消失
+              </span>
+            </p>
+          )}
           <p className="mac-info__hint">不选择标签时显示全部内容</p>
           {loading ? (
             <div className="mac-info__state">正在加载信息节点…</div>
@@ -148,7 +234,9 @@ export default function ProjectInfoCard({ projectId, canEdit }: { projectId: str
             </div>
           ) : (
             <article className="mac-doc">
-              {visibleRoots.map((root) => <DocSection key={root.id} node={root} depth={1} byParent={byParent} />)}
+              {visibleRoots.map((root) => (
+                <DocSection key={root.id} node={root} depth={1} byParent={byParent} marked={marked} onToggleMark={toggleMark} />
+              ))}
             </article>
           )}
         </>
@@ -158,13 +246,20 @@ export default function ProjectInfoCard({ projectId, canEdit }: { projectId: str
 }
 
 /** 文档式节点：标题与内容同一行并列（层级用缩进与字号/颜色区分，不再分行堆叠）；分支节点只占一行标题 */
-function DocSection({ node, depth, byParent }: { node: ProjectInfoNode; depth: number; byParent: Map<string | null, ProjectInfoNode[]> }) {
+function DocSection({ node, depth, byParent, marked, onToggleMark }: {
+  node: ProjectInfoNode;
+  depth: number;
+  byParent: Map<string | null, ProjectInfoNode[]>;
+  marked: Set<string>;
+  onToggleMark: (nodeId: string) => void;
+}) {
   const allChildren = byParent.get(node.id) ?? [];
   // 与编辑页一致：区域细分字段按所选区域显隐（节点仍在数据里，只是不渲染）
   const children = allChildren.filter((child) => isInfoNodeVisible(child, allChildren));
   const level = Math.min(depth, 4);
   const isLeaf = allChildren.length === 0;
   const isMedia = isLeaf && (node.content_type === 'file' || node.content_type === 'image');
+  const isMarked = marked.has(node.id);
   const rowClass = [
     'mac-doc__row',
     `mac-doc__row--d${level}`,
@@ -180,8 +275,23 @@ function DocSection({ node, depth, byParent }: { node: ProjectInfoNode; depth: n
             <DocContent node={node} />
           </div>
         )}
+        {/* 关注星标（子节点=一级标签下的节点）：点它把该节点的最新变动订进「项目动态」 */}
+        {depth > 1 && (
+          <button
+            type="button"
+            className={`mac-doc__star${isMarked ? ' is-active' : ''}`}
+            onClick={() => onToggleMark(node.id)}
+            aria-label={isMarked ? `取消关注${node.title}` : `关注${node.title}`}
+            aria-pressed={isMarked}
+            title={isMarked ? '取消关注' : '关注此节点的变动'}
+          >
+            <MacStar size={14} />
+          </button>
+        )}
       </div>
-      {children.map((child) => <DocSection key={child.id} node={child} depth={depth + 1} byParent={byParent} />)}
+      {children.map((child) => (
+        <DocSection key={child.id} node={child} depth={depth + 1} byParent={byParent} marked={marked} onToggleMark={onToggleMark} />
+      ))}
     </section>
   );
 }

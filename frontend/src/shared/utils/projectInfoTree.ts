@@ -12,15 +12,19 @@ import {
   deleteInfoNodeApi,
   fetchInfoNodeChangeSummaryApi,
   fetchInfoNodeChangesApi,
+  fetchInfoNodeMarksApi,
   fetchInfoTree,
+  fetchProjectActivityApi,
   importInfoTemplateApi,
   importInfoTreeApi,
   moveInfoNodeApi,
+  toggleInfoNodeMarkApi,
   updateInfoNodeApi,
   type ApiInfoNode,
   type ApiInfoNodeChange,
   type ApiInfoNodeUpdate,
   type ApiInfoTreeImportNode,
+  type ApiProjectActivityItem,
 } from '@/api/infoNodes';
 
 export type ProjectInfoContentType = 'text' | 'select' | 'file' | 'image';
@@ -265,6 +269,51 @@ export function unseenHistoryNodes(
     if (seen?.[nodeId] !== latestId) result.add(nodeId);
   });
   return result;
+}
+
+/**
+ * 未读变动往上归到一级标签：返回「该标签下有未读变动」的根节点 id 集合。
+ * 展示页标签池的红点用它——与编辑页行内红点同一套水位（unseenHistoryNodes）：
+ * 节点本身或它所属的一级标签下有没看过的记录就带点；点开该节点「历史」后不再贡献，
+ * 该一级标签下没有其它未读时红点随之消失。节点已从树里删除（只剩记录）不往上归。
+ */
+export function unseenHistoryRoots(
+  nodes: Array<Pick<ProjectInfoNode, 'id' | 'parent_id'>>,
+  unseen: Set<string>,
+): Set<string> {
+  const parentOf = new Map(nodes.map((node) => [node.id, node.parent_id]));
+  const roots = new Set<string>();
+  unseen.forEach((nodeId) => {
+    if (!parentOf.has(nodeId)) return;
+    let current = nodeId;
+    for (let depth = 0; depth < PROJECT_INFO_MAX_DEPTH; depth += 1) {
+      const parentId = parentOf.get(current);
+      if (!parentId) break;
+      current = parentId;
+    }
+    roots.add(current);
+  });
+  return roots;
+}
+
+// —— 关注（星标）与项目动态：关注按登录人隔离（后端落库，服务端按 token 过滤），动态按本人关注节点聚合 ——
+
+/** 某项目被关注的节点 id（「项目信息管理」卡的星标状态） */
+export async function loadInfoNodeMarks(projectId: string): Promise<string[]> {
+  return fetchInfoNodeMarksApi(projectId);
+}
+
+/** 切换节点关注状态，返回切换后是否被关注 */
+export async function toggleInfoNodeMark(nodeId: string): Promise<boolean> {
+  return toggleInfoNodeMarkApi(nodeId);
+}
+
+/** 项目动态里的一条：某被关注节点的最新变动（只展示 detail，不带时间与人员） */
+export type ProjectActivityItem = ApiProjectActivityItem;
+
+/** 项目动态：每个被关注节点只取最新一条变动（后端聚合，最新在前） */
+export async function loadProjectActivity(projectId: string): Promise<ProjectActivityItem[]> {
+  return fetchProjectActivityApi(projectId);
 }
 
 /** 归一化导入内容：接受节点数组、{nodes:[…]}、{info_nodes:[…]}，

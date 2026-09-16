@@ -31,6 +31,7 @@ from app.models.delivery import (
     ProjectTransportEfficiencyRobot,
     ProjectInfoNode,
     ProjectInfoNodeChange,
+    ProjectInfoNodeMark,
     ProjectInfoTemplate,
 )
 
@@ -101,6 +102,7 @@ __all__ = [
     "ProjectTransportEfficiency", "ProjectTransportEfficiencyRobot",
     "ProjectInfoNode",
     "ProjectInfoNodeChange",
+    "ProjectInfoNodeMark",
     # task
     "Task", "TaskComment", "TaskStatus", "TaskPriority", "TaskType", "TaskUserMapping", "TaskStep",
     # task dispatch log

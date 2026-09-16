@@ -380,3 +380,32 @@ class ProjectInfoNodeChange(Base):
         return f"<ProjectInfoNodeChange(id='{self.id}', node_id='{self.node_id}', action='{self.action}')>"
 
 
+class ProjectInfoNodeMark(Base):
+    """项目信息树节点「关注」标注（个人订阅：项目动态按人过滤）。
+
+    用户在项目详情页「项目信息管理」展示卡上点子节点右侧的星标即关注该节点，
+    被关注节点的最新一条变动展示在同页「项目动态」卡里。
+
+    **每人一份关注列表**：主键 (node_id, operator)——同一节点可被多人各存一行，
+    星标状态与项目动态都按当前登录人过滤（自己关注的自己才能看到）；
+    按人隔离靠登录名（JWT sub），取不到用户身份的请求接口层拒绝（401）。
+    节点（含子树）被删除、或整树被导入/模板重建替换时，**所有人**的相关标注
+    随节点一起清理，避免留下点不开的「孤儿关注」（见 info_node_mark_service）。
+    """
+    __tablename__ = 'project_info_node_mark'
+
+    node_id = Column(String(64), primary_key=True, comment='被关注的节点ID')
+    operator = Column(String(64), primary_key=True, comment='关注人登录名（关注列表按人隔离）')
+    project_id = Column(String(64), nullable=False, comment='所属项目ID')
+    operator_name = Column(String(64), nullable=True, comment='关注人显示名')
+    created_at = Column(String(30), nullable=False, comment='关注时间')
+
+    __table_args__ = (
+        Index('idx_pnm_project_user', 'project_id', 'operator'),
+    )
+
+    def __repr__(self):
+        return (f"<ProjectInfoNodeMark(node_id='{self.node_id}', "
+                f"operator='{self.operator}', project_id='{self.project_id}')>")
+
+

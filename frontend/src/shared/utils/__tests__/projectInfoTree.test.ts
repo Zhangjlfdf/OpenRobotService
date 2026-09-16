@@ -10,14 +10,18 @@ import {
   loadHistoryLatest,
   loadHistorySeen,
   loadInfoNodeChanges,
+  loadInfoNodeMarks,
   loadInfoNodes,
+  loadProjectActivity,
   moveInfoNode,
   normalizeImportNodes,
   patchInfoNode,
   REGION_MAINLAND,
   removeInfoNode,
   saveHistorySeen,
+  toggleInfoNodeMark,
   unseenHistoryNodes,
+  unseenHistoryRoots,
   updateInfoNode,
   visibleInfoNodes,
   type ProjectInfoNode,
@@ -27,10 +31,13 @@ import {
   deleteInfoNodeApi,
   fetchInfoNodeChangeSummaryApi,
   fetchInfoNodeChangesApi,
+  fetchInfoNodeMarksApi,
   fetchInfoTree,
+  fetchProjectActivityApi,
   importInfoTemplateApi,
   importInfoTreeApi,
   moveInfoNodeApi,
+  toggleInfoNodeMarkApi,
   updateInfoNodeApi,
   type ApiInfoNode,
 } from '@/api/infoNodes';
@@ -45,6 +52,9 @@ vi.mock('@/api/infoNodes', () => ({
   importInfoTemplateApi: vi.fn(),
   fetchInfoNodeChangesApi: vi.fn(),
   fetchInfoNodeChangeSummaryApi: vi.fn(),
+  fetchInfoNodeMarksApi: vi.fn(),
+  toggleInfoNodeMarkApi: vi.fn(),
+  fetchProjectActivityApi: vi.fn(),
 }));
 
 const TS = '2026-09-14 10:00:00';
@@ -321,6 +331,54 @@ describe('编辑历史（操作记录读接口 + 本机已读水位）', () => {
     // 没有任何记录的节点不参与
     expect(unseenHistoryNodes({}, {})).toEqual(new Set());
     expect(unseenHistoryNodes({ n9: '' }, {})).toEqual(new Set());
+  });
+
+  it('unseenHistoryRoots：未读变动归到所在的一级标签（多层上溯），删除的节点不归', () => {
+    const nodes = [
+      { id: 'r1', parent_id: null },
+      { id: 'c1', parent_id: 'r1' },
+      { id: 'g1', parent_id: 'c1' },
+      { id: 'r2', parent_id: null },
+    ];
+    // 孙节点归到 r1，根自身未读归自己；无关的根不出现
+    expect(unseenHistoryRoots(nodes, new Set(['g1', 'r2']))).toEqual(new Set(['r1', 'r2']));
+    // 一个标签下多个未读子节点只出一个根
+    expect(unseenHistoryRoots(nodes, new Set(['c1', 'g1']))).toEqual(new Set(['r1']));
+    // 树里已删除（只剩记录）的节点不往上归
+    expect(unseenHistoryRoots(nodes, new Set(['missing']))).toEqual(new Set());
+    expect(unseenHistoryRoots(nodes, new Set())).toEqual(new Set());
+  });
+});
+
+describe('关注（星标）与项目动态', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    localStorage.clear();
+  });
+
+  it('loadInfoNodeMarks / toggleInfoNodeMark 直通关注接口', async () => {
+    vi.mocked(fetchInfoNodeMarksApi).mockResolvedValue(['n1', 'n2']);
+    vi.mocked(toggleInfoNodeMarkApi).mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+
+    await expect(loadInfoNodeMarks('P1')).resolves.toEqual(['n1', 'n2']);
+    expect(fetchInfoNodeMarksApi).toHaveBeenCalledWith('P1');
+
+    await expect(toggleInfoNodeMark('n1')).resolves.toBe(true);
+    await expect(toggleInfoNodeMark('n1')).resolves.toBe(false); // 再点即取消
+    expect(toggleInfoNodeMarkApi).toHaveBeenCalledWith('n1');
+  });
+
+  it('loadProjectActivity 返回被关注节点的最新变动（只含变动内容所需字段）', async () => {
+    vi.mocked(fetchProjectActivityApi).mockResolvedValue([
+      {
+        node_id: 'n1', node_title: '客户信息', root_title: '基础信息', action: 'update',
+        detail: '把内容从「空」改为「中力」', created_at: TS,
+      },
+    ]);
+    const list = await loadProjectActivity('P1');
+    expect(fetchProjectActivityApi).toHaveBeenCalledWith('P1');
+    expect(list[0].detail).toBe('把内容从「空」改为「中力」');
+    expect(list[0].root_title).toBe('基础信息');
   });
 });
 

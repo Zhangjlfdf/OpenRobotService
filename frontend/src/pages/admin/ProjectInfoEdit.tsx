@@ -39,6 +39,7 @@ import {
   saveCollapsedIds,
   saveHistorySeen,
   unseenHistoryNodes,
+  unseenHistoryRoots,
   updateInfoNode,
   visibleInfoNodes,
   type ProjectInfoContentType,
@@ -431,22 +432,11 @@ export default function ProjectInfoEdit() {
   // 小红点要显示在哪些行上：有未读记录的节点本身 + 它所在的一级节点（根节点）。
   // 根节点上的点是「这个一级标签下有你没看过的变动」的汇总，判定与消失都跟子节点同一套水位：
   // 没点开过该节点的历史就带点，点开后该节点不再贡献，根节点上没有其它未读变动时点也随之消失。
-  const historyDotIds = useMemo(() => {
-    const parentOf = new Map(nodes.map((node) => [node.id, node.parent_id]));
-    const roots = new Set(unseenHistoryIds);
-    unseenHistoryIds.forEach((nodeId) => {
-      // 节点可能已被删除（其记录挂在上级节点下展示），树里找不到就不往上归
-      if (!parentOf.has(nodeId)) return;
-      let current = nodeId;
-      for (let depth = 0; depth < PROJECT_INFO_MAX_DEPTH; depth += 1) {
-        const parentId = parentOf.get(current);
-        if (!parentId) break;
-        current = parentId;
-      }
-      roots.add(current);
-    });
-    return roots;
-  }, [nodes, unseenHistoryIds]);
+  // 展示页标签池的红点（ProjectInfoCard）复用同一个归并函数 unseenHistoryRoots。
+  const historyDotIds = useMemo(
+    () => new Set([...unseenHistoryIds, ...unseenHistoryRoots(nodes, unseenHistoryIds)]),
+    [nodes, unseenHistoryIds],
+  );
 
   const rowProps = {
     byParent, collapsedIds, editingId, draggingId, dropTarget, uploadingNodeId,

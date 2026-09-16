@@ -8213,8 +8213,22 @@ html, body, #root {
   background: #808080; color: #fff; font-size: 9px; font-weight: 700;
   border: 1px solid rgba(255, 255, 255, 0.55);
 }
+/* 红点（该标签下有未读的操作记录）：默认占标签右上角；
+   同标签也有感叹号时，挪到感叹号的右上角（骑在角上，白圈与灰底自然分层） */
+.mac-tagpool__dot {
+  position: absolute; top: -3px; right: -3px; width: 8px; height: 8px; border-radius: 50%;
+  background: #fa5151; box-shadow: 0 0 0 1.5px rgba(255, 255, 255, 0.9);
+}
+.mac-tagpool__dot--on-warn { top: -7px; right: -7px; }
+/* 图例里的角标：位置还原成行内摆放（大小/配色与标签上的一致） */
+.mac-tagpool__warn--static, .mac-tagpool__dot--static { position: static; }
 
 /* —— 提示 / 空态 —— */
+.mac-info__legend {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 4px 16px;
+  margin: 10px 0 0; font-size: 11.5px; color: var(--mac-muted-fg);
+}
+.mac-info__legend-item { display: inline-flex; align-items: center; gap: 5px; }
 .mac-info__hint { margin: 10px 0 0; font-size: 11.5px; color: var(--mac-muted-fg); }
 .mac-info__state { padding: 22px 12px; text-align: center; font-size: 12.5px; line-height: 1.7; color: var(--mac-muted-fg); }
 .mac-info__state-sub { font-size: 11px; color: var(--mac-gray-light); }
@@ -8256,6 +8270,15 @@ html, body, #root {
 .mac-doc__file { display: flex; align-items: center; gap: 6px; padding: 8px 10px; background: var(--mac-secondary); border-radius: 10px; font-size: 12px; color: var(--mac-muted-fg); }
 .mac-doc__file-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--mac-fg); }
 .mac-doc__dl { display: inline-flex; padding: 2px; color: var(--mac-blue-2); }
+/* 子节点右侧的关注星标：点它把该节点订进「项目动态」（对照原型 Star 按钮，关注态填充） */
+.mac-doc__star {
+  flex-shrink: 0; align-self: center; margin-left: auto; display: inline-flex; align-items: center; justify-content: center;
+  width: 24px; height: 24px; padding: 0; border: none; border-radius: 8px; background: none;
+  color: var(--mac-gray-light); cursor: pointer;
+}
+.mac-doc__star:active { background: rgba(80, 90, 100, 0.08); }
+.mac-doc__star.is-active { color: var(--mac-blue-2); }
+.mac-doc__star.is-active svg { fill: currentColor; }
 
 /* —— 信息树（编辑页） —— */
 .mac-info__tree { margin-top: 14px; display: flex; flex-direction: column; gap: 6px; }
@@ -8367,6 +8390,21 @@ html, body, #root {
 .mac-history__action { padding: 1px 6px; border-radius: 999px; background: rgba(54, 151, 195, 0.12); color: var(--mac-blue-1); font-size: 10.5px; white-space: nowrap; }
 .mac-history__when { margin-left: auto; white-space: nowrap; }
 .mac-history__what { margin: 5px 0 0; font-size: 12.5px; line-height: 1.6; color: var(--mac-fg); overflow-wrap: anywhere; }
+
+/* —— 项目动态（关注节点变动）：节点名 + 最新一条变动内容，不带时间与人员 —— */
+.mac-activity__head { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; color: var(--mac-fg); }
+.mac-activity__head svg { color: var(--mac-blue-2); }
+.mac-activity__list { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.mac-activity__item {
+  display: flex; align-items: baseline; gap: 8px; padding: 8px 10px;
+  border-radius: 10px; background: var(--mac-secondary); font-size: 11.5px; line-height: 1.6;
+}
+.mac-activity__node { flex-shrink: 0; font-weight: 600; color: var(--mac-blue-1); }
+.mac-activity__text { min-width: 0; flex: 1; color: var(--mac-fg); overflow-wrap: anywhere; }
+.mac-activity__empty {
+  margin-top: 8px; padding: 8px 10px; border-radius: 10px;
+  background: var(--mac-secondary); font-size: 11.5px; line-height: 1.6; color: var(--mac-muted-fg);
+}
 
 /* —— 文件导入（AI 识别）：三组预览 + 勾选确认 —— */
 .mac-import__hint { margin: 8px 0 12px; font-size: 11.5px; line-height: 1.65; color: var(--mac-muted-fg); }
