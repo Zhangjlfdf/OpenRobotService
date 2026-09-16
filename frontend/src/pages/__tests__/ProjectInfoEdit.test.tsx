@@ -6,10 +6,13 @@ import ProjectInfoEdit from '../admin/ProjectInfoEdit';
 import {
   createInfoNodeApi,
   deleteInfoNodeApi,
+  fetchInfoNodeChangeSummaryApi,
+  fetchInfoNodeChangesApi,
   fetchInfoTree,
   importInfoTemplateApi,
   updateInfoNodeApi,
   type ApiInfoNode,
+  type ApiInfoNodeChange,
 } from '@/api/infoNodes';
 
 vi.mock('@/api/infoNodes', () => ({
@@ -20,6 +23,9 @@ vi.mock('@/api/infoNodes', () => ({
   deleteInfoNodeApi: vi.fn(),
   importInfoTreeApi: vi.fn(),
   importInfoTemplateApi: vi.fn(),
+  // 编辑历史：进页面会拉一次「各节点最新记录时间」算小红点，缺了页面会直接崩
+  fetchInfoNodeChangesApi: vi.fn(),
+  fetchInfoNodeChangeSummaryApi: vi.fn(),
 }));
 
 // 页头副标题会拉一次项目详情、上传走资源管理服务：统一给个空实现
@@ -70,6 +76,19 @@ const TREE: ApiInfoNode[] = [
   }),
 ];
 
+/** 构造一条后端操作记录（默认值可按需覆盖） */
+const change = (partial: Partial<ApiInfoNodeChange> & { id: string }): ApiInfoNodeChange => ({
+  node_id: 'r1',
+  parent_id: null,
+  node_title: '基础信息',
+  action: 'update',
+  operator: null,
+  operator_name: null,
+  detail: null,
+  created_at: '2026-09-14 11:00:00',
+  ...partial,
+});
+
 const renderEdit = () =>
   render(
     <MemoryRouter initialEntries={['/admin/project-detail/P1/edit']}>
@@ -86,6 +105,9 @@ describe('ProjectInfoEdit（信息树编辑页）', () => {
     vi.clearAllMocks();
     authState.permissions = ['admin'];
     vi.mocked(fetchInfoTree).mockResolvedValue(TREE);
+    // 默认没有操作记录：不出小红点，历史弹层显示空态
+    vi.mocked(fetchInfoNodeChangeSummaryApi).mockResolvedValue({});
+    vi.mocked(fetchInfoNodeChangesApi).mockResolvedValue([]);
   });
 
   it('打开页面读取后端信息树并渲染节点', async () => {
@@ -254,5 +276,213 @@ describe('ProjectInfoEdit（信息树编辑页）', () => {
     // 初始化成功后重新拉树（第二次 fetchInfoTree 返回 TREE），页面切换成树视图
     expect(await screen.findByText('基础信息')).toBeTruthy();
     expect(fetchInfoTree).toHaveBeenCalledTimes(2);
+  });
+
+  it('历史弹层展示后端的操作记录：人员 / 变动 / 时间；子节点删除记录挂在父节点下', async () => {
+    vi.mocked(fetchInfoNodeChangesApi).mockResolvedValue([
+      change({
+        id: 'h1',
+        operator: 'zhangsan',
+        operator_name: '张三',
+        detail: '把标题从「基础」改为「基础信息」',
+        created_at: '2026-09-14 11:00:00',
+      }),
+      // 子节点「客户信息」被删：记录在父节点「基础信息」的历史里
+      change({
+        id: 'h2',
+        node_id: 'c1',
+        parent_id: 'r1',
+        node_title: '客户信息',
+        action: 'delete',
+        operator_name: '李四',
+        detail: '删除节点「客户信息」',
+        created_at: '2026-09-14 10:30:00',
+      }),
+    ]);
+    renderEdit();
+
+    fireEvent.click(await screen.findByLabelText('查看基础信息的编辑历史'));
+
+    expect(fetchInfoNodeChangesApi).toHaveBeenCalledWith('P1', 'r1');
+    expect(await screen.findByText('张三')).toBeTruthy();
+    expect(screen.getByText('把标题从「基础」改为「基础信息」')).toBeTruthy();
+    expect(screen.getByText('2026-09-14 11:00:00')).toBeTruthy();
+    // 删除记录连同操作人与时间一起显示在父节点下
+    expect(screen.getByText('删除')).toBeTruthy();
+    expect(screen.getByText('删除节点「客户信息」')).toBeTruthy();
+    expect(screen.getByText('李四')).toBeTruthy();
+  });
+
+  it('识别不到操作人时回退成「未知用户」，没有 detail 时按节点标题兜底', async () => {
+    vi.mocked(fetchInfoNodeChangesApi).mockResolvedValue([change({ id: 'h1', action: 'create', detail: null })]);
+    renderEdit();
+    fireEvent.click(await screen.findByLabelText('查看基础信息的编辑历史'));
+
+    expect(await screen.findByText('未知用户')).toBeTruthy();
+    expect(screen.getByText('新增节点「基础信息」')).toBeTruthy();
+  });
+
+  it('该节点有新记录时历史按钮出小红点，打开看过之后消失（已读水位存本机）', async () => {
+    vi.mocked(fetchInfoNodeChangeSummaryApi).mockResolvedValue({ r1: '01a0a8f3-9f64-7103-82df-90d24a472f2c' });
+    vi.mocked(fetchInfoNodeChangesApi).mockResolvedValue([
+      change({ id: '01a0a8f3-9f64-7103-82df-90d24a472f2c', operator_name: '张三', detail: '把内容从「空」改为「中力」' }),
+    ]);
+    renderEdit();
+
+    const historyBtn = await screen.findByLabelText('查看基础信息的编辑历史');
+    await waitFor(() => expect(historyBtn.querySelector('.mac-info-row__op-dot')).toBeTruthy());
+    // 没有记录的节点不出红点
+    expect(screen.getByLabelText('查看客户信息的编辑历史').querySelector('.mac-info-row__op-dot')).toBeNull();
+
+    fireEvent.click(historyBtn);
+    expect(await screen.findByText('张三')).toBeTruthy();
+
+    await waitFor(() => {
+      expect(screen.getByLabelText('查看基础信息的编辑历史').querySelector('.mac-info-row__op-dot')).toBeNull();
+    });
+    // 已读水位 = 该节点最新记录 id，按「项目 + 登录用户」存，互不影响
+    expect(JSON.parse(localStorage.getItem('project-info-tree:history-seen:P1:admin') ?? '{}')).toEqual({
+      r1: '01a0a8f3-9f64-7103-82df-90d24a472f2c',
+    });
+  });
+
+  it('已看过（水位就是最新记录）的节点不出小红点', async () => {
+    localStorage.setItem(
+      'project-info-tree:history-seen:P1:admin',
+      JSON.stringify({ r1: '01a0a8f3-9f64-7103-82df-90d24a472f2c' }),
+    );
+    vi.mocked(fetchInfoNodeChangeSummaryApi).mockResolvedValue({ r1: '01a0a8f3-9f64-7103-82df-90d24a472f2c' });
+    renderEdit();
+
+    const historyBtn = await screen.findByLabelText('查看基础信息的编辑历史');
+    await waitFor(() => expect(fetchInfoNodeChangeSummaryApi).toHaveBeenCalled());
+    expect(historyBtn.querySelector('.mac-info-row__op-dot')).toBeNull();
+  });
+
+  it('保存成功后立即重算历史：自己刚改的节点也带上小红点（没点开过就一直带）', async () => {
+    vi.mocked(fetchInfoNodeChangeSummaryApi)
+      .mockResolvedValueOnce({ r1: '01a0a8f3-9f64-7103-82df-90d24a472f2c' }) // 进入页面：r1 已读
+      .mockResolvedValue({ r1: '01a0a8f3-9f64-7105-b1c2-3d4e5f607182' }); // 保存后：r1 有了新记录
+    localStorage.setItem(
+      'project-info-tree:history-seen:P1:admin',
+      JSON.stringify({ r1: '01a0a8f3-9f64-7103-82df-90d24a472f2c' }),
+    );
+    vi.mocked(updateInfoNodeApi).mockResolvedValue(node({ id: 'r1', title: '基础信息2' }));
+    renderEdit();
+
+    const historyBtn = await screen.findByLabelText('查看基础信息的编辑历史');
+    await waitFor(() => expect(fetchInfoNodeChangeSummaryApi).toHaveBeenCalledTimes(1));
+    expect(historyBtn.querySelector('.mac-info-row__op-dot')).toBeNull();
+
+    // 改名保存成功 → 立即再拉一次各节点最新记录 → 小红点出现
+    fireEvent.click(await screen.findByLabelText('编辑基础信息'));
+    const input = document.querySelector('.mac-info-row__input') as HTMLInputElement;
+    fireEvent.change(input, { target: { value: '基础信息2' } });
+    fireEvent.blur(input);
+
+    await waitFor(() => expect(updateInfoNodeApi).toHaveBeenCalledWith('r1', { title: '基础信息2' }));
+    await waitFor(() => {
+      expect(screen.getByLabelText('查看基础信息2的编辑历史').querySelector('.mac-info-row__op-dot')).toBeTruthy();
+    });
+    expect(fetchInfoNodeChangeSummaryApi).toHaveBeenCalledTimes(2); // 进页面 1 次 + 保存成功后 1 次
+  });
+
+  it('子节点有新变动时，所在的一级节点（根节点）同样出小红点', async () => {
+    // 只有子节点 c1 有新记录，根节点 r1 自己没有
+    vi.mocked(fetchInfoNodeChangeSummaryApi).mockResolvedValue({ c1: 'h-c1' });
+    renderEdit();
+
+    const rootBtn = await screen.findByLabelText('查看基础信息的编辑历史');
+    const childBtn = screen.getByLabelText('查看客户信息的编辑历史');
+    await waitFor(() => expect(childBtn.querySelector('.mac-info-row__op-dot')).toBeTruthy());
+    expect(rootBtn.querySelector('.mac-info-row__op-dot')).toBeTruthy();
+  });
+
+  it('点开子节点历史后，子节点与根节点的红点一起消失（根节点的点只汇总未读的变动）', async () => {
+    vi.mocked(fetchInfoNodeChangeSummaryApi).mockResolvedValue({ c1: 'h-c1' });
+    vi.mocked(fetchInfoNodeChangesApi).mockResolvedValue([
+      change({ id: 'h-c1', node_id: 'c1', parent_id: 'r1', node_title: '客户信息', detail: '把内容从「空」改为「中力」' }),
+    ]);
+    renderEdit();
+
+    const childBtn = await screen.findByLabelText('查看客户信息的编辑历史');
+    await waitFor(() => expect(childBtn.querySelector('.mac-info-row__op-dot')).toBeTruthy());
+    expect(screen.getByLabelText('查看基础信息的编辑历史').querySelector('.mac-info-row__op-dot')).toBeTruthy();
+
+    fireEvent.click(childBtn);
+    expect(await screen.findByText('把内容从「空」改为「中力」')).toBeTruthy();
+
+    await waitFor(() => {
+      expect(screen.getByLabelText('查看客户信息的编辑历史').querySelector('.mac-info-row__op-dot')).toBeNull();
+      expect(screen.getByLabelText('查看基础信息的编辑历史').querySelector('.mac-info-row__op-dot')).toBeNull();
+    });
+  });
+
+  it('根节点自身还有别的未读变动时，点开某一处后根节点的红点保留', async () => {
+    // c1 与根节点 r1 都有未读记录
+    vi.mocked(fetchInfoNodeChangeSummaryApi).mockResolvedValue({ r1: 'h-r1', c1: 'h-c1' });
+    vi.mocked(fetchInfoNodeChangesApi).mockImplementation(async (_projectId, nodeId) =>
+      nodeId === 'c1'
+        ? [change({ id: 'h-c1', node_id: 'c1', parent_id: 'r1', node_title: '客户信息', detail: '改了子节点' })]
+        : [change({ id: 'h-r1', node_id: 'r1', node_title: '基础信息', detail: '改了根节点' })],
+    );
+    renderEdit();
+
+    const childBtn = await screen.findByLabelText('查看客户信息的编辑历史');
+    await waitFor(() => expect(childBtn.querySelector('.mac-info-row__op-dot')).toBeTruthy());
+
+    fireEvent.click(childBtn);
+    expect(await screen.findByText('改了子节点')).toBeTruthy();
+
+    await waitFor(() => {
+      expect(screen.getByLabelText('查看客户信息的编辑历史').querySelector('.mac-info-row__op-dot')).toBeNull();
+    });
+    // 根节点自己的记录还没看过 → 红点还在
+    expect(screen.getByLabelText('查看基础信息的编辑历史').querySelector('.mac-info-row__op-dot')).toBeTruthy();
+  });
+
+  it('深层节点（第 4 层）有新变动时，红点一路汇总到最外层一级节点', async () => {
+    const deepTree: ApiInfoNode[] = [
+      node({
+        id: 'h1', title: '硬件', sort_order: 0,
+        children: [
+          node({
+            id: 'v1', parent_id: 'h1', title: '车辆', sort_order: 0,
+            children: [
+              node({
+                id: 'm1', parent_id: 'v1', title: '车型1', sort_order: 0,
+                children: [node({ id: 'q1', parent_id: 'm1', title: '数量', value: '2', sort_order: 0 })],
+              }),
+            ],
+          }),
+        ],
+      }),
+    ];
+    vi.mocked(fetchInfoTree).mockResolvedValue(deepTree);
+    vi.mocked(fetchInfoNodeChangeSummaryApi).mockResolvedValue({ q1: 'h-q1' });
+    renderEdit();
+
+    const leafBtn = await screen.findByLabelText('查看数量的编辑历史');
+    await waitFor(() => expect(leafBtn.querySelector('.mac-info-row__op-dot')).toBeTruthy());
+    // 只汇总到一级节点：中间层「车辆」「车型1」不出点
+    expect(screen.getByLabelText('查看硬件的编辑历史').querySelector('.mac-info-row__op-dot')).toBeTruthy();
+    expect(screen.getByLabelText('查看车辆的编辑历史').querySelector('.mac-info-row__op-dot')).toBeNull();
+    expect(screen.getByLabelText('查看车型1的编辑历史').querySelector('.mac-info-row__op-dot')).toBeNull();
+  });
+
+  it('已删除节点的记录（树里没有这一行）不会把红点挂到别处', async () => {
+    vi.mocked(fetchInfoNodeChangeSummaryApi).mockResolvedValue({ gone: 'h-gone', c1: 'h-c1' });
+    vi.mocked(fetchInfoNodeChangesApi).mockResolvedValue([
+      change({ id: 'h-c1', node_id: 'c1', parent_id: 'r1', node_title: '客户信息', detail: '改了子节点' }),
+    ]);
+    renderEdit();
+
+    const childBtn = await screen.findByLabelText('查看客户信息的编辑历史');
+    await waitFor(() => expect(childBtn.querySelector('.mac-info-row__op-dot')).toBeTruthy());
+
+    fireEvent.click(childBtn);
+    await waitFor(() => {
+      expect(screen.getByLabelText('查看基础信息的编辑历史').querySelector('.mac-info-row__op-dot')).toBeNull();
+    });
   });
 });

@@ -1,9 +1,14 @@
 // 编辑项目信息 —— 项目信息树编辑页（对照原型 routes/projects.$id_.edit.tsx + components/tree/ProjectInformationTree.tsx）。
 // 集中管理节点：新增 / 改名 / 改内容形式 / 删除 / 长按拖动调整从属 / 全部展开折叠 / 四种内容形式（文字、下拉、文件、图片）。
 // 「文件导入」打开 AI 识别弹层（ProjectInfoFileImport：Word/Markdown/Excel/文本 → 大模型识别 → 三组预览勾选确认）。
+// 每行的「历史」看该节点的操作记录（时间 / 人员 / 变动；子节点被删除时记录在父节点下）。
+// 有本机没看过的新记录时历史按钮右上角出小红点：保存成功后立即出，点开该节点历史才消失；
+// 该节点所在的一级节点（根节点）同时出点，作为「这个一级标签下有未看过的变动」的汇总。
+// 已读水位按「项目 + 登录用户」存本机（localStorage，见 shared/utils/projectInfoTree.ts）。
 //
 // 数据走后端 /api/admin/info-nodes/*（逐节点 CRUD，数据层见 shared/utils/projectInfoTree.ts）：变更先本地乐观更新，
 // 接口失败时提示并整树重读回滚；文件/图片内容先上传资源管理服务（与项目文档同一接口）再写节点值。
+// 操作记录由后端在每个写接口里随业务同事务落库（backend .../services/info_node_change_service.py），前端只读。
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { BackTop, Input, Navbar, Popup, Toast } from 'tdesign-mobile-react';
@@ -22,6 +27,9 @@ import {
   formatFileSize,
   importInfoTemplate,
   loadCollapsedIds,
+  loadHistoryLatest,
+  loadHistorySeen,
+  loadInfoNodeChanges,
   loadInfoNodes,
   isInfoNodeVisible,
   moveInfoNode,
@@ -29,6 +37,8 @@ import {
   PROJECT_INFO_MAX_DEPTH,
   removeInfoNode,
   saveCollapsedIds,
+  saveHistorySeen,
+  unseenHistoryNodes,
   updateInfoNode,
   visibleInfoNodes,
   type ProjectInfoContentType,
@@ -36,6 +46,7 @@ import {
   type ProjectInfoNode,
   type ProjectInfoSelectValue,
 } from '@/shared/utils/projectInfoTree';
+import type { ApiInfoNodeChange } from '@/api/infoNodes';
 import {
   isKnownVehicleModel,
   isVehicleModelNode,
@@ -49,6 +60,15 @@ const CONTENT_TYPE_NAMES: Record<ProjectInfoContentType, string> = {
   select: '下拉选择',
   file: '上传文件',
   image: '上传图片',
+};
+/** 操作记录的类型标签（与后端 action 一一对应） */
+const HISTORY_ACTION_NAMES: Record<string, string> = {
+  create: '新增',
+  update: '修改',
+  move: '移动',
+  delete: '删除',
+  import: '导入',
+  sync: '模板同步',
 };
 
 export default function ProjectInfoEdit() {
@@ -68,6 +88,11 @@ export default function ProjectInfoEdit() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [menuNode, setMenuNode] = useState<ProjectInfoNode | null>(null);
   const [historyNode, setHistoryNode] = useState<ProjectInfoNode | null>(null);
+  const [historyChanges, setHistoryChanges] = useState<ApiInfoNodeChange[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState(false);
+  // 历史按钮上的小红点：有本机没看过的新记录（已读水位存本机，见 projectInfoTree）
+  const [unseenHistoryIds, setUnseenHistoryIds] = useState<Set<string>>(new Set());
   const [deleteNode, setDeleteNode] = useState<ProjectInfoNode | null>(null);
   const [selectNode, setSelectNode] = useState<ProjectInfoNode | null>(null);
   const [titleOptionsNode, setTitleOptionsNode] = useState<ProjectInfoNode | null>(null);
@@ -78,6 +103,8 @@ export default function ProjectInfoEdit() {
   const [uploadingNodeId, setUploadingNodeId] = useState<string | null>(null);
   const [projectName, setProjectName] = useState('');
   const holdTimer = useRef<number | null>(null);
+  /** 正在查看历史的节点 id：请求期间用户切到别的节点时，丢弃过期响应 */
+  const historyRequestRef = useRef('');
 
   // 项目名称仅用于页头副标题（真实数据；失败静默降级为项目编号）
   useEffect(() => {
@@ -122,15 +149,67 @@ export default function ProjectInfoEdit() {
 
   const errMsg = (err: unknown) => (err instanceof Error && err.message ? err.message : '请稍后重试');
 
-  // 写入后端：先本地乐观更新（界面即时反馈），成功后提示；失败时提示原因并整树重读回滚
-  const applyMutation = async (optimistic: ProjectInfoNode[], action: () => Promise<unknown>, successMsg: string) => {
+  // 编辑历史（后端每个节点操作都有记录）：拉「各节点最新记录时间」对比本机已读水位，
+  // 算哪些节点的历史按钮要出小红点。水位只在「点开该节点历史」时推进——包括自己刚保存的改动，
+  // 没点开过就一直带红点（谁没看过谁自己看到）。
+  const syncHistoryMeta = useCallback(async () => {
+    if (!id) return;
+    try {
+      const latest = await loadHistoryLatest(id);
+      setUnseenHistoryIds(unseenHistoryNodes(latest, loadHistorySeen(id, username)));
+    } catch {
+      // 红点只是辅助提示：拉取失败静默，不打扰主流程
+    }
+  }, [id, username]);
+
+  useEffect(() => { void syncHistoryMeta(); }, [syncHistoryMeta]);
+
+  // 写入后端：先本地乐观更新（界面即时反馈），成功后提示；失败时提示原因并整树重读回滚。
+  // 保存成功即重算历史元信息，本次改动对应的节点立刻带上小红点（还没点开过）。
+  const applyMutation = async (
+    optimistic: ProjectInfoNode[],
+    action: () => Promise<unknown>,
+    successMsg: string,
+  ) => {
     setNodes(optimistic);
     try {
       await action();
       Toast({ message: successMsg, theme: 'success' });
+      void syncHistoryMeta();
     } catch (err) {
       Toast({ message: `保存失败：${errMsg(err)}`, theme: 'error' });
       void reload();
+    }
+  };
+
+  // 打开某节点的编辑历史；打开即把该节点标记为已读（小红点消失）
+  const openHistory = async (node: ProjectInfoNode) => {
+    setHistoryNode(node);
+    setHistoryChanges([]);
+    setHistoryError(false);
+    setHistoryLoading(true);
+    historyRequestRef.current = node.id;
+    try {
+      const records = await loadInfoNodeChanges(id, node.id);
+      if (historyRequestRef.current !== node.id) return; // 期间切到了别的节点，丢弃本次结果
+      setHistoryChanges(records);
+      // 点开即已读：水位记成该节点最新记录的 id（与后端 summary 同口径取最大 id），
+      // 小红点消失，直到这个节点再出现新记录
+      const latestId = records.reduce((acc, record) => (record.id > acc ? record.id : acc), '');
+      if (latestId) {
+        const seen = loadHistorySeen(id, username);
+        if (seen[node.id] !== latestId) { seen[node.id] = latestId; saveHistorySeen(id, seen, username); }
+      }
+      setUnseenHistoryIds((prev) => {
+        if (!prev.has(node.id)) return prev;
+        const next = new Set(prev);
+        next.delete(node.id);
+        return next;
+      });
+    } catch {
+      if (historyRequestRef.current === node.id) setHistoryError(true);
+    } finally {
+      if (historyRequestRef.current === node.id) setHistoryLoading(false);
     }
   };
 
@@ -168,6 +247,7 @@ export default function ProjectInfoEdit() {
         setCollapsedIds((prev) => { const next = new Set(prev); next.delete(parent.id); return next; });
       }
       setEditingId(node.id);
+      void syncHistoryMeta(); // 新增记录落在新节点上：立即重算，历史按钮带红点
     } catch (err) {
       Toast({ message: `新增失败：${errMsg(err)}`, theme: 'error' });
     }
@@ -190,7 +270,11 @@ export default function ProjectInfoEdit() {
 
   const confirmDelete = () => {
     if (!deleteNode) return;
-    void applyMutation(removeInfoNode(nodes, deleteNode.id), () => deleteInfoNode(deleteNode.id), '节点及其子节点已删除');
+    void applyMutation(
+      removeInfoNode(nodes, deleteNode.id),
+      () => deleteInfoNode(deleteNode.id),
+      '节点及其子节点已删除',
+    );
     setDeleteNode(null);
   };
 
@@ -211,6 +295,7 @@ export default function ProjectInfoEdit() {
       await updateInfoNode(node, { value });
       setNodes((prev) => patchInfoNode(prev, node.id, { value }));
       Toast({ message: '文件已上传并保存', theme: 'success' });
+      void syncHistoryMeta();
     } catch (err) {
       Toast({ message: `上传失败：${errMsg(err)}`, theme: 'error' });
     } finally {
@@ -334,6 +419,7 @@ export default function ProjectInfoEdit() {
       }
       setNodes(await loadInfoNodes(id));
       setCollapsedIds(new Set());
+      void syncHistoryMeta();
       Toast({ message: `已按预设模板初始化 ${imported} 个节点`, theme: 'success' });
     } catch (err) {
       Toast({ message: `初始化失败：${errMsg(err)}`, theme: 'error' });
@@ -342,8 +428,29 @@ export default function ProjectInfoEdit() {
     }
   };
 
+  // 小红点要显示在哪些行上：有未读记录的节点本身 + 它所在的一级节点（根节点）。
+  // 根节点上的点是「这个一级标签下有你没看过的变动」的汇总，判定与消失都跟子节点同一套水位：
+  // 没点开过该节点的历史就带点，点开后该节点不再贡献，根节点上没有其它未读变动时点也随之消失。
+  const historyDotIds = useMemo(() => {
+    const parentOf = new Map(nodes.map((node) => [node.id, node.parent_id]));
+    const roots = new Set(unseenHistoryIds);
+    unseenHistoryIds.forEach((nodeId) => {
+      // 节点可能已被删除（其记录挂在上级节点下展示），树里找不到就不往上归
+      if (!parentOf.has(nodeId)) return;
+      let current = nodeId;
+      for (let depth = 0; depth < PROJECT_INFO_MAX_DEPTH; depth += 1) {
+        const parentId = parentOf.get(current);
+        if (!parentId) break;
+        current = parentId;
+      }
+      roots.add(current);
+    });
+    return roots;
+  }, [nodes, unseenHistoryIds]);
+
   const rowProps = {
     byParent, collapsedIds, editingId, draggingId, dropTarget, uploadingNodeId,
+    historyDotIds,
     onToggle: (nodeId: string) => setCollapsedIds((current) => {
       const next = new Set(current);
       if (next.has(nodeId)) next.delete(nodeId); else next.add(nodeId);
@@ -353,7 +460,7 @@ export default function ProjectInfoEdit() {
     onAdd: addNode,
     onRename: renameNode,
     onMenu: setMenuNode,
-    onHistory: setHistoryNode,
+    onHistory: openHistory,
     onSaveValue: saveValue,
     onUpload: uploadNodeFile,
     onRemoveFile: removeNodeFile,
@@ -477,17 +584,47 @@ export default function ProjectInfoEdit() {
         onClose={() => setFileImportOpen(false)}
         projectId={id}
         nodes={nodes}
-        onApplied={() => void reload()}
+        onApplied={() => { void reload(); void syncHistoryMeta(); }}
       />
 
-      {/* 编辑历史：后端无接口，先占位说明（不虚构真实操作记录） */}
+      {/* 编辑历史：后端真实操作记录（时间/人员/节点/具体变动）；打开即标记已读（小红点消失） */}
       <Popup visible={!!historyNode} onClose={() => setHistoryNode(null)} placement="bottom" showOverlay>
         <div className="mac-sheet">
           <h4 className="mac-sheet__title">编辑历史{historyNode ? ` · ${historyNode.title}` : ''}</h4>
-          <div className="mac-info__state">
-            编辑历史接口未接入
-            <div className="mac-info__state-sub">接入后将显示「谁 · 什么时候 · 改了什么」</div>
-          </div>
+          {historyLoading ? (
+            <div className="mac-info__state">正在加载编辑历史…</div>
+          ) : historyError ? (
+            <div className="mac-info__state">
+              编辑历史加载失败
+              <div className="mac-info__state-sub">请检查网络后重试</div>
+              <button
+                type="button"
+                className="mac-btn mac-btn--outline"
+                style={{ marginTop: 12 }}
+                onClick={() => historyNode && void openHistory(historyNode)}
+              >
+                重新加载
+              </button>
+            </div>
+          ) : historyChanges.length === 0 ? (
+            <div className="mac-info__state">
+              暂无编辑记录
+              <div className="mac-info__state-sub">该节点的新增、修改、移动会记录在这里；子节点被删除时，删除记录显示在本节点下</div>
+            </div>
+          ) : (
+            <ul className="mac-history">
+              {historyChanges.map((record) => (
+                <li key={record.id} className="mac-history__item">
+                  <div className="mac-history__head">
+                    <span className="mac-history__who">{record.operator_name || record.operator || '未知用户'}</span>
+                    <span className="mac-history__action">{HISTORY_ACTION_NAMES[record.action] ?? record.action}</span>
+                    <span className="mac-history__when">{record.created_at}</span>
+                  </div>
+                  <p className="mac-history__what">{record.detail || `${HISTORY_ACTION_NAMES[record.action] ?? '操作'}节点「${record.node_title}」`}</p>
+                </li>
+              ))}
+            </ul>
+          )}
         </div>
       </Popup>
 
@@ -580,6 +717,8 @@ interface InfoRowProps {
   draggingId: string | null;
   dropTarget: { id: string; mode: DropMode } | null;
   uploadingNodeId: string | null;
+  /** 历史按钮右上角要出小红点的节点 id 集合（自身有未读记录，或下辖子树里有） */
+  historyDotIds: Set<string>;
   onToggle: (id: string) => void;
   onEdit: (id: string | null) => void;
   onAdd: (parent: ProjectInfoNode) => void;
@@ -608,6 +747,7 @@ function InfoRow(props: InfoRowProps) {
   const titleOptions = ((node.value ?? {}) as { titleOptions?: string[] }).titleOptions ?? [];
   // 车型节点（模板里的「车型1/车型2」或已选好/自定义的车型）：标题直接给「选车型」下拉框
   const isVehicleNode = isVehicleModelNode(node.title, props.parentTitle);
+  const hasUnseenHistory = props.historyDotIds.has(node.id);
   const classNames = [
     'mac-info-row',
     `mac-info-row--d${level}`,
@@ -689,7 +829,16 @@ function InfoRow(props: InfoRowProps) {
             {/* 行内编辑按钮：一步进入改名，不必展开「⋯」菜单（叶子节点的内容本来就已是行内直接编辑） */}
             <button type="button" className="mac-info-row__op" onClick={() => props.onEdit(node.id)} aria-label={`编辑${node.title}`} title="编辑节点"><MacPencil size={15} /></button>
             <button type="button" className="mac-info-row__op" onClick={() => props.onAdd(node)} aria-label={`在${node.title}下新增`}><MacPlus size={15} /></button>
-            <button type="button" className="mac-info-row__op" onClick={() => props.onHistory(node)} aria-label={`查看${node.title}的编辑历史`}><MacHistory size={15} /></button>
+            <button
+              type="button"
+              className="mac-info-row__op"
+              onClick={() => props.onHistory(node)}
+              aria-label={`查看${node.title}的编辑历史`}
+              title={hasUnseenHistory ? '有新的编辑记录' : '编辑历史'}
+            >
+              <MacHistory size={15} />
+              {hasUnseenHistory && <span className="mac-info-row__op-dot" aria-hidden="true" />}
+            </button>
             <button type="button" className="mac-info-row__op" onClick={() => props.onMenu(node)} aria-label="更多操作"><MacMoreHorizontal size={15} /></button>
           </div>
         </div>

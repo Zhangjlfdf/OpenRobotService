@@ -7,12 +7,17 @@ import {
   flattenInfoTree,
   importInfoTemplate,
   importInfoTree,
+  loadHistoryLatest,
+  loadHistorySeen,
+  loadInfoNodeChanges,
   loadInfoNodes,
   moveInfoNode,
   normalizeImportNodes,
   patchInfoNode,
   REGION_MAINLAND,
   removeInfoNode,
+  saveHistorySeen,
+  unseenHistoryNodes,
   updateInfoNode,
   visibleInfoNodes,
   type ProjectInfoNode,
@@ -20,6 +25,8 @@ import {
 import {
   createInfoNodeApi,
   deleteInfoNodeApi,
+  fetchInfoNodeChangeSummaryApi,
+  fetchInfoNodeChangesApi,
   fetchInfoTree,
   importInfoTemplateApi,
   importInfoTreeApi,
@@ -36,6 +43,8 @@ vi.mock('@/api/infoNodes', () => ({
   deleteInfoNodeApi: vi.fn(),
   importInfoTreeApi: vi.fn(),
   importInfoTemplateApi: vi.fn(),
+  fetchInfoNodeChangesApi: vi.fn(),
+  fetchInfoNodeChangeSummaryApi: vi.fn(),
 }));
 
 const TS = '2026-09-14 10:00:00';
@@ -264,6 +273,54 @@ describe('区域细分字段联动（区域选项 → 省份/地区 | 具体国�
   it('换成普通下拉（选项里没有大陆）：不做联动，细分字段照常显示', () => {
     expect(titlesOf(regionNodes('甲', ['甲', '乙']))).toContain('省份');
     expect(titlesOf(regionNodes('甲', ['甲', '乙']))).toContain('具体国家');
+  });
+});
+
+describe('编辑历史（操作记录读接口 + 本机已读水位）', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    localStorage.clear();
+  });
+
+  it('loadInfoNodeChanges / loadHistoryLatest 按项目与节点查后端', async () => {
+    vi.mocked(fetchInfoNodeChangesApi).mockResolvedValue([
+      {
+        id: 'h1', node_id: 'n1', parent_id: null, node_title: '客户信息', action: 'update',
+        operator: 'zhangsan', operator_name: '张三', detail: '把内容从「空」改为「中力」', created_at: TS,
+      },
+    ]);
+    vi.mocked(fetchInfoNodeChangeSummaryApi).mockResolvedValue({ n1: 'h1' });
+
+    const records = await loadInfoNodeChanges('P1', 'n1');
+    expect(fetchInfoNodeChangesApi).toHaveBeenCalledWith('P1', 'n1');
+    expect(records[0].operator_name).toBe('张三');
+    expect(records[0].detail).toBe('把内容从「空」改为「中力」');
+
+    await expect(loadHistoryLatest('P1')).resolves.toEqual({ n1: 'h1' });
+    expect(fetchInfoNodeChangeSummaryApi).toHaveBeenCalledWith('P1');
+  });
+
+  it('已读水位按「项目 + 用户」分别存本机，坏数据回退空表', () => {
+    expect(loadHistorySeen('CODE-A', 'zhang')).toEqual({});
+    saveHistorySeen('CODE-A', { n1: 'h1' }, 'zhang');
+    expect(loadHistorySeen('CODE-A', 'zhang')).toEqual({ n1: 'h1' });
+    expect(loadHistorySeen('CODE-B', 'zhang')).toEqual({}); // 别的项目不受影响
+    // 别人的已读状态与本机用户无关：换个登录用户，未看过的照样出红点
+    expect(loadHistorySeen('CODE-A', 'li')).toEqual({});
+
+    localStorage.setItem('project-info-tree:history-seen:CODE-A:zhang', 'not-json');
+    expect(loadHistorySeen('CODE-A', 'zhang')).toEqual({});
+  });
+
+  it('unseenHistoryNodes：最新记录 id 与已读水位不一致（或从没看过）即出新红点', () => {
+    // 记录 id 是时间有序的 UUIDv7：同秒内的新记录 id 也不同，不会漏
+    const latest = { n1: 'a-2', n2: 'b-2', n3: 'c-1' };
+    const seen = { n1: 'a-2', n2: 'b-1', n3: '' };
+    // n1 看过的就是最新那条 → 不冒红点；n2 看过之后又有新记录 → 冒；n3 本机没水位 → 冒
+    expect([...unseenHistoryNodes(latest, seen)].sort()).toEqual(['n2', 'n3']);
+    // 没有任何记录的节点不参与
+    expect(unseenHistoryNodes({}, {})).toEqual(new Set());
+    expect(unseenHistoryNodes({ n9: '' }, {})).toEqual(new Set());
   });
 });
 

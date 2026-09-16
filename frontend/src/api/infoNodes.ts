@@ -105,6 +105,42 @@ export async function importInfoTemplateApi(projectId: string): Promise<number> 
   return data?.imported ?? 0;
 }
 
+// —— 编辑历史（节点操作记录）：后端每个节点操作都会落库，见 info_node_change_service ——
+
+/** 一条节点操作记录（时间 / 人员 / 节点 / 具体变动） */
+export interface ApiInfoNodeChange {
+  id: string;
+  node_id: string | null;
+  parent_id: string | null;
+  /** 操作时的节点标题快照（节点改名/删除后仍能看清当时是谁） */
+  node_title: string;
+  /** create / update / move / delete / import / sync */
+  action: string;
+  operator: string | null;
+  /** 操作人显示名（识别不到用户时为 null） */
+  operator_name: string | null;
+  /** 具体变动的人话描述（服务端拼好，直接展示） */
+  detail: string | null;
+  created_at: string;
+}
+
+/** 某节点的编辑历史：自身操作 + 其直接子节点的删除记录（最新在前） */
+export async function fetchInfoNodeChangesApi(projectId: string, nodeId: string, limit = 100): Promise<ApiInfoNodeChange[]> {
+  const data = await request()<{ changes?: ApiInfoNodeChange[] }>(
+    `/info-nodes/projects/${encodeURIComponent(projectId)}/changes?node_id=${encodeURIComponent(nodeId)}&limit=${limit}`,
+  );
+  return Array.isArray(data?.changes) ? data.changes : [];
+}
+
+/** 各节点最新记录的 id {节点id: 记录id}，供「历史」红点判断新变动（与已读水位比相等） */
+export async function fetchInfoNodeChangeSummaryApi(projectId: string): Promise<Record<string, string>> {
+  const data = await request()<{ latest?: Record<string, string> }>(
+    `/info-nodes/projects/${encodeURIComponent(projectId)}/changes/summary`,
+  );
+  const latest = data?.latest;
+  return latest && typeof latest === 'object' ? latest : {};
+}
+
 // —— 文件导入（AI 识别）：上传文档 → 后端调大模型识别 → 三类预览（不落库，确认后走上面的 CRUD） ——
 
 /** 匹配到现有节点的识别条目（将填写 / 将覆盖共用） */

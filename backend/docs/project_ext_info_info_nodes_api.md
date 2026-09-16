@@ -1,18 +1,19 @@
 # 项目扩展信息（ext_info）与项目信息树（info_nodes）后端接口变更说明
 
-> 变更日期：2026-09-14（初版）；2026-09-15 新增 5.8 文件识别接口；2026-09-16 新增 4.4 AI 项目摘要接口
+> 变更日期：2026-09-14（初版）；2026-09-15 新增 5.8 文件识别接口；2026-09-16 新增 4.4 AI 项目摘要接口、5.9 / 5.10 节点操作记录（编辑历史）接口
 > 模块：`app/modules/admin`（后台管理）
 > 路由公共前缀：`/api/admin`（`/api` 来自 `API_V1_STR`，`/admin` 来自 `admin_router`）
 
 ## 一、功能概述
 
-本次为支撑「项目信息页」改造，后端做了三项变更：
+本次为支撑「项目信息页」改造，后端做了四项变更：
 
 | # | 变更 | 存储位置 | 目的 |
 |---|------|----------|------|
 | 1 | `project` 表新增 `ext_info` JSON 列 | 主表 | 承接递归嵌套、变化频繁的展示型字段（overview / activity） |
 | 2 | `project` 表新增 `version` 乐观锁列 | 主表 | 防止整文档读改写模式下多人并发编辑互相覆盖 |
 | 3 | 新增 `project_info_node` 表及 6 个接口 | 独立子表 | 用户可自由增删/拖拽/编辑的信息大纲树，逐节点 CRUD 互不干扰 |
+| 4 | 新增 `project_info_node_change` 表及 2 个查询接口（5.9 / 5.10） | 独立子表 | 每个节点操作留痕（时间/人员/节点/具体变动），编辑页「历史」可查、有未读新变动出小红点 |
 
 **职责边界（重要）**
 
@@ -60,6 +61,42 @@ ORM 定义：[delivery.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/mode
 - `idx_pn_project_parent_sort (project_id, parent_id, sort_order)` —— 同级有序查询
 
 ORM 定义：[delivery.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/models/delivery.py#L294-L322)（`ProjectInfoNode` 类，经 `models_das/models.py` 再导出）。
+
+### 2.4 project_info_node_change 新表（节点操作记录）
+
+每次节点操作写一行；与业务**同一个事务**提交（不另开连接），避免「节点改了但没记」或反之。表由 `Base.metadata.create_all` 在启动时自动创建，无需迁移脚本。
+
+| 列 | 类型 | 约束 | 说明 |
+|----|------|------|------|
+| `id` | VARCHAR(64) | PK | 记录 id，**时间有序的 UUIDv7**（`created_at` 只到秒，同秒多条的先后靠它兜底排序） |
+| `project_id` | VARCHAR(64) | NOT NULL | 所属项目 ID |
+| `node_id` | VARCHAR(64) | NULL | 被操作节点 ID；整树级操作（import / 模板重建 / 详情模板同步）为 NULL |
+| `parent_id` | VARCHAR(64) | NULL | 上级节点 ID —— **删除记录据此挂到父节点历史里**；根节点被删为 NULL |
+| `node_title` | VARCHAR(255) | NOT NULL DEFAULT '' | 操作当时的节点标题快照（改名/删除后仍能看清当时是谁） |
+| `action` | VARCHAR(16) | NOT NULL | `create` / `update` / `move` / `delete` / `import` / `sync` |
+| `operator` / `operator_name` | VARCHAR(64) | NULL | 操作人用户名 / 显示名；识别不到时为 NULL（前端显示「未知用户」） |
+| `detail` | TEXT | NULL | 具体变动的人话描述（服务端拼好，前端直接展示） |
+| `created_at` | VARCHAR(30) | NOT NULL | 字符串时间戳 `YYYY-MM-DD HH:MM:SS` |
+
+索引：`idx_pnc_project_time (project_id, created_at)`、`idx_pnc_node (project_id, node_id)`、`idx_pnc_parent (project_id, parent_id)`。
+
+ORM 定义：[delivery.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/models/delivery.py)（`ProjectInfoNodeChange` 类）；读写集中在 [info_node_change_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/services/info_node_change_service.py)。
+
+**记录的触发点与粒度**
+
+| 操作 | 记录条数 | action | node_id / parent_id | detail 示例 |
+|------|----------|--------|---------------------|-------------|
+| 新建节点（5.2） | 1 | `create` | 新节点 / 其父 | 新建节点「充电区位置」 |
+| 更新节点（5.3） | 有一条实质变动才记（逐字段对比 title/content_type/value/sort_order，无变化不记） | `update` | 节点 / —— | 把标题从「基础」改为「基础信息」；把内容从「空」改为「中力」 |
+| 移动/排序（5.4） | 换父或同级序号确实变了才记 | `move` | 节点 / —— | 把「叉车1」从「车辆」移到「设备」下 |
+| 删除节点（5.5） | 1（整棵子树只记一条，detail 含子树节点数） | `delete` | **被删节点 / 其父** | 删除节点「车辆」及其 3 个子节点 |
+| 批量导入（5.6） | 1（整树级） | `import` | NULL / NULL | 导入信息树：写入 120 个节点（原有 121 个节点被替换） |
+| 按模板重建（5.7） | 1（整树级） | `import` | NULL / NULL | 按预设模板重建信息树：写入 120 个节点（原有 0 个节点被替换） |
+| 详情模板同步 | 每个受影响项目 1 条（整树级） | `sync` | NULL / NULL | 详情模板同步：新增 2 个、更新 5 个、删除 1 个节点 |
+
+**展示归属**：节点 X 的编辑历史 = `node_id = X` 的记录 + 「`parent_id = X` 且 `action = delete`」的记录。删除记录挂在**上级节点**上——节点删掉后自身查询入口没了，用户要求「删除节点在其上级节点显示删除记录」。整树级记录（node_id 为 NULL）入库但不进任何单节点历史，只在项目级查询里可见。
+
+**人员识别**：写接口用 `get_request_actor_optional`（`api/auth.py`）尽力解析 `Authorization: Bearer <token>`（`decode_token` → `get_user_with_roles`，取 `username` / `name`）。**不强制鉴权**：解析失败/无 token 一律按匿名记录（operator 为 NULL），保持本组路由「网关管控」的现状不被破坏。
 
 ## 三、YAML 模板初始化机制
 
@@ -172,13 +209,14 @@ Service 逻辑（`update_project`）：
 - `ProjectUpdate`：新增 `ext_info`、`version: Optional[int]`
 - `ProjectResponse`：新增 `ext_info`、`version: int = 1`
 
-## 五、项目信息树接口（新增，8 个）
+## 五、项目信息树接口（新增，10 个）
 
 路由文件：[info_nodes.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/api/info_nodes.py)
 Service：[info_node_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/services/info_node_service.py)、[info_node_import_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/services/info_node_import_service.py)（仅 5.8）
 路由前缀：`/api/admin/info-nodes`，tag：`admin-info-nodes`
 
 > 鉴权现状：本组路由暂未挂载 `security` 依赖（与项目接口的 DEBUG 开关鉴权不同），当前依赖部署侧网关管控，后续如需端级鉴权再补充。
+> 5.2～5.7 六个写接口额外挂了 `get_request_actor_optional`（**尽力识别、不拦截**）：带 `Authorization: Bearer` 时把操作人记进操作记录（2.4），不带/解析失败按匿名记录，行为与从前一致。
 
 节点对象标准字段：`id, project_id, parent_id, title, content_type, value, sort_order, created_at, updated_at`；树查询时每节点额外含 `children` 数组。
 
@@ -277,10 +315,40 @@ Service：[info_node_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/ap
 - 错误：`400`（格式不支持/内容为空/项目无数节点）；`503`（`LLM_API_KEY` 未配置或大模型调用失败，detail 带中文原因）。
 - **本接口不写库**：前端预览勾选后，用 5.3 更新（fill/overwrite）与 5.2 创建（unmatched）逐节点落库；未匹配且无归属的条目挂到按需创建的「导入信息」根节点下。
 
+### 5.9 GET /info-nodes/projects/{project_id}/changes —— 获取节点操作记录（编辑历史）
+
+- 查询参数：
+
+| 参数 | 类型 | 必填 | 默认 | 说明 |
+|------|------|------|------|------|
+| `node_id` | string | 否 | 无 | 只看某节点的历史（自身记录 + 直接子节点的删除记录）；不传则返回该项目全部记录（含整树级） |
+| `limit` | int | 否 | 100 | 1～500，超出校验失败返回 422 |
+
+- Service 逻辑（`info_node_change_service.list_for_node` / `list_project_changes`）：按 `project_id`（+ `node_id` 命中规则）过滤，`ORDER BY created_at DESC, id DESC`（同秒内的先后用时间有序的 UUIDv7 兜底），`limit` 截断。
+- 响应 `200`：
+
+```json
+{ "changes": [ { "id": "...", "project_id": "P1", "node_id": "n1", "parent_id": null,
+  "node_title": "基础信息", "action": "update", "operator": "admin", "operator_name": "张三",
+  "detail": "把内容从「空」改为「中力」", "created_at": "2026-09-16 14:42:13" } ] }
+```
+
+- 说明：空历史返回 `{"changes": []}`（不区分「节点不存在」与「无记录」——节点可能已被删除，历史仍需可查，见 5.5 的删除记录）。
+
+### 5.10 GET /info-nodes/projects/{project_id}/changes/summary —— 各节点最新记录 id（小红点）
+
+- 请求：无参数。
+- 用途：前端进入编辑页、以及每次保存成功后各拉一次，与本机「已读水位」（localStorage，按「项目 + 登录用户」存）比较，算出哪些节点的历史按钮要出小红点（未读的节点 + 它所在的一级节点，见第九节第 11 条）；打开某节点历史即把该节点水位推进到**该节点最新记录的 id**。
+- Service 逻辑（`latest_by_node`）：两条 `GROUP BY max(id)` —— 一条按 `node_id`（自身记录）、一条按 `parent_id`（仅 `action = delete`，即子节点删除记录计入父节点），合并取较大者。
+- 响应 `200`：`{"latest": {"节点id": "记录id", ...}}`。整树级记录（`node_id` 为 NULL）不出现在 `latest` 里（没有对应节点行可挂红点）。
+- **为什么返回记录 id 而不是时间**：记录 id 是时间有序的 UUIDv7（见 2.4），`max(id)` 即最新一条；`created_at` 只到秒，用户「点开历史」与「同一秒内又产生一条记录」相遇时，按时间比较会判成已读而漏掉红点，按 id 相等比较则不会。前端只做 `latest[node] === seen[node]` 的相等判断。
+- 备注：小红点语义是「该用户没点开过」——已读状态按「项目 + 登录用户」存浏览器（localStorage），服务端不存个人已读；同一台机器换个账号登录、或换设备/清缓存，水位各算各的（本机没记过即视为没看过，会出点，可接受）。
+
 ## 六、并发与一致性小结
 
 1. **ext_info 并发编辑**：靠 `version` 乐观锁（冲突 409）+ 更新瞬间行锁串行化；内部系统写入不带 version，显式绕过乐观锁。
 2. **信息树并发编辑**：逐节点独立 CRUD，天然缩小冲突粒度；移动/删除不做跨节点协同锁，后写覆盖先写。
+2.1 **操作记录与业务同事务**：`add_change` 只 `db.add`，由调用方（info_node_service / info_template_service）统一 commit —— 业务失败即回滚，记录不会凭空多出；模板同步按项目逐个事务提交，某项目失败只影响该项目（记录也不会留下）。
 3. **创建初始化的一致性**：project 插入与 info_nodes 初始化在同一 Session 内分两次 commit；模板实例化每节点生成独立 UUID，保证同源模板的多个项目不发生主键冲突。
 4. **老数据兼容**：`ext_info` 为 NULL 的存量项目读取时按模板 lazy 填充（仅响应、不落库）；`version` 为 NULL 时按 1 参与校验与自增。
 
@@ -292,6 +360,7 @@ Service：[info_node_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/ap
 | 401 | 未提供/无效 token、token 缺用户信息（/me 类接口） | projects |
 | 404 | 项目/节点不存在（含软删除项目） | projects、info-nodes |
 | 409 | 项目编号/名称重复；**乐观锁版本冲突** | projects（PUT） |
+| 422 | 请求体字段非法：`changes` 的 `limit` 越界（1～500）、`limit` 非整数 | info-nodes（changes） |
 | 500 | 权限服务联动失败、删除项目外键残留等 | projects |
 | 503 | 文件识别接口 / AI 项目摘要：`LLM_API_KEY` 未配置或大模型调用失败 | info-nodes（parse-file）、projects（ai-summary） |
 
@@ -300,11 +369,11 @@ Service：[info_node_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/ap
 | 类型 | 文件 |
 |------|------|
 | 迁移 | [a7b8c9d0e1f2_add_project_ext_info.py](file:///d:/CODE/9_9/OpenRobotService/backend/alembic/versions/a7b8c9d0e1f2_add_project_ext_info.py)、[b2c3d4e5f6a7_add_project_info_node.py](file:///d:/CODE/9_9/OpenRobotService/backend/alembic/versions/b2c3d4e5f6a7_add_project_info_node.py) |
-| 模型 | [app/models/delivery.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/models/delivery.py)（Project / ProjectInfoNode）、[models_das/models.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/models_das/models.py)（再导出） |
+| 模型 | [app/models/delivery.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/models/delivery.py)（Project / ProjectInfoNode / ProjectInfoNodeChange）、[models_das/models.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/models_das/models.py)（再导出） |
 | Schema | [schemas_das/request_models.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/schemas_das/request_models.py) |
 | API | [api/projects.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/api/projects.py)、[api/info_nodes.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/api/info_nodes.py) |
-| Service | [services/project_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/services/project_service.py)、[services/info_node_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/services/info_node_service.py)、[services/info_node_import_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/services/info_node_import_service.py)、[services/project_ai_summary_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/services/project_ai_summary_service.py)（4.4） |
-| 测试 | [tests/test_info_node_import.py](file:///d:/CODE/9_9/OpenRobotService/backend/tests/test_info_node_import.py)（文本抽取/目录与 prompt 构造/LLM 返回解析/0.9 阈值匹配/select 校验/归属解析，13 用例）、[tests/test_project_ai_summary.py](file:///d:/CODE/9_9/OpenRobotService/backend/tests/test_project_ai_summary.py)（节点内容解码/信息树渲染/prompt 组装/输出清洗，10 用例） |
+| Service | [services/project_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/services/project_service.py)、[services/info_node_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/services/info_node_service.py)、[services/info_node_import_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/services/info_node_import_service.py)、[services/project_ai_summary_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/services/project_ai_summary_service.py)（4.4）、[services/info_node_change_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/services/info_node_change_service.py)（2.4 / 5.9 / 5.10，另被 info_node_service、info_template_service 调用写记录） |
+| 测试 | [tests/test_info_node_import.py](file:///d:/CODE/9_9/OpenRobotService/backend/tests/test_info_node_import.py)（文本抽取/目录与 prompt 构造/LLM 返回解析/0.9 阈值匹配/select 校验/归属解析，13 用例）、[tests/test_project_ai_summary.py](file:///d:/CODE/9_9/OpenRobotService/backend/tests/test_project_ai_summary.py)（节点内容解码/信息树渲染/prompt 组装/输出清洗，10 用例）、[tests/test_info_node_change.py](file:///d:/CODE/9_9/OpenRobotService/backend/tests/test_info_node_change.py)（节点值→人话/逐字段变动文案/各操作类型文案/记录 id 时间有序，26 用例） |
 | 模板 | [config/project_templates/default.yaml](file:///d:/CODE/9_9/OpenRobotService/backend/app/config/project_templates/default.yaml) |
 | 路由挂载 | [modules/admin/__init__.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/__init__.py) |
 
@@ -318,3 +387,7 @@ Service：[info_node_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/ap
 6. 导入文件（`/import`）除节点数组外，也接受「标题 → 内容」紧凑映射（`""` 文字、`[...]` 下拉选项、`{...}` 子节点，即 `project_templates/tmp.json` 的写法）。
 7. 信息编辑页「文件导入」走 `parse-file`（上传 → 转圈 → 三组预览勾选 → 确认后逐节点 CRUD）；上传时不要手写 `Content-Type`（交给浏览器带 boundary），大模型识别耗时较长，前端请求超时需放宽到 180s 以上。原「JSON 整树导入」入口已被该弹层替换，`/import` 接口与前端 `importInfoTreeApi` 保留未删（截图/调试仍可直调）。
 8. 项目概况卡「AI 项目摘要」：非新建模式显示「AI 生成 / 重新生成」按钮（生成中禁用），POST `/projects/{id}/ai-summary`（超时同样放宽到 180s）；摘要正文从 `project.ext_info.overview.ai_summary` 派生并用 react-markdown 渲染（结构化 Markdown；纯文本旧数据也兼容），生成响应里的 `ext_info` 直接替换本地状态即可持久展示；未生成过时展示「暂无数据」，空信息树项目后端会返回 400 提示先初始化信息树。
+9. 编辑页每行的「历史」按钮：点开调 `GET /changes?node_id=X` 展示该节点记录（人员 / 操作类型 / 时间 / 具体变动，item 内字段见 5.9），文案直接展示 `detail`，不要前端再拼；操作人取 `operator_name || operator || '未知用户'`。
+10. 小红点：进页面、以及**每次保存成功后**各调一次 `GET /changes/summary`，与**本机**已读水位（localStorage `project-info-tree:history-seen:{项目code}:{登录用户}`，只存个人未读状态、不上传）比较——`latest[node] !== seen[node]` 或该用户没记过即出点；**只有点开过该节点历史才推进水位**（打开弹层时把该节点最新记录的 id 写入）。因此任何人保存节点后该节点立即出点、包括保存者自己——谁没点开过，谁就看得见红点；看过之后不再出点，直到有新记录。
+11. 小红点还会**汇总到一级节点（根节点）**：某个下级节点有未读记录时，它所在的根节点同一位置也出点（中间层不出）。判定完全由前端根据第 10 条的未读集合往上归（按当前树的 parent_id 一路走到最外层，忽略已删除、树里没有对应行的节点），所以消失规则与子节点一致——点开某下级节点的历史后它不再贡献，该根节点下再没有别的未读变动时，根节点的点随之消失；根节点自己的记录没看过则仍然保留。服务端不需要为此加接口。
+12. summary / changes 接口失败要静默（红点只是辅助提示，不打扰主流程），历史弹层本身失败则给出重试入口。

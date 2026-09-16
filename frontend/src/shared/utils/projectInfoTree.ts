@@ -10,12 +10,15 @@
 import {
   createInfoNodeApi,
   deleteInfoNodeApi,
+  fetchInfoNodeChangeSummaryApi,
+  fetchInfoNodeChangesApi,
   fetchInfoTree,
   importInfoTemplateApi,
   importInfoTreeApi,
   moveInfoNodeApi,
   updateInfoNodeApi,
   type ApiInfoNode,
+  type ApiInfoNodeChange,
   type ApiInfoNodeUpdate,
   type ApiInfoTreeImportNode,
 } from '@/api/infoNodes';
@@ -60,6 +63,7 @@ export const PROJECT_INFO_MAX_DEPTH = 4;
 const selectedKey = (code: string) => `project-info-tree:selected:${code}`;
 const collapsedKey = (code: string) => `project-info-tree:collapsed:${code}`;
 const cardCollapsedKey = (code: string) => `project-info-tree:card-collapsed:${code}`;
+const historySeenKey = (code: string, user: string) => `project-info-tree:history-seen:${code}:${user}`;
 
 function readJson<T>(key: string, fallback: T): T {
   try {
@@ -221,6 +225,46 @@ export async function importInfoTree(projectId: string, input: unknown): Promise
  *  模板来自 project_type → project_templates/*.yaml，与新建项目同一份定义 */
 export async function importInfoTemplate(projectId: string): Promise<number> {
   return importInfoTemplateApi(projectId);
+}
+
+// —— 编辑历史（节点操作记录）：后端全量落库，「已读水位」存本机（每个人各自的未读状态） ——
+
+/** 某节点的编辑历史：自身操作 + 其直接子节点的删除记录（最新在前） */
+export async function loadInfoNodeChanges(projectId: string, nodeId: string): Promise<ApiInfoNodeChange[]> {
+  return fetchInfoNodeChangesApi(projectId, nodeId);
+}
+
+/** 各节点最新记录的 id {节点id: 记录id}（删除记录计入其上级节点） */
+export async function loadHistoryLatest(projectId: string): Promise<Record<string, string>> {
+  return fetchInfoNodeChangeSummaryApi(projectId);
+}
+
+/** 已读水位（该节点看过的最后一条记录 id）按「项目 + 登录用户」存本机：
+ *  每个没点开过历史的用户，自己看到小红点 */
+export function loadHistorySeen(projectCode: string, username = ''): Record<string, string> {
+  return readJson<Record<string, string>>(historySeenKey(projectCode, username), {});
+}
+
+export function saveHistorySeen(projectCode: string, seen: Record<string, string>, username = '') {
+  writeJson(historySeenKey(projectCode, username), seen);
+}
+
+/**
+ * 有「新变动」的节点（历史按钮上的小红点）：
+ * 该节点最新记录 id 与本机已读水位不一致（或从没点开过）即未读；没有记录的节点不出红点。
+ * 只有点开过该节点的历史才会推进水位——包括自己刚保存的改动。
+ * 记录 id 是后端时间有序的 UUIDv7：只比相等，同秒内的新记录也不会漏（时间戳只到秒）。
+ */
+export function unseenHistoryNodes(
+  latest: Record<string, string>,
+  seen: Record<string, string>,
+): Set<string> {
+  const result = new Set<string>();
+  Object.entries(latest ?? {}).forEach(([nodeId, latestId]) => {
+    if (!latestId) return;
+    if (seen?.[nodeId] !== latestId) result.add(nodeId);
+  });
+  return result;
 }
 
 /** 归一化导入内容：接受节点数组、{nodes:[…]}、{info_nodes:[…]}，

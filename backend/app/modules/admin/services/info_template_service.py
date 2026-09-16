@@ -28,6 +28,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from app.models.delivery import PROJECT_DELETED
 from app.modules.admin.models_das.models import Project, ProjectInfoNode, ProjectInfoTemplate
+from app.modules.admin.services import info_node_change_service as change_log
 from app.modules.admin.services.info_node_service import SessionLocal
 
 TEMPLATE_ID = "default"
@@ -430,7 +431,7 @@ class InfoTemplateService:
         result = self._plan_all(nodes)
         return {"dry_run": True, **result["totals"], "details": result["details"]}
 
-    def save_and_sync(self, nodes: Any, username: str = "") -> Dict[str, Any]:
+    def save_and_sync(self, nodes: Any, username: str = "", operator_name: str = "") -> Dict[str, Any]:
         """保存模板并把变更同步到所有项目。返回保存信息 + 同步统计。"""
         result = self._plan_all(nodes)
         template_info = self.save_template(result["normalized"], username)
@@ -444,7 +445,7 @@ class InfoTemplateService:
                 continue
             db = SessionLocal()
             try:
-                self._apply_plan(db, project_id, plan, now)
+                self._apply_plan(db, project_id, plan, now, username, operator_name)
                 db.commit()
             except Exception as exc:  # 单个项目失败不拖垮整体，最后汇总上报
                 db.rollback()
@@ -454,8 +455,9 @@ class InfoTemplateService:
 
         return {"dry_run": False, **template_info, **totals, "details": result["details"]}
 
-    def _apply_plan(self, db, project_id: str, plan: Dict[str, Any], now: str) -> None:
-        """在一个事务里执行某个项目的同步计划。"""
+    def _apply_plan(self, db, project_id: str, plan: Dict[str, Any], now: str,
+                    operator: str = "", operator_name: str = "") -> None:
+        """在一个事务里执行某个项目的同步计划（并记一条项目级操作记录）。"""
         rows = db.query(ProjectInfoNode).filter(ProjectInfoNode.project_id == project_id).all()
         by_id = {n.id: n for n in rows}
 
@@ -501,6 +503,17 @@ class InfoTemplateService:
                 created_at=now,
                 updated_at=now,
             ))
+
+        # 5) 操作记录：整树级同步记一条项目级流水（不逐节点刷屏）
+        change_log.add_change(
+            db, project_id=project_id, action=change_log.ACTION_SYNC,
+            detail=change_log.build_sync_detail(
+                len(plan["creates"]), len(plan["updates"]) + len(plan["link"]),
+                len(plan["delete_ids"]),
+            ),
+            operator=operator or None, operator_name=operator_name or operator or None,
+            created_at=now,
+        )
 
 
 info_template_service = InfoTemplateService()

@@ -345,3 +345,38 @@ class ProjectInfoTemplate(Base):
         return f"<ProjectInfoTemplate(id='{self.id}', name='{self.name}')>"
 
 
+class ProjectInfoNodeChange(Base):
+    """项目信息树节点操作记录（编辑历史，用户在编辑页可查看）。
+
+    每次节点操作（新增 / 修改 / 移动 / 删除）写一行：时间（created_at）、
+    人员（operator / operator_name）、节点（node_id + node_title 当时的标题快照）、
+    具体变动（detail，服务端写入时就拼好的人话描述，前端直接展示）。
+
+    展示归属：节点 X 的历史 = node_id=X 的记录 + 「parent_id=X 且 action=delete」的记录——
+    节点被删除后其自身记录已无从查起，因此删除记录挂在被删节点的上级节点上。
+    整树级操作（批量导入 / 模板重建 / 模板同步）记一行 node_id 为 NULL 的项目级记录，
+    不逐节点刷屏。
+    """
+    __tablename__ = 'project_info_node_change'
+
+    id = Column(String(64), primary_key=True, comment='记录UUID')
+    project_id = Column(String(64), nullable=False, comment='所属项目ID')
+    node_id = Column(String(64), nullable=True, comment='被操作的节点ID；整树级操作为 NULL')
+    parent_id = Column(String(64), nullable=True, comment='上级节点ID（删除记录据此在父节点历史里展示）')
+    node_title = Column(String(255), nullable=False, default='', comment='操作时的节点标题快照')
+    action = Column(String(16), nullable=False, comment='操作类型: create/update/move/delete/import/sync')
+    operator = Column(String(64), nullable=True, comment='操作人登录名（无法识别时为 NULL）')
+    operator_name = Column(String(64), nullable=True, comment='操作人显示名')
+    detail = Column(Text, nullable=True, comment='具体变动的人话描述')
+    created_at = Column(String(30), nullable=False, comment='操作时间')
+
+    __table_args__ = (
+        Index('idx_pnc_project_time', 'project_id', 'created_at'),
+        Index('idx_pnc_node', 'project_id', 'node_id'),
+        Index('idx_pnc_parent', 'project_id', 'parent_id'),
+    )
+
+    def __repr__(self):
+        return f"<ProjectInfoNodeChange(id='{self.id}', node_id='{self.node_id}', action='{self.action}')>"
+
+

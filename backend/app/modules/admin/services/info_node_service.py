@@ -4,6 +4,10 @@
 与 ext_info 的区别：ext_info 存「开发者定义结构的值」，info_node 存
 「结构本身是用户数据」——用户可自由增删节点、拖拽排序、编辑值，
 每个节点独立 CRUD，不会因整文档读改写而互相覆盖。
+
+每个写操作都在同一事务里追加一条操作记录（project_info_node_change，见
+info_node_change_service）：时间 / 人员 / 节点 / 具体变动，供前端「编辑历史」展示；
+本次调用未实际改变任何字段的更新不记流水。
 """
 from datetime import datetime
 from typing import Dict, List, Optional
@@ -13,6 +17,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import sessionmaker
 
 from app.modules.admin.models_das.models import ProjectInfoNode, Project
+from app.modules.admin.services import info_node_change_service as change_log
 from app.models.delivery import PROJECT_DELETED
 from app.modules.admin.utils_das.config import DATABASE_URL
 from sqlalchemy import create_engine
@@ -107,7 +112,9 @@ class InfoNodeService:
 
     # ── 创建 ──────────────────────────────────────────
 
-    def create_node(self, project_id: str, node_data: Dict) -> Dict:
+    def create_node(self, project_id: str, node_data: Dict,
+                    operator: Optional[str] = None,
+                    operator_name: Optional[str] = None) -> Dict:
         """创建节点。node_data 需含 id（客户端生成 UUID）、title；
         可选 parent_id / content_type / value / sort_order。
         """
@@ -126,6 +133,12 @@ class InfoNodeService:
                 updated_at=now,
             )
             db.add(node)
+            change_log.add_change(
+                db, project_id=project_id, action=change_log.ACTION_CREATE,
+                node_id=node.id, parent_id=node.parent_id, node_title=node.title,
+                detail=change_log.build_create_detail(node.title),
+                operator=operator, operator_name=operator_name, created_at=now,
+            )
             db.commit()
             db.refresh(node)
             return _node_to_dict(node)
@@ -134,7 +147,9 @@ class InfoNodeService:
 
     # ── 更新 ──────────────────────────────────────────
 
-    def update_node(self, node_id: str, update_data: Dict) -> Optional[Dict]:
+    def update_node(self, node_id: str, update_data: Dict,
+                    operator: Optional[str] = None,
+                    operator_name: Optional[str] = None) -> Optional[Dict]:
         """更新节点可编辑字段（title / content_type / value / sort_order）。
         parent_id 变更走 move_node，不在此处理。
         """
@@ -146,10 +161,22 @@ class InfoNodeService:
             if not node:
                 return None
 
+            before = {field: getattr(node, field)
+                      for field in ("title", "content_type", "value", "sort_order")}
             for field in ("title", "content_type", "value", "sort_order"):
                 if field in update_data:
                     setattr(node, field, update_data[field])
             node.updated_at = _now_str()
+
+            # 逐字段对比后才记流水：前端乐观更新失败重试等场景可能提交与现值相同的字段，
+            # 这种「没有实际变动」的更新不入历史（避免刷屏）。
+            detail = change_log.build_update_detail(before, update_data)
+            if detail:
+                change_log.add_change(
+                    db, project_id=node.project_id, action=change_log.ACTION_UPDATE,
+                    node_id=node.id, parent_id=node.parent_id, node_title=node.title,
+                    detail=detail, operator=operator, operator_name=operator_name,
+                )
 
             db.commit()
             db.refresh(node)
@@ -158,7 +185,9 @@ class InfoNodeService:
             db.close()
 
     def move_node(self, node_id: str, new_parent_id: Optional[str],
-                  new_sort_order: int = 0) -> Optional[Dict]:
+                  new_sort_order: int = 0,
+                  operator: Optional[str] = None,
+                  operator_name: Optional[str] = None) -> Optional[Dict]:
         """移动节点（改变父节点和/或排序）。不做环检测的简单实现——
         前端树形控件拖拽时不会把节点拖入自己的子树。
         """
@@ -170,9 +199,31 @@ class InfoNodeService:
             if not node:
                 return None
 
+            old_parent_id = node.parent_id
+            old_sort_order = node.sort_order
+
             node.parent_id = new_parent_id
             node.sort_order = new_sort_order
             node.updated_at = _now_str()
+
+            if new_parent_id != old_parent_id or new_sort_order != old_sort_order:
+                def _title(parent_id: Optional[str]) -> Optional[str]:
+                    if not parent_id:
+                        return None
+                    parent = db.query(ProjectInfoNode).filter(
+                        ProjectInfoNode.id == parent_id
+                    ).first()
+                    return parent.title if parent else None
+
+                detail = change_log.build_move_detail(
+                    node.title, _title(old_parent_id), _title(new_parent_id),
+                    same_parent=(new_parent_id == old_parent_id),
+                )
+                change_log.add_change(
+                    db, project_id=node.project_id, action=change_log.ACTION_MOVE,
+                    node_id=node.id, parent_id=node.parent_id, node_title=node.title,
+                    detail=detail, operator=operator, operator_name=operator_name,
+                )
 
             db.commit()
             db.refresh(node)
@@ -182,13 +233,31 @@ class InfoNodeService:
 
     # ── 删除 ──────────────────────────────────────────
 
-    def delete_node(self, node_id: str) -> bool:
-        """删除节点及其全部子树。递归 CTE 找出所有后代 ID，批量删除。"""
+    def delete_node(self, node_id: str, operator: Optional[str] = None,
+                    operator_name: Optional[str] = None) -> bool:
+        """删除节点及其全部子树。递归 CTE 找出所有后代 ID，批量删除。
+
+        操作记录只有一条，挂在被删节点的上级节点上（parent_id）——节点删除后
+        自身的历史已无从打开，前端在上级节点的「编辑历史」里展示这条删除记录。
+        """
         db = SessionLocal()
         try:
+            node = db.query(ProjectInfoNode).filter(
+                ProjectInfoNode.id == node_id
+            ).first()
+            if not node:
+                return False
+
             ids = self._get_descendant_ids(db, node_id)
             if not ids:
                 return False
+
+            change_log.add_change(
+                db, project_id=node.project_id, action=change_log.ACTION_DELETE,
+                node_id=node.id, parent_id=node.parent_id, node_title=node.title,
+                detail=change_log.build_delete_detail(node.title, len(ids) - 1),
+                operator=operator, operator_name=operator_name,
+            )
             db.query(ProjectInfoNode).filter(
                 ProjectInfoNode.id.in_(ids)
             ).delete(synchronize_session=False)
@@ -199,13 +268,23 @@ class InfoNodeService:
 
     # ── 批量导入 ────────────────────────────────────────
 
-    def import_tree(self, project_id: str, nodes: List[Dict]) -> int:
+    def import_tree(self, project_id: str, nodes: List[Dict],
+                    operator: Optional[str] = None,
+                    operator_name: Optional[str] = None,
+                    source: str = "import") -> int:
         """批量导入信息树（如从 a.json 的 info_nodes 导入）。
         节点需含 id/title/children/sort_order 等。
         先清空旧节点再导入。返回导入数量。
+
+        source: import=外部导入；template=按模板重建（仅影响记录文案）。
+        整树替换记一条项目级操作记录（node_id 为 NULL），不逐节点刷屏。
         """
         db = SessionLocal()
         try:
+            removed = db.query(ProjectInfoNode).filter(
+                ProjectInfoNode.project_id == project_id
+            ).count()
+
             # 清空旧节点
             db.query(ProjectInfoNode).filter(
                 ProjectInfoNode.project_id == project_id
@@ -233,12 +312,18 @@ class InfoNodeService:
 
             flatten(nodes)
             db.bulk_save_objects(flat)
+            change_log.add_change(
+                db, project_id=project_id, action=change_log.ACTION_IMPORT,
+                detail=change_log.build_import_detail(source, len(flat), removed),
+                operator=operator, operator_name=operator_name,
+            )
             db.commit()
             return len(flat)
         finally:
             db.close()
 
-    def import_template(self, project_id: str) -> int:
+    def import_template(self, project_id: str, operator: Optional[str] = None,
+                        operator_name: Optional[str] = None) -> int:
         """按项目模板重建信息树（替换现有全部节点）。
 
         模板来源与新建项目一致：project_type → {type}.yaml，缺省 default.yaml
@@ -284,7 +369,8 @@ class InfoNodeService:
         rows = build(get_info_nodes_template(project_type))
         if not rows:
             return 0
-        return self.import_tree(project_id, rows)
+        return self.import_tree(project_id, rows, operator=operator,
+                                operator_name=operator_name, source="template")
 
 
 info_node_service = InfoNodeService()

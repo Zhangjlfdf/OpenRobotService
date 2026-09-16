@@ -8302,12 +8302,18 @@ html, body, #root {
 }
 .mac-info-row__ops { display: flex; align-items: center; gap: 2px; flex-shrink: 0; margin-left: auto; }
 .mac-info-row__op {
+  position: relative;
   display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px;
   border: none; border-radius: 8px; background: none; padding: 0; color: var(--mac-muted-fg); cursor: pointer;
 }
 .mac-info-row__op:active { background: rgba(80, 90, 100, 0.08); }
 .mac-info-row--d1 .mac-info-row__op { color: rgba(255, 255, 255, 0.85); }
 .mac-info-row--d1 .mac-info-row__op:active { background: rgba(255, 255, 255, 0.15); }
+/* 历史按钮右上角的未读小红点：该节点有本机还没看过的新操作记录 */
+.mac-info-row__op-dot {
+  position: absolute; top: 2px; right: 2px; width: 7px; height: 7px; border-radius: 50%;
+  background: #fa5151; box-shadow: 0 0 0 1.5px rgba(255, 255, 255, 0.9);
+}
 
 /* —— 末级节点内容（文字 / 下拉 / 文件 / 图片）—— */
 .mac-info-node__text {
@@ -8351,6 +8357,16 @@ html, body, #root {
 .mac-info__confirm { margin: 0; font-size: 13px; line-height: 1.6; color: var(--mac-fg); }
 .mac-info__confirm-actions { display: flex; gap: 10px; margin-top: 16px; }
 .mac-info__confirm-actions .mac-btn { flex: 1; }
+
+/* —— 编辑历史（节点操作记录）：谁 · 什么时候 · 改了什么 —— */
+.mac-history { list-style: none; margin: 10px 0 0; padding: 0; max-height: 58vh; overflow-y: auto; }
+.mac-history__item { padding: 10px 12px; border-radius: 10px; background: var(--mac-secondary); }
+.mac-history__item + .mac-history__item { margin-top: 8px; }
+.mac-history__head { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--mac-muted-fg); }
+.mac-history__who { font-size: 12px; font-weight: 600; color: var(--mac-fg); }
+.mac-history__action { padding: 1px 6px; border-radius: 999px; background: rgba(54, 151, 195, 0.12); color: var(--mac-blue-1); font-size: 10.5px; white-space: nowrap; }
+.mac-history__when { margin-left: auto; white-space: nowrap; }
+.mac-history__what { margin: 5px 0 0; font-size: 12.5px; line-height: 1.6; color: var(--mac-fg); overflow-wrap: anywhere; }
 
 /* —— 文件导入（AI 识别）：三组预览 + 勾选确认 —— */
 .mac-import__hint { margin: 8px 0 12px; font-size: 11.5px; line-height: 1.65; color: var(--mac-muted-fg); }

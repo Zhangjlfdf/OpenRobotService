@@ -1,14 +1,19 @@
-"""项目信息树节点 API（逐节点 CRUD + 树查询 + 批量导入 + 文件 AI 识别导入预览 + 详情模板）。
+"""项目信息树节点 API（逐节点 CRUD + 树查询 + 批量导入 + 文件 AI 识别导入预览 + 详情模板 + 编辑历史）。
 
 路由前缀 /info-nodes，挂载到 admin_router 后实际路径为
 /api/admin/info-nodes/projects/{project_id}/...。
 详情模板接口（/info-nodes/template）仅管理员可用（require get_current_admin_user）。
+
+写接口不强制鉴权（沿用网关管控），但会尽力识别操作人，把「谁做的」记进
+project_info_node_change（编辑历史，见 services/info_node_change_service.py）。
 """
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from typing import Dict, List, Optional, Any
 from pydantic import BaseModel, Field
+from app.modules.admin.api.auth import get_request_actor_optional
 from app.modules.admin.api.permissions import get_current_admin_user
 from app.modules.admin.services.info_node_service import info_node_service
+from app.modules.admin.services.info_node_change_service import info_node_change_service
 from app.modules.admin.services import info_node_import_service
 from app.modules.admin.services.info_template_service import info_template_service
 
@@ -58,63 +63,118 @@ async def get_info_tree(project_id: str):
 
 
 @info_node_router.post("/projects/{project_id}", summary="创建信息节点", status_code=201)
-async def create_info_node(project_id: str, node: InfoNodeCreate):
+async def create_info_node(project_id: str, node: InfoNodeCreate,
+                           actor: Dict[str, Optional[str]] = Depends(get_request_actor_optional)):
     """创建单个信息节点。id 由客户端生成（UUID），供后续引用。"""
-    return info_node_service.create_node(project_id, node.model_dump())
+    return info_node_service.create_node(
+        project_id, node.model_dump(),
+        operator=actor.get("username"), operator_name=actor.get("name"),
+    )
 
 
 @info_node_router.put("/nodes/{node_id}", summary="更新信息节点")
-async def update_info_node(node_id: str, update: InfoNodeUpdate):
+async def update_info_node(node_id: str, update: InfoNodeUpdate,
+                           actor: Dict[str, Optional[str]] = Depends(get_request_actor_optional)):
     """更新节点可编辑字段。parent_id 变更请用 PATCH move。"""
     update_data = {k: v for k, v in update.model_dump().items() if v is not None}
     if not update_data:
         raise HTTPException(status_code=400, detail="无更新字段")
-    result = info_node_service.update_node(node_id, update_data)
+    result = info_node_service.update_node(
+        node_id, update_data,
+        operator=actor.get("username"), operator_name=actor.get("name"),
+    )
     if not result:
         raise HTTPException(status_code=404, detail="节点不存在")
     return result
 
 
 @info_node_router.patch("/nodes/{node_id}/move", summary="移动信息节点")
-async def move_info_node(node_id: str, move: InfoNodeMove):
+async def move_info_node(node_id: str, move: InfoNodeMove,
+                         actor: Dict[str, Optional[str]] = Depends(get_request_actor_optional)):
     """移动节点到新父节点下并设置排序位置（拖拽排序）。"""
-    result = info_node_service.move_node(node_id, move.new_parent_id, move.new_sort_order)
+    result = info_node_service.move_node(
+        node_id, move.new_parent_id, move.new_sort_order,
+        operator=actor.get("username"), operator_name=actor.get("name"),
+    )
     if not result:
         raise HTTPException(status_code=404, detail="节点不存在")
     return result
 
 
 @info_node_router.delete("/nodes/{node_id}", summary="删除信息节点(含子树)")
-async def delete_info_node(node_id: str):
-    """删除节点及其全部子树（递归 CTE 找后代，批量删除）。"""
-    deleted = info_node_service.delete_node(node_id)
+async def delete_info_node(node_id: str,
+                           actor: Dict[str, Optional[str]] = Depends(get_request_actor_optional)):
+    """删除节点及其全部子树（递归 CTE 找后代，批量删除）。
+
+    删除记录只有一条，挂在被删节点的上级节点上（见 info_node_change_service）。
+    """
+    deleted = info_node_service.delete_node(
+        node_id, operator=actor.get("username"), operator_name=actor.get("name"),
+    )
     if not deleted:
         raise HTTPException(status_code=404, detail="节点不存在")
     return {"detail": "已删除节点及其子树"}
 
 
 @info_node_router.post("/projects/{project_id}/import", summary="批量导入信息树")
-async def import_info_tree(project_id: str, data: InfoNodeImport):
+async def import_info_tree(project_id: str, data: InfoNodeImport,
+                           actor: Dict[str, Optional[str]] = Depends(get_request_actor_optional)):
     """批量导入信息树（如从 a.json 的 info_nodes 导入）。
     先清空旧节点再导入。返回导入数量。
     """
-    count = info_node_service.import_tree(project_id, data.nodes)
+    count = info_node_service.import_tree(
+        project_id, data.nodes,
+        operator=actor.get("username"), operator_name=actor.get("name"),
+    )
     return {"imported": count}
 
 
 @info_node_router.post("/projects/{project_id}/import-template",
                        summary="按项目模板重建信息树")
-async def import_info_template(project_id: str):
+async def import_info_template(project_id: str,
+                               actor: Dict[str, Optional[str]] = Depends(get_request_actor_optional)):
     """用后端模板（project_type → {type}.yaml，缺省 default.yaml）重建整棵信息树。
 
     与新建项目初始化走同一份模板定义，供存量空项目一键初始化；
     先清空旧节点再写入。模板为空时不做改动，返回 {"imported": 0}。
     """
     try:
-        count = info_node_service.import_template(project_id)
+        count = info_node_service.import_template(
+            project_id,
+            operator=actor.get("username"), operator_name=actor.get("name"),
+        )
     except LookupError:
         raise HTTPException(status_code=404, detail="项目不存在")
     return {"imported": count}
+
+
+# ── 编辑历史（节点操作记录） ──────────────────────────
+
+@info_node_router.get("/projects/{project_id}/changes", summary="获取节点操作记录")
+async def get_info_node_changes(
+    project_id: str,
+    node_id: Optional[str] = Query(None, description="节点ID；给了则只返回该节点的历史（含其直接子节点的删除记录）"),
+    limit: int = Query(100, ge=1, le=500, description="最多返回条数（最新在前）"),
+):
+    """节点编辑历史。传 node_id 返回该节点的记录（自身操作 + 其子节点的删除记录）；
+    不传则返回项目全部记录（含整树级导入/模板同步）。"""
+    if node_id:
+        changes = info_node_change_service.list_for_node(project_id, node_id, limit)
+    else:
+        changes = info_node_change_service.list_project_changes(project_id, limit)
+    return {"changes": changes}
+
+
+@info_node_router.get("/projects/{project_id}/changes/summary",
+                      summary="各节点最新记录 id（小红点）")
+async def get_info_node_change_summary(project_id: str):
+    """返回 {节点id: 最新记录 id}，用于前端判断哪些节点的「历史」有新变动（小红点）：
+    与本机已读水位（也是记录 id）不一致即未读。
+
+    记录 id 时间有序，只做相等比较；不用时间戳是因为它只到秒，同秒内的新记录会漏。
+    与 changes 接口同口径：子节点的删除记录计入其上级节点。
+    """
+    return {"latest": info_node_change_service.latest_by_node(project_id)}
 
 
 @info_node_router.post("/projects/{project_id}/parse-file",
@@ -162,6 +222,10 @@ async def save_info_template(
     try:
         if payload.dry_run:
             return info_template_service.preview_sync(payload.nodes)
-        return info_template_service.save_and_sync(payload.nodes, current_user.get("username") or "")
+        return info_template_service.save_and_sync(
+            payload.nodes,
+            current_user.get("username") or "",
+            current_user.get("name") or "",
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
