@@ -3477,6 +3477,9 @@ class AiDiagnosisPlatform:
             "motion_control": "🚗 车端",
             "vehicle_errors": "🚗 车端", "vehicle_implementation": "🚗 车端",
             "vehicle_calibration": "🚗 车端", "vehicle_io": "🚗 车端",
+            "vehicle_implementation/自研车实施": "🚚 自研",
+            "vehicle_implementation/华睿VDA5050接入": "🤖 华睿",
+            "vehicle_implementation/科钛VDA5050接入": "🤖 科钛",
             "vehicle_motion": "🚗 车端",
             "translation": "🌐 翻译", "USP/translation": "🌐 翻译",
             "diagnosis": "🏭 诊断", "usp/diagnosis": "🏭 诊断",
@@ -3487,6 +3490,8 @@ class AiDiagnosisPlatform:
             "usp/error_codes": "🚨 平台错误码", "USP/error_codes": "🚨 平台错误码",
             "usp/ui_pages": "🧭 页面导航", "USP/ui_pages": "🧭 页面导航",
             "usp/terminology": "🔤 术语表", "USP/terminology": "🔤 术语表",
+            "usp/algorithm": "🧮 算法", "USP/algorithm": "🧮 算法",
+            "huarui": "🤖 华睿", "USP/huarui": "🤖 华睿",
             "product_catalog": "🏢 产品", "vda5050_protocol": "🏢 协议",
             "navigation": "📐 导航", "standards": "📐 标准",
         }

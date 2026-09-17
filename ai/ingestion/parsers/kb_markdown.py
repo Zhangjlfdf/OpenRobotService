@@ -54,6 +54,8 @@ class KBEntry:
     related_cards: List[str] = field(default_factory=list)
     anchor_error_codes: List[str] = field(default_factory=list)
     embed_text: str = ""
+    # 控制器品牌（company 域）：错误码按节「自研+华睿」/「科钛」，其余由 to_chunk 路径推断
+    brand: str = ""
 
 
 class KBDomainIngester(BaseIngester[KBEntry]):
@@ -199,6 +201,7 @@ class KBDomainIngester(BaseIngester[KBEntry]):
                     order=e.order + i - 1,
                     images=e.images, section=e.section, chapter=e.chapter,
                     error_code=e.error_code, category=e.category, level=e.level,
+                    brand=e.brand,
                     description_cn=e.description_cn, solution_cn=e.solution_cn,
                     card_id=e.card_id, card_domain=e.card_domain,
                     severity=e.severity, symptom_terms=e.symptom_terms,
@@ -638,6 +641,8 @@ class KBDomainIngester(BaseIngester[KBEntry]):
 
             # 判断表格格式：3位表 vs 4-5位表
             is_3bit = "3位" in section_title
+            # 0916 品牌定稿：3 位段=自研+华睿通用（车载界面协议），4-5 位段=科钛
+            section_brand = "自研+华睿" if is_3bit else ("科钛" if section_title else "")
 
             for line in section.splitlines():
                 line = line.strip()
@@ -700,6 +705,7 @@ class KBDomainIngester(BaseIngester[KBEntry]):
                     description_cn=desc_cn,
                     description_en=desc_en,
                     solution_cn=solution,
+                    brand=section_brand,
                 ))
                 order += 1
 
@@ -903,6 +909,10 @@ class KBDomainIngester(BaseIngester[KBEntry]):
             "source_file": str(entry.source_file),
             "order": entry.order,
         }
+        # 车端文档按控制器品牌打标（公司域限定）——检索/展示按品牌筛选用。
+        # 判定规则按 0916 用户定稿：实施类按目录，原理/参数类自研专属，错误码/IO 通用。
+        if self._domain == "company":
+            payload["brand"] = entry.brand or self._infer_brand(entry.sub_domain, str(entry.source_file))
         if entry.images:
             payload["images"] = entry.images
         if entry.section:
@@ -938,6 +948,36 @@ class KBDomainIngester(BaseIngester[KBEntry]):
     def get_source_label(self) -> str:
         n = len(self.source_paths)
         return f"kb/{self._domain} ({n} files)"
+
+    @staticmethod
+    def _infer_brand(sub_domain: str, source_file: str) -> str:
+        """公司域 chunk 的控制器品牌推断（0916 定稿：brand 是文档属性，不是目录结构）。
+
+        - 实施类按目录：自研车实施/华睿VDA5050接入/科钛VDA5050接入
+        - 原理/参数类自研专属：vda5050_protocol（XMover 适配）、vehicle_calibration、vehicle_motion
+        - 通用（跨品牌共用）：vehicle_errors（3 位段自研+华睿、4-5 位段科钛，chunk 级不细分）、
+          vehicle_io（24 车型对照表）、inacs 充电机
+        - product_catalog：X 开头/UHX/擎天柱 = 自研全系（品牌不同不影响产品参数检索）
+        """
+        sd = sub_domain or ""
+        sf = source_file or ""
+        if "华睿" in sf or "华睿" in sd:
+            return "华睿"
+        if "科钛" in sf or "科钛" in sd:
+            return "科钛"
+        if "inacs" in sf.lower():
+            return "通用"  # iNACS 充电机硬件，跨品牌配套
+        if "自研车实施" in sd or "自研车实施" in sf:
+            return "自研"
+        if sd == "vehicle_implementation":
+            return "自研"
+        if sd in ("vda5050_protocol", "vehicle_calibration", "vehicle_motion"):
+            return "自研"  # XMover 专属（协议适配/标定/运动控制）
+        if sd in ("vehicle_errors", "vehicle_io"):
+            return "通用"  # 跨品牌共用
+        if sd == "product_catalog" or sf.startswith("product_catalog"):
+            return "自研"
+        return "通用"
 
 
 # ═══════════════════════════════════════════════════════════════

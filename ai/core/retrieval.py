@@ -1079,6 +1079,9 @@ class RetrievalService:
             "motion_control": "🚗 车端",
             "vehicle_errors": "🚗 车端", "vehicle_implementation": "🚗 车端",
             "vehicle_calibration": "🚗 车端", "vehicle_io": "🚗 车端",
+            "vehicle_implementation/自研车实施": "🚚 自研",
+            "vehicle_implementation/华睿VDA5050接入": "🤖 华睿",
+            "vehicle_implementation/科钛VDA5050接入": "🤖 科钛",
             "vehicle_motion": "🚗 车端",
             "translation": "🌐 翻译", "USP/translation": "🌐 翻译",
             "diagnosis": "🏭 诊断", "usp/diagnosis": "🏭 诊断",
@@ -1089,6 +1092,8 @@ class RetrievalService:
             "usp/error_codes": "🚨 平台错误码", "USP/error_codes": "🚨 平台错误码",
             "usp/ui_pages": "🧭 页面导航", "USP/ui_pages": "🧭 页面导航",
             "usp/terminology": "🔤 术语表", "USP/terminology": "🔤 术语表",
+            "usp/algorithm": "🧮 算法", "USP/algorithm": "🧮 算法",
+            "huarui": "🤖 华睿", "USP/huarui": "🤖 华睿",
             "product_catalog": "🏢 产品", "vda5050_protocol": "🏢 协议",
             "navigation": "📐 导航", "standards": "📐 标准",
         }
@@ -1101,13 +1106,22 @@ class RetrievalService:
             _sec = re.split(r" [>/·] ", _t, maxsplit=1)[0].strip() if _t else ""
             return (r.source_file or r.sub_domain or "", _sec)
 
-        async def _one(domain: str, dom_top_k: int):
+        async def _one(domain: str, dom_top_k: int, _retried: bool = False):
             try:
                 dense_res, sparse_res = await asyncio.wait_for(
                     self.retrieve_domain_dual(query, domain, top_k=8),
-                    timeout=15.0,
+                    timeout=getattr(self, "_dom_timeout", 30.0),
                 )
                 return list(dense_res)[:dom_top_k], list(sparse_res)[:dom_top_k]
+            except asyncio.TimeoutError:
+                # 本地/冷启动首查常超时（集合加载占用），此时第二次必然是热的——
+                # 重试一次；仍超时才放弃该域（0916 实锤：team 域冷启动被吞，
+                # 算法层 chunk 全部丢池，热启动后同 query 直接霸榜）
+                if not _retried:
+                    logger.warning(f"[retrieve_ai_kb] {domain} 域检索超时（疑似冷启动），重试一次")
+                    return await _one(domain, dom_top_k, _retried=True)
+                logger.warning(f"[retrieve_ai_kb] {domain} 域双路检索超时（重试后仍失败）")
+                return [], []
             except Exception as e:
                 logger.warning(f"[retrieve_ai_kb] {domain} 域双路检索失败: "
                                f"{type(e).__name__}: {str(e)[:300]}")

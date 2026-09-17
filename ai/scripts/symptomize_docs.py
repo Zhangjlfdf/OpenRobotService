@@ -95,9 +95,13 @@ async def symptomize_one(llm, src: Path) -> str:
         print(f"  [SKIP] {src.name} 已含症状对照")
         return ""
     summary, anomaly = extract_sections(text)
-    if not anomaly:
-        print(f"  [SKIP] {src.name} 未发现异常相关小节")
+    # 异常节缺失 + 文档太短（<800字）= 概念/总览，不值得做症状化，跳过
+    if not anomaly and len(text) < 800:
+        print(f"  [SKIP] {src.name} 无异常节且篇幅过短")
         return ""
+    if not anomaly:
+        # 无标准异常节但篇幅够：把全文当 anomaly 输入，让 LLM 也能榨出症状
+        anomaly = text[:_ANOMALY_CHARS]
     prompt = _PROMPT.format(summary=summary, anomaly=anomaly)
     out = await llm.chat(
         [{"role": "user", "content": prompt}],
@@ -124,22 +128,28 @@ async def main():
 
     OUT.mkdir(parents=True, exist_ok=True)
     ok = fail = 0
+    done = 0
     for name in names:
         src = SRC / name
         if not src.is_file():
             print(f"[MISS] {name}")
             fail += 1
             continue
-        print(f"[GEN] {name} ...")
-        try:
-            symptom = await symptomize_one(llm, src)
-        except Exception as e:
-            print(f"  [FAIL] {type(e).__name__}: {str(e)[:120]}")
-            fail += 1
-            continue
+        print(f"[{done+1}/{len(names)}] {name} ...", flush=True)
+        attempts = 0
+        symptom = ""
+        while attempts < 3 and not symptom:
+            attempts += 1
+            try:
+                symptom = await symptomize_one(llm, src)
+            except Exception as e:
+                print(f"  [RETRY {attempts}] {type(e).__name__}: {str(e)[:80]}", flush=True)
+                await asyncio.sleep(2)
         if not symptom:
             fail += 1
+            done += 1
             continue
+        done += 1
         if "## 症状对照" not in symptom:
             print("  [WARN] 输出未含症状对照标题，原样保留供检查")
         text = src.read_text(encoding="utf-8")
