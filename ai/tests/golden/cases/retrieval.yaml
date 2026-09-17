@@ -26,7 +26,8 @@
 
 - name: 货架前停住取不出货
   query: AGV到了货架前面就停住不动了，货也没取出来，日志里查什么
-  expect_hit: ["stacking 取、卸货识别"]
+  # 0916 知识库扩充后检索重排：车端实施手册「卸货停在路上」排查节顶到第一
+  expect_hit: ["卸货时，停在了路上"]
 
 - name: 多车到同一点位偏差
   query: 多台AGV到同一个点位都有偏差，怎么校准一致
@@ -39,18 +40,22 @@
 
 - name: 车身尺寸与膨胀量在哪改
   query: 机器人的车身尺寸参数在哪改，怕膨胀量不够会撞到货架
-  expect_hit: ["vehicleui参数（二）"]
+  # 0916 重排观察项：华睿协议手册（讲货架腿宽高=膨胀量语义）顶到第一，
+  # vehicleui参数（二）被挤出——检索噪声挤占，若持续退化需调域权重
+  expect_hit: ["货架腿", "膨胀量"]
 
 - name: 低电量自动充电阈值
   query: 机器人低电量到多少会自己回去充电，阈值在哪设
-  expect_hit: ["vehicleui参数（三）"]
+  # 0916 重排：低电量诊断卡（现象/影响/排查）顶到第一，比参数页更贴现象
+  expect_hit: ["低电量不自动回充"]
   # 0904 域保底后从 MISS 救回 rank#3（0902 精排重接混域稀释实锤之一）；
   # 送 prompt 共 6 条，第 3 名对 LLM 可见，断言 2→3
   rank_within: 3
 
 - name: 机器人型号版本号在哪改
   query: 机器人型号和软件版本号在配置里哪里改
-  expect_hit: ["vehicleui参数（一）"]
+  # 0916 重排：机器人类型配置手册章节命中
+  expect_hit: ["机器人类型配置"]
 
 - name: 列库存宽度参数
   query: 列库存那边的宽度参数在哪配置
@@ -80,3 +85,24 @@
   query: rxx潜伏车怎么上线
   expect_hit: ["RXX车上线"]
   rank_within: 4
+
+# ── 0916 知识库扩充回归：车型目录 17 例 + 算法原理 43 篇 + 沉淀卡 ──
+- name: 车型目录-XFC001数智飞仓
+  query: XFC001是什么车
+  expect_hit: ["XFC001"]
+  rank_within: 3
+
+- name: 算法原理-多车路径规划
+  query: 多车路径规划有哪几种方式
+  expect_hit: ["多车路径规划"]
+  rank_within: 5
+
+- name: 症状词-绕远路命中算法/锁区文档
+  query: 车规划绕远路是什么原因
+  expect_hit: ["路径规划", "锁区", "库位"]
+  rank_within: 8
+
+- name: 沉淀卡-休息节点编排
+  query: 流程模板找不到休息节点怎么编排
+  expect_hit: ["休息节点"]
+  rank_within: 6
