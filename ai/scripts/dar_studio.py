@@ -11,6 +11,7 @@
 - token 只存本进程内存，不落盘；页面仅拿 username。
 """
 import asyncio
+from typing import List
 import glob
 import hashlib
 import json
@@ -317,6 +318,73 @@ async def probe(req: ProbeReq):
         raise HTTPException(502, f"探针失败: {diag}")
     result["_diag"] = diag
     return result
+
+
+class BatchProbeReq(BaseModel):
+    queries: List[str]
+    qdrant: str = "local"
+
+
+@app.post("/api/probe_batch")
+def probe_batch(req: BatchProbeReq):
+    """批量探针：每条 subprocess 跑，按命中 chunk 的 route 统计覆盖度。
+    用途：未直答问题清单 -> 批量探测 -> 模块覆盖度看板 -> 驱动症状化优先级。"""
+    if req.qdrant not in ("test", "prod", "local"):
+        raise HTTPException(400, "qdrant 取值 test|prod|local")
+    rows = []
+    for q in req.queries:
+        q = q.strip()
+        if not q:
+            continue
+        result, diag = _run_probe_sync(q, req.qdrant)
+        if not result:
+            rows.append({"q": q, "ok": False, "diag": (diag or "")[:200], "routes": [], "top_title": "", "top_route": ""})
+            continue
+        chunks = result.get("chunks", [])
+        routes = []
+        for c in chunks:
+            r = (c.get("route") or "").strip()
+            if r and r not in routes:
+                routes.append(r)
+        top = chunks[0] if chunks else {}
+        sub_domains = []
+        for c in chunks:
+            sd = (c.get("sub_domain") or c.get("route") or "").strip()
+            if sd and sd not in sub_domains:
+                sub_domains.append(sd)
+        rows.append({
+            "q": q, "ok": True, "n_chunks": len(chunks),
+            "top_title": (top.get("title") or "")[:60],
+            "top_route": top.get("route", ""),
+            "routes": routes[:6],
+            "sub_domains": sub_domains[:6],
+        })
+    # 覆盖度看板用 sub_domain 聚合（模块维度，不受 title 漂移影响）
+    sd_hits = {}
+    for r in rows:
+        for sd in r.get("sub_domains", []):
+            sd_hits[sd] = sd_hits.get(sd, 0) + 1
+    return {"rows": rows, "route_hits": sd_hits, "total": len(rows),
+            "note": "route_hits 已按 sub_domain 聚合（模块维度）"}
+
+
+def _run_probe_sync(q: str, qdrant: str):
+    """单条探针同步跑（subprocess 包装 dar_probe.py，180s 超时，避开冷启动 30s 吞域）。"""
+    import subprocess as _sp, json as _json
+    env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+    try:
+        r = _sp.run(
+            [sys.executable, os.path.join(HERE, "dar_probe.py"),
+             "--q", q, "--qdrant", qdrant],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=180, cwd=PROJ, env=env)
+    except _sp.TimeoutExpired:
+        return None, "timeout 180s"
+    out = (r.stdout or "").strip()
+    try:
+        return _json.loads(out[out.index("{"):]), (r.stderr or "")[:200]
+    except Exception:
+        return None, out[-200:] or (r.stderr or "")[-200:]
 
 
 # ── 一键回归（golden 用例集 → 测试 API / 本地检索重放）──────────
@@ -1733,6 +1801,7 @@ _KB_LABELS = {
     "product_catalog": "🏢 产品", "vda5050_protocol": "🏢 协议",
     "vehicle_errors": "🚗 车端", "vehicle_implementation": "🚗 车端",
     "vehicle_calibration": "🚗 车端", "vehicle_io": "🚗 车端", "vehicle_motion": "🚗 车端",
+    "vehicle_implementation/huarui": "🤖 华睿", "vehicle_implementation/科钛VDA5050接入": "🤖 科钛",
     "ORS": "🎫 服务号",
     "team/diagnosis_cards": "🔍 诊断卡", "USP/faq": "📋 FAQ", "USP/manual": "📖 手册",
     "USP/error_codes": "🚨 平台错误码", "USP/overview": "📘 模块文档",
@@ -1745,6 +1814,9 @@ _KB_DIR_CN = {
     "navigation": "导航原理", "standards": "国标文档",
     "product_catalog": "产品目录", "vda5050_protocol": "VDA5050 协议",
     "vehicle_errors": "车端错误码", "vehicle_implementation": "车端实施",
+    "自研车实施": "🚚 自研车",
+    "华睿VDA5050接入": "🤖 华睿",
+    "科钛VDA5050接入": "🤖 科钛",
     "vehicle_calibration": "车辆标定", "vehicle_io": "IO 定义", "vehicle_motion": "运动控制",
     "ORS": "服务号平台", "USP": "USP 平台",
     "diagnosis_cards": "诊断知识卡", "error_codes": "平台错误码", "faq": "常见问答",
@@ -1752,9 +1824,33 @@ _KB_DIR_CN = {
     "translation": "翻译对照", "troubleshooting": "故障排查树", "ui_pages": "页面导航",
     "map": "地图", "monitor": "监控", "peripheral": "外设", "robot": "机器人",
     "simulator": "仿真", "system": "系统", "task": "任务", "warehousing": "仓储",
+    "algorithm": "算法原理", "algorithms": "算法原理", "算法": "算法原理",
 }
 
 _KB_CACHE: dict = {"sig": None, "data": None}
+_KB_DISK_CACHE = os.path.join(PROJ, "ai", "kb", "kb_structure_cache.json")
+
+
+def _kb_disk_load(sig: str):
+    """磁盘缓存：进程重启后指纹没变就免 parse 秒开（首次部署/文件变更才重算）。"""
+    try:
+        if os.path.isfile(_KB_DISK_CACHE):
+            with open(_KB_DISK_CACHE, encoding="utf-8") as fh:
+                d = json.load(fh)
+            if d.get("sig") == sig and d.get("data"):
+                return d["data"]
+    except Exception:
+        pass
+    return None
+
+
+def _kb_disk_save(sig: str, data):
+    try:
+        os.makedirs(os.path.dirname(_KB_DISK_CACHE), exist_ok=True)
+        with open(_KB_DISK_CACHE, "w", encoding="utf-8") as fh:
+            json.dump({"sig": sig, "data": data}, fh, ensure_ascii=False)
+    except Exception:
+        pass
 
 
 def _kb_fingerprint() -> str:
@@ -1766,6 +1862,11 @@ def _kb_fingerprint() -> str:
         if not root.is_dir():
             continue
         for p in sorted(root.rglob("*.md")):
+            st = p.stat()
+            h.update(f"{p}|{st.st_mtime_ns}|{st.st_size};".encode())
+    sc = _KB_DIR / "sink_cards"
+    if sc.is_dir():
+        for p in sorted(sc.glob("*.md")):
             st = p.stat()
             h.update(f"{p}|{st.st_mtime_ns}|{st.st_size};".encode())
     return h.hexdigest()
@@ -1782,9 +1883,12 @@ def _kb_build() -> dict:
         ing = KBDomainIngester(domain=d)
         per_file: dict = {}
         first_title: dict = {}
+        file_brand: dict = {}
         for e in ing.parse():
             per_file[e.source_file] = per_file.get(e.source_file, 0) + 1
             first_title.setdefault(e.source_file, e.title)
+            if d == "company":
+                file_brand[e.source_file] = ing._infer_brand(e.sub_domain, e.source_file)
 
         def _file_cn(rel: str) -> str:
             """文件中文标题：优先 H1（卡片无 H1 用 frontmatter title 即 chunk 首题）。"""
@@ -1811,11 +1915,15 @@ def _kb_build() -> dict:
                 child = next((c for c in node["children"] if c["dir"] and c["name"] == seg), None)
                 if child is None:
                     child = {"name": seg, "dir": True, "chunks": 0, "files": 0, "children": [],
-                             "cn": _KB_DIR_CN.get(seg, "")}
+                             "cn": _KB_DIR_CN.get(seg, ""), "label": ""}
+                    # 深两级子目录（如 USP/算法、华睿VDA5050接入）按完整路径匹配 label
+                    deep_key = parts[0] + "/" + seg if len(parts) > 1 else seg
+                    child["label"] = _KB_DIR_CN.get(deep_key, "") or _KB_DIR_CN.get(seg, "")
                     node["children"].append(child)
                 node = child
             node["children"].append({"name": parts[-1], "dir": False,
-                                     "chunks": per_file[rel], "cn": cn_file.get(rel, "")})
+                                     "chunks": per_file[rel], "cn": cn_file.get(rel, ""),
+                                     "brand": file_brand.get(rel, ""), "path": d + "/" + rel})
 
         def _agg(n):
             if not n["dir"]:
@@ -1829,6 +1937,76 @@ def _kb_build() -> dict:
             return cs, fs
 
         root["chunks"], root["files"] = _agg(root)
+
+        def _brand_agg(n):
+            if not n["dir"]:
+                return n.get("brand", "")
+            brands = {_brand_agg(c) for c in n["children"]}
+            brands.discard("")
+            n["brand"] = brands.pop() if len(brands) == 1 else "混合"
+            return ""
+        _brand_agg(root)
+
+        # 公司域：品牌优先分组（0916 用户定稿——公司树第一层 自研车/华睿/科钛/通用/产品目录）。
+        # 纯视图层重排：文件不动、sub_domain 不动、检索零影响；文件节点带 path 供预览。
+        if d == "company":
+            file_list = []
+            def _collect_files(n, prefix):
+                if not n["dir"]:
+                    file_list.append((prefix + n["name"], n))
+                    return
+                for c in n["children"]:
+                    _collect_files(c, prefix + n["name"] + "/")
+            for c0 in root["children"]:
+                _collect_files(c0, "")
+            group_order = ["自研车", "华睿", "科钛", "通用", "产品目录"]
+            gbrand = {"自研车": "自研", "华睿": "华睿", "科钛": "科钛",
+                      "通用": "通用", "产品目录": "自研"}
+            groups = {g: {"name": g, "dir": True, "chunks": 0, "files": 0,
+                          "children": [], "cn": g, "label": "", "brand": gbrand[g],
+                          "path": ""} for g in group_order}
+            for rel, node in file_list:
+                b = node.get("brand", "通用")
+                if rel.startswith("product_catalog/"):
+                    gname, inner = "产品目录", rel[len("product_catalog/"):]
+                elif b == "华睿":
+                    gname = "华睿"
+                    inner = rel[len("vehicle_implementation/"):] if rel.startswith("vehicle_implementation/") else rel
+                    if inner.startswith("华睿VDA5050接入/"):  # 组名已表意，剥掉同名层
+                        inner = inner[len("华睿VDA5050接入/"):]
+                elif b == "科钛":
+                    gname = "科钛"
+                    inner = rel[len("vehicle_implementation/"):] if rel.startswith("vehicle_implementation/") else rel
+                    if inner.startswith("科钛VDA5050接入/"):
+                        inner = inner[len("科钛VDA5050接入/"):]
+                elif b == "自研":
+                    gname, inner = "自研车", rel
+                    if inner.startswith("vehicle_implementation/"):  # 组名已表意，剥掉冗余层
+                        inner = inner[len("vehicle_implementation/"):]
+                else:
+                    gname, inner = "通用", rel
+                node = dict(node)  # path 已是 KB 根相对（company/...），保留
+                cur = groups[gname]
+                for seg in inner.split("/")[:-1]:
+                    child = next((c for c in cur["children"] if c["dir"] and c["name"] == seg), None)
+                    if child is None:
+                        child = {"name": seg, "dir": True, "chunks": 0, "files": 0,
+                                 "children": [], "cn": _KB_DIR_CN.get(seg, ""), "path": ""}
+                        cur["children"].append(child)
+                    cur = child
+                cur["children"].append(node)
+            def _agg2(n):
+                if not n["dir"]:
+                    return n["chunks"], 1
+                cs = fs = 0
+                for c in n["children"]:
+                    cc, cf = _agg2(c)
+                    c["chunks"], c["files"] = cc, cf
+                    cs += cc
+                    fs += cf
+                return cs, fs
+            root["children"] = [groups[g] for g in group_order]
+            root["chunks"], root["files"] = _agg2(root)
         for c in root["children"]:
             if c["dir"]:
                 c["label"] = _KB_LABELS.get(f"{d}/{c['name']}", _KB_LABELS.get(c["name"], ""))
@@ -1842,24 +2020,106 @@ def _kb_build() -> dict:
                         "ingest_at": ing_at, "tree": root})
         total_files += root["files"]
         total_chunks += root["chunks"]
+
+    # 工单沉淀卡（kb/sink_cards/*.md，审核 approved 的本地留存；一卡一 chunk）
+    sink_dir = _KB_DIR / "sink_cards"
+    sink_files = sorted(sink_dir.glob("*.md")) if sink_dir.is_dir() else []
+    sink_children = []
+    for f in sink_files:
+        head = f.read_text(encoding="utf-8")[:400]
+        m = re.search(r"^# (.+)$", head, re.MULTILINE)
+        v = re.search(r"- 判定: (✅|❌|🧪)", head)
+        cn = (m.group(1).strip() if m else f.stem)
+        if v:
+            cn = v.group(1) + " " + cn
+        sink_children.append({"name": f.name, "dir": False, "chunks": 1, "cn": cn})
+    sink_node = {"name": "sink_cards", "dir": True, "chunks": len(sink_files),
+                 "files": len(sink_files), "cn": "工单沉淀卡",
+                 "label": "📥 沉淀", "children": sink_children}
+    domains.append({"domain": "sink_cards", "files": len(sink_files),
+                    "chunks": len(sink_files), "collection": "", "ingest_at": "",
+                    "tree": sink_node})
+    total_files += len(sink_files)
+    total_chunks += len(sink_files)
     return {"domains": domains, "total_files": total_files, "total_chunks": total_chunks,
             "generated_at": time.strftime("%Y-%m-%d %H:%M:%S")}
+
+
+
+_SINK_QCACHE: dict = {"v": -1, "at": 0.0}
+
+
+def _kb_sink_info() -> dict:
+    """工单沉淀卡概览：本地在库数 + 最新审核导出进度（卡片本体在生产库）。"""
+    out = {"local_cards": -1, "found": False}
+    # 本地 qdrant 是嵌入式 path 模式，每次开库数一遍要秒级——结果缓存 10 分钟
+    if time.time() - _SINK_QCACHE["at"] < 600:
+        out["local_cards"] = _SINK_QCACHE["v"]
+    else:
+        try:
+            from qdrant_client.models import Filter, FieldCondition, MatchValue
+            from ai.ingestion.base import BaseIngester
+            from ai.config import get_ai_config, get_active_collection_for
+            col = get_active_collection_for("company")
+            if col:
+                qc = BaseIngester._make_qdrant_client(get_ai_config())
+                try:
+                    flt = Filter(must=[FieldCondition(key="sub_domain",
+                                                      match=MatchValue(value="ticket_resolutions"))])
+                    _SINK_QCACHE["v"] = qc.count(col, count_filter=flt).count
+                    _SINK_QCACHE["at"] = time.time()
+                    out["local_cards"] = _SINK_QCACHE["v"]
+                    out["collection"] = col
+                finally:
+                    qc.close()
+        except Exception:
+            pass
+    try:
+        out.update(sink_status())
+    except Exception:
+        pass
+    return out
+
+
+_SINK_SYNC: dict = {"sig": None}
+
+
+def _sync_sink_if_stale():
+    """导出批次有变化时增量同步沉淀卡留存文件（打开知识库页签即自动同步）。"""
+    try:
+        if HERE not in sys.path:
+            sys.path.insert(0, HERE)
+        from sink_cards_store import exports_signature, sync_sink_cards
+        sig = exports_signature()
+        if _SINK_SYNC["sig"] != sig:
+            r = sync_sink_cards()
+            _SINK_SYNC["sig"] = sig
+            print(f"[sink-cards] 留存同步: {r}")
+    except Exception as e:
+        print(f"[sink-cards] 同步失败: {e}")
 
 
 @app.get("/api/kb_structure")
 def kb_structure(refresh: int = 0):
     """KB 目录树 + chunk 统计（复用真实 parser；源文件 mtime 没变走缓存，refresh=1 强制重算）。"""
+    _sync_sink_if_stale()
     try:
         sig = _kb_fingerprint()
     except Exception as e:
         raise HTTPException(500, f"扫描 KB 目录失败: {e}")
     if refresh or _KB_CACHE["data"] is None or _KB_CACHE["sig"] != sig:
-        try:
-            _KB_CACHE["data"] = _kb_build()
-            _KB_CACHE["sig"] = sig
-        except Exception as e:
-            raise HTTPException(500, f"解析 KB 失败: {e}")
-    return _KB_CACHE["data"]
+        data = None if refresh else _kb_disk_load(sig)  # 重启后免 parse 秒开
+        if data is None:
+            try:
+                data = _kb_build()
+                _kb_disk_save(sig, data)
+            except Exception as e:
+                raise HTTPException(500, f"解析 KB 失败: {e}")
+        _KB_CACHE["sig"] = sig
+        _KB_CACHE["data"] = data
+    data = dict(_KB_CACHE["data"])
+    data["sink"] = _kb_sink_info()
+    return data
 
 
 @app.get("/vendor/echarts.min.js")
@@ -1886,9 +2146,32 @@ def _kb_safe_path(rel: str, exts: tuple):
 
 @app.get("/api/kb_file")
 def kb_file(rel: str = ""):
-    """读单个 KB md 源文件原文（预览抽屉用）。"""
+    """读单个 KB md 源文件：渲染 html + chunk 划分（预览抽屉用）。"""
     p = _kb_safe_path(rel, (".md",))
-    return {"rel": rel.replace("\\", "/").lstrip("/"), "text": p.read_text(encoding="utf-8")}
+    rel_n = rel.replace("\\", "/").lstrip("/")
+    base = rel_n.rsplit("/", 1)[0] + "/" if "/" in rel_n else ""
+    if HERE not in sys.path:
+        sys.path.insert(0, HERE)
+    from kb_md import md_to_html
+    from urllib.parse import quote
+    text = p.read_text(encoding="utf-8")
+    html = md_to_html(text)
+    html = re.sub(r'src="(media/[^"]+)"',
+                  lambda m: 'src="/api/kb_media?rel=' + quote(base + m.group(1), safe="") + '"',
+                  html)
+    domain = rel_n.split("/", 1)[0]
+    chunks = []
+    try:
+        from ai.ingestion.parsers.kb_markdown import KBDomainIngester
+        ing = KBDomainIngester(domain=domain)
+        ing.source_paths = [p]
+        chunks = [{"title": e.title, "chars": len(e.content), "preview": e.content[:150]}
+                  for e in ing.parse()]
+    except Exception:
+        # 非域目录文件（如 sink_cards 沉淀卡）：整文件即一块
+        chunks = [{"title": p.name + "（整卡一块）", "chars": len(text),
+                   "preview": text[:150]}]
+    return {"rel": rel_n, "html": html, "chunks": chunks}
 
 
 _IMG_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
@@ -1910,4 +2193,7 @@ def index():
 
 if __name__ == "__main__":
     print(f"AI 质量工作台 → http://127.0.0.1:{PORT}")
+    # 预热：本地 qdrant 数沉淀卡（嵌入式库首次打开 ~3s）挪到启动时后台做，
+    # 否则知识库页签首次打开会被这 3s 卡住
+    threading.Thread(target=_kb_sink_info, daemon=True).start()
     uvicorn.run(app, host="127.0.0.1", port=PORT, log_level="warning")

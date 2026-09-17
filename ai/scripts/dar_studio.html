@@ -352,6 +352,13 @@ label.f{display:flex;flex-direction:column;gap:5px;font-size:12px;color:var(--in
 .prow{border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-bottom:8px}
 .prow .rt{display:flex;gap:8px;align-items:center;margin-bottom:5px;flex-wrap:wrap}
 .prow .route{font-size:11.5px;background:var(--brand-soft);color:var(--brand);border-radius:5px;padding:2px 8px}
+.prow .route.k0{background:#fff4e5;color:#c2410c}
+.prow .route.k1{background:#f3e8ff;color:#7c3aed}
+.prow .route.k2{background:#fee2e2;color:#b91c1c}
+.prow .route.k3{background:#e0f2fe;color:#0369a1}
+.prow .route.k4{background:#dcfce7;color:#15803d}
+.prow .route.k5{background:#fef9c3;color:#a16207}
+.prow .route.k6{background:#f1f5f9;color:#64748b}
 .prow .ttl{font-size:12.5px;font-weight:600}
 .prow .txt{font-size:12.5px;color:var(--ink2);line-height:1.7;word-break:break-word}
 .prow img{max-width:200px;border-radius:6px;margin-top:6px}
@@ -394,7 +401,7 @@ kbd{background:#f1f5f9;border:1px solid var(--line);border-bottom-width:2px;bord
 /* ── 页签4 知识库 ── */
 .kbstats{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px}
 .kbdom{flex:1;min-width:168px;background:#fff;border:1px solid var(--line);border-radius:10px;padding:10px 14px}
-.kbdom .dn{font-size:13px;font-weight:650;display:flex;align-items:center;gap:6px}
+.kbdom .dn{font-size:13px;font-weight:650;display:flex;align-items:center;gap:6px;white-space:nowrap}
 .kbdom .dn .mono{font-size:11px;color:var(--ink3);font-weight:400}
 .kbdom .dn2{font-size:11.5px;color:var(--ink3);margin-top:4px;line-height:1.7}
 .kbdom .dn2 b{color:var(--ink2);font-variant-numeric:tabular-nums}
@@ -427,10 +434,10 @@ kbd{background:#f1f5f9;border:1px solid var(--line);border-bottom-width:2px;bord
 .kbgraph:active{cursor:grabbing}
 .kbfiles-tog{display:inline-flex;align-items:center;gap:5px;font-size:12.5px;color:var(--ink2);cursor:pointer;user-select:none}
 .kbfiles-tog input{margin:0}
-.kbprev{display:none;position:fixed;right:0;top:0;bottom:0;width:min(720px,62vw);
+#kbprev{display:none;position:fixed;right:0;top:0;bottom:0;width:min(720px,62vw);
   background:#fff;box-shadow:-6px 0 24px rgba(15,23,42,.18);z-index:60;
   flex-direction:column}
-.kbprev.on{display:flex}
+#kbprev.on{display:flex}
 .kbprev-hd{display:flex;align-items:center;gap:10px;padding:12px 16px;
   border-bottom:1px solid var(--line);flex-shrink:0}
 .kbprev-hd b{font-size:14px}
@@ -450,6 +457,17 @@ kbd{background:#f1f5f9;border:1px solid var(--line);border-bottom-width:2px;bord
 .kbprev-body img{max-width:100%;border:1px solid var(--line);border-radius:8px;margin:6px 0}
 .kbprev-body .kbmd-imgfail{color:var(--ink3);font-size:11.5px;border:1px dashed var(--line);border-radius:6px;padding:2px 8px}
 .fn.en{color:var(--ink3);font-size:10.5px;margin-left:6px;font-weight:400}
+.kbchint{font-size:12px;color:var(--ink3);margin-bottom:10px}
+.lb.brand-自研{background:#fff4e5;color:#c2410c}
+.lb.brand-华睿{background:#e0f2fe;color:#0369a1}
+.lb.brand-科钛{background:#f3e8ff;color:#7c3aed}
+.lb.brand-睿芯行{background:#dcfce7;color:#15803d}
+.kbc{border:1px solid var(--line);border-radius:10px;padding:10px 14px;margin-bottom:8px;background:#fff}
+.kbc-hd{display:flex;align-items:baseline;gap:8px;font-size:13px}
+.kbc-hd b{color:var(--brand);flex-shrink:0}
+.kbc-hd .kc{margin-left:auto;flex-shrink:0}
+.kbc-pv{font-size:12px;color:var(--ink3);margin-top:5px;line-height:1.7;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 </style>
 </head>
 <body>
@@ -616,16 +634,34 @@ kbd{background:#f1f5f9;border:1px solid var(--line);border-bottom-width:2px;bord
       <!-- 检索探针 -->
       <div id="pane-probe" style="display:none">
         <div class="card" style="display:flex;gap:10px;align-items:flex-end">
-          <label class="f" style="flex:1">问题<input type="text" id="f_pq" placeholder="如：AGV 怎么上线部署"></label>
+          <label class="f" style="flex:1">问题<input type="text" id="f_pq" placeholder="输入问题，或点下面的示例直接试"></label>
           <label class="f">知识库
             <select id="f_psrc"><option value="test">测试环境（默认）</option><option value="prod">生产（只读）</option><option value="local">本地</option></select></label>
           <button class="btn pri" id="probebtn">检索</button>
         </div>
+        <div class="chips" id="probesamples" style="margin:-2px 0 10px"></div>
         <div id="probeout"><div class="card"><div class="empty">输入问题查看知识库命中</div></div></div>
+        <details class="card" id="batchcard" style="margin-top:14px">
+          <summary style="cursor:pointer;font-size:13px;font-weight:600;color:var(--ink2)">
+            批量探针 · 检索覆盖度看板
+            <span class="hint" id="batchhint" style="font-weight:400">每行一题，提交后输出每条命中的模块分布</span>
+          </summary>
+          <div style="margin-top:10px;display:flex;gap:8px;align-items:flex-end">
+            <label class="f" style="flex:1">问题列表（每行一条）
+              <textarea id="f_pbatch" rows="6" placeholder="例如：&#10;车规划绕远路&#10;不规划路径&#10;华睿对接VDA5050 报文格式" style="width:100%;font-family:inherit;padding:6px 8px;border:1px solid var(--line);border-radius:6px"></textarea>
+            </label>
+          </div>
+          <div style="margin-top:8px;display:flex;gap:8px">
+            <button class="btn pri" id="batchbtn">跑批量探针</button>
+            <span style="flex:1"></span>
+            <span class="badge dim" id="batchstat">未运行</span>
+          </div>
+          <div id="batchout" style="margin-top:10px"></div>
+        </details>
       </div>
     </section>
 
-    <!-- ══ 页签3 工单沉淀 ══ -->
+    <!-- 页签3 工单沉淀 -->
     <section class="view" id="view-sink">
       <h2 class="pg">工单沉淀审核</h2>
       <p class="sub">closed 工单 → LLM 提炼卡（pending 不可检索）→ 人工判定 → 应用。每周三步：拉取 → 审核 → 应用（应用是<b>生产写</b>：放行卡即刻可检索，驳回/测试单删点+终态标记）。</p>
@@ -664,7 +700,6 @@ kbd{background:#f1f5f9;border:1px solid var(--line);border-bottom-width:2px;bord
         <span style="flex:1"></span>
         <button class="btn sm" id="kbrefresh" title="忽略缓存强制重算 chunk 统计">强制重算</button>
       </div>
-      <p class="sub">源目录 <span class="mono">D:\Code\OpenRobotService_Data\kb</span> → KBDomainIngester 按文件名路由切分 → Qdrant 时间戳集合 → 切指针。chunk 数由真实 parser 现算，源文件有改动自动重算；标签 = 检索侧 _sub_labels 映射。</p>
 
       <div class="kbstats" id="kbdoms"></div>
 
@@ -684,11 +719,15 @@ kbd{background:#f1f5f9;border:1px solid var(--line);border-bottom-width:2px;bord
     </section>
   </main>
 </div>
-<div id="kbprev" style="display:none">
+<div id="kbprev">
   <div class="kbprev-hd">
     <b id="kbprev-title"></b>
     <span class="mono" id="kbprev-en"></span>
     <span style="flex:1"></span>
+    <div class="seg" id="kbprev-tabs">
+      <button data-t="doc" class="on">文档</button>
+      <button data-t="chunks">Chunk 划分</button>
+    </div>
     <button class="btn sm" id="kbprev-close">关闭 ✕</button>
   </div>
   <div class="kbprev-body" id="kbprev-body"></div>
@@ -1159,6 +1198,8 @@ loadSink();
 
 /* ══ 页签4 知识库 ══ */
 let kbData = null;
+const KB_DOMAIN_NAMES = {industry:"📐 行业知识", company:"🏢 公司/车端", team:"🧭 团队知识",
+                project:"📦 项目", personal:"👤 个人", sink_cards:"📥 工单沉淀卡"};
 
 async function loadKB(refresh){
   try{
@@ -1168,15 +1209,27 @@ async function loadKB(refresh){
     kbData = j;
     $("#kbstat").textContent =
       `${j.total_files} 文件 · ${j.total_chunks} chunks · 生成于 ${j.generated_at}`;
-    const DN = {industry:"📐 行业知识", company:"🏢 公司/车端", team:"🧭 团队知识",
-                project:"📦 项目", personal:"👤 个人"};
-    $("#kbdoms").innerHTML = j.domains.map(d=>`
-      <div class="kbdom ${d.files ? "" : "empty"}">
-        <div class="dn">${DN[d.domain] || d.domain}<span class="mono">${d.domain}</span></div>
-        <div class="dn2"><b>${d.files}</b> 文件 · <b>${d.chunks}</b> chunks
+    $("#kbdoms").innerHTML = j.domains.filter(d=>d.domain !== "sink_cards").map(d=>`
+      <div class="kbdom ${d.files ? "" : "empty"}" data-dom="${d.domain}" style="cursor:pointer" title="点击查看该库全部文档">
+        <div class="dn">${KB_DOMAIN_NAMES[d.domain] || d.domain}</div>
+        <div class="dn2"><span class="mono">${d.domain}</span> · <b>${d.files}</b> 文件 · <b>${d.chunks}</b> chunks
           ${d.collection ? `<br>集合 <span class="mono">${esc(d.collection)}</span>${d.ingest_at ? ` · 入库 ${d.ingest_at}` : ""}` : "<br>暂无内容/集合"}
         </div>
       </div>`).join("");
+    $("#kbdoms").onclick = e=>{
+      const c = e.target.closest("[data-dom]");
+      if(c && kbData) kbOpenDomainIndex(c.dataset.dom);
+    };
+    // 工单沉淀卡：本地留存篇数，点击抽屉直接看全部内容
+    const sk = j.sink || {};
+    const sd = (j.domains || []).find(x=>x.domain === "sink_cards");
+    $("#kbdoms").insertAdjacentHTML("beforeend", `
+      <div class="kbdom" id="kbsink" data-dom="sink_cards" style="cursor:pointer" title="点击查看全部沉淀卡内容">
+        <div class="dn">📥 工单沉淀卡</div>
+        <div class="dn2"><span class="mono">ticket_resolutions</span> · 本地留存 <b>${sd ? sd.files : 0}</b> 篇 · 点击查看全部
+          ${sk.found ? `<br>最新审核 ${esc(sk.dir || "")} · 已判 ${sk.judged}/${sk.total}（通过 ${sk.approved}）` : "<br>本地无审核导出"}
+        </div>
+      </div>`);
     kbSetMode(kbMode);  // 按当前模式渲染（默认树图；数据就绪后再渲染）
   }catch(e){
     $("#kbtree").innerHTML = `<div class="empty">加载失败：${esc(String(e.message || e))}</div>`;
@@ -1194,15 +1247,18 @@ function kbRender(n, q, depth, prefix){
     if(q && !inner) return null;
     const open = q || depth < 2 || (n.files || 0) <= 30 ? " open" : "";
     const lbl = n.label ? ` <span class="lb">${n.label}</span>` : "";
+    const btag = n.brand && n.brand !== "混合" && n.brand !== "通用"
+      ? ` <span class="lb brand-${n.brand}">${n.brand}</span>` : "";
     return `<details${open}><summary><span class="tw">▶</span><span class="fo">📁</span>
-      <span class="kn">${esc(disp)}</span>${n.cn && n.cn !== n.name ? `<span class="fn en">${esc(n.name)}</span>` : ""}${lbl}
+      <span class="kn">${esc(disp)}</span>${btag}${lbl}
       <span class="kc">${n.chunks} chunks · ${n.files} 文件</span></summary>
       <div class="kids">${inner}</div></details>`;
   }
   if(q && !(n.name.toLowerCase().includes(q) || disp.toLowerCase().includes(q))) return null;
-  return `<div class="file" onclick="openKBPreview('${esc(prefix + n.name)}','${esc(disp).replace(/'/g,"&#39;")}')"
+  const fb = n.brand && n.brand !== "通用" ? ` <span class="lb brand-${n.brand}">${n.brand}</span>` : "";
+  return `<div class="file" onclick="openKBPreview('${esc(n.path || (prefix + n.name))}','${esc(disp).replace(/'/g,"&#39;")}')"
     style="cursor:pointer" title="点击预览"><span class="fo">📄</span>
-    <span class="fn">${esc(disp)}</span>${n.cn ? `<span class="fn en">${esc(n.name)}</span>` : ""}
+    <span class="fn">${esc(disp)}</span>${fb}${n.cn ? `<span class="fn en">${esc(n.name)}</span>` : ""}
     <span class="kc">${n.chunks}</span></div>`;
 }
 
@@ -1225,7 +1281,7 @@ $("#kbfilter").oninput = ()=>{ if(kbData) renderKBTree(); };
 /* ── 知识库树图（ECharts）── */
 let kbChart = null, kbMode = "graph", kbFilesMode = false;
 const KB_COLORS = {industry:"#7c5cbf", company:"#1f7a5c", team:"#1d6fb8",
-                   project:"#98680b", personal:"#98680b"};
+                   project:"#98680b", personal:"#98680b", sink_cards:"#0d9488"};
 
 function kbToEcharts(n, depth, domain, prefix){
   prefix = prefix || "";
@@ -1235,10 +1291,10 @@ function kbToEcharts(n, depth, domain, prefix){
     name: disp,
     en: n.name,
     cn: n.cn || "",
-    rel: prefix + n.name,
+    rel: n.path || (prefix + n.name),
     dir: !!n.dir,
     value: n.chunks,
-    collapsed: n.dir && depth >= 1 && !(kbFilesMode && (n.files||0) <= 30),
+    collapsed: n.dir && !(kbFilesMode && depth === 1 && (n.files||0) <= 30),
     itemStyle: n.dir
       ? {color: isDom ? (KB_COLORS[domain] || "#64748b") : "#64748b", borderWidth: isDom ? 2 : 1}
       : {color: KB_COLORS[domain] || "#64748b", opacity: .45},
@@ -1268,6 +1324,11 @@ function renderKBGraph(){
       return node;
     })
   };
+  // 叶子数决定画布高度：标签间距足够，不放大也不叠字
+  const leafCount = n => (!n.dir || n.collapsed || !(n.children||[]).length) ? 1
+    : n.children.reduce((s,c)=>s+leafCount(c), 0);
+  $("#kbgraph").style.height =
+    Math.max(560, Math.min(2600, (leafCount(root) + 2) * 34)) + "px";
   if(kbChart){ kbChart.dispose(); kbChart = null; }
   kbChart = echarts.init($("#kbgraph"));
   kbChart.setOption({
@@ -1287,7 +1348,7 @@ function renderKBGraph(){
               overflow:"truncate", width:130}},
       expandAndCollapse: true,
       animationDuration: 280, animationDurationUpdate: 280,
-      top:"2%", left:"2%", right:"14%", bottom:"2%",
+      top:"2%", left:"3%", right:"3%", bottom:"16%",
     }],
     toolbox: {feature:{saveAsImage:{name:"kb-结构图", pixelRatio:2, title:"导出图片"}},
               iconStyle:{borderColor:"#94a3b8"}},
@@ -1316,6 +1377,71 @@ $("#kbmode").onclick = e=>{
   if(b) kbSetMode(b.dataset.m);
 };
 $("#kbgraphfiles").onchange = ()=>{ kbFilesMode = $("#kbgraphfiles").checked; renderKBGraph(); };
+
+/* ── 知识库预览抽屉（文档 + Chunk 划分）── */
+let kbPrevData = null;
+async function openKBPreview(rel, title){
+  $("#kbprev").classList.add("on");
+  $("#kbprev-tabs").style.visibility = "";
+  $("#kbprev-title").textContent = title || rel;
+  $("#kbprev-en").textContent = rel;
+  $("#kbprev-body").innerHTML = '<div class="empty">加载中…</div>';
+  kbSetPrevTab("doc");
+  try{
+    const r = await fetch("/api/kb_file?rel=" + encodeURIComponent(rel));
+    const j = await r.json();
+    if(!r.ok) throw new Error(j.detail || ("HTTP " + r.status));
+    kbPrevData = j;
+    $("#kbprev-body").innerHTML = j.html;
+    $("#kbprev-body").scrollTop = 0;
+  }catch(e){
+    $("#kbprev-body").innerHTML = '<div class="empty">加载失败：' + esc(String(e.message || e)) + '</div>';
+  }
+}
+function kbSetPrevTab(t){
+  document.querySelectorAll("#kbprev-tabs button").forEach(b=>b.classList.toggle("on", b.dataset.t === t));
+  if(t !== "chunks" || !kbPrevData) return;
+  const cs = kbPrevData.chunks || [];
+  $("#kbprev-body").innerHTML = cs.length
+    ? '<div class="kbchint">' + cs.length + ' chunks（与检索库一致，由 KBDomainIngester 切分）</div>' +
+      cs.map((c,i)=>'<div class="kbc"><div class="kbc-hd"><b>#' + i + '</b> ' + esc(c.title) +
+        '<span class="kc">' + c.chars + ' 字</span></div>' +
+        '<div class="kbc-pv">' + esc(c.preview) + '…</div></div>').join("")
+    : '<div class="empty">无 chunk 信息</div>';
+  $("#kbprev-body").scrollTop = 0;
+}
+$("#kbprev-tabs").onclick = e=>{
+  const b = e.target.closest("button[data-t]");
+  if(b && b.dataset.t === "chunks") kbSetPrevTab("chunks");
+  else if(b) { kbPrevData && ($("#kbprev-body").innerHTML = kbPrevData.html); }
+};
+$("#kbprev-close").onclick = ()=>$("#kbprev").classList.remove("on");
+
+function kbOpenDomainIndex(domain){
+  const d = (kbData.domains || []).find(x=>x.domain === domain);
+  const files = [];
+  (function walk(n, prefix){
+    for(const c of (n.children || [])){
+      if(c.dir) walk(c, prefix + c.name + "/");
+      else files.push({name: c.name, cn: c.cn || "", rel: c.path || (prefix + c.name),
+                       chunks: c.chunks || 1});
+    }
+  })(d && d.tree || {}, domain + "/");
+  $("#kbprev").classList.add("on");
+  $("#kbprev-tabs").style.visibility = "hidden";
+  $("#kbprev-title").textContent = (KB_DOMAIN_NAMES[domain] || domain) + " · 文档清单";
+  $("#kbprev-en").textContent = files.length + " 篇 · 点击条目查看内容";
+  kbPrevData = null;
+  $("#kbprev-body").innerHTML = files.length
+    ? files.map(f=>{
+        const rel = esc(f.rel).replace(/'/g, "&#39;");
+        const tt = esc(f.cn || f.name).replace(/'/g, "&#39;");
+        return `<div class="kbc" style="cursor:pointer" onclick="openKBPreview('${rel}','${tt}')">
+          <div class="kbc-hd"><b>📄</b><span>${esc(f.cn || f.name)}</span><span class="kc">${f.chunks} chunk</span></div>
+        </div>`;
+      }).join("")
+    : '<div class="empty">该知识库暂无内容</div>';
+}
 
 /* ══ 页签2 在线测试 ══ */
 function setConn(user){
@@ -1590,6 +1716,55 @@ function ticketCard(msgEl, result){
 }
 
 /* 检索探针 */
+$("#batchbtn").onclick = async ()=>{
+  const txt = $("#f_pbatch").value.trim();
+  if(!txt) return;
+  const queries = txt.split(/\r?\n/).map(s=>s.trim()).filter(Boolean);
+  if(!queries.length) return;
+  const b = $("#batchbtn"); b.disabled = true; b.textContent = "跑批量探针中…";
+  $("#batchstat").textContent = "运行中（每条≤180s，2 条=约 1 分钟）";
+  $("#batchout").innerHTML = "";
+  try{
+    const r = await fetch("/api/probe_batch", {method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({queries, qdrant: $("#f_psrc").value})});
+    const j = await r.json();
+    if(!r.ok) throw new Error(j.detail || "HTTP " + r.status);
+    renderBatchDashboard(j);
+  }catch(e){
+    $("#batchout").innerHTML = '<div class="empty" style="color:var(--danger)">'+esc(String(e.message || e))+'</div>';
+  }
+  b.disabled = false; b.textContent = "跑批量探针";
+  $("#batchstat").textContent = "完成";
+};
+function renderBatchDashboard(j){
+  const out = $("#batchout");
+  const rows = j.rows || [];
+  // 覆盖度看板：每个 route 命中多少 query
+  const rh = j.route_hits || {};
+  const rhKeys = Object.keys(rh).sort((a,b)=>rh[b]-rh[a]);
+  const cover = rhKeys.length === 0 ? "" :
+    rhKeys.map(rt=>`<div class="chip" style="background:var(--brand-soft);color:var(--brand)">${esc(rt)} <b>${rh[rt]}</b></div>`).join("");
+  const tbody = rows.map(r=>{
+    if(!r.ok){
+      return `<tr><td colspan="4" style="color:var(--danger)">✗ ${esc(r.q)}<br><span class="hint">${esc(r.diag||"")}</span></td></tr>`;
+    }
+    const sds = r.sub_domains || [];
+    const chips = sds.length
+      ? sds.map(sd=>`<span class="chip">${esc(KB_DOMAIN_NAMES[sd] || sd)}</span>`).join(" ")
+      : '<span class="hint">无命中</span>';
+    return `<tr><td style="width:34%">${esc(r.q)}</td>
+      <td style="width:18%">${chips}</td>
+      <td style="width:34%">${esc(r.top_title)}</td>
+      <td style="width:14%;text-align:right">${r.n_chunks}</td></tr>`;
+  }).join("");
+  out.innerHTML = `
+    <div style="margin-bottom:8px"><b>覆盖度</b>（${rows.length} 题命中分布）：${cover || '<span class="hint">无</span>'}</div>
+    <table style="width:100%;font-size:12.5px;border-collapse:collapse">
+      <tr style="background:var(--bg)"><th style="text-align:left;padding:6px">问题</th><th style="text-align:left;padding:6px">命中模块</th><th style="text-align:left;padding:6px">首块标题</th><th style="text-align:right;padding:6px">块数</th></tr>
+      ${tbody}
+    </table>`;
+}
+
 $("#probebtn").onclick = async ()=>{
   const q = $("#f_pq").value.trim(); if(!q) return;
   const b = $("#probebtn");
@@ -1614,11 +1789,35 @@ function renderProbe(j){
     <span>命中：<b>${j.chunks?.length || 0} 块</b></span><span>上下文：<b>${j.ctx_len || 0} 字</b></span>
     ${j.pointers?.company ? `<span class="mono" style="font-size:11px;color:var(--ink3)">${esc(j.pointers.company)} · ${esc(j.pointers.team||"")}</span>` : ""}</div>`;
   const rows = (j.chunks || []).map(c=>`
-    <div class="prow"><div class="rt"><span class="route">${esc(c.route)}</span>
+    <div class="prow"><div class="rt"><span class="route ${probeRouteCls(c.route)}">${esc(c.route)}</span>
     ${c.title ? `<span class="ttl">${esc(c.title)}</span>` : ""}</div>
     <div class="txt">${esc(c.text)}</div></div>`).join("");
   out.innerHTML = heads + (rows || '<div class="card"><div class="empty">无命中</div></div>');
 }
+
+/* ── 检索示例（覆盖当前知识库各知识类型）── */
+function probeRouteCls(route){
+  const e = [...(route || "").trim()][0] || "";
+  const map = {"🚗":0,"🚙":0,"🚚":0, "🔍":1,"🏭":1, "🚨":2,
+               "📋":3,"📖":3,"🧭":3, "📘":4, "🌐":5,"🔤":5};
+  return "k" + (map[e] !== undefined ? map[e] : 0);
+}
+const PROBE_SAMPLES = [
+  "XNA 双侧取放货换向高度怎么设置",
+  "离线建图录包有什么要求",
+  "倒车时定位横向跳变怎么排查",
+  "错误码 30001 是什么意思",
+  "应用地图失败怎么排查",
+  "怎么配置库位类型",
+];
+$("#probesamples").innerHTML =
+  PROBE_SAMPLES.map(s=>`<span class="chip">${esc(s)}</span>`).join("");
+$("#probesamples").onclick = e=>{
+  const c = e.target.closest(".chip");
+  if(!c) return;
+  $("#f_pq").value = c.textContent;
+  $("#probebtn").click();
+};
 
 // ═══ 漏斗走查（ORS-#821）：层点击 → 段明细 → 行内改判 → 键盘流 ═══
 const FL = [
