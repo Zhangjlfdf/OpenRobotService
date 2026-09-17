@@ -1825,6 +1825,7 @@ _KB_DIR_CN = {
     "map": "地图", "monitor": "监控", "peripheral": "外设", "robot": "机器人",
     "simulator": "仿真", "system": "系统", "task": "任务", "warehousing": "仓储",
     "algorithm": "算法原理", "algorithms": "算法原理", "算法": "算法原理",
+    "xmover": "🚚 自研车", "huarui": "🤖 华睿", "ksec": "🤖 科钛", "common": "🧩 通用",
 }
 
 _KB_CACHE: dict = {"sig": None, "data": None}
