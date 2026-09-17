@@ -7,7 +7,7 @@ import allure
 import pytest
 
 from automation.config.models import ApiConfig
-from automation.src.assertions import assert_dict_contains_subset, assert_status_code
+from automation.src.assertions import assert_dict_contains_subset, assert_status_code, assert_task_row, assert_task_status
 from automation.src.assertions.report import flush_assert_attachment
 from automation.src.clients.api_client import ApiClient
 
@@ -70,9 +70,14 @@ async def _call(
 class TestTicketLifecycleReal:
     @allure.story("真实后端工单生命周期")
     @allure.title("真实后端：U1建单，U2处理并已解决，U1关闭")
-    async def test_ticket_lifecycle_real(self, real_lifecycle_client):
+    async def test_ticket_lifecycle_real(self, real_lifecycle_client, request):
         """全链路：真实后端工单生命周期，AI 问答段不纳入本用例。"""
         marker = f"AUTO-LIFECYCLE-{uuid.uuid4().hex[:8]}"
+        mysql_client = (
+            request.getfixturevalue("mysql_client")
+            if os.getenv("REAL_DB_ASSERTIONS", "1") == "1"
+            else None
+        )
         u1_headers = await _login(real_lifecycle_client, *_U1)
         u2_headers = await _login(real_lifecycle_client, *_U2)
         ticket_id = None
@@ -97,6 +102,12 @@ class TestTicketLifecycleReal:
             ticket_id = created.json()["id"]
             created_json = created.json()
             assert created_json.get("created_by") == _U1[0] or created_json.get("created_by_name") == "自动化提单用户"
+            if mysql_client is not None:
+                assert_task_row(
+                    mysql_client,
+                    ticket_id,
+                    {"title": marker, "status": "new", "project_id": "Leo_test"},
+                )
 
             await _call(
                 real_lifecycle_client,
@@ -178,6 +189,8 @@ class TestTicketLifecycleReal:
                 json={"status": "resolved", "resolution_summary": "真实后端生命周期自动化验证完成"},
                 expected_fields={"status": "resolved"},
             )
+            if mysql_client is not None:
+                assert_task_status(mysql_client, ticket_id, "resolved")
 
             await _call(
                 real_lifecycle_client,
@@ -199,6 +212,8 @@ class TestTicketLifecycleReal:
                 json={"status": "closed"},
                 expected_fields={"status": "closed"},
             )
+            if mysql_client is not None:
+                assert_task_status(mysql_client, ticket_id, "closed")
         finally:
             if ticket_id is not None:
                 with allure.step("清理测试工单"):
