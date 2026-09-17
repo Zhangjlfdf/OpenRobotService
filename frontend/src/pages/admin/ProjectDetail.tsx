@@ -200,7 +200,7 @@ export default function ProjectDetail() {
       );
       setProject((prev) => (prev ? { ...prev, ext_info: res.ext_info ?? prev.ext_info } : prev));
       setSummaryExpanded(true);
-      Toast({ message: 'AI 摘要已生成并保存', theme: 'success' });
+      Toast({ message: '摘要已生成并保存', theme: 'success' });
     } catch (err) {
       Toast({ message: `生成失败: ${err instanceof Error ? err.message : ''}`, theme: 'error' });
     } finally {
@@ -399,11 +399,11 @@ export default function ProjectDetail() {
           <div className="mac-ai">
             <div className="mac-ai__head">
               <span className="mac-ai__icon"><MacSparkles size={14} /></span>
-              <span className="mac-ai__title">AI 项目摘要</span>
+              <span className="mac-ai__title">项目摘要</span>
               <div className="mac-ai__head-right">
                 {!isNew && (
                   <button type="button" className="mac-ai__gen" disabled={aiGenerating} onClick={generateAiSummary}>
-                    {aiGenerating ? '生成中...' : aiSummary ? '重新生成' : 'AI 生成'}
+                    {aiGenerating ? '生成中...' : aiSummary ? '重新生成' : '点击生成'}
                   </button>
                 )}
                 <button type="button" className="mac-ai__toggle" onClick={() => setSummaryExpanded((value) => !value)}>

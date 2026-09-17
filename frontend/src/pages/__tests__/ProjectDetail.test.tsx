@@ -258,7 +258,7 @@ describe('ProjectDetail（AI 项目摘要）', () => {
     fireEvent.click(screen.getByText('重新生成'));
     expect(await screen.findByText('全新的摘要内容')).toBeTruthy();
     expect(mockCreateRequest).toHaveBeenLastCalledWith(...genCall);
-    expect(mockToast).toHaveBeenCalledWith({ message: 'AI 摘要已生成并保存', theme: 'success' });
+    expect(mockToast).toHaveBeenCalledWith({ message: '摘要已生成并保存', theme: 'success' });
   });
 
   it('Markdown 摘要渲染为标题 / 列表 / 加粗结构', async () => {
@@ -278,7 +278,7 @@ describe('ProjectDetail（AI 项目摘要）', () => {
     expect(within(mdBox).getAllByRole('listitem')).toHaveLength(2);
   });
 
-  it('无摘要：按钮为「AI 生成」，生成中禁用并显示加载文案，完成后展示摘要', async () => {
+  it('无摘要：按钮为「点击生成」，生成中禁用并显示加载文案，完成后展示摘要', async () => {
     // 用受控 Promise 卡住生成请求，观察按钮的「生成中...」禁用态
     let resolvePost: (value: unknown) => void = () => {};
     mockCreateRequest
@@ -286,7 +286,7 @@ describe('ProjectDetail（AI 项目摘要）', () => {
       .mockImplementationOnce(() => new Promise((resolve) => { resolvePost = resolve; }));
 
     renderView();
-    const generateBtn = await screen.findByRole('button', { name: 'AI 生成' });
+    const generateBtn = await screen.findByRole('button', { name: '点击生成' });
     expect(document.querySelector('.mac-ai__body')?.textContent).toBe('暂无数据');
 
     fireEvent.click(generateBtn);
@@ -300,6 +300,6 @@ describe('ProjectDetail（AI 项目摘要）', () => {
     expect(screen.getByText('第一次生成的摘要')).toBeTruthy();
     // 生成完成后按钮变为「重新生成」
     expect(screen.getByRole('button', { name: '重新生成' })).toBeTruthy();
-    expect(mockToast).toHaveBeenCalledWith({ message: 'AI 摘要已生成并保存', theme: 'success' });
+    expect(mockToast).toHaveBeenCalledWith({ message: '摘要已生成并保存', theme: 'success' });
   });
 });
