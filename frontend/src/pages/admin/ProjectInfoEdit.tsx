@@ -72,6 +72,9 @@ const HISTORY_ACTION_NAMES: Record<string, string> = {
   sync: '模板同步',
 };
 
+/** 接口错误 → 提示文案（各写操作共用） */
+const errMsg = (err: unknown) => (err instanceof Error && err.message ? err.message : '请稍后重试');
+
 export default function ProjectInfoEdit() {
   const { id = '' } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -145,10 +148,10 @@ export default function ProjectInfoEdit() {
   }, [nodes]);
 
   const roots = byParent.get(null) ?? [];
+  /** 树是否为空（自动初始化只认这一条布尔，避免把每次渲染都换身份的数组放进 effect 依赖） */
+  const treeEmpty = roots.length === 0;
   // 完整度只统计当前看得见的字段（区域联动隐藏的字段不该计入「缺 N」）
   const completeness = useMemo(() => computeInfoCompleteness(visibleInfoNodes(nodes)), [nodes]);
-
-  const errMsg = (err: unknown) => (err instanceof Error && err.message ? err.message : '请稍后重试');
 
   // 编辑历史（后端每个节点操作都有记录）：拉「各节点最新记录时间」对比本机已读水位，
   // 算哪些节点的历史按钮要出小红点。水位只在「点开该节点历史」时推进——包括自己刚保存的改动，
@@ -409,7 +412,7 @@ export default function ProjectInfoEdit() {
   // —— 按预设模板初始化（空树项目；模板在后端 project_type → project_templates/*.yaml） ——
 
   /** 空树项目「按预设模板初始化」：模板与新建项目同一份定义，前端只触发，不再自带一份结构副本 */
-  const initFromTemplate = async () => {
+  const initFromTemplate = useCallback(async () => {
     if (!id) return;
     setImporting(true);
     try {
@@ -427,7 +430,19 @@ export default function ProjectInfoEdit() {
     } finally {
       setImporting(false);
     }
-  };
+  }, [id, syncHistoryMeta]);
+
+  // 新项目（信息树为空）进页即自动初始化，不再要求用户点「按预设模板初始化」。
+  // 接口是「替换式导入」（先清空后写入），重复触发会重复建树：按项目 id 只自动跑一次
+  // （StrictMode 双跑 effect、初始化后重读树导致的依赖变化都靠这个 ref 挡住）；
+  // 自动初始化失败/模板为空时停在空态，按钮保留作手动重试。
+  const autoInitRef = useRef('');
+  useEffect(() => {
+    if (loading || loadError || !id || !treeEmpty) return;
+    if (autoInitRef.current === id) return;
+    autoInitRef.current = id;
+    void initFromTemplate();
+  }, [loading, loadError, id, treeEmpty, initFromTemplate]);
 
   // 小红点要显示在哪些行上：有未读记录的节点本身 + 它所在的一级节点（根节点）。
   // 根节点上的点是「这个一级标签下有你没看过的变动」的汇总，判定与消失都跟子节点同一套水位：
@@ -509,6 +524,8 @@ export default function ProjectInfoEdit() {
                 重新加载
               </button>
             </div>
+          ) : roots.length === 0 && importing ? (
+            <div className="mac-info__state">正在按预设模板初始化…</div>
           ) : roots.length === 0 ? (
             <div className="mac-info__state">
               还没有信息节点，点击右上角「新标签」创建，或按预设模板初始化
@@ -517,10 +534,9 @@ export default function ProjectInfoEdit() {
                 type="button"
                 className="mac-btn mac-btn--outline"
                 style={{ marginTop: 12 }}
-                disabled={importing}
                 onClick={() => void initFromTemplate()}
               >
-                {importing ? '初始化中…' : '按预设模板初始化'}
+                按预设模板初始化
               </button>
             </div>
           ) : (

@@ -114,6 +114,8 @@ describe('ProjectInfoEdit（信息树编辑页）', () => {
     renderEdit();
     expect(fetchInfoTree).toHaveBeenCalledWith('P1');
     expect(await screen.findByText('基础信息')).toBeTruthy();
+    // 有节点的项目不会被自动初始化（接口是替换式导入，误触发会重建整棵树）
+    expect(importInfoTemplateApi).not.toHaveBeenCalled();
     expect(screen.getByText('客户信息')).toBeTruthy();
     expect((screen.getByLabelText('客户信息内容') as HTMLTextAreaElement).value).toBe('中力');
   });
@@ -265,17 +267,28 @@ describe('ProjectInfoEdit（信息树编辑页）', () => {
     expect(await screen.findByText('基础信息')).toBeTruthy();
   });
 
-  it('空树时「按预设模板初始化」调后端模板接口并重载树', async () => {
+  it('空树项目进页自动调模板接口初始化（无需点按钮）并重载树', async () => {
     vi.mocked(fetchInfoTree).mockResolvedValueOnce([]).mockResolvedValue(TREE);
     vi.mocked(importInfoTemplateApi).mockResolvedValue(120);
     renderEdit();
-
-    fireEvent.click(await screen.findByRole('button', { name: '按预设模板初始化' }));
 
     await waitFor(() => expect(importInfoTemplateApi).toHaveBeenCalledWith('P1'));
     // 初始化成功后重新拉树（第二次 fetchInfoTree 返回 TREE），页面切换成树视图
     expect(await screen.findByText('基础信息')).toBeTruthy();
     expect(fetchInfoTree).toHaveBeenCalledTimes(2);
+    // 「替换式导入」不能重复触发：只自动跑一次
+    expect(importInfoTemplateApi).toHaveBeenCalledTimes(1);
+  });
+
+  it('自动初始化失败时停在空态，按钮保留可手动重试', async () => {
+    vi.mocked(fetchInfoTree).mockResolvedValueOnce([]).mockResolvedValue(TREE);
+    vi.mocked(importInfoTemplateApi).mockRejectedValueOnce(new Error('network')).mockResolvedValue(120);
+    renderEdit();
+
+    await waitFor(() => expect(importInfoTemplateApi).toHaveBeenCalledTimes(1));
+
+    fireEvent.click(await screen.findByRole('button', { name: '按预设模板初始化' }));
+    expect(await screen.findByText('基础信息')).toBeTruthy();
   });
 
   it('历史弹层展示后端的操作记录：人员 / 变动 / 时间；子节点删除记录挂在父节点下', async () => {

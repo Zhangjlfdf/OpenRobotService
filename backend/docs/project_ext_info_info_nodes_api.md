@@ -304,7 +304,7 @@ Service：[info_node_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/ap
 - 功能：读该项目 `project_type` 对应的 YAML 模板（缺省 `default.yaml`），实例化整棵信息树并**替换**该项目现有全部节点（与新建项目的初始化同一份模板定义）。
 - Service 逻辑：查项目（软删除项目视为不存在 → `404`）→ `get_info_nodes_template(project_type)` 取模板 → 递归生成 UUID 与 `content_type` / `value`（`options` 编码为 `{"selected":"","options":[...]}`）→ 复用 `import_tree`（先清空后批量插入）。
 - 响应：`200 {"imported": <节点总数>}`；模板为空或解析失败时**不改动现有节点**，返回 `{"imported": 0}`。
-- 适用场景：功能上线前创建、信息树为空的存量项目一键初始化；前端信息编辑页空态的「按预设模板初始化」按钮。
+- 适用场景：功能上线前创建、信息树为空的存量项目一键初始化；前端信息编辑页打开时**自动**触发（空树才跑、按项目只跑一次，避免「替换式导入」重复建树），空态按钮保留为自动初始化失败/模板为空时的手动重试入口。
 
 ### 5.8 POST /info-nodes/projects/{project_id}/parse-file —— AI 识别导入文件（预览，**不落库**）
 
@@ -438,10 +438,10 @@ Service：[info_node_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/ap
 2. `ext_info` 按整体对象提交；信息大纲树不要放进 `ext_info`，改用 `/info-nodes/*` 逐节点操作。
 3. 新建节点前由前端生成 UUID 作为 `id`；删除节点会连带删除整棵子树，需二次确认。
 4. 拖拽节点后调 PATCH move；批量替换整树调 import（注意会先清空旧树）。
-5. 空树项目一键初始化调 `import-template`——模板结构在后端 YAML 里，前端不保留副本（原前端常量 `PROJECT_INFO_TEMPLATE` 已删除），避免两套模板漂移。
+5. 空树项目一键初始化调 `import-template`——模板结构在后端 YAML 里，前端不保留副本（原前端常量 `PROJECT_INFO_TEMPLATE` 已删除），避免两套模板漂移。信息编辑页打开后若树为空会**自动**调它（无需点按钮），因此前端必须保证只触发一次（按项目 id 记忆，StrictMode 双跑 effect 也不能重发）。
 6. 导入文件（`/import`）除节点数组外，也接受「标题 → 内容」紧凑映射（`""` 文字、`[...]` 下拉选项、`{...}` 子节点，即 `project_templates/tmp.json` 的写法）。
 7. 信息编辑页「文件导入」走 `parse-file`（上传 → 转圈 → 三组预览勾选 → 确认后逐节点 CRUD）；上传时不要手写 `Content-Type`（交给浏览器带 boundary），大模型识别耗时较长，前端请求超时需放宽到 180s 以上。原「JSON 整树导入」入口已被该弹层替换，`/import` 接口与前端 `importInfoTreeApi` 保留未删（截图/调试仍可直调）。
-8. 项目概况卡「AI 项目摘要」：非新建模式显示「AI 生成 / 重新生成」按钮（生成中禁用），POST `/projects/{id}/ai-summary`（超时同样放宽到 180s）；摘要正文从 `project.ext_info.overview.ai_summary` 派生并用 react-markdown 渲染（结构化 Markdown；纯文本旧数据也兼容），生成响应里的 `ext_info` 直接替换本地状态即可持久展示；未生成过时展示「暂无数据」，空信息树项目后端会返回 400 提示先初始化信息树。
+8. 项目概况卡「项目摘要」（原「AI 项目摘要」）：非新建模式显示「点击生成 / 重新生成」按钮（生成中禁用），POST `/projects/{id}/ai-summary`（超时同样放宽到 180s）；摘要正文从 `project.ext_info.overview.ai_summary` 派生并用 react-markdown 渲染（结构化 Markdown；纯文本旧数据也兼容），生成响应里的 `ext_info` 直接替换本地状态即可持久展示；未生成过时展示「暂无数据」，空信息树项目后端会返回 400 提示先初始化信息树。
 9. 编辑页每行的「历史」按钮：点开调 `GET /changes?node_id=X` 展示该节点记录（人员 / 操作类型 / 时间 / 具体变动，item 内字段见 5.9），文案直接展示 `detail`，不要前端再拼；操作人取 `operator_name || operator || '未知用户'`。
 10. 小红点：进页面、以及**每次保存成功后**各调一次 `GET /changes/summary`，与**本机**已读水位（localStorage `project-info-tree:history-seen:{项目code}:{登录用户}`，只存个人未读状态、不上传）比较——`latest[node] !== seen[node]` 或该用户没记过即出点；**只有点开过该节点历史才推进水位**（打开弹层时把该节点最新记录的 id 写入）。因此任何人保存节点后该节点立即出点、包括保存者自己——谁没点开过，谁就看得见红点；看过之后不再出点，直到有新记录。
 11. 小红点还会**汇总到一级节点（根节点）**：某个下级节点有未读记录时，它所在的根节点同一位置也出点（中间层不出）。判定完全由前端根据第 10 条的未读集合往上归（按当前树的 parent_id 一路走到最外层，忽略已删除、树里没有对应行的节点），所以消失规则与子节点一致——点开某下级节点的历史后它不再贡献，该根节点下再没有别的未读变动时，根节点的点随之消失；根节点自己的记录没看过则仍然保留。服务端不需要为此加接口。

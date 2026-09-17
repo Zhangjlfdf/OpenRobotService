@@ -140,7 +140,7 @@ def test_plan_links_existing_nodes_by_path():
 
 
 def test_plan_updates_title_parent_sort_and_type():
-    """锚点对上的节点：标题/父子/顺序/内容类型以模板为准；text→select 重置值。"""
+    """锚点对上的节点：标题/父子/顺序/内容类型以模板为准；text→select 保住能对上的已填内容。"""
     project_nodes = [
         _pn("p1", "基础信息（旧名）", tpl="t-base", sort=5),
         _pn("p2", "客户信息", parent="p1", tpl="t-cust", value="中力", sort=0),
@@ -152,13 +152,45 @@ def test_plan_updates_title_parent_sort_and_type():
 
     assert updates["p1"] == {"title": "基础信息", "sort_order": 0}
     assert "p2" not in updates or updates["p2"] == {}  # 已一致
-    # 内容类型变化 → 值按模板重置为下拉空值
+    # 内容类型变化：选项以模板为准，旧文本恰好是某个选项 → 作为已选值保留
     assert updates["p3"]["content_type"] == "select"
-    assert json.loads(updates["p3"]["value"]) == {"selected": "", "options": ["试点项目", "PK项目"]}
+    assert json.loads(updates["p3"]["value"]) == {"selected": "试点项目", "options": ["试点项目", "PK项目"]}
     # 车型1 需要被移动到新建的 硬件/车辆 下（新建节点 id 从 creates 里取）
     by_tpl = {item["template_node_id"]: item for item in plan["creates"]}
     assert updates["p9"]["parent_id"] == by_tpl["t-veh"]["node_id"]
     assert updates["p9"]["sort_order"] == 0
+
+
+def test_plan_keeps_filled_content_when_type_changes():
+    """内容类型变更不整体覆盖：对不上的旧值才退回模板默认值，能带过去的都带过去。"""
+    # text→select：旧文本不在新选项里 → 选择清空，但选项仍是模板的
+    project_nodes = [_pn("p3", "项目类型", tpl="t-type", ct="text", value="大客户项目")]
+    plan = compute_sync_plan(_flat(), project_nodes)
+    updates = {item["node_id"]: item["changes"] for item in plan["updates"]}
+    assert json.loads(updates["p3"]["value"]) == {"selected": "", "options": ["试点项目", "PK项目"]}
+
+    # file → image：附件结构相同，已传文件原样保留（不因换类型丢附件）
+    attachment = json.dumps({"name": "方案.pdf", "resource_id": 7, "size": 1024}, ensure_ascii=False)
+    tpl = _tpl() + [{"id": "t-doc", "title": "方案文档", "content_type": "image", "sort_order": 2, "children": []}]
+    flat = flatten_template(normalize_template_nodes(tpl))
+    plan = compute_sync_plan(flat, [_pn("p8", "方案文档", tpl="t-doc", ct="file", value=attachment)])
+    updates = {item["node_id"]: item["changes"] for item in plan["updates"]}
+    assert updates["p8"]["content_type"] == "image"
+    assert json.loads(updates["p8"]["value"]) == {"name": "方案.pdf", "resource_id": 7, "size": 1024}
+
+    # select → text：已选值当文本保留
+    tpl = _tpl()
+    for child in tpl[0]["children"]:
+        if child["id"] == "t-type":
+            child.pop("options", None)
+            child["content_type"] = "text"
+    flat = flatten_template(normalize_template_nodes(tpl))
+    plan = compute_sync_plan(flat, [_pn("p3", "项目类型", tpl="t-type", ct="select",
+                                      value=json.dumps({"selected": "PK项目", "options": ["试点项目", "PK项目"]},
+                                                       ensure_ascii=False))])
+    updates = {item["node_id"]: item["changes"] for item in plan["updates"]}
+    assert updates["p3"]["content_type"] == "text"
+    assert updates["p3"]["value"] == "PK项目"
 
 
 def test_plan_merges_select_options_keeping_valid_selection():

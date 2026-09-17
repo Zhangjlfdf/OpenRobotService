@@ -3,7 +3,8 @@
 // 数据走后端 /api/admin/info-nodes/template（GET 读模板 / POST 保存并同步，均仅管理员可调）。
 // 保存流程：本地编辑 → 点「保存并同步」先 dry-run（后端算出影响面）→ 确认弹窗展示
 // 「新增 / 更新 / 删除多少节点、涉及多少项目」→ 确认后真正保存并同步，Toast 汇总结果。
-// 同步语义（后端 info_template_service）：标题/层级/顺序/内容类型以模板为准；文本已填内容保留；
+// 同步语义（后端 info_template_service）：只变更节点本身——标题/层级/顺序/内容类型以模板为准，
+// 各项目已填内容不被整体覆盖（文本保留；file ↔ image 互切保留已传附件；转下拉时旧值能对上选项就选中）；
 // 下拉选项以模板为准；删除模板节点会连带删除各项目对应节点及其子树（确认弹窗已明示）。
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
@@ -252,7 +253,7 @@ export default function ProjectInfoTemplate() {
             <>
               <p className="mac-tpl__hint">
                 点节点名可改名；「层次」在行末的 ⋯ 菜单里调整（上移/下移/降级/升级）。
-                「保存并同步」会把变更应用到这个系统里所有项目的节点，
+                「保存并同步」会把变更应用到这个系统里所有项目的节点（只改节点，各项目已填内容保留），
                 删除模板节点会同时删除各项目对应节点及其已填内容（保存前会先给你预览影响面）。
               </p>
               <div className="mac-info__actions mac-tpl__actions">

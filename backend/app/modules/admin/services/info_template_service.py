@@ -9,10 +9,11 @@
   - 回填不上的节点视为用户自建，同步不动它（也不会被模板删除带走）；
   - 模板删掉的节点 → 带锚点的项目节点连其子树一起删（前端确认弹窗里已明示）。
 
-节点对上后的同步规则：
+节点对上后的同步规则（**只变更节点，不整体覆盖项目已填内容**）：
   - 标题 / 父子关系 / 同级顺序 / 内容类型 一律以模板为准；
-  - 文本类节点已填内容保留；内容类型变了（如 text→select）按模板重置值；
-  - 下拉节点的选项以模板为准，已选项仍在新选项里则保留。
+  - 值（value）：类型没变时不动；类型变了也尽量把已填内容带到新类型下（`_carry_value`）——
+    文本原样保留、file ↔ image 互切保留已传附件、转下拉时旧值能对上选项就选中；
+  - 下拉节点的选项以模板为准，已选项仍在新选项里则保留（模板删掉的选项无从保留，选择清空）。
 
 接口层（api/info_nodes.py）：
   GET  /info-nodes/template              读模板（仅管理员）
@@ -64,6 +65,49 @@ def _select_state(value: Any) -> Tuple[str, List[str]]:
     selected = parsed.get("selected") if isinstance(parsed.get("selected"), str) else ""
     options = [o for o in parsed.get("options", []) if isinstance(o, str)] if isinstance(parsed.get("options"), list) else []
     return selected, options
+
+
+def _parse_value(raw: Any) -> Any:
+    """项目节点值（TEXT 列）→ 结构化：是 JSON 就解析出来，否则按原字符串。"""
+    if not isinstance(raw, str):
+        return raw
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return raw
+
+
+def _is_attachment(value: Any) -> bool:
+    """是否是文件 / 图片节点的值结构（`{name, resource_id, size}`，前端两者共用同一形状）。"""
+    return isinstance(value, dict) and (value.get("resource_id") is not None or bool(value.get("name")))
+
+
+def _carry_value(new_type: str, old_value: Any, options: List[str], template_value: Any) -> Any:
+    """内容类型变更时的取值：结构以模板为准，项目已填内容尽量带到新类型下（模板同步不整体覆盖）。
+
+    只在 target 类型「表达不了」旧内容时才退回模板默认值，逐类型规则：
+      - select：值必须是 {"selected","options"}（前端按 JSON 解析），选项以模板为准；
+        已填内容能对上就保留——旧选择结构取 selected，旧文本恰好等于某个选项也认，对不上才清空。
+      - file / image：旧值本身就是附件结构时原样保留（file ↔ image 互切不丢已传附件）。
+      - text：已填文本原样保留；旧是选择结构则把已选值当文本。
+    """
+    parsed = _parse_value(old_value)
+    if new_type == "select":
+        if isinstance(parsed, dict):
+            candidate = parsed.get("selected") if isinstance(parsed.get("selected"), str) else ""
+        else:
+            candidate = parsed.strip() if isinstance(parsed, str) else ""
+        selected = candidate if candidate in options else ""
+        return json.dumps({"selected": selected, "options": options}, ensure_ascii=False)
+    if new_type in ("file", "image"):
+        return json.dumps(parsed, ensure_ascii=False) if _is_attachment(parsed) else template_value
+    if isinstance(parsed, str) and parsed.strip():
+        return parsed
+    if isinstance(parsed, dict):  # 旧下拉的已选值当文本；附件结构在文字节点上显示不出来，带不过去
+        selected = parsed.get("selected")
+        if isinstance(selected, str) and selected.strip():
+            return selected
+    return template_value
 
 
 def _node_content_type(node: Dict) -> str:
@@ -244,12 +288,11 @@ def compute_sync_plan(template_flat: List[Dict], project_nodes: List[Dict]) -> D
         if current.get("sort_order") != t["sort_order"]:
             changes["sort_order"] = t["sort_order"] if t["sort_order"] is not None else 0
         if (current.get("content_type") or "text") != t["content_type"]:
-            # 内容类型变了：值按模板重置（旧格式的内容不再适用）
+            # 内容类型变了：类型以模板为准，值尽量带过去（不整体覆盖项目已填内容，见 _carry_value）
             changes["content_type"] = t["content_type"]
-            if t["content_type"] == "select":
-                changes["value"] = json.dumps({"selected": "", "options": t["options"]}, ensure_ascii=False)
-            else:
-                changes["value"] = t.get("value")
+            changes["value"] = _carry_value(
+                t["content_type"], current.get("value"), t["options"], t.get("value"),
+            )
         elif t["content_type"] == "select":
             selected, options = _select_state(current.get("value"))
             if options != t["options"]:
