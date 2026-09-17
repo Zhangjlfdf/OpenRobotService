@@ -105,6 +105,12 @@ class KBDomainIngester(BaseIngester[KBEntry]):
             # sub_domain 与消费端（pipeline._sub_labels 等）的键匹配错位
             sub_domain = str(rel.parent).replace("\\", "/") if str(rel.parent) != "." else ""
             source_file = str(rel).replace("\\", "/")
+            # 0917 公司域品牌目录（自研车/华睿/科钛/通用）：sub_domain 剥掉品牌段
+            # 保持叶子名稳定（vehicle_errors 等过滤器零迁移），品牌信息走 payload.brand
+            if self._domain == "company" and "/" in sub_domain:
+                first = sub_domain.split("/", 1)[0]
+                if first in ("自研车", "华睿", "科钛", "通用"):
+                    sub_domain = sub_domain.split("/", 1)[1]
 
             try:
                 content = md_file.read_text(encoding="utf-8")
