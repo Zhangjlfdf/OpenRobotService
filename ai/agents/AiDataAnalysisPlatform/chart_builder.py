@@ -45,6 +45,9 @@ FIELD_LABEL_MAP: dict[str, str] = {
     "new_by_day": "每日新增",
     "overdue_list": "逾期明细",
     "items": "明细列表",
+    # 项目明细按状态分组（组内截断），「哪些项目」类问法喂 LLM 的分组结构
+    "items_by_status": "项目分组明细",
+    "items_count": "项目明细总数",
     # collection_data 窗口内按天聚合（日期 → 每日汇总），多日趋势图数据源
     "by_day": "每日汇总",
     # 无数据项目（project 表与 collection_data 上报对比）
