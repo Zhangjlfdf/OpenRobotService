@@ -89,15 +89,18 @@ class _FakeSessionFactory:
 
 class TestToggle:
     def test_未关注的节点切换为关注(self):
-        # query().filter().first() 连查两次：先节点、后既有标注（没有）
-        node = SimpleNamespace(project_id="p1")
+        # 两次查询：先按 id 拿节点（first），再按 node_id+operator 拿已有标注（all 取空）
+        node = SimpleNamespace(project_id=None)  # 全局节点：project_id 为 NULL
         db = MagicMock()
-        db.query.return_value.filter.return_value.first.side_effect = [node, None]
+        db.query.return_value.filter.return_value.first.return_value = node
+        db.query.return_value.filter.return_value.filter.return_value.all.return_value = []
         with _FakeSessionFactory(db):
-            marked = marks_mod.InfoNodeMarkService().toggle("n1", operator="u", operator_name="U")
+            marked = marks_mod.InfoNodeMarkService().toggle(
+                "n1", operator="u", project_id="p1", operator_name="U")
 
         assert marked is True
         added = db.add.call_args[0][0]
+        # 全局节点的 project_id 是 NULL，标注必须记请求传来的项目，否则动态里查不到
         assert added.node_id == "n1" and added.project_id == "p1"
         assert added.operator == "u" and added.operator_name == "U"
         assert added.created_at  # 'YYYY-MM-DD HH:MM:SS'
@@ -107,25 +110,61 @@ class TestToggle:
     def test_已关注的节点取消关注(self):
         existing = MagicMock()
         db = MagicMock()
-        db.query.return_value.filter.return_value.first.side_effect = [
-            SimpleNamespace(project_id="p1"), existing,
-        ]
+        db.query.return_value.filter.return_value.first.return_value = SimpleNamespace(project_id=None)
+        db.query.return_value.filter.return_value.filter.return_value.all.return_value = [existing]
         with _FakeSessionFactory(db):
-            marked = marks_mod.InfoNodeMarkService().toggle("n1", operator="u")
+            marked = marks_mod.InfoNodeMarkService().toggle("n1", operator="u", project_id="p1")
 
         assert marked is False
         db.delete.assert_called_once_with(existing)
         db.add.assert_not_called()
         db.commit.assert_called_once()
 
+    def test_增补节点未指定项目时用节点自带项目(self):
+        # 旧展示卡只传 nodeId：增补节点自带 project_id，回退路径要能正常开关星标
+        node = SimpleNamespace(project_id="p9")
+        db = MagicMock()
+        db.query.return_value.filter.return_value.first.return_value = node
+        db.query.return_value.filter.return_value.filter.return_value.all.return_value = []
+        with _FakeSessionFactory(db):
+            marked = marks_mod.InfoNodeMarkService().toggle("n1", operator="u")
+
+        assert marked is True
+        assert db.add.call_args[0][0].project_id == "p9"
+
+    def test_全局节点未指定项目时拒绝(self):
+        # 全局节点 project_id 为 NULL，又没传项目 → 标注无处归属，必须报错而不是写 NULL
+        db = MagicMock()
+        db.query.return_value.filter.return_value.first.return_value = SimpleNamespace(project_id=None)
+        db.query.return_value.filter.return_value.all.return_value = []
+        with _FakeSessionFactory(db):
+            try:
+                marks_mod.InfoNodeMarkService().toggle("n1", operator="u")
+                raised = False
+            except LookupError:
+                raised = True
+        assert raised
+        db.add.assert_not_called()
+
+    def test_其它项目的增补节点在本项目关注被拒(self):
+        db = MagicMock()
+        db.query.return_value.filter.return_value.first.return_value = SimpleNamespace(project_id="other")
+        with _FakeSessionFactory(db):
+            try:
+                marks_mod.InfoNodeMarkService().toggle("n1", operator="u", project_id="p1")
+                raised = False
+            except PermissionError:
+                raised = True
+        assert raised
+        db.add.assert_not_called()
+
     def test_查既有标注只按本人过滤(self):
         # 取消/判定时 WHERE 必须同时带 node_id 与 operator：绝不能删掉别人的关注
         db = MagicMock()
-        db.query.return_value.filter.return_value.first.side_effect = [
-            SimpleNamespace(project_id="p1"), None,
-        ]
+        db.query.return_value.filter.return_value.first.return_value = SimpleNamespace(project_id=None)
+        db.query.return_value.filter.return_value.filter.return_value.all.return_value = []
         with _FakeSessionFactory(db):
-            marks_mod.InfoNodeMarkService().toggle("n1", operator="u")
+            marks_mod.InfoNodeMarkService().toggle("n1", operator="u", project_id="p1")
 
         clause = " AND ".join(str(a) for a in db.query.return_value.filter.call_args_list[1][0])
         assert "project_info_node_mark.node_id" in clause

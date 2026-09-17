@@ -18,7 +18,7 @@ import {
 } from '@/api/infoNodes';
 import {
   createInfoNode,
-  updateInfoNode,
+  setInfoNodeValue,
   type ProjectInfoNode,
   type ProjectInfoSelectValue,
 } from '@/shared/utils/projectInfoTree';
@@ -152,28 +152,30 @@ export default function ProjectInfoFileImport({ visible, onClose, projectId, nod
       for (const row of picked) {
         if (row.matched && row.node) {
           const node = row.node;
+          // 填值走值写入接口（普通用户也能用；节点定义不动）
           if (node.content_type === 'select') {
             const options = (node.value as ProjectInfoSelectValue | null)?.options ?? [];
-            await updateInfoNode(node, { value: { selected: row.matched.value, options } });
+            await setInfoNodeValue(node, { selected: row.matched.value, options }, projectId);
           } else {
-            await updateInfoNode(node, { value: row.matched.value });
+            await setInfoNodeValue(node, row.matched.value, projectId);
           }
           if (row.group === 'overwrite') overwritten += 1; else filled += 1;
           continue;
         }
         const fresh = row.fresh;
         if (!fresh) continue;
-        // 未匹配条目：挂到建议归属节点；没有归属时用「导入信息」根节点兜底（按需创建一次）
+        // 未匹配条目：挂到建议归属节点；没有归属时用「导入信息」根节点兜底（按需创建一次）。
+        // 导入是管理员操作，新节点按管理员的「增补」入口建（不动全局模板）
         let parentId: string | null = fresh.suggested_parent_id ?? null;
         if (!parentId) {
           if (!fallbackRootId) {
             fallbackRootId = nodes.find((node) => node.parent_id === null && node.title === FALLBACK_ROOT_TITLE)?.id
-              ?? (await createInfoNode(projectId, null, nextSort(null), FALLBACK_ROOT_TITLE)).id;
+              ?? (await createInfoNode(projectId, null, nextSort(null), FALLBACK_ROOT_TITLE, true)).id;
           }
           parentId = fallbackRootId;
         }
-        const createdNode = await createInfoNode(projectId, parentId, nextSort(parentId), fresh.title.slice(0, 80));
-        await updateInfoNode(createdNode, { value: fresh.value });
+        const createdNode = await createInfoNode(projectId, parentId, nextSort(parentId), fresh.title.slice(0, 80), true);
+        await setInfoNodeValue(createdNode, fresh.value, projectId);
         created += 1;
       }
       Toast({ message: `已填写 ${filled} 项，覆盖 ${overwritten} 项，新增 ${created} 项`, theme: 'success' });

@@ -1,244 +1,270 @@
-"""详情模板服务纯函数测试 —— 不连库：校验规范化、树展平、同步差异计算。
+"""详情模板服务测试 —— 校验规范化 / 节点清单派生 / 保存前预览。
 
-同步差异（compute_sync_plan）是「模板改动 → 各项目节点变更」的核心：
-回填锚点 / 新建 / 更新（标题·父子·顺序·内容类型·下拉选项）/ 删除（锚点失效的子树，
-锚点仍有效的节点会被移走而非删除）。
+新版模板不再是「一份 JSON + 逐项目同步」：全局节点定义直接就是
+project_info_node 里 project_id IS NULL 的那些行，保存即全项目生效。
+因此这里测的是三件事：
+  1. normalize_template_nodes —— 管理员提交的树是否合法、规范化成什么形状；
+  2. InfoTemplateService._collect_actions —— 树展平成待落库节点清单（父在子前、
+     已存在节点沿用库里 id、新节点按标题路径派生稳定 id 与 node_key）；
+  3. preview_sync —— 保存前的「会停用哪些字段」预览。
+
+不连库：需要读库的两处用假 session 顶掉（SessionLocal 是模块级符号，替换即生效）。
+运行方式（反射 runner；**必须先 import app.core.db**——conftest 会把 create_engine
+换成 MagicMock，若任由 admin 包在之后懒加载 app.core.db，event.listen 会对
+MagicMock 引擎报 InvalidRequestError）：
+    python -c "
+    import app.core.db
+    import tests.conftest
+    import tests.test_info_template_service as t
+    import inspect
+    n=0
+    for name, obj in vars(t).items():
+        if inspect.isclass(obj) and name.startswith('Test'):
+            inst = obj()
+            for m in dir(obj):
+                if m.startswith('test_'): getattr(inst, m)(); n+=1
+    print('PASS', n)
+    "
 """
-import json
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
+import app.modules.admin.services.info_template_service as tpl_mod
 from app.modules.admin.services.info_template_service import (
-    compute_sync_plan,
-    flatten_template,
+    InfoTemplateService,
     normalize_template_nodes,
+    template_to_legacy_tree,
 )
 
 
 def _tpl():
-    """一份贴近真实模板的两级结构（含 select 与 4 层深的车型分支）。"""
+    """一份贴近真实模板的两级结构（含 select 与 3 层深的车型分支）。"""
     return [
         {
-            "id": "t-base", "title": "基础信息", "content_type": "text", "sort_order": 0,
+            "id": "t-base", "title": "基础信息",
             "children": [
-                {"id": "t-cust", "title": "客户信息", "content_type": "text", "sort_order": 0, "children": []},
-                {
-                    "id": "t-type", "title": "项目类型", "content_type": "select",
-                    "options": ["试点项目", "PK项目"], "sort_order": 1, "children": [],
-                },
+                {"id": "t-cust", "title": "客户信息"},
+                {"id": "t-type", "title": "项目类型", "value_type": "select",
+                 "options": ["试点项目", "PK项目"]},
             ],
         },
         {
-            "id": "t-hw", "title": "硬件", "content_type": "text", "sort_order": 1,
+            "id": "t-hw", "title": "硬件",
             "children": [
-                {
-                    "id": "t-veh", "title": "车辆", "content_type": "text", "sort_order": 0,
-                    "children": [
-                        {"id": "t-m1", "title": "车型1", "content_type": "text", "sort_order": 0, "children": []},
-                    ],
-                },
+                {"id": "t-veh", "title": "车辆",
+                 "children": [{"id": "t-m1", "title": "车型1"}]},
             ],
         },
     ]
 
 
-def _pn(node_id, title, *, parent=None, ct="text", value=None, sort=0, tpl=None):
-    return {
-        "id": node_id, "parent_id": parent, "title": title, "content_type": ct,
-        "value": value, "sort_order": sort, "template_node_id": tpl,
-    }
-
-
-# ── 校验规范化 ────────────────────────────────────────────
-
-def test_normalize_ok():
-    nodes = normalize_template_nodes([
-        {"id": "a", "title": " 基础信息 ", "children": [
-            {"id": "b", "title": "客户信息"},
-            {"id": "c", "title": "项目类型", "options": ["试点项目", " PK项目 "]},
-        ]},
-    ])
-    assert nodes[0]["title"] == "基础信息" and nodes[0]["sort_order"] == 0
-    assert nodes[0]["content_type"] == "text"
-    child = nodes[0]["children"]
-    assert child[0]["content_type"] == "text"
-    assert child[1]["content_type"] == "select"
-    assert child[1]["options"] == ["试点项目", "PK项目"]  # 选项去空白
-    assert child[1]["sort_order"] == 1
-
-
-def test_normalize_rejects_bad_templates():
-    cases = [
-        ([], "模板不能为空"),
-        ([{"title": "无id"}], "缺少 id"),
-        ([{"id": "a", "title": "  "}], "标题不能为空"),
-        ([{"id": "a", "title": "x"}, {"id": "a", "title": "y"}], "id 重复"),
-        ([{"id": "a", "title": "下拉", "content_type": "select", "children": [{"id": "b", "title": "子"}]}], "不能有子节点"),
-    ]
-    for nodes, keyword in cases:
-        try:
-            normalize_template_nodes(nodes)
-        except ValueError as exc:
-            assert keyword in str(exc), f"{keyword} 未出现在：{exc}"
-        else:
-            raise AssertionError(f"应拒绝：{keyword}")
-
-    # 第 5 层超深
-    deep = {"id": "l4", "title": "第四层", "children": [{"id": "l5", "title": "第五层"}]}
-    tree = [{"id": "l1", "title": "一", "children": [{"id": "l2", "title": "二", "children": [{"id": "l3", "title": "三", "children": [deep]}]}]}]
-    try:
-        normalize_template_nodes(tree)
-    except ValueError as exc:
-        assert "层" in str(exc)
-    else:
-        raise AssertionError("超过 4 层应被拒绝")
-
-
-# ── 树展平 ────────────────────────────────────────────────
-
-def test_flatten_template_paths_depths():
-    flat = flatten_template(normalize_template_nodes(_tpl()))
-    by_id = {n["id"]: n for n in flat}
-    assert by_id["t-m1"]["path"] == "硬件 / 车辆 / 车型1"
-    assert by_id["t-m1"]["depth"] == 3
-    assert by_id["t-m1"]["parent_id"] == "t-veh"
-    assert by_id["t-type"]["content_type"] == "select"
-    assert by_id["t-type"]["options"] == ["试点项目", "PK项目"]
-    # 父节点在子节点之前（同步按序创建/更新）
-    assert [n["id"] for n in flat].index("t-hw") < [n["id"] for n in flat].index("t-veh")
-
-
-# ── 同步差异计算 ──────────────────────────────────────────
-
 def _flat():
-    return flatten_template(normalize_template_nodes(_tpl()))
+    return InfoTemplateService()._collect_actions(
+        normalize_template_nodes(_tpl()), {}, (), None)
 
 
-def test_plan_links_existing_nodes_by_path():
-    """存量项目（无锚点）：按标题路径回填锚点；路径对不上的用户自建节点不受影响。"""
-    project_nodes = [
-        _pn("p1", "基础信息", sort=0),
-        _pn("p2", "客户信息", parent="p1", value="中力", sort=0),
-        _pn("p3", "项目类型", parent="p1", ct="select",
-            value=json.dumps({"selected": "试点项目", "options": ["试点项目", "PK项目"]}, ensure_ascii=False), sort=1),
-        _pn("p4", "用户自建", parent="p1", sort=2),
-    ]
-    plan = compute_sync_plan(_flat(), project_nodes)
-    linked = {item["project_node_id"]: item["template_node_id"] for item in plan["link"]}
-    assert linked == {"p1": "t-base", "p2": "t-cust", "p3": "t-type"}
-    # 自建节点不回填、不更新、不删除
-    assert all(item["node_id"] != "p4" for item in plan["updates"])
-    assert "p4" not in plan["delete_ids"]
-    # 已勾选项仍在模板选项里 → 值不重写
-    assert all(item["node_id"] != "p3" for item in plan["updates"])
-    # 模板新增的节点（硬件分支）会新建
-    created_tpl = {item["template_node_id"] for item in plan["creates"]}
-    assert created_tpl == {"t-hw", "t-veh", "t-m1"}
-    # 新建节点挂在正确父级下（t-m1 的父是本次新建的 t-veh 节点）
-    by_tpl = {item["template_node_id"]: item for item in plan["creates"]}
-    assert by_tpl["t-hw"]["parent_id"] is None
-    assert by_tpl["t-veh"]["parent_id"] == by_tpl["t-hw"]["node_id"]
-    assert by_tpl["t-m1"]["parent_id"] == by_tpl["t-veh"]["node_id"]
+def _by_name(nodes=None):
+    """提交的树里全是中文标题 → node_key/id 都按标题路径派生，用标题索引更好认。"""
+    return {a["node_name"]: a for a in (nodes if nodes is not None else _flat())}
 
 
-def test_plan_updates_title_parent_sort_and_type():
-    """锚点对上的节点：标题/父子/顺序/内容类型以模板为准；text→select 保住能对上的已填内容。"""
-    project_nodes = [
-        _pn("p1", "基础信息（旧名）", tpl="t-base", sort=5),
-        _pn("p2", "客户信息", parent="p1", tpl="t-cust", value="中力", sort=0),
-        _pn("p3", "项目类型", tpl="t-type", ct="text", value="试点项目", sort=1),  # 类型从 text 改为 select
-        _pn("p9", "车型1", tpl="t-m1", sort=3),  # 位置错了：模板里在 硬件/车辆 下
-    ]
-    plan = compute_sync_plan(_flat(), project_nodes)
-    updates = {item["node_id"]: item["changes"] for item in plan["updates"]}
-
-    assert updates["p1"] == {"title": "基础信息", "sort_order": 0}
-    assert "p2" not in updates or updates["p2"] == {}  # 已一致
-    # 内容类型变化：选项以模板为准，旧文本恰好是某个选项 → 作为已选值保留
-    assert updates["p3"]["content_type"] == "select"
-    assert json.loads(updates["p3"]["value"]) == {"selected": "试点项目", "options": ["试点项目", "PK项目"]}
-    # 车型1 需要被移动到新建的 硬件/车辆 下（新建节点 id 从 creates 里取）
-    by_tpl = {item["template_node_id"]: item for item in plan["creates"]}
-    assert updates["p9"]["parent_id"] == by_tpl["t-veh"]["node_id"]
-    assert updates["p9"]["sort_order"] == 0
+def _row(node_id, key, name, *, parent=None, order=10, status='active'):
+    return SimpleNamespace(id=node_id, node_key=key, node_name=name,
+                           parent_id=parent, sort_order=order, status=status)
 
 
-def test_plan_keeps_filled_content_when_type_changes():
-    """内容类型变更不整体覆盖：对不上的旧值才退回模板默认值，能带过去的都带过去。"""
-    # text→select：旧文本不在新选项里 → 选择清空，但选项仍是模板的
-    project_nodes = [_pn("p3", "项目类型", tpl="t-type", ct="text", value="大客户项目")]
-    plan = compute_sync_plan(_flat(), project_nodes)
-    updates = {item["node_id"]: item["changes"] for item in plan["updates"]}
-    assert json.loads(updates["p3"]["value"]) == {"selected": "", "options": ["试点项目", "PK项目"]}
+class TestNormalize:
+    def test_规范化补齐默认字段(self):
+        nodes = normalize_template_nodes([
+            {"id": "a", "title": " 基础信息 ", "children": [
+                {"id": "b", "title": "客户信息"},
+                {"id": "c", "title": "项目类型", "value_type": "select",
+                 "options": ["试点项目", " PK项目 "]},
+            ]},
+        ])
+        top = nodes[0]
+        assert top["title"] == "基础信息"                     # 去空白
+        assert top["sort_order"] == 10                        # 按下标派生的步长 10
+        assert top["value_type"] == "text" and top["content_type"] == "text"
+        assert top["required"] is False and top["allow_custom"] is False
+        # 同级第二个节点位次 20
+        assert [c["sort_order"] for c in top["children"]] == [10, 20]
+        assert top["children"][1]["value_type"] == "select"
+        # 选项去空白
+        assert top["children"][1]["options"] == ["试点项目", "PK项目"]
 
-    # file → image：附件结构相同，已传文件原样保留（不因换类型丢附件）
-    attachment = json.dumps({"name": "方案.pdf", "resource_id": 7, "size": 1024}, ensure_ascii=False)
-    tpl = _tpl() + [{"id": "t-doc", "title": "方案文档", "content_type": "image", "sort_order": 2, "children": []}]
-    flat = flatten_template(normalize_template_nodes(tpl))
-    plan = compute_sync_plan(flat, [_pn("p8", "方案文档", tpl="t-doc", ct="file", value=attachment)])
-    updates = {item["node_id"]: item["changes"] for item in plan["updates"]}
-    assert updates["p8"]["content_type"] == "image"
-    assert json.loads(updates["p8"]["value"]) == {"name": "方案.pdf", "resource_id": 7, "size": 1024}
+    def test_同一父节点下同名被拒(self):
+        # 查重在 save_template 里由 _assert_keys_unique 负责，不在规范化阶段
+        svc = InfoTemplateService()
+        for tree in (
+            [{"title": "基础信息"}, {"title": "基础信息"}],               # 顶层同层
+            [{"title": "甲", "children": [{"title": "子"}, {"title": "子"}]}],  # 子层同层
+        ):
+            try:
+                svc._assert_keys_unique(normalize_template_nodes(tree))
+            except ValueError as exc:
+                assert "同名" in str(exc), exc
+            else:
+                raise AssertionError(f"同层同名节点应被拒绝：{tree}")
 
-    # select → text：已选值当文本保留
-    tpl = _tpl()
-    for child in tpl[0]["children"]:
-        if child["id"] == "t-type":
-            child.pop("options", None)
-            child["content_type"] = "text"
-    flat = flatten_template(normalize_template_nodes(tpl))
-    plan = compute_sync_plan(flat, [_pn("p3", "项目类型", tpl="t-type", ct="select",
-                                      value=json.dumps({"selected": "PK项目", "options": ["试点项目", "PK项目"]},
-                                                       ensure_ascii=False))])
-    updates = {item["node_id"]: item["changes"] for item in plan["updates"]}
-    assert updates["p3"]["content_type"] == "text"
-    assert updates["p3"]["value"] == "PK项目"
+    def test_不同分支下同名允许(self):
+        # 硬件/厂家 与 网络/厂家 是合法结构，seen 不能跨分支共用，否则改个名字就存不下去
+        svc = InfoTemplateService()
+        svc._assert_keys_unique(normalize_template_nodes([
+            {"title": "硬件", "children": [{"title": "厂家"}]},
+            {"title": "网络", "children": [{"title": "厂家"}]},
+        ]))
 
+    def test_拒绝非法模板(self):
+        cases = [
+            ([], "不能为空"),
+            ([{"title": "  "}], "标题不能为空"),
+            ([{"title": "下拉", "value_type": "select",
+               "children": [{"title": "子"}]}], "不能有子节点"),
+        ]
+        for nodes, keyword in cases:
+            try:
+                normalize_template_nodes(nodes)
+            except ValueError as exc:
+                assert keyword in str(exc), f"{keyword} 未出现在：{exc}"
+            else:
+                raise AssertionError(f"应拒绝：{keyword}")
 
-def test_plan_merges_select_options_keeping_valid_selection():
-    project_nodes = [
-        _pn("p3", "项目类型", tpl="t-type", ct="select",
-            value=json.dumps({"selected": "试点项目", "options": ["试点项目"]}, ensure_ascii=False)),
-    ]
-    plan = compute_sync_plan(_flat(), project_nodes)
-    updates = {item["node_id"]: item["changes"] for item in plan["updates"]}
-    merged = json.loads(updates["p3"]["value"])
-    assert merged["selected"] == "试点项目"  # 仍在新选项里 → 保留
-    assert merged["options"] == ["试点项目", "PK项目"]
+    def test_超过四层被拒(self):
+        leaf = {"title": "第五层"}
+        tree = [{"title": "一", "children": [{"title": "二", "children": [
+            {"title": "三", "children": [{"title": "第四层", "children": [leaf]}]}]}]}]
+        try:
+            normalize_template_nodes(tree)
+        except ValueError as exc:
+            assert "层" in str(exc), exc
+        else:
+            raise AssertionError("超过 4 层应被拒绝")
 
-    # 已选项不在新选项里 → 清空选择
-    project_nodes[0]["value"] = json.dumps({"selected": "大客户项目", "options": ["大客户项目"]}, ensure_ascii=False)
-    plan = compute_sync_plan(_flat(), project_nodes)
-    updates = {item["node_id"]: item["changes"] for item in plan["updates"]}
-    assert json.loads(updates["p3"]["value"])["selected"] == ""
-
-
-def test_plan_deletes_stale_anchors_but_spares_alive_descendants():
-    """模板删掉的锚点：删节点及子树；子树里锚点仍有效的节点会被移走，不删。"""
-    project_nodes = [
-        # p-old 的锚点已不在模板里 → 整棵删（p-old-child 也是失效锚点）
-        _pn("p-old", "废弃分组", tpl="t-gone", sort=0),
-        _pn("p-old-child", "废子项", parent="p-old", tpl="t-gone-child", sort=0),
-        # p-veh 的锚点在模板里仍有效，但当前挂在废弃分组下 → 被移动而不是删除
-        _pn("p-veh", "车辆", parent="p-old", tpl="t-veh", sort=1),
-        _pn("p-hw", "硬件", tpl="t-hw", sort=2),
-    ]
-    plan = compute_sync_plan(_flat(), project_nodes)
-    assert plan["delete_ids"] == {"p-old", "p-old-child"}
-    updates = {item["node_id"]: item["changes"] for item in plan["updates"]}
-    assert updates["p-veh"]["parent_id"] == "p-hw"  # 移回模板位置（模板里 车辆 在 硬件 下）
-    assert plan["creates"] == [] or all(c["template_node_id"] != "t-veh" for c in plan["creates"])
+    def test_无id节点允许提交(self):
+        # id 由服务端派生（按标题路径），前端新建节点不必自带 id
+        assert normalize_template_nodes([{"title": "新分组"}])[0]["id"] is None
 
 
-def test_plan_noop_when_in_sync():
-    """项目节点与模板完全一致 → 无任何动作。"""
-    project_nodes = [
-        _pn("p1", "基础信息", tpl="t-base", sort=0),
-        _pn("p2", "客户信息", parent="p1", tpl="t-cust", sort=0),
-        _pn("p3", "项目类型", parent="p1", tpl="t-type", ct="select",
-            value=json.dumps({"selected": "", "options": ["试点项目", "PK项目"]}, ensure_ascii=False), sort=1),
-        _pn("p4", "硬件", tpl="t-hw", sort=1),
-        _pn("p5", "车辆", parent="p4", tpl="t-veh", sort=0),
-        _pn("p6", "车型1", parent="p5", tpl="t-m1", sort=0),
-    ]
-    plan = compute_sync_plan(_flat(), project_nodes)
-    assert plan["creates"] == [] and plan["updates"] == [] and plan["link"] == []
-    assert plan["delete_ids"] == set()
+class TestCollectActions:
+    def test_父母在子之前且父子关系正确(self):
+        flat = _flat()
+        names = [a["node_name"] for a in flat]
+        by_name = _by_name(flat)
+        assert names.index("硬件") < names.index("车辆") < names.index("车型1")
+        assert by_name["车辆"]["parent_id"] == by_name["硬件"]["id"]
+        assert by_name["车型1"]["parent_id"] == by_name["车辆"]["id"]
+
+    def test_节点类型按结构与层级判定(self):
+        by_name = _by_name()
+        # 顶层一律 root（与迁移播种同规则），哪怕它有子节点
+        assert by_name["基础信息"]["node_type"] == "root"
+        assert by_name["硬件"]["node_type"] == "root"
+        # 非顶层有子节点是 group，末级是 field
+        assert by_name["车辆"]["node_type"] == "group"
+        assert by_name["客户信息"]["node_type"] == "field"
+
+    def test_已存在节点沿用库里的id与key(self):
+        base = _by_name()["基础信息"]
+        existing = {base["id"]: _row(base["id"], "base", "基础信息（旧名）")}
+        flat = InfoTemplateService()._collect_actions(
+            normalize_template_nodes(_tpl()), existing, (), None)
+        got = next(a for a in flat if a["id"] == base["id"])
+        assert got["node_key"] == "base"       # 改名不换 key（外部锚点不失效）
+        assert got["node_name"] == "基础信息"   # 标题以提交为准
+
+    def test_标题路径派生稳定id与key(self):
+        flat = InfoTemplateService()._collect_actions(
+            normalize_template_nodes([
+                {"title": "base", "children": [{"title": "customer_info"}]},
+            ]), {}, (), None)
+        by_name = _by_name(flat)
+        # 三段路径全是 ASCII → key 就是点分路径
+        assert by_name["customer_info"]["node_key"] == "base.customer_info"
+        # 同一个标题路径每次派生同一个 id（重启/重复保存不新建节点）
+        again = _by_name(InfoTemplateService()._collect_actions(
+            normalize_template_nodes([{"title": "base", "children": [{"title": "customer_info"}]}]),
+            {}, (), None))
+        assert again["customer_info"]["id"] == by_name["customer_info"]["id"]
+
+    def test_纯中文标题退回id派生key(self):
+        by_name = _by_name()
+        # 标题含中文：不能拼出半截 key，整体退回 tpl.<id>
+        assert by_name["基础信息"]["node_key"].startswith("tpl.")
+        assert by_name["硬件"]["node_key"].startswith("tpl.")
+        # 两个不同的中文顶层节点 key 不重复
+        assert by_name["基础信息"]["node_key"] != by_name["硬件"]["node_key"]
+
+    def test_select选项落到config(self):
+        assert _by_name()["项目类型"]["config"] == {"options": [
+            {"value": "试点项目", "label": "试点项目"},
+            {"value": "PK项目", "label": "PK项目"},
+        ]}
+
+    def test_无选项的节点config为空(self):
+        assert _by_name()["客户信息"]["config"] is None
+
+
+class TestLegacyTree:
+    def test_补上展示用的children与options(self):
+        tree = template_to_legacy_tree(normalize_template_nodes(_tpl()))
+        top = {n["title"]: n for n in tree}
+        assert [c["title"] for c in top["基础信息"]["children"]] == ["客户信息", "项目类型"]
+        # 没有选项的节点也给空列表，前端不用判 undefined
+        assert top["基础信息"]["children"][0]["options"] == []
+        assert top["硬件"]["children"][0]["children"][0]["title"] == "车型1"
+
+
+class _FakeSession:
+    """顶掉模块级 SessionLocal：query() 链上两种调用都能返回预设行。"""
+
+    def __init__(self, global_rows, project_count=0):
+        self.db = MagicMock()
+        self.db.query.return_value.filter.return_value.order_by.return_value.all.return_value = global_rows
+        self.db.query.return_value.filter.return_value.count.return_value = project_count
+
+    def __enter__(self):
+        self.old = tpl_mod.SessionLocal
+        tpl_mod.SessionLocal = lambda: self.db
+        return self
+
+    def __exit__(self, *exc):
+        tpl_mod.SessionLocal = self.old
+
+
+class TestPreviewSync:
+    def test_预览列出将被停用的字段(self):
+        base = _by_name()["基础信息"]
+        rows = [
+            _row(base["id"], "tpl.x", "基础信息"),
+            _row("t-old", "tpl.old", "废弃字段", parent=base["id"]),
+            _row("t-off", "tpl.off", "早就停用的", parent=base["id"], status="disabled"),
+        ]
+        with _FakeSession(rows, project_count=7):
+            info = InfoTemplateService().preview_sync(_tpl())
+
+        # 提交的树里没有 t-old → 停用；t-off 已停用，不重复计数
+        assert info["dry_run"] is True
+        assert info["disabled_titles"] == ["废弃字段"]
+        assert info["deleted"] == 1
+        assert info["projects"] == 7          # 全局字段改动覆盖全部项目
+        assert info["changed_projects"] == 0  # 不再有逐项目改动
+
+    def test_预览统计新增与沿用(self):
+        base = _by_name()["基础信息"]
+        with _FakeSession([_row(base["id"], "tpl.x", "基础信息")]):
+            info = InfoTemplateService().preview_sync(_tpl())
+
+        # 提交的树共 6 个节点：基础信息沿用，其余 5 个新建
+        assert info["updated"] == 1
+        assert info["added"] == 5
+        assert info["deleted"] == 0
+
+    def test_预览不报错于跨分支同名(self):
+        # 不同分支下的同名末级字段是合法的，预览不应因它抛错
+        with _FakeSession([]):
+            info = InfoTemplateService().preview_sync([
+                {"title": "硬件", "children": [{"title": "厂家"}]},
+                {"title": "网络", "children": [{"title": "厂家"}]},
+            ])
+        assert info["added"] == 4

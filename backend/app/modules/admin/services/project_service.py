@@ -48,34 +48,24 @@ def _get_ext_info_template(project_type: Optional[str] = None) -> dict:
     return copy.deepcopy(_tpl_cache[key])
 
 
-def template_node_value(node: dict) -> tuple[str, Optional[str]]:
-    """模板节点 → (content_type, value)。
-
-    content_type 缺省：有 options 视作 select，否则 text。
-    options（下拉候选值）编码成前端约定的 JSON 字符串 {"selected":"","options":[...]}，
-    text 的 value 保持普通字符串，未预置值时为 None。
-    """
-    content_type = node.get("content_type") or ("select" if node.get("options") else "text")
-    value = node.get("value")
-    if value is None and node.get("options"):
-        value = json.dumps({"selected": "", "options": list(node["options"])},
-                           ensure_ascii=False)
-    return content_type, value
-
-
 def get_info_nodes_template_from_yaml(project_type: Optional[str] = None) -> list:
     """YAML 里的信息树模板（未实例化）：节点含 title/sort_order/children 与可选
-    content_type/options/value。仅作为数据库详情模板的兜底来源。
+    content_type/options/value。
+
+    仅作参考来源（YAML 里没有 node_key，也没有层级外的元信息）；
+    **权威定义是数据库里的全局节点行**，见 get_info_nodes_template。
     """
     return _get_ext_info_template(project_type).get("info_nodes", []) or []
 
 
 def get_info_nodes_template(project_type: Optional[str] = None) -> list:
-    """信息树模板（未实例化）：优先取数据库里的「详情模板」（管理员可编辑、可同步所有项目），
-    还没有模板行 / 读库失败时回退到 {project_type}.yaml（缺省 default.yaml）。
+    """全局字段定义（未实例化）：project_info_node 里 project_id 为 NULL 的节点树。
 
-    数据库模板节点带稳定 id（即项目节点的同步锚点 template_node_id）；
-    YAML 节点没有 id，实例化出的项目节点锚点为 NULL（首次模板同步时按标题路径回填）。
+    权威来源是数据库（首次由 alembic 迁移从 {project_type}.yaml 播种，之后由管理员
+    在编辑页的「详情模板」里维护）；读库失败时回退到 YAML，保证不拖垮调用方。
+    新结构下没有「项目节点副本」，所以这里返回的就是**所有项目共用**的那一份定义。
+
+    project_type 参数保留只为兼容旧调用签名：全局模板只有一份，不再按项目类型分。
     """
     try:
         from app.modules.admin.services.info_template_service import info_template_service
@@ -83,16 +73,16 @@ def get_info_nodes_template(project_type: Optional[str] = None) -> list:
         nodes = info_template_service.get_template_nodes()
         if nodes:
             return nodes
-    except Exception as exc:  # 表缺失/解析失败等：不能拖垮建项目
+    except Exception as exc:  # 表缺失/解析失败等：不能拖垮调用方
         logger.warning("读取数据库详情模板失败，回退 YAML 模板：%s", exc)
     return get_info_nodes_template_from_yaml(project_type)
 
 
 def _split_template(project_type: Optional[str] = None) -> tuple[dict, list]:
-    """拆分模板：返回 (ext_info dict, info_nodes list)。
+    """拆分 YAML 模板：返回 (ext_info dict, info_nodes list)。
 
-    ext_info 含 overview + activity；info_nodes 是树结构定义，
-    节点无 id/value（实例化时生成 UUID）。
+    ext_info 含 overview + activity，写入 project.ext_info；
+    info_nodes 只作兜底参考（新结构下建项目不再实例化信息树节点）。
     """
     tpl = _get_ext_info_template(project_type)
     ext_info = {
@@ -450,37 +440,6 @@ class ProjectService:
         finally:
             db.close()
 
-    def _init_info_nodes(self, db_session, project_id: str, nodes_tpl: list,
-                         parent_id: str = None):
-        """从模板递归创建 info_node 行：为每个节点生成新 UUID（避免多项目冲突），
-        保持模板定义的 title / sort_order / 层级关系。
-        content_type 与 value 按模板实例化：select 节点的 options 清单编码进 value，
-        文本节点未预置值时留空（None）。
-        模板节点带 id（数据库详情模板）时记到 template_node_id，作为后续模板同步的锚点。
-        """
-        from app.modules.admin.models_das.models import ProjectInfoNode
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        for n in nodes_tpl:
-            node_id = str(uuid.uuid4())
-            content_type, value = template_node_value(n)
-            tpl_node_id = n.get("id") if isinstance(n.get("id"), str) and n.get("id") else None
-            node = ProjectInfoNode(
-                id=node_id,
-                project_id=project_id,
-                parent_id=parent_id,
-                title=n.get("title", "未命名节点"),
-                content_type=content_type,
-                value=value,
-                sort_order=n.get("sort_order", 0),
-                template_node_id=tpl_node_id,
-                created_at=now,
-                updated_at=now,
-            )
-            db_session.add(node)
-            if n.get("children"):
-                self._init_info_nodes(db_session, project_id, n["children"],
-                                     parent_id=node_id)
-
     def create_project(self, project_data: Dict) -> Dict:
         db = SessionLocal()
         try:
@@ -504,10 +463,10 @@ class ProjectService:
 
             project_data = _filter_project_fields(project_data)
 
-            # 按模板初始化 ext_info（overview+activity）与 info_nodes 树。
-            # 若调用方已传入 ext_info 则以传入值为准；info_nodes 树总是从模板生成。
+            # 按模板初始化 ext_info（overview+activity）。
+            # 若调用方已传入 ext_info 则以传入值为准。
             project_type = project_data.get("project_type")
-            ext_info_tpl, info_nodes_tpl = _split_template(project_type)
+            ext_info_tpl = _split_template(project_type)[0]
             if not project_data.get("ext_info"):
                 project_data["ext_info"] = ext_info_tpl
 
@@ -516,12 +475,10 @@ class ProjectService:
             db.commit()
             db.refresh(db_project)
 
-            # 从模板初始化信息树：递归生成 UUID 写入 project_info_node 表
-            if info_nodes_tpl:
-                self._init_info_nodes(db_session=db, project_id=db_project.id,
-                                      nodes_tpl=info_nodes_tpl)
-                db.commit()
-
+            # 不再为项目复制一份信息树节点：新结构下全局字段定义（project_info_node 里
+            # project_id 为 NULL 的行）是所有项目共用的一份，项目只在自己的
+            # project_info_value 里存值（SKILL 第 4 节）。旧实现每次建项目都递归
+            # 拷贝一整棵树，既冗余又导致「改模板要同步 N 个项目」。
             return self._convert_to_dict(db_project)
         finally:
             db.close()

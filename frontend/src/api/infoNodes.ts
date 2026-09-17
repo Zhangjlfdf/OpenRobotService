@@ -1,50 +1,91 @@
 // 项目信息树节点 API —— 对接 admin 模块 /api/admin/info-nodes/*
 // 后端实现：backend/app/modules/admin/api/info_nodes.py（路由前缀 /info-nodes，挂在 /api/admin 下）
-// 契约要点（见 backend/docs/project_ext_info_info_nodes_api.md 第五节）：
-//   - 逐节点 CRUD，不做整树读改写；换父/排序走 move，批量替换整树走 import；
-//   - value 在库里是 TEXT，结构化内容由调用方自行编码（本项目用 JSON 字符串）；
-//   - 创建节点的 id 由客户端生成（UUID），服务端原样入库，供后续稳定引用；
-//   - 删除节点会连带删除整棵子树；import 会先清空该项目全部旧节点。
+// 契约要点（改造后）：
+//   - 字段定义与项目值分离：节点（title/content_type）是「定义」，value 是**本项目**填的数据；
+//   - 结构类写接口（增删改节点/位置/导入/模板）仅管理员；值写入（PUT /nodes/{id}/value）
+//     任何登录用户都能用，且只能写已存在节点——普通用户要记表外信息走「增补信息」；
+//   - value 在库里是 JSON，服务端按值类型编码后再下发：下拉/布尔为 {selected, options}，
+//     附件为 {name, resource_id, size}，其余为字符串或 null；
+//   - 换父/排序走 move；import 为纯增补（只增不改不删，不再清空旧节点）；
+//   - 删除节点会连带删除整棵子树，但只允许删本项目的增补节点。
 import { createRequest } from './client';
 import API_CONFIG from '@/config/api';
 
-/** 后端原始节点（value 为 TEXT 字符串；树查询时每节点含 children） */
+/** 下拉 / 布尔类节点的值：选项来自字段定义（服务端合并下发），selected 是本项目的选中项 */
+export interface ApiInfoValueSelect {
+  selected: string;
+  options: string[];
+}
+
+/** 附件类节点的值 */
+export interface ApiInfoValueAttachment {
+  name: string;
+  resource_id?: string;
+  size?: number;
+}
+
+export type ApiInfoNodeValue = string | ApiInfoValueSelect | ApiInfoValueAttachment | null;
+
+/** 后端原始节点（value 由服务端按值类型编码；树查询时每节点含 children） */
 export interface ApiInfoNode {
   id: string;
-  project_id: string;
+  project_id: string | null;
   parent_id: string | null;
   title: string;
   content_type: string;
-  value: string | null;
+  value: ApiInfoNodeValue;
   sort_order: number;
   created_at: string;
   updated_at: string;
   children?: ApiInfoNode[];
+  /** 字段标识（服务端维护，程序引用用；不在界面上展示） */
+  node_key?: string;
+  /** root / group / field */
+  node_type?: string;
+  /** 内部细分类型 text/number/boolean/date/select/multi_select/person/attachment/json */
+  value_type?: string;
+  /** 该字段在模板里是否必填 */
+  required?: boolean;
+  /** 该节点下是否允许普通用户「增补信息」 */
+  allow_custom?: boolean;
+  /** 下拉类字段的可选项（定义在节点上，全员共用） */
+  options?: string[];
+  /** 非末级节点的标题备选项（定义在节点上，全员共用） */
+  titleOptions?: string[];
+  /** true = 本项目增补的节点（非全局字段定义） */
+  is_custom?: boolean;
 }
 
+/** 增补一个节点（管理员走 /projects/{id}，普通用户走 /projects/{id}/custom-nodes，载荷相同） */
 export interface ApiInfoNodeCreate {
-  id: string;
   parent_id?: string | null;
   title?: string;
   content_type?: string;
-  value?: string | null;
+  value_type?: string;
   sort_order?: number;
+  /** 外部标识，仅管理员接口认；增补入口服务端强制忽略 */
+  node_key?: string;
 }
 
-/** 可更新字段；parent_id 不在此列，换父走 moveInfoNodeApi */
+/** 可更新字段（仅管理员，且只对「本项目增补的节点」有效）；parent_id 不在此列，换父走 move */
 export interface ApiInfoNodeUpdate {
   title?: string;
   content_type?: string;
-  value?: string | null;
+  value_type?: string;
   sort_order?: number;
+  required?: boolean;
+  allow_custom?: boolean;
+  /** 下拉选项（字段定义，落节点 config） */
+  options?: string[];
+  /** 标题备选项（字段定义，落节点 config） */
+  titleOptions?: string[];
 }
 
 /** import 接口的递归节点结构（children 递归嵌套） */
 export interface ApiInfoTreeImportNode {
-  id: string;
   title: string;
   content_type?: string;
-  value?: string | null;
+  value?: ApiInfoNodeValue;
   sort_order?: number;
   children?: ApiInfoTreeImportNode[];
 }
@@ -58,7 +99,7 @@ export async function fetchInfoTree(projectId: string): Promise<ApiInfoNode[]> {
   return Array.isArray(data) ? data : [];
 }
 
-/** 创建节点（id 由调用方生成） */
+/** 创建节点（仅管理员，只在本项目范围内增补，不动全局模板） */
 export async function createInfoNodeApi(projectId: string, payload: ApiInfoNodeCreate): Promise<ApiInfoNode> {
   return request()<ApiInfoNode>(`/info-nodes/projects/${encodeURIComponent(projectId)}`, {
     method: 'POST',
@@ -66,7 +107,27 @@ export async function createInfoNodeApi(projectId: string, payload: ApiInfoNodeC
   });
 }
 
-/** 更新节点（title / content_type / value / sort_order；空对象会被后端 400 拒绝） */
+/** 增补信息（任何登录用户）：必须在允许增补的父节点下，只能加在本项目 */
+export async function createCustomInfoNodeApi(projectId: string, payload: ApiInfoNodeCreate): Promise<ApiInfoNode> {
+  return request()<ApiInfoNode>(`/info-nodes/projects/${encodeURIComponent(projectId)}/custom-nodes`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+/** 写入节点值（任何登录用户，值的归属项目由 project_id 指定） */
+export async function setInfoNodeValueApi(
+  nodeId: string,
+  projectId: string,
+  value: ApiInfoNodeValue,
+): Promise<ApiInfoNode> {
+  return request()<ApiInfoNode>(
+    `/info-nodes/nodes/${encodeURIComponent(nodeId)}/value?project_id=${encodeURIComponent(projectId)}`,
+    { method: 'PUT', body: JSON.stringify({ value }) },
+  );
+}
+
+/** 更新节点定义（仅管理员；只对「本项目增补的节点」生效，全局字段请改详情模板） */
 export async function updateInfoNodeApi(nodeId: string, updates: ApiInfoNodeUpdate): Promise<ApiInfoNode> {
   return request()<ApiInfoNode>(`/info-nodes/nodes/${encodeURIComponent(nodeId)}`, {
     method: 'PUT',
@@ -74,7 +135,7 @@ export async function updateInfoNodeApi(nodeId: string, updates: ApiInfoNodeUpda
   });
 }
 
-/** 移动节点（换父 + 排序位置）；newParentId 为 null 表示移到根 */
+/** 移动节点（仅管理员，换父 + 排序位置）；newParentId 为 null 表示移到根 */
 export async function moveInfoNodeApi(nodeId: string, newParentId: string | null, newSortOrder: number): Promise<ApiInfoNode> {
   return request()<ApiInfoNode>(`/info-nodes/nodes/${encodeURIComponent(nodeId)}/move`, {
     method: 'PATCH',
@@ -82,12 +143,12 @@ export async function moveInfoNodeApi(nodeId: string, newParentId: string | null
   });
 }
 
-/** 删除节点及其整棵子树（404 = 节点不存在） */
+/** 删除节点及其整棵子树（仅管理员；404 = 节点不存在，403 = 全局字段不可删） */
 export async function deleteInfoNodeApi(nodeId: string): Promise<void> {
   await request()<{ detail?: string }>(`/info-nodes/nodes/${encodeURIComponent(nodeId)}`, { method: 'DELETE' });
 }
 
-/** 批量导入信息树（先清空该项目旧节点再写入）；返回写入节点数 */
+/** 批量导入信息树（仅管理员；纯增补，只增不改不删）；返回新增节点数 */
 export async function importInfoTreeApi(projectId: string, nodes: ApiInfoTreeImportNode[]): Promise<number> {
   const data = await request()<{ imported?: number }>(`/info-nodes/projects/${encodeURIComponent(projectId)}/import`, {
     method: 'POST',
@@ -96,14 +157,11 @@ export async function importInfoTreeApi(projectId: string, nodes: ApiInfoTreeImp
   return data?.imported ?? 0;
 }
 
-/** 按后端模板重建信息树（服务端读 project_type → project_templates/*.yaml，先清空旧节点）；
- *  与新建项目初始化同一份模板，前端不再各自维护一份结构定义；模板为空时返回 0 且不改动数据 */
-export async function importInfoTemplateApi(projectId: string): Promise<number> {
-  const data = await request()<{ imported?: number }>(`/info-nodes/projects/${encodeURIComponent(projectId)}/import-template`, {
-    method: 'POST',
-  });
-  return data?.imported ?? 0;
-}
+/** 按后端模板重建信息树 —— 已废弃。
+ *  新结构下全局字段定义是所有项目共用的一份（project_info_node 里 project_id 为空的行），
+ *  每个项目读树时自动带上，不存在「本项目缺字段需要补种」的情况，后端也已移除该接口。
+ *  管理员改字段定义请走 /info-nodes/template（见下方 saveInfoTemplateApi）。
+ */
 
 // —— 编辑历史（节点操作记录）：后端每个节点操作都会落库，见 info_node_change_service ——
 
@@ -151,10 +209,13 @@ export async function fetchInfoNodeMarksApi(projectId: string): Promise<string[]
   return Array.isArray(data?.node_ids) ? data.node_ids : [];
 }
 
-/** 切换节点关注状态，返回切换后是否被关注（404 = 节点不存在） */
-export async function toggleInfoNodeMarkApi(nodeId: string): Promise<boolean> {
+/** 切换节点关注状态，返回切换后是否被关注（404 = 节点不存在）。
+ *  projectId 可选：不传时后端按该节点已有标注切换（增补节点用自己的项目）——
+ *  「项目信息管理」展示卡只传 nodeId，接口保持向后兼容。 */
+export async function toggleInfoNodeMarkApi(nodeId: string, projectId?: string): Promise<boolean> {
+  const suffix = projectId ? `?project_id=${encodeURIComponent(projectId)}` : '';
   const data = await request()<{ marked?: boolean }>(
-    `/info-nodes/nodes/${encodeURIComponent(nodeId)}/mark`,
+    `/info-nodes/nodes/${encodeURIComponent(nodeId)}/mark${suffix}`,
     { method: 'POST' },
   );
   return !!data?.marked;

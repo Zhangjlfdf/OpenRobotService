@@ -6,7 +6,7 @@ import ProjectInfoFileImport from '../admin/ProjectInfoFileImport';
 import {
   createInfoNodeApi,
   parseImportFileApi,
-  updateInfoNodeApi,
+  setInfoNodeValueApi,
   type ApiImportParseResult,
   type ApiInfoNode,
 } from '@/api/infoNodes';
@@ -15,11 +15,12 @@ import type { ProjectInfoNode } from '@/shared/utils/projectInfoTree';
 vi.mock('@/api/infoNodes', () => ({
   fetchInfoTree: vi.fn(),
   createInfoNodeApi: vi.fn(),
+  createCustomInfoNodeApi: vi.fn(),
+  setInfoNodeValueApi: vi.fn(),
   updateInfoNodeApi: vi.fn(),
   moveInfoNodeApi: vi.fn(),
   deleteInfoNodeApi: vi.fn(),
   importInfoTreeApi: vi.fn(),
-  importInfoTemplateApi: vi.fn(),
   parseImportFileApi: vi.fn(),
 }));
 
@@ -136,12 +137,13 @@ describe('ProjectInfoFileImport（文件导入 AI 识别）', () => {
     expect(screen.getByText('确认导入（1）')).toBeTruthy();
   });
 
-  it('确认导入：勾选项逐节点落库（填写走更新，未匹配走新建+写值）', async () => {
+  it('确认导入：勾选项逐节点落库（填写/覆盖走值写入，未匹配走新建+写值）', async () => {
     vi.mocked(parseImportFileApi).mockResolvedValue(RESULT);
-    vi.mocked(updateInfoNodeApi).mockImplementation(async (id, updates) =>
-      apiNode({ id, value: updates.value ?? null }));
+    // 值写入接口按「节点 id + 归属项目 + 值」调用，返回写入后的节点
+    vi.mocked(setInfoNodeValueApi).mockImplementation(async (id, _projectId, value) =>
+      apiNode({ id, value }));
     vi.mocked(createInfoNodeApi).mockImplementation(async (_projectId, payload) =>
-      apiNode({ id: payload.id, title: payload.title ?? '', parent_id: payload.parent_id ?? null }));
+      apiNode({ id: 'server-1', title: payload.title ?? '', parent_id: payload.parent_id ?? null }));
     const onApplied = renderDialog();
     pickFile();
     await screen.findByText('将填写');
@@ -151,13 +153,14 @@ describe('ProjectInfoFileImport（文件导入 AI 识别）', () => {
     fireEvent.click(screen.getByText('确认导入（2）'));
 
     await waitFor(() => expect(onApplied).toHaveBeenCalled());
-    expect(updateInfoNodeApi).toHaveBeenCalledWith('c2', { value: 'SAP ECC' });
+    expect(setInfoNodeValueApi).toHaveBeenCalledWith('c2', 'P1', 'SAP ECC');
     expect(createInfoNodeApi).toHaveBeenCalledWith('P1', expect.objectContaining({
       parent_id: 'p1', title: '设备数量',
     }));
-    expect(updateInfoNodeApi).toHaveBeenCalledWith(expect.any(String), { value: '3 台' });
+    // 未匹配的新节点：先建节点，再把值写到它自己身上
+    expect(setInfoNodeValueApi).toHaveBeenCalledWith('server-1', 'P1', '3 台');
     // 未勾选的「将覆盖」不落库
-    expect(updateInfoNodeApi).not.toHaveBeenCalledWith('c1', expect.anything());
+    expect(setInfoNodeValueApi).not.toHaveBeenCalledWith('c1', expect.anything(), expect.anything());
     expect(vi.mocked(Toast)).toHaveBeenCalledWith(expect.objectContaining({
       message: '已填写 1 项，覆盖 0 项，新增 1 项',
     }));
@@ -170,10 +173,12 @@ describe('ProjectInfoFileImport（文件导入 AI 识别）', () => {
       overwrite: [],
       unmatched: [{ title: '临时信息', value: 'x', suggested_parent_id: null, suggested_parent_path: null }],
     });
-    vi.mocked(createInfoNodeApi).mockImplementation(async (_projectId, payload) =>
-      apiNode({ id: payload.id, title: payload.title ?? '', parent_id: payload.parent_id ?? null }));
-    vi.mocked(updateInfoNodeApi).mockImplementation(async (id, updates) =>
-      apiNode({ id, value: updates.value ?? null }));
+    let created = 0;
+    vi.mocked(createInfoNodeApi).mockImplementation(async (_projectId, payload) => {
+      created += 1;
+      return apiNode({ id: `server-${created}`, title: payload.title ?? '', parent_id: payload.parent_id ?? null });
+    });
+    vi.mocked(setInfoNodeValueApi).mockImplementation(async (id, _projectId, value) => apiNode({ id, value }));
     renderDialog();
     pickFile();
     await screen.findByText('未匹配到节点');
@@ -182,6 +187,7 @@ describe('ProjectInfoFileImport（文件导入 AI 识别）', () => {
     fireEvent.click(screen.getByLabelText('选择 临时信息'));
     fireEvent.click(screen.getByText('确认导入（1）'));
 
+    // 先建兜底根「导入信息」，再在它下面建「临时信息」
     await waitFor(() => expect(createInfoNodeApi).toHaveBeenCalledTimes(2));
     expect(createInfoNodeApi).toHaveBeenNthCalledWith(1, 'P1', expect.objectContaining({
       parent_id: null, title: '导入信息',
@@ -189,6 +195,7 @@ describe('ProjectInfoFileImport（文件导入 AI 识别）', () => {
     expect(createInfoNodeApi).toHaveBeenNthCalledWith(2, 'P1', expect.objectContaining({
       title: '临时信息',
     }));
+    expect(setInfoNodeValueApi).toHaveBeenCalledWith('server-2', 'P1', 'x');
   });
 
   it('文件项目名与当前项目不一致时，显著提醒可能导错文件（可继续或取消）', async () => {

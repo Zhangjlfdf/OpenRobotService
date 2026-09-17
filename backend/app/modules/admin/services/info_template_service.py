@@ -1,564 +1,464 @@
-"""项目信息树「详情模板」服务 —— 管理员在编辑页维护模板，保存后同步到所有项目。
+"""项目信息树「详情模板」服务 —— 管理员维护全局字段定义（project_info_node 里 project_id 为 NULL 的那些行）。
 
-背景：模板原先是代码目录里的 YAML（config/project_templates/default.yaml），改模板要改代码发版。
-本服务把模板搬进数据库（project_info_template 表，当前只有一套，id='default'），
-首次读取时用 YAML 模板补种（保留现有默认结构），之后凭前端编辑页维护。
+**与旧实现的根本差别**：模板不再是存在 project_info_template 里的一份 JSON，
+也不再需要「保存后同步到所有项目」。模板**就是**全局节点行本身，项目不再持有副本，
+所以管理员改一次，全体项目立刻生效——`compute_sync_plan` 那套
+「按标题路径回填锚点 → 逐项目算出增/改/删」的差异引擎连同 template_node_id 锚点
+一起废弃：它存在的理由是「模板与项目各存一份、需要对齐」，新结构下不存在两份。
 
-同步锚点：project_info_node.template_node_id ↔ 模板节点 id。
-  - 存量项目节点没有锚点 → 同步时先按「标题路径」回填一次；
-  - 回填不上的节点视为用户自建，同步不动它（也不会被模板删除带走）；
-  - 模板删掉的节点 → 带锚点的项目节点连其子树一起删（前端确认弹窗里已明示）。
+顺带消失的问题：
+  - 旧同步会把模板的标题/类型/顺序强制覆盖到所有项目（`_carry_value` 那套「尽量不丢值」
+    的兼容逻辑就是在给这个覆盖擦屁股）；现在节点只有一份，改它就是改它，没有「覆盖谁」。
+  - 旧同步用 template_node_id 判断「节点是不是模板带来的」；现在 project_id 是否为空
+    天然区分全局定义与项目增补，不会再误删用户自建节点。
 
-节点对上后的同步规则（**只变更节点，不整体覆盖项目已填内容**）：
-  - 标题 / 父子关系 / 同级顺序 / 内容类型 一律以模板为准；
-  - 值（value）：类型没变时不动；类型变了也尽量把已填内容带到新类型下（`_carry_value`）——
-    文本原样保留、file ↔ image 互切保留已传附件、转下拉时旧值能对上选项就选中；
-  - 下拉节点的选项以模板为准，已选项仍在新选项里则保留（模板删掉的选项无从保留，选择清空）。
+模板节点 id 的来源：新增节点时按「标题路径」派生稳定 UUID
+（`_template_node_id`，与 alembic 播种同一个 uuid5 命名空间），
+所以同一份模板反复保存、或在另一套环境里重建，得到的 id 是一致的；
+已有节点则沿用库里的 id（改名不会换 id，历史和关注因此不会断）。
 
-接口层（api/info_nodes.py）：
-  GET  /info-nodes/template              读模板（仅管理员）
-  POST /info-nodes/template {nodes,dry_run}  dry_run=预览影响；否则保存并同步（仅管理员）
+**绝不触碰 project_info_value**：模板管的是字段定义，项目已填的数据不属于模板的职责范围。
+停用（而非删除）一个字段时，它的值原样留在库里，重新启用即可恢复。
 """
 from __future__ import annotations
 
-import json
-import re
 import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-from app.models.delivery import PROJECT_DELETED
-from app.modules.admin.models_das.models import Project, ProjectInfoNode, ProjectInfoTemplate
-from app.modules.admin.services import info_node_change_service as change_log
-from app.modules.admin.services import info_node_mark_service as node_marks
+from app.models.delivery import (
+    PROJECT_INFO_NODE_ACTIVE,
+    PROJECT_INFO_NODE_DISABLED,
+    PROJECT_INFO_VALUE_TYPES,
+)
+from app.modules.admin.models_das.models import Project, ProjectInfoNode
 from app.modules.admin.services.info_node_service import SessionLocal
 
-TEMPLATE_ID = "default"
-TEMPLATE_NAME = "项目详情模板"
 MAX_TEMPLATE_DEPTH = 4  # 与前端 PROJECT_INFO_MAX_DEPTH / 导入服务 MAX_NODE_DEPTH 一致
-ALLOWED_CONTENT_TYPES = ("text", "select", "file", "image")
 MAX_TITLE_LEN = 255
-MAX_PREVIEW_DETAILS = 20  # 预览里最多列出的项目数（其余只给汇总）
 
-_NORM_STRIP_RE = re.compile(r"[\s　()（）\[\]【】<>《》\"'“”‘’,，。.：:；;、·|/\\\-—_~]+")
+# 前端内容形式 → 值类型（接口层沿用旧口径，内部存细类型）
+_CONTENT_TYPE_TO_VALUE_TYPE = {
+    "text": "text",
+    "select": "select",
+    "file": "attachment",
+    "image": "attachment",
+}
+# 值类型 → 前端内容形式（只用于把库里已有的细类型回吐给编辑页）
+_VALUE_TYPE_TO_CONTENT_TYPE = {
+    "text": "text",
+    "number": "text",
+    "boolean": "select",
+    "date": "text",
+    "select": "select",
+    "multi_select": "text",
+    "person": "text",
+    "attachment": "file",
+    "json": "text",
+}
 
 
 def _now_str() -> str:
+    """与 delivery.py 一致的时间戳字符串。"""
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-def _norm_title(text: Any) -> str:
-    """标题/路径规范化（去空白与常见标点、统一小写），用于按路径回填锚点。"""
-    return _NORM_STRIP_RE.sub("", str(text or "")).lower()
+def _template_node_id(path: Tuple[str, ...]) -> str:
+    """按标题路径派生稳定的模板节点 id。
 
-
-def _select_state(value: Any) -> Tuple[str, List[str]]:
-    """项目节点 value → (selected, options)；坏数据按空处理。"""
-    parsed: Any = None
-    if isinstance(value, str):
-        try:
-            parsed = json.loads(value)
-        except (json.JSONDecodeError, TypeError):
-            parsed = None
-    if not isinstance(parsed, dict):
-        return "", []
-    selected = parsed.get("selected") if isinstance(parsed.get("selected"), str) else ""
-    options = [o for o in parsed.get("options", []) if isinstance(o, str)] if isinstance(parsed.get("options"), list) else []
-    return selected, options
-
-
-def _parse_value(raw: Any) -> Any:
-    """项目节点值（TEXT 列）→ 结构化：是 JSON 就解析出来，否则按原字符串。"""
-    if not isinstance(raw, str):
-        return raw
-    try:
-        return json.loads(raw)
-    except (json.JSONDecodeError, TypeError):
-        return raw
-
-
-def _is_attachment(value: Any) -> bool:
-    """是否是文件 / 图片节点的值结构（`{name, resource_id, size}`，前端两者共用同一形状）。"""
-    return isinstance(value, dict) and (value.get("resource_id") is not None or bool(value.get("name")))
-
-
-def _carry_value(new_type: str, old_value: Any, options: List[str], template_value: Any) -> Any:
-    """内容类型变更时的取值：结构以模板为准，项目已填内容尽量带到新类型下（模板同步不整体覆盖）。
-
-    只在 target 类型「表达不了」旧内容时才退回模板默认值，逐类型规则：
-      - select：值必须是 {"selected","options"}（前端按 JSON 解析），选项以模板为准；
-        已填内容能对上就保留——旧选择结构取 selected，旧文本恰好等于某个选项也认，对不上才清空。
-      - file / image：旧值本身就是附件结构时原样保留（file ↔ image 互切不丢已传附件）。
-      - text：已填文本原样保留；旧是选择结构则把已选值当文本。
+    与 alembic 播种（7c1e9a4b2d38）用同一个命名空间与同一套路径拼接，
+    因此「迁移播种的节点」与「管理员新建的节点」在 id 规则上是一致的。
     """
-    parsed = _parse_value(old_value)
-    if new_type == "select":
-        if isinstance(parsed, dict):
-            candidate = parsed.get("selected") if isinstance(parsed.get("selected"), str) else ""
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, 'ors://project-info-node/' + '/'.join(path)))
+
+
+def _to_content_type(value_type: Optional[str]) -> str:
+    return _VALUE_TYPE_TO_CONTENT_TYPE.get(value_type or "text", "text")
+
+
+def _to_value_type(content_type: Optional[str]) -> str:
+    if content_type in PROJECT_INFO_VALUE_TYPES:
+        # 已经是内部细类型（编辑页回传库里读到的 value_type 时会走到这）
+        return content_type
+    return _CONTENT_TYPE_TO_VALUE_TYPE.get(content_type or "text", "text")
+
+
+def _options_to_config(options: Any) -> Optional[Dict[str, Any]]:
+    """选项清单 → config JSON：统一存 [{"value","label"}]。"""
+    if not options:
+        return None
+    items = []
+    for opt in options:
+        if isinstance(opt, dict):
+            value = opt.get("value", opt.get("label"))
+            if value is None:
+                continue
+            items.append({"value": str(value), "label": str(opt.get("label", value))})
         else:
-            candidate = parsed.strip() if isinstance(parsed, str) else ""
-        selected = candidate if candidate in options else ""
-        return json.dumps({"selected": selected, "options": options}, ensure_ascii=False)
-    if new_type in ("file", "image"):
-        return json.dumps(parsed, ensure_ascii=False) if _is_attachment(parsed) else template_value
-    if isinstance(parsed, str) and parsed.strip():
-        return parsed
-    if isinstance(parsed, dict):  # 旧下拉的已选值当文本；附件结构在文字节点上显示不出来，带不过去
-        selected = parsed.get("selected")
-        if isinstance(selected, str) and selected.strip():
-            return selected
-    return template_value
+            text = str(opt).strip()
+            if text:
+                items.append({"value": text, "label": text})
+    return {"options": items} if items else None
 
 
-def _node_content_type(node: Dict) -> str:
-    """模板节点内容类型：显式 content_type 优先，其次有 options 即 select，否则 text。"""
-    ct = node.get("content_type")
-    if isinstance(ct, str) and ct in ALLOWED_CONTENT_TYPES:
-        return ct
-    return "select" if node.get("options") else "text"
+def normalize_template_nodes(nodes: Any, depth: int = 1) -> List[Dict]:
+    """校验并规范化管理员提交的模板树（保存前调用）。
 
-
-def normalize_template_nodes(nodes: Any, depth: int = 1, seen_ids: Optional[set] = None) -> List[Dict]:
-    """校验并规范化模板节点树（保存前调用）。
-
-    规则（与模板的两条硬约束一致）：标题非空、id 唯一、内容类型合法、
-    下拉节点必须是末级、整树最深 4 层。返回规范化后的新树（sort_order 按顺序重排）。
-    不合法直接抛 ValueError（接口层转 400，带用户可读信息）。
+    规则：标题非空、整树最深 MAX_TEMPLATE_DEPTH 层、（另由 _assert_keys_unique 保证）
+    同级节点标识不重复。返回规范化后的新树。不合法直接抛 ValueError（接口层转 400）。
     """
     if not isinstance(nodes, list) or not nodes:
         raise ValueError("模板不能为空，至少保留一个节点")
     if depth > MAX_TEMPLATE_DEPTH:
         raise ValueError(f"模板最多 {MAX_TEMPLATE_DEPTH} 层，节点层级过深")
 
-    seen = seen_ids if seen_ids is not None else set()
     normalized: List[Dict] = []
     for index, raw in enumerate(nodes):
         if not isinstance(raw, dict):
             raise ValueError("模板节点格式不正确")
-        title = str(raw.get("title") or "").strip()
+        # title 优先：get_template 会把 node_name 一并下发，前端编辑页只改 title，
+        # 若这里先读 node_name，读回来再存回去就会把旧名字写回，改名永远不生效。
+        title = str(raw.get("title") or raw.get("node_name") or "").strip()
         if not title:
             raise ValueError(f"第 {depth} 层第 {index + 1} 个节点标题不能为空")
-        node_id = raw.get("id")
-        if not isinstance(node_id, str) or not node_id.strip():
-            raise ValueError(f"模板节点「{title}」缺少 id")
-        if node_id in seen:
-            raise ValueError(f"模板节点 id 重复：{node_id}")
-        seen.add(node_id)
 
-        content_type = _node_content_type(raw)
+        content_type = raw.get("content_type")
+        value_type = _to_value_type(content_type or raw.get("value_type"))
         children = raw.get("children") or []
-        if content_type == "select" and children:
-            raise ValueError(f"下拉节点「{title}」不能有子节点（下拉必须是末级）")
-
-        options: List[str] = []
-        if content_type == "select":
-            raw_options = raw.get("options") or []
-            if not isinstance(raw_options, list):
-                raise ValueError(f"下拉节点「{title}」的选项格式不正确")
-            options = [str(o).strip() for o in raw_options if str(o).strip()]
+        if value_type in ("select", "attachment") and children:
+            raise ValueError(f"「{title}」是末级字段，不能有子节点")
 
         node: Dict[str, Any] = {
-            "id": node_id,
+            "id": raw.get("id") or None,
             "title": title[:MAX_TITLE_LEN],
-            "content_type": content_type,
-            "sort_order": index,
-            "children": normalize_template_nodes(children, depth + 1, seen) if children else [],
+            "value_type": value_type,
+            "content_type": _to_content_type(value_type),
+            "sort_order": (index + 1) * 10,
+            "required": bool(raw.get("required")),
+            "allow_custom": bool(raw.get("allow_custom")),
+            "children": normalize_template_nodes(children, depth + 1) if children else [],
         }
-        if content_type == "select":
-            node["options"] = options
-        if "value" in raw and raw.get("value") is not None:
-            node["value"] = raw.get("value")
+        if value_type == "select":
+            node["options"] = _flatten_options(raw.get("options"))
+        elif node["allow_custom"] and raw.get("options"):
+            # 允许增补的父节点也可以带默认选项（当前无此用法，保留透传避免丢数据）
+            node["options"] = _flatten_options(raw.get("options"))
         normalized.append(node)
     return normalized
 
 
-def flatten_template(nodes: List[Dict]) -> List[Dict]:
-    """模板树 → 平铺列表（父节点在前，保序）。含 parent_id / depth / path"""
-    flat: List[Dict] = []
-
-    def walk(items: List[Dict], parent_id: Optional[str], parent_path: List[str], depth: int) -> None:
-        for item in items:
-            titles = parent_path + [item.get("title", "")]
-            flat.append({
-                "id": item.get("id"),
-                "parent_id": parent_id,
-                "title": item.get("title", ""),
-                "content_type": _node_content_type(item),
-                "options": [str(o) for o in (item.get("options") or [])] if _node_content_type(item) == "select" else [],
-                "sort_order": item.get("sort_order"),
-                "depth": depth,
-                "path": " / ".join(titles),
-                "value": item.get("value"),
-            })
-            walk(item.get("children") or [], item.get("id"), titles, depth + 1)
-
-    walk(nodes, None, [], 1)
-    return flat
+def _flatten_options(options: Any) -> List[str]:
+    result: List[str] = []
+    for opt in options or []:
+        if isinstance(opt, dict):
+            picked = opt.get("value", opt.get("label"))
+            if picked is not None:
+                result.append(str(picked))
+        else:
+            text = str(opt).strip()
+            if text:
+                result.append(text)
+    return result
 
 
-def _project_paths(project_nodes: List[Dict]) -> Dict[str, str]:
-    """项目节点 → 标题路径（内存递归，带环保护）。"""
-    by_id = {n["id"]: n for n in project_nodes}
-    cache: Dict[str, str] = {}
-
-    def path_of(node_id: str, guard: set) -> str:
-        if node_id in cache:
-            return cache[node_id]
-        if node_id in guard:
-            return ""
-        guard.add(node_id)
-        node = by_id.get(node_id)
-        if node is None:
-            return ""
-        parent_id = node.get("parent_id")
-        prefix = path_of(parent_id, guard) + " / " if parent_id else ""
-        result = prefix + (node.get("title") or "")
-        cache[node_id] = result
-        return result
-
-    return {n["id"]: path_of(n["id"], set()) for n in project_nodes}
-
-
-def compute_sync_plan(template_flat: List[Dict], project_nodes: List[Dict]) -> Dict[str, Any]:
-    """纯函数：模板 + 一个项目的现有节点 → 该项目要执行的动作清单（不碰数据库）。
-
-    返回 {link, creates, updates, delete_ids}：
-      link      [{project_node_id, template_node_id}] 存量节点按标题路径回填锚点
-      creates   [{node_id(新UUID), template_node_id, parent_id, title, content_type, options, sort_order}]
-      updates   [{node_id, template_node_id, changes: {字段: 新值}}]
-      delete_ids 集合：锚点已被模板删除的项目节点及其子树（锚点仍有效的节点会被移走，不删）
-    """
-    tpl_by_id = {t["id"]: t for t in template_flat}
-    proj_by_id = {p["id"]: p for p in project_nodes}
-
-    # 1) 锚点回填：没有锚点的存量节点，按规范化标题路径对上模板节点（先到先得）
-    linked: Dict[str, str] = {p["id"]: p["template_node_id"] for p in project_nodes if p.get("template_node_id")}
-    claimed = set(linked.values())
-    tpl_by_path: Dict[str, List[Dict]] = {}
-    for t in template_flat:
-        tpl_by_path.setdefault(_norm_title(t["path"]), []).append(t)
-
-    proj_paths = _project_paths(project_nodes)
-    link: List[Dict] = []
-    for p in project_nodes:
-        if p.get("template_node_id"):
-            continue
-        key = _norm_title(proj_paths.get(p["id"], ""))
-        for candidate in tpl_by_path.get(key, []):
-            if candidate["id"] not in claimed:
-                link.append({"project_node_id": p["id"], "template_node_id": candidate["id"]})
-                claimed.add(candidate["id"])
-                linked[p["id"]] = candidate["id"]
-                break
-
-    # 锚点 → 项目节点映射（同一锚点多个节点时取第一个，其余按用户节点处理）
-    mapping: Dict[str, str] = {}
-    for p in project_nodes:
-        tpl_id = linked.get(p["id"])
-        if tpl_id and tpl_id in tpl_by_id:
-            mapping.setdefault(tpl_id, p["id"])
-
-    # 2) 逐模板节点（父在前）：有对应项目节点 → 算差异；没有 → 新建
-    creates: List[Dict] = []
-    updates: List[Dict] = []
-    for t in template_flat:
-        parent_proj = mapping.get(t["parent_id"]) if t["parent_id"] else None
-        proj_id = mapping.get(t["id"])
-        if proj_id is None:
-            new_id = str(uuid.uuid4())
-            mapping[t["id"]] = new_id
-            creates.append({
-                "node_id": new_id,
-                "template_node_id": t["id"],
-                "parent_id": parent_proj,
-                "title": t["title"],
-                "content_type": t["content_type"],
-                "options": t["options"],
-                "sort_order": t["sort_order"] if t["sort_order"] is not None else 0,
-                "value": t.get("value"),
-            })
-            continue
-
-        current = proj_by_id.get(proj_id) or {}
-        changes: Dict[str, Any] = {}
-        if (current.get("title") or "") != t["title"]:
-            changes["title"] = t["title"]
-        if (current.get("parent_id") or None) != (parent_proj or None):
-            changes["parent_id"] = parent_proj
-        if current.get("sort_order") != t["sort_order"]:
-            changes["sort_order"] = t["sort_order"] if t["sort_order"] is not None else 0
-        if (current.get("content_type") or "text") != t["content_type"]:
-            # 内容类型变了：类型以模板为准，值尽量带过去（不整体覆盖项目已填内容，见 _carry_value）
-            changes["content_type"] = t["content_type"]
-            changes["value"] = _carry_value(
-                t["content_type"], current.get("value"), t["options"], t.get("value"),
-            )
-        elif t["content_type"] == "select":
-            selected, options = _select_state(current.get("value"))
-            if options != t["options"]:
-                changes["value"] = json.dumps(
-                    {"selected": selected if selected in t["options"] else "", "options": t["options"]},
-                    ensure_ascii=False,
-                )
-        if changes:
-            updates.append({"node_id": proj_id, "template_node_id": t["id"], "changes": changes})
-
-    # 3) 模板已删除的锚点：删其项目节点及子树；锚点仍有效的节点会被移动到模板位置，跳过不删
-    children_map: Dict[str, List[str]] = {}
-    for p in project_nodes:
-        if p.get("parent_id"):
-            children_map.setdefault(p["parent_id"], []).append(p["id"])
-
-    alive = set(tpl_by_id)
-    delete_ids: set = set()
-
-    def collect(node_id: str) -> None:
-        for child in children_map.get(node_id, []):
-            child_tpl = linked.get(child)
-            if child_tpl and child_tpl in alive:
-                collect(child)  # 锚点有效：不删（会被同步移走），继续看它下面
-                continue
-            delete_ids.add(child)
-            collect(child)
-
-    for p in project_nodes:
-        tpl_id = p.get("template_node_id")
-        if tpl_id and tpl_id not in alive:
-            delete_ids.add(p["id"])
-            collect(p["id"])
-
-    return {"link": link, "creates": creates, "updates": updates, "delete_ids": delete_ids}
+def template_to_legacy_tree(nodes: List[Dict]) -> List[Dict]:
+    """规范化模板树 → 编辑页用的读取结构（补上 id options 等展示字段）。"""
+    out: List[Dict] = []
+    for node in nodes:
+        item = dict(node)
+        item["options"] = node.get("options") or []
+        item["children"] = template_to_legacy_tree(node.get("children") or [])
+        out.append(item)
+    return out
 
 
 class InfoTemplateService:
-    """详情模板的读取 / 保存 / 同步。所有写操作都由管理员端点触发。"""
+    """全局字段定义（project_info_node 中 project_id IS NULL 的部分）的读取 / 保存。"""
 
-    # ── 模板读取 / 保存 ──────────────────────────────
+    # ── 读取 ─────────────────────────────────────────
 
-    def get_template_nodes(self) -> List[Dict]:
-        """数据库模板节点树；没有模板行时返回空列表（调用方回退 YAML）。"""
-        db = SessionLocal()
-        try:
-            row = db.query(ProjectInfoTemplate).filter(ProjectInfoTemplate.id == TEMPLATE_ID).first()
-            if row is None or not row.nodes:
-                return []
-            data = json.loads(row.nodes)
-            return data if isinstance(data, list) else []
-        finally:
-            db.close()
+    def _load_global_nodes(self, db, include_disabled: bool = False) -> List[ProjectInfoNode]:
+        query = db.query(ProjectInfoNode).filter(ProjectInfoNode.project_id.is_(None))
+        if not include_disabled:
+            query = query.filter(ProjectInfoNode.status == PROJECT_INFO_NODE_ACTIVE)
+        return query.order_by(ProjectInfoNode.sort_order).all()
 
     def get_template(self) -> Dict[str, Any]:
-        """模板完整信息（首次访问用 YAML 模板补种，保证模板节点 id 从此刻起稳定）。"""
+        """模板完整信息（树 + 受影响项目数），供编辑页与保存前预览使用。
+
+        `source` 恒为 'db'：模板的权威来源是数据库里的全局节点行
+        （首次由 alembic 迁移从 default.yaml 播种），不再有 YAML 兜底分支。
+        """
         db = SessionLocal()
         try:
-            row = db.query(ProjectInfoTemplate).filter(ProjectInfoTemplate.id == TEMPLATE_ID).first()
-            source = "db"
-            if row is None:
-                nodes = self._seed_from_yaml()
-                row = ProjectInfoTemplate(
-                    id=TEMPLATE_ID, name=TEMPLATE_NAME,
-                    nodes=json.dumps(nodes, ensure_ascii=False),
-                    updated_at=_now_str(), updated_by="system",
-                )
-                db.add(row)
-                db.commit()
-                db.refresh(row)
-                source = "yaml"
-            project_count = db.query(Project).filter(Project.status != PROJECT_DELETED).count()
+            rows = self._load_global_nodes(db)
+            tree = self._rows_to_tree(rows)
+            project_count = db.query(Project).filter(Project.status != "deleted").count()
+            updated_at = None
+            updated_by = None
+            for row in rows:
+                if row.updated_at and (updated_at is None or row.updated_at > updated_at):
+                    updated_at = row.updated_at
+                    updated_by = row.updated_by
             return {
-                "id": row.id,
-                "name": row.name or TEMPLATE_NAME,
-                "nodes": json.loads(row.nodes or "[]"),
-                "updated_at": row.updated_at,
-                "updated_by": row.updated_by,
+                "id": "default",
+                "name": "项目详情模板",
+                "nodes": template_to_legacy_tree(tree),
+                "updated_at": updated_at,
+                "updated_by": updated_by,
                 "project_count": project_count,
-                "source": source,
+                "source": "db",
             }
         finally:
             db.close()
 
-    def _seed_from_yaml(self) -> List[Dict]:
-        """YAML 默认模板 → 带稳定 id 的模板节点树（补种用）。"""
-        from app.modules.admin.services.project_service import get_info_nodes_template_from_yaml
+    def get_template_nodes(self) -> List[Dict]:
+        """模板节点树（无则空列表）。"""
+        return self.get_template()["nodes"]
 
-        def build(items: List[Dict]) -> List[Dict]:
-            rows: List[Dict] = []
-            for index, n in enumerate(items):
-                if not isinstance(n, dict):
-                    continue
-                content_type = _node_content_type(n)
-                row: Dict[str, Any] = {
-                    "id": str(uuid.uuid4()),
-                    "title": str(n.get("title") or "未命名节点")[:MAX_TITLE_LEN],
-                    "content_type": content_type,
-                    "sort_order": index,
-                    "children": build(n.get("children") or []),
-                }
-                if content_type == "select":
-                    row["options"] = [str(o) for o in (n.get("options") or [])]
-                if n.get("value") is not None:
-                    row["value"] = n.get("value")
-                rows.append(row)
-            return rows
+    def _rows_to_tree(self, rows: List[ProjectInfoNode]) -> List[Dict]:
+        children_map: Dict[Optional[str], List[ProjectInfoNode]] = {}
+        for row in rows:
+            children_map.setdefault(row.parent_id, []).append(row)
 
-        return build(get_info_nodes_template_from_yaml(None))
-
-    def save_template(self, nodes: Any, username: str = "") -> Dict[str, Any]:
-        """校验并保存模板（不同步）。返回保存后的模板信息。"""
-        normalized = normalize_template_nodes(nodes)
-        db = SessionLocal()
-        try:
-            row = db.query(ProjectInfoTemplate).filter(ProjectInfoTemplate.id == TEMPLATE_ID).first()
-            if row is None:
-                row = ProjectInfoTemplate(id=TEMPLATE_ID, name=TEMPLATE_NAME)
-                db.add(row)
-            row.nodes = json.dumps(normalized, ensure_ascii=False)
-            row.updated_at = _now_str()
-            row.updated_by = username or "admin"
-            db.commit()
-            db.refresh(row)
-            return {"id": row.id, "name": row.name, "updated_at": row.updated_at, "updated_by": row.updated_by}
-        finally:
-            db.close()
-
-    # ── 同步 ─────────────────────────────────────────
-
-    def _plan_all(self, nodes: Any) -> Dict[str, Any]:
-        """对全部未删除项目计算同步计划（模板节点已校验规范化）。"""
-        normalized = normalize_template_nodes(nodes)
-        flat = flatten_template(normalized)
-
-        db = SessionLocal()
-        try:
-            projects = db.query(Project).filter(Project.status != PROJECT_DELETED).all()
-            project_infos = [(p.id, p.name or p.id) for p in projects]
-            nodes_by_project: Dict[str, List[Dict]] = {}
-            for project_id, _ in project_infos:
-                rows = db.query(ProjectInfoNode).filter(ProjectInfoNode.project_id == project_id).all()
-                nodes_by_project[project_id] = [{
-                    "id": n.id,
-                    "parent_id": n.parent_id,
-                    "title": n.title,
-                    "content_type": n.content_type,
-                    "value": n.value,
-                    "sort_order": n.sort_order,
-                    "template_node_id": n.template_node_id,
-                } for n in rows]
-        finally:
-            db.close()
-
-        details: List[Dict] = []
-        totals = {"projects": len(project_infos), "changed_projects": 0, "added": 0, "updated": 0, "deleted": 0}
-        plans: Dict[str, Dict] = {}
-        for project_id, project_name in project_infos:
-            plan = compute_sync_plan(flat, nodes_by_project[project_id])
-            plans[project_id] = plan
-            changed = len(plan["creates"]) + len(plan["updates"]) + len(plan["link"]) + len(plan["delete_ids"])
-            if not changed:
-                continue
-            totals["changed_projects"] += 1
-            totals["added"] += len(plan["creates"])
-            totals["updated"] += len(plan["updates"]) + len(plan["link"])
-            totals["deleted"] += len(plan["delete_ids"])
-            if len(details) < MAX_PREVIEW_DETAILS:
-                details.append({
-                    "project_id": project_id,
-                    "project_name": project_name,
-                    "added": len(plan["creates"]),
-                    "updated": len(plan["updates"]) + len(plan["link"]),
-                    "deleted": len(plan["delete_ids"]),
+        def build(parent_id: Optional[str]) -> List[Dict]:
+            result = []
+            for row in sorted(children_map.get(parent_id, []), key=lambda r: r.sort_order):
+                options: List[str] = []
+                config = row.config or {}
+                if isinstance(config, dict):
+                    for opt in config.get("options") or []:
+                        if isinstance(opt, dict):
+                            picked = opt.get("value", opt.get("label"))
+                            if picked is not None:
+                                options.append(str(picked))
+                        elif opt is not None:
+                            options.append(str(opt))
+                result.append({
+                    "id": row.id,
+                    "title": row.node_name,
+                    "node_name": row.node_name,
+                    "node_key": row.node_key,
+                    "value_type": row.value_type,
+                    "content_type": _to_content_type(row.value_type),
+                    "sort_order": row.sort_order,
+                    "required": bool(row.required),
+                    "allow_custom": bool(row.allow_custom),
+                    "options": options,
+                    "children": build(row.id),
                 })
-        return {"normalized": normalized, "plans": plans, "totals": totals, "details": details}
+            return result
 
-    def preview_sync(self, nodes: Any) -> Dict[str, Any]:
-        """预览（dry-run）：只算影响面，不写库。"""
-        result = self._plan_all(nodes)
-        return {"dry_run": True, **result["totals"], "details": result["details"]}
+        return build(None)
 
-    def save_and_sync(self, nodes: Any, username: str = "", operator_name: str = "") -> Dict[str, Any]:
-        """保存模板并把变更同步到所有项目。返回保存信息 + 同步统计。"""
-        result = self._plan_all(nodes)
-        template_info = self.save_template(result["normalized"], username)
+    # ── 保存 ─────────────────────────────────────────
 
-        totals = dict(result["totals"])
-        totals["failed_projects"] = []
+    def save_template(self, nodes: Any, username: str = "",
+                      operator_name: str = "") -> Dict[str, Any]:
+        """保存模板 = 把全局节点行改成提交的这棵树（不再有「同步到项目」这一步）。
+
+        三件事在同一事务里完成：
+          1. 提交树里已有的节点 → 改名 / 改类型 / 改排序 / 改 allow_custom；
+          2. 提交树里没有的全局节点 → status='disabled'（软停用，不动 project_info_value，
+             字段重新加回来时项目已填的值还在）；
+          3. 提交树里的新节点 → 按标题路径派生稳定 id 插入。
+        停用的节点若在本次又被加回来，会被重新置为 active（走第 1 步的恢复逻辑）。
+        """
+        normalized = normalize_template_nodes(nodes)
         now = _now_str()
 
-        for project_id, plan in result["plans"].items():
-            if not (plan["creates"] or plan["updates"] or plan["link"] or plan["delete_ids"]):
-                continue
-            db = SessionLocal()
-            try:
-                self._apply_plan(db, project_id, plan, now, username, operator_name)
-                db.commit()
-            except Exception as exc:  # 单个项目失败不拖垮整体，最后汇总上报
-                db.rollback()
-                totals["failed_projects"].append({"project_id": project_id, "error": str(exc)[:200]})
-            finally:
-                db.close()
+        db = SessionLocal()
+        try:
+            existing = {row.id: row for row in self._load_global_nodes(db, include_disabled=True)}
+            actions = self._collect_actions(normalized, existing, (), None)
+            self._assert_keys_unique(normalized)
 
-        return {"dry_run": False, **template_info, **totals, "details": result["details"]}
+            kept_ids = set()
+            for item in actions:
+                kept_ids.add(item["id"])
 
-    def _apply_plan(self, db, project_id: str, plan: Dict[str, Any], now: str,
-                    operator: str = "", operator_name: str = "") -> None:
-        """在一个事务里执行某个项目的同步计划（并记一条项目级操作记录）。"""
-        rows = db.query(ProjectInfoNode).filter(ProjectInfoNode.project_id == project_id).all()
-        by_id = {n.id: n for n in rows}
+            for item in actions:
+                row = existing.get(item["id"])
+                if row is None:
+                    db.add(ProjectInfoNode(
+                        id=item["id"],
+                        project_id=None,
+                        parent_id=item["parent_id"],
+                        node_key=item["node_key"],
+                        node_name=item["node_name"],
+                        node_type=item["node_type"],
+                        value_type=item["value_type"],
+                        sort_order=item["sort_order"],
+                        required=item["required"],
+                        allow_custom=item["allow_custom"],
+                        config=item["config"],
+                        status=PROJECT_INFO_NODE_ACTIVE,
+                        created_by=username or "admin",
+                        created_at=now,
+                        updated_by=username or "admin",
+                        updated_at=now,
+                    ))
+                    continue
+                row.parent_id = item["parent_id"]
+                row.node_name = item["node_name"]
+                row.node_type = item["node_type"]
+                row.value_type = item["value_type"]
+                row.sort_order = item["sort_order"]
+                row.required = item["required"]
+                row.allow_custom = item["allow_custom"]
+                row.config = item["config"]
+                row.status = PROJECT_INFO_NODE_ACTIVE
+                row.updated_by = username or "admin"
+                row.updated_at = now
 
-        # 1) 删除：模板已删除锚点的节点及子树（锚点有效的节点不在此列，会被下面移走）
-        node_marks.remove_marks(db, plan["delete_ids"])
-        for node_id in plan["delete_ids"]:
-            obj = by_id.get(node_id)
-            if obj is not None:
-                db.delete(obj)
-                by_id.pop(node_id, None)
+            # 模板里已移除的全局节点：停用而非删除（SKILL 第 5.8 节）。
+            # 值留在 project_info_value，字段重新加回来即刻恢复。
+            disabled = 0
+            for node_id, row in existing.items():
+                if node_id in kept_ids or row.status == PROJECT_INFO_NODE_DISABLED:
+                    continue
+                row.status = PROJECT_INFO_NODE_DISABLED
+                row.updated_by = username or "admin"
+                row.updated_at = now
+                disabled += 1
 
-        # 2) 回填锚点
-        for item in plan["link"]:
-            obj = by_id.get(item["project_node_id"])
-            if obj is not None:
-                obj.template_node_id = item["template_node_id"]
-                obj.updated_at = now
+            db.commit()
+            return {
+                "id": "default",
+                "name": "项目详情模板",
+                "updated_at": now,
+                "updated_by": username or "admin",
+                "disabled": disabled,
+            }
+        finally:
+            db.close()
 
-        # 3) 更新（先于新建也无妨：父节点映射用的是同步后的 id）
-        for item in plan["updates"]:
-            obj = by_id.get(item["node_id"])
-            if obj is None:
-                continue
-            for field, value in item["changes"].items():
-                setattr(obj, field, value)
-            obj.updated_at = now
+    def _collect_actions(self, nodes: List[Dict], existing: Dict[str, ProjectInfoNode],
+                         parent_path: Tuple[str, ...], parent_id: Optional[str]) -> List[Dict]:
+        """规范化模板树 → 待落库的节点清单（父节点在子节点之前）。
 
-        # 4) 新建（父节点在前，parent 已在 plan 里解析成项目节点 id）
-        for item in plan["creates"]:
-            content_type = item["content_type"]
-            if content_type == "select":
-                value = json.dumps({"selected": "", "options": item["options"]}, ensure_ascii=False)
+        已存在的节点沿用库里的 id（改名不换身份，历史与关注不断线）；
+        新节点按标题路径派生稳定 id。
+        """
+        actions: List[Dict] = []
+        for node in nodes:
+            path = parent_path + (node["title"],)
+            node_id = node.get("id")
+            if not node_id or node_id not in existing:
+                node_id = _template_node_id(path)
+            if node_id in existing:
+                node_key = existing[node_id].node_key
             else:
-                value = item.get("value")
-            db.add(ProjectInfoNode(
-                id=item["node_id"],
-                project_id=project_id,
-                parent_id=item["parent_id"],
-                title=item["title"],
-                content_type=content_type,
-                value=value,
-                sort_order=item["sort_order"],
-                template_node_id=item["template_node_id"],
-                created_at=now,
-                updated_at=now,
-            ))
+                node_key = self._key_for(path, node_id)
 
-        # 5) 操作记录：整树级同步记一条项目级流水（不逐节点刷屏）
-        change_log.add_change(
-            db, project_id=project_id, action=change_log.ACTION_SYNC,
-            detail=change_log.build_sync_detail(
-                len(plan["creates"]), len(plan["updates"]) + len(plan["link"]),
-                len(plan["delete_ids"]),
-            ),
-            operator=operator or None, operator_name=operator_name or operator or None,
-            created_at=now,
-        )
+            children = node.get("children") or []
+            # node_type 与迁移播种同一套规则：最顶层是 root（哪怕它有子节点），
+            # 非顶层且有子节点才是 group。两处不一致会让同一棵树在
+            # 「迁移播种的节点」和「管理员保存过的节点」之间出现类型漂移。
+            if parent_id is None:
+                node_type = "root"
+            elif children:
+                node_type = "group"
+            else:
+                node_type = "field"
+            actions.append({
+                "id": node_id,
+                "parent_id": parent_id,
+                "node_key": node_key,
+                "node_name": node["title"],
+                "node_type": node_type,
+                "value_type": node["value_type"],
+                "sort_order": node["sort_order"],
+                "required": node["required"],
+                "allow_custom": node["allow_custom"],
+                "config": _options_to_config(node.get("options")),
+            })
+            if children:
+                actions.extend(self._collect_actions(children, existing, path, node_id))
+        return actions
+
+    def _key_for(self, path: Tuple[str, ...], node_id: str) -> str:
+        """新全局节点的 node_key。
+
+        取路径的英文/数字段拼成点分标识；一个都没有（纯中文标题）时退回 id 派生，
+        保证仍然稳定、唯一、可读性尚可。**已存在的节点绝不重算 key**——
+        key 是外部（导入、脚本、其它系统）对齐节点的锚，改名换 key 会让锚失效。
+        """
+        parts: List[str] = []
+        for segment in path:
+            ascii_part = "".join(
+                ch if (ch.isascii() and (ch.isalnum() or ch in "._-")) else "_"
+                for ch in segment
+            ).strip("_").lower()
+            if ascii_part and ascii_part.strip("_") and len(ascii_part) <= 40:
+                parts.append(ascii_part)
+        if len(parts) == len(path) and parts:
+            return ".".join(parts)[:191]
+        # 标题含中文等非 ASCII 字符：用路径派生的短 id 作 key，稳定且不与他节点冲突
+        return "tpl." + node_id.replace("-", "")[:24]
+
+    def _assert_keys_unique(self, nodes: List[Dict]) -> None:
+        """同一父节点下的标题不允许重复（避免编辑页里两个同名节点分不清）。
+
+        查重以「同一个父节点的直接子节点」为单位：不同分支下同名是合法的
+        （硬件/厂家 与 网络/厂家 互不干扰），所以 seen 每层各建一份，
+        不能跨分支共用——否则改一个字段名就可能误报「同名」挡住保存。
+        """
+        seen = set()
+        for item in nodes:
+            title = item["title"]
+            if title in seen:
+                raise ValueError(f"同一层存在同名节点「{title}」，请改名后再保存")
+            seen.add(title)
+            self._assert_keys_unique(item.get("children") or [])
+
+    # ── 兼容旧接口：新结构下「同步」是空操作 ──────────────
+
+    def preview_sync(self, nodes: Any) -> Dict[str, Any]:
+        """保存前的预览。
+
+        新结构下保存即是全局生效（项目不再持有副本），所以预览要说明的是
+        「会停用哪些字段」而不是「会去改几个项目」。
+        """
+        normalized = normalize_template_nodes(nodes)
+        kept = {item["id"] for item in self._collect_actions(normalized, {}, (), None)}
+        db = SessionLocal()
+        try:
+            existing = {row.id: row for row in self._load_global_nodes(db, include_disabled=True)}
+            project_count = db.query(Project).filter(Project.status != "deleted").count()
+        finally:
+            db.close()
+
+        will_disable = [
+            row.node_name for node_id, row in existing.items()
+            if node_id not in kept and row.status == PROJECT_INFO_NODE_ACTIVE
+        ]
+        return {
+            "dry_run": True,
+            "projects": project_count,       # 影响面覆盖全部项目（字段是全局的）
+            "changed_projects": 0,           # 不再有“逐项目改动”这回事
+            "added": len([i for i in kept if i not in existing]),
+            "updated": len([i for i in kept if i in existing]),
+            "deleted": len(will_disable),    # 实为「停用」，沿用旧字段名保持接口兼容
+            "details": [],
+            "disabled_titles": will_disable[:20],
+        }
+
+    def save_and_sync(self, nodes: Any, username: str = "",
+                      operator_name: str = "") -> Dict[str, Any]:
+        """保存模板（旧名字沿用）。新结构下没有独立的同步步骤，保存即生效。"""
+        info = self.save_template(nodes, username=username, operator_name=operator_name)
+        return {
+            "dry_run": False,
+            **info,
+            "projects": 0,
+            "changed_projects": 0,
+            "added": 0,
+            "updated": 0,
+            "deleted": info.get("disabled", 0),
+            "failed_projects": [],
+            "details": [],
+        }
 
 
 info_template_service = InfoTemplateService()

@@ -5,11 +5,12 @@ import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import ProjectInfoEdit from '../admin/ProjectInfoEdit';
 import {
   createInfoNodeApi,
+  createCustomInfoNodeApi,
   deleteInfoNodeApi,
   fetchInfoNodeChangeSummaryApi,
   fetchInfoNodeChangesApi,
   fetchInfoTree,
-  importInfoTemplateApi,
+  setInfoNodeValueApi,
   updateInfoNodeApi,
   type ApiInfoNode,
   type ApiInfoNodeChange,
@@ -18,11 +19,12 @@ import {
 vi.mock('@/api/infoNodes', () => ({
   fetchInfoTree: vi.fn(),
   createInfoNodeApi: vi.fn(),
+  createCustomInfoNodeApi: vi.fn(),
   updateInfoNodeApi: vi.fn(),
+  setInfoNodeValueApi: vi.fn(),
   moveInfoNodeApi: vi.fn(),
   deleteInfoNodeApi: vi.fn(),
   importInfoTreeApi: vi.fn(),
-  importInfoTemplateApi: vi.fn(),
   // 编辑历史：进页面会拉一次「各节点最新记录时间」算小红点，缺了页面会直接崩
   fetchInfoNodeChangesApi: vi.fn(),
   fetchInfoNodeChangeSummaryApi: vi.fn(),
@@ -114,8 +116,6 @@ describe('ProjectInfoEdit（信息树编辑页）', () => {
     renderEdit();
     expect(fetchInfoTree).toHaveBeenCalledWith('P1');
     expect(await screen.findByText('基础信息')).toBeTruthy();
-    // 有节点的项目不会被自动初始化（接口是替换式导入，误触发会重建整棵树）
-    expect(importInfoTemplateApi).not.toHaveBeenCalled();
     expect(screen.getByText('客户信息')).toBeTruthy();
     expect((screen.getByLabelText('客户信息内容') as HTMLTextAreaElement).value).toBe('中力');
   });
@@ -136,6 +136,9 @@ describe('ProjectInfoEdit（信息树编辑页）', () => {
 
   it('行内改名写回后端（PUT 节点）', async () => {
     vi.mocked(updateInfoNodeApi).mockResolvedValue(node({ id: 'r1', title: '基础信息2' }));
+    vi.mocked(fetchInfoTree).mockResolvedValue([
+      node({ id: 'r1', title: '基础信息', sort_order: 0, is_custom: true }),
+    ]);
     renderEdit();
     fireEvent.click(await screen.findByLabelText('编辑基础信息'));
 
@@ -188,19 +191,29 @@ describe('ProjectInfoEdit（信息树编辑页）', () => {
   });
 
   it('「新标签」先建后端节点再进入改名态', async () => {
-    vi.mocked(createInfoNodeApi).mockImplementation(async (_projectId, payload) =>
-      node({ id: payload.id, title: payload.title ?? '', parent_id: payload.parent_id ?? null }),
+    // 节点 id 由后端生成（增补节点要按 node_key 保证同项目内唯一），页面拿返回值入列
+    vi.mocked(createInfoNodeApi).mockResolvedValue(
+      node({ id: 'server-1', title: '未命名节点', parent_id: null, sort_order: 10 }),
     );
     renderEdit();
     fireEvent.click(await screen.findByText('新标签'));
 
     await waitFor(() => {
-      expect(createInfoNodeApi).toHaveBeenCalledWith('P1', expect.objectContaining({ sort_order: 1, parent_id: null }));
+      expect(createInfoNodeApi).toHaveBeenCalledWith('P1', {
+        parent_id: null, title: '未命名节点', content_type: 'text', sort_order: 10,
+      });
     });
     expect(document.querySelector('.mac-info-row__input')).toBeTruthy();
   });
 
   it('删除节点走 DELETE 接口（含子树提示）', async () => {
+    // 结构操作只对本项目增补的节点开放：全局字段定义只能回「详情模板」改
+    vi.mocked(fetchInfoTree).mockResolvedValue([
+      node({
+        id: 'r1', title: '基础信息', sort_order: 0, is_custom: true,
+        children: [node({ id: 'c1', parent_id: 'r1', title: '客户信息', value: '中力', sort_order: 0 })],
+      }),
+    ]);
     vi.mocked(deleteInfoNodeApi).mockResolvedValue(undefined);
     renderEdit();
     // 树里每行都有「更多操作」按钮，这里取第一个（根节点）
@@ -215,6 +228,16 @@ describe('ProjectInfoEdit（信息树编辑页）', () => {
     expect(screen.queryByText('基础信息')).toBeNull();
   });
 
+  it('全局字段定义不给结构操作，只留历史（改定义要走「详情模板」）', async () => {
+    renderEdit();
+    await screen.findByText('基础信息');
+    expect(screen.queryByLabelText('编辑基础信息')).toBeNull();
+    expect(screen.queryByLabelText('更多操作')).toBeNull();
+    // 新增子节点是结构操作，但管理员可以在这里加（后端落成全局定义）
+    expect(screen.getByLabelText('在基础信息下新增')).toBeTruthy();
+    expect(screen.getByLabelText('查看基础信息的编辑历史')).toBeTruthy();
+  });
+
   it('区域选项选大陆 → 出现省份/地区；改选其它区域 → 换成具体国家', async () => {
     const regionTree: ApiInfoNode[] = [
       node({
@@ -225,7 +248,8 @@ describe('ProjectInfoEdit（信息树编辑页）', () => {
             children: [
               node({
                 id: 'd1', parent_id: 'p1', title: '区域选项', content_type: 'select', sort_order: 0,
-                value: JSON.stringify({ selected: '', options: ['大陆(China Mainland)', '亚洲Asia'] }),
+                options: ['大陆(China Mainland)', '亚洲Asia'],
+                value: { selected: '', options: ['大陆(China Mainland)', '亚洲Asia'] },
               }),
               node({ id: 's1', parent_id: 'p1', title: '省份', value: '浙江省', sort_order: 1 }),
               node({ id: 'a1', parent_id: 'p1', title: '地区', value: '安吉县', sort_order: 2 }),
@@ -236,8 +260,9 @@ describe('ProjectInfoEdit（信息树编辑页）', () => {
       }),
     ];
     vi.mocked(fetchInfoTree).mockResolvedValue(regionTree);
+    // 选值走值写入接口：选项落在节点定义上，页面拿到返回值后重新回填
     vi.mocked(updateInfoNodeApi).mockImplementation(async (nodeId, updates) =>
-      node({ id: nodeId, value: typeof updates.value === 'string' ? updates.value : null }),
+      node({ id: nodeId, content_type: 'select', options: updates.options }),
     );
     renderEdit();
 
@@ -248,12 +273,15 @@ describe('ProjectInfoEdit（信息树编辑页）', () => {
 
     const select = screen.getByLabelText('区域选项内容') as HTMLSelectElement;
     fireEvent.change(select, { target: { value: '大陆(China Mainland)' } });
-    expect(await screen.findByText('省份')).toBeTruthy();
-    expect(screen.getByText('地区')).toBeTruthy();
+    // 选值后先乐观更新、再等接口返回回填，两次渲染之间查询会扑空，统一用 waitFor 等稳
+    await waitFor(() => {
+      expect(screen.getByText('省份')).toBeTruthy();
+      expect(screen.getByText('地区')).toBeTruthy();
+    });
     expect(screen.queryByText('具体国家')).toBeNull();
 
     fireEvent.change(screen.getByLabelText('区域选项内容'), { target: { value: '亚洲Asia' } });
-    expect(await screen.findByText('具体国家')).toBeTruthy();
+    await waitFor(() => expect(screen.getByText('具体国家')).toBeTruthy());
     expect(screen.queryByText('省份')).toBeNull();
     expect(screen.queryByText('地区')).toBeNull();
   });
@@ -267,28 +295,55 @@ describe('ProjectInfoEdit（信息树编辑页）', () => {
     expect(await screen.findByText('基础信息')).toBeTruthy();
   });
 
-  it('空树项目进页自动调模板接口初始化（无需点按钮）并重载树', async () => {
-    vi.mocked(fetchInfoTree).mockResolvedValueOnce([]).mockResolvedValue(TREE);
-    vi.mocked(importInfoTemplateApi).mockResolvedValue(120);
+  it('空树时给出角色对应的空态（管理员引导建节点，别人引导找管理员）', async () => {
+    vi.mocked(fetchInfoTree).mockResolvedValue([]);
     renderEdit();
 
-    await waitFor(() => expect(importInfoTemplateApi).toHaveBeenCalledWith('P1'));
-    // 初始化成功后重新拉树（第二次 fetchInfoTree 返回 TREE），页面切换成树视图
-    expect(await screen.findByText('基础信息')).toBeTruthy();
-    expect(fetchInfoTree).toHaveBeenCalledTimes(2);
-    // 「替换式导入」不能重复触发：只自动跑一次
-    expect(importInfoTemplateApi).toHaveBeenCalledTimes(1);
+    expect(await screen.findByText('还没有信息节点，点击右上角「新标签」创建')).toBeTruthy();
+    expect(screen.queryByText('按预设模板初始化')).toBeNull();
   });
 
-  it('自动初始化失败时停在空态，按钮保留可手动重试', async () => {
-    vi.mocked(fetchInfoTree).mockResolvedValueOnce([]).mockResolvedValue(TREE);
-    vi.mocked(importInfoTemplateApi).mockRejectedValueOnce(new Error('network')).mockResolvedValue(120);
+  it('非管理员看不到「新标签」，空态改提示联系管理员', async () => {
+    authState.permissions = [];
+    vi.mocked(fetchInfoTree).mockResolvedValue([]);
     renderEdit();
 
-    await waitFor(() => expect(importInfoTemplateApi).toHaveBeenCalledTimes(1));
+    expect(await screen.findByText('信息模板还没有配置节点，请联系管理员')).toBeTruthy();
+    expect(screen.queryByText('新标签')).toBeNull();
+  });
 
-    fireEvent.click(await screen.findByRole('button', { name: '按预设模板初始化' }));
-    expect(await screen.findByText('基础信息')).toBeTruthy();
+  it('「增补信息」：普通用户在允许增补的节点下加本项目字段，不碰全局模板', async () => {
+    authState.permissions = [];
+    vi.mocked(fetchInfoTree).mockResolvedValue([
+      node({
+        id: 'r1', title: '基础信息', sort_order: 0, allow_custom: true,
+        children: [node({ id: 'c1', parent_id: 'r1', title: '客户信息', value: '中力', sort_order: 0 })],
+      }),
+    ]);
+    vi.mocked(createCustomInfoNodeApi).mockResolvedValue(
+      node({ id: 'server-9', parent_id: 'r1', title: '合同编号', sort_order: 10, is_custom: true }),
+    );
+    vi.mocked(updateInfoNodeApi).mockResolvedValue(
+      node({ id: 'server-9', parent_id: 'r1', title: '合同编号', content_type: 'select', sort_order: 10, is_custom: true }),
+    );
+    renderEdit();
+
+    fireEvent.click(await screen.findByLabelText('在基础信息下增补信息'));
+    fireEvent.change(screen.getByPlaceholderText('信息名称，例如「临时调试口令」'), { target: { value: '合同编号' } });
+    fireEvent.click(screen.getByRole('button', { name: '下拉选择' }));
+    fireEvent.click(screen.getByRole('button', { name: '增补' }));
+
+    await waitFor(() => {
+      expect(createCustomInfoNodeApi).toHaveBeenCalledWith('P1', {
+        parent_id: 'r1', title: '合同编号', content_type: 'text', sort_order: 10,
+      });
+    });
+    // 内容形式跟着切到下拉（类型的调整走改定义接口）
+    await waitFor(() => expect(updateInfoNodeApi).toHaveBeenCalledWith('server-9', { content_type: 'select' }));
+    expect(await screen.findByText('合同编号')).toBeTruthy();
+    // 普通用户没有结构操作入口
+    expect(screen.queryByLabelText('编辑基础信息')).toBeNull();
+    expect(screen.queryByLabelText('更多操作')).toBeNull();
   });
 
   it('历史弹层展示后端的操作记录：人员 / 变动 / 时间；子节点删除记录挂在父节点下', async () => {
@@ -381,6 +436,9 @@ describe('ProjectInfoEdit（信息树编辑页）', () => {
       JSON.stringify({ r1: '01a0a8f3-9f64-7103-82df-90d24a472f2c' }),
     );
     vi.mocked(updateInfoNodeApi).mockResolvedValue(node({ id: 'r1', title: '基础信息2' }));
+    vi.mocked(fetchInfoTree).mockResolvedValue([
+      node({ id: 'r1', title: '基础信息', sort_order: 0, is_custom: true }),
+    ]);
     renderEdit();
 
     const historyBtn = await screen.findByLabelText('查看基础信息的编辑历史');

@@ -1,13 +1,16 @@
 // 项目信息树（项目详细信息）——前端数据层。
 //
-// 后端接口已接入（backend/app/modules/admin/api/info_nodes.py，契约见
-// backend/docs/project_ext_info_info_nodes_api.md 第五节）：
-// - 树的读写全部走 /api/admin/info-nodes/*，逐节点 CRUD（不做整树读改写）；
-// - 本文件把「后端行（value 为 TEXT 字符串）」与「页面用的结构化节点」互相转换：
-//   text 存原始字符串，select / file / image 存 JSON 字符串，读取时按 content_type 解码；
-// - 仍存本机的只剩个人界面偏好（标签筛选、折叠状态、卡片折叠），与设计稿一致，不属于共享数据。
+// 后端接口（backend/app/modules/admin/api/info_nodes.py）在本次改造后分成两类写操作：
+// - **结构**（增删改节点/位置/类型/导入/模板）＝管理员，服务端有 get_current_admin_user 闸门；
+//   普通用户要记表外信息走「增补信息」：createCustomInfoNode，受父节点 allow_custom 约束。
+// - **值**（填内容）＝任何登录用户，走 setInfoNodeValue，只能写已存在节点的值。
+//   普通用户的编辑权限就到此为止——他改不了节点名/类型/位置，也加不了节点。
+// - 值由服务端按值类型编码后下发（下拉/布尔 {selected, options}、附件 {name, resource_id, size}），
+//   本文件的解码层只做归一化，不再 JSON 解析字符串。
+// - 仍存本机的只剩个人界面偏好（标签筛选、折叠状态、卡片折叠、历史已读水位），不属于共享数据。
 
 import {
+  createCustomInfoNodeApi,
   createInfoNodeApi,
   deleteInfoNodeApi,
   fetchInfoNodeChangeSummaryApi,
@@ -15,21 +18,22 @@ import {
   fetchInfoNodeMarksApi,
   fetchInfoTree,
   fetchProjectActivityApi,
-  importInfoTemplateApi,
   importInfoTreeApi,
   moveInfoNodeApi,
+  setInfoNodeValueApi,
   toggleInfoNodeMarkApi,
   updateInfoNodeApi,
   type ApiInfoNode,
   type ApiInfoNodeChange,
   type ApiInfoNodeUpdate,
+  type ApiInfoNodeValue,
   type ApiInfoTreeImportNode,
   type ApiProjectActivityItem,
 } from '@/api/infoNodes';
 
 export type ProjectInfoContentType = 'text' | 'select' | 'file' | 'image';
 
-/** 下拉选择节点的内容值（选项由用户自行增删） */
+/** 下拉选择节点的内容值（选项来自字段定义，服务端合并在 value 里下发） */
 export interface ProjectInfoSelectValue {
   selected: string;
   options: string[];
@@ -38,13 +42,14 @@ export interface ProjectInfoSelectValue {
 /** 文件/图片节点的内容值（resource_id 指向资源管理服务的真实文件） */
 export interface ProjectInfoFileValue {
   name: string;
-  resource_id: number;
+  resource_id?: number;
   size?: number;
 }
 
 export interface ProjectInfoNode {
   id: string;
-  project_id: string;
+  /** 全局字段为 null：该节点是全体项目共用的字段定义，值才是本项目的 */
+  project_id: string | null;
   parent_id: string | null;
   title: string;
   content_type: ProjectInfoContentType;
@@ -54,15 +59,27 @@ export interface ProjectInfoNode {
   created_at: string;
   /** 后端最后更新时间（字符串时间戳），本地乐观更新时为最近一次成功写入的值 */
   updated_at?: string;
+  /** 字段标识（服务端维护，供程序引用，不在界面上展示） */
+  node_key?: string;
+  /** 内部细分类型 text/number/boolean/date/select/multi_select/person/attachment/json */
+  value_type?: string;
+  /** 该节点是否允许普通用户「增补信息」 */
+  allow_custom?: boolean;
+  /** true = 本项目增补的节点（可改名/改类型/删除/拖动），false = 全局字段定义（仅模板可改） */
+  is_custom?: boolean;
+  /** 下拉选项（字段定义，只读下发；管理员改） */
+  options?: string[];
+  /** 标题备选项（字段定义，只读下发；管理员改） */
+  titleOptions?: string[];
 }
 
 /** 信息树最大层级（与设计稿一致：第 4 层不可再新增/下挂） */
 export const PROJECT_INFO_MAX_DEPTH = 4;
 
-// —— 预设信息树模板（已下沉到后端，前端不再维护副本） ——
-// 唯一来源：backend/app/config/project_templates/{project_type}.yaml（缺省 default.yaml）。
-// 后端在「新建项目」与 POST /info-nodes/projects/{id}/import-template（按模板初始化）时实例化，
-// 前端只负责触发，避免前后端两套模板各自漂移。
+// —— 预设信息树模板（已下沉到后端） ——
+// 唯一来源：project_info_node 里 project_id 为空的行（全局字段定义）。
+// 管理员在编辑页的「详情模板」入口维护；普通项目读树时自动带上，前端不再维护副本，
+// 也没有「按模板补种本项目」这一步（旧接口 POST /import-template 已移除）。
 
 const selectedKey = (code: string) => `project-info-tree:selected:${code}`;
 const collapsedKey = (code: string) => `project-info-tree:collapsed:${code}`;
@@ -86,69 +103,72 @@ function writeJson(key: string, value: unknown) {
   }
 }
 
-function genId(): string {
-  try {
-    if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
-  } catch {
-    /* ignore */
-  }
-  return `n-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
 // —— 后端行 <-> 页面节点 ——
 
-function tryParseJson(raw: string | null): unknown {
-  if (!raw) return null;
-  try {
-    return JSON.parse(raw);
-  } catch {
-    return null;
-  }
-}
-
-/** 后端 TEXT → 结构化值：text 原样；select 归一为 {selected, options}；file/image 归一为对象 */
-function decodeInfoValue(contentType: string, raw: string | null): unknown {
+/**
+ * 后端值 → 页面结构化值。
+ * 服务端已按下发口径编码好了：下拉是 {selected, options}，附件是对象，text 是字符串。
+ * 这里只做「形状归一化」——选项过滤掉非字符串、附件缺 name 时留空，
+ * 免得调用方（展示卡、完整度统计）到处判空。
+ */
+function decodeInfoValue(contentType: string, raw: unknown): unknown {
   if (contentType === 'select') {
-    const parsed = tryParseJson(raw);
-    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-      const data = parsed as Partial<ProjectInfoSelectValue>;
-      return {
-        selected: typeof data.selected === 'string' ? data.selected : '',
-        options: Array.isArray(data.options) ? data.options.filter((item): item is string => typeof item === 'string') : [],
-      };
-    }
-    return { selected: '', options: [] };
+    const data = (raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {}) as Partial<ProjectInfoSelectValue>;
+    return {
+      selected: typeof data.selected === 'string' ? data.selected : '',
+      options: Array.isArray(data.options) ? data.options.filter((item): item is string => typeof item === 'string') : [],
+    };
   }
   if (contentType === 'file' || contentType === 'image') {
-    const parsed = tryParseJson(raw);
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    return raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as ProjectInfoFileValue) : {};
   }
-  // text 及后端未来扩展的其它内容形式：按字符串透传
-  return raw ?? '';
+  if (raw === null || raw === undefined) return '';
+  // 数字/布尔等非字符串标量统一成字符串，页面按文本渲染
+  return typeof raw === 'string' ? raw : String(raw);
 }
 
-/** 结构化值 → 后端 TEXT：字符串原样存取（可读），其余（下拉/文件/标题备选项）存 JSON 字符串 */
-export function encodeInfoValue(value: unknown): string | null {
+/**
+ * 页面结构化值 → 提交给后端的值。
+ * 服务端按 value_type 解码，所以这里**不再 JSON.stringify 对象**：
+ * 直接把结构化值送过去，字符串类节点的值原样丢弃首尾空白。
+ */
+export function encodeInfoValue(value: unknown): ApiInfoNodeValue {
   if (value === null || value === undefined) return null;
-  if (typeof value === 'string') return value;
-  try {
-    return JSON.stringify(value);
-  } catch {
-    return null;
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    return trimmed ? trimmed : null;
   }
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  return value as ApiInfoNodeValue;
+}
+
+function stringList(raw: unknown): string[] {
+  return Array.isArray(raw) ? raw.filter((item): item is string => typeof item === 'string') : [];
+}
+
+/** 节点定义里的选项清单：服务端下发在顶层（options / titleOptions）。 */
+function decodeNodeOptions(raw: ApiInfoNode, key: 'options' | 'titleOptions'): string[] {
+  return stringList(raw[key]);
 }
 
 function decodeInfoNode(raw: ApiInfoNode, parentId: string | null): ProjectInfoNode {
+  const contentType = (raw.content_type || 'text') as ProjectInfoContentType;
   return {
     id: raw.id,
-    project_id: raw.project_id,
+    project_id: raw.project_id ?? null,
     parent_id: parentId,
     title: raw.title,
-    content_type: (raw.content_type || 'text') as ProjectInfoContentType,
-    value: decodeInfoValue(raw.content_type || 'text', raw.value),
+    content_type: contentType,
+    value: decodeInfoValue(contentType, raw.value),
     sort_order: raw.sort_order,
     created_at: raw.created_at,
     updated_at: raw.updated_at,
+    node_key: raw.node_key,
+    value_type: raw.value_type,
+    allow_custom: !!raw.allow_custom,
+    is_custom: !!raw.is_custom,
+    options: decodeNodeOptions(raw, 'options'),
+    titleOptions: decodeNodeOptions(raw, 'titleOptions'),
   };
 }
 
@@ -167,45 +187,80 @@ export function flattenInfoTree(roots: ApiInfoNode[]): ProjectInfoNode[] {
 
 // —— 节点读写（真实后端 /api/admin/info-nodes/*，逐节点 CRUD） ——
 
-/** 读取某项目的全部信息节点（扁平，按 sort_order 升序） */
+/** 读取某项目的全部信息节点（扁平，按 sort_order 升序）。
+ *  返回的是「全局字段定义 ∪ 本项目增补节点」的并集，值取自本项目。 */
 export async function loadInfoNodes(projectId: string): Promise<ProjectInfoNode[]> {
   const tree = await fetchInfoTree(projectId);
   return flattenInfoTree(tree).sort((a, b) => a.sort_order - b.sort_order);
 }
 
-/** 在 parentId 下新增节点（id 由前端生成；title 先占位，进入编辑态由用户改名） */
+/**
+ * 增补一个节点到本项目。
+ * - 普通用户（isAdmin=false）走 /custom-nodes：父节点必须 allow_custom=true，
+ *   且必须指定 parentId；这是普通用户唯一能加节点的途径。
+ * - 管理员走 /projects/{id}：不受 allow_custom 约束。
+ */
 export async function createInfoNode(
   projectId: string,
   parentId: string | null,
   sortOrder: number,
   title = '未命名节点',
+  isAdmin = false,
 ): Promise<ProjectInfoNode> {
-  const raw = await createInfoNodeApi(projectId, {
-    id: genId(),
+  const payload = {
     parent_id: parentId,
     title,
     content_type: 'text',
-    value: '',
     sort_order: sortOrder,
-  });
+  };
+  const raw = isAdmin
+    ? await createInfoNodeApi(projectId, payload)
+    : await createCustomInfoNodeApi(projectId, payload);
   return decodeInfoNode(raw, parentId);
 }
 
-/** 更新节点（title / content_type / value / sort_order） */
+/**
+ * 写节点值（任何登录用户）。值 + 历史在后端同一事务里落库。
+ * 这是普通用户唯一能改数据的地方——改不了结构。
+ */
+export async function setInfoNodeValue(
+  node: ProjectInfoNode,
+  value: unknown,
+  projectId?: string,
+): Promise<ProjectInfoNode> {
+  const ownerProject = projectId ?? node.project_id ?? '';
+  const raw = await setInfoNodeValueApi(node.id, ownerProject, encodeInfoValue(value));
+  return decodeInfoNode(raw, node.parent_id);
+}
+
+/**
+ * 更新节点**定义**（仅管理员，且只对「本项目增补的节点」生效）。
+ * 全局字段的定义请改详情模板（saveInfoTemplate），否则后端返回 403。
+ * 值不在这里改——走 setInfoNodeValue；options/titleOptions 是定义（落节点 config），在这里改。
+ */
 export async function updateInfoNode(
   node: ProjectInfoNode,
-  updates: { title?: string; content_type?: ProjectInfoContentType; value?: unknown; sort_order?: number },
+  updates: {
+    title?: string;
+    content_type?: ProjectInfoContentType;
+    sort_order?: number;
+    /** 下拉选项（字段定义，落节点 config） */
+    options?: string[];
+    /** 标题备选项（字段定义，落节点 config） */
+    titleOptions?: string[];
+  },
 ): Promise<ProjectInfoNode> {
   const payload: ApiInfoNodeUpdate = {};
   if (updates.title !== undefined) payload.title = updates.title;
   if (updates.content_type !== undefined) payload.content_type = updates.content_type;
-  if (updates.value !== undefined) payload.value = encodeInfoValue(updates.value);
   if (updates.sort_order !== undefined) payload.sort_order = updates.sort_order;
+  if (updates.options !== undefined) payload.options = updates.options;
+  if (updates.titleOptions !== undefined) payload.titleOptions = updates.titleOptions;
   const raw = await updateInfoNodeApi(node.id, payload);
   return decodeInfoNode(raw, node.parent_id);
 }
 
-/** 移动节点（换父 + 同级排序） */
+/** 移动节点（仅管理员；换父 + 同级排序） */
 export async function moveInfoNode(
   node: ProjectInfoNode,
   parentId: string | null,
@@ -215,20 +270,14 @@ export async function moveInfoNode(
   return decodeInfoNode(raw, parentId);
 }
 
-/** 删除节点及其整棵子树 */
+/** 删除节点及其整棵子树（仅管理员；全局字段定义删不掉，只能改模板） */
 export async function deleteInfoNode(nodeId: string): Promise<void> {
   await deleteInfoNodeApi(nodeId);
 }
 
-/** 批量替换整树（文件导入）；返回写入的节点数 */
+/** 批量导入信息树（仅管理员；纯增补，只增不改不删）；返回新增的节点数 */
 export async function importInfoTree(projectId: string, input: unknown): Promise<number> {
   return importInfoTreeApi(projectId, normalizeImportNodes(input));
-}
-
-/** 按后端模板重建整树（空树项目的「按预设模板初始化」）；
- *  模板来自 project_type → project_templates/*.yaml，与新建项目同一份定义 */
-export async function importInfoTemplate(projectId: string): Promise<number> {
-  return importInfoTemplateApi(projectId);
 }
 
 // —— 编辑历史（节点操作记录）：后端全量落库，「已读水位」存本机（每个人各自的未读状态） ——
@@ -303,9 +352,10 @@ export async function loadInfoNodeMarks(projectId: string): Promise<string[]> {
   return fetchInfoNodeMarksApi(projectId);
 }
 
-/** 切换节点关注状态，返回切换后是否被关注 */
-export async function toggleInfoNodeMark(nodeId: string): Promise<boolean> {
-  return toggleInfoNodeMarkApi(nodeId);
+/** 切换节点关注状态，返回切换后是否被关注。
+ *  projectId 可选（展示卡只传 nodeId，后端按已有标注切换）。 */
+export async function toggleInfoNodeMark(nodeId: string, projectId?: string): Promise<boolean> {
+  return toggleInfoNodeMarkApi(nodeId, projectId);
 }
 
 /** 项目动态里的一条：某被关注节点的最新变动（只展示 detail，不带时间与人员） */
@@ -318,7 +368,8 @@ export async function loadProjectActivity(projectId: string): Promise<ProjectAct
 
 /** 归一化导入内容：接受节点数组、{nodes:[…]}、{info_nodes:[…]}，
  *  或「标题 → 内容」紧凑映射（backend/app/config/project_templates/tmp.json 的写法）。
- *  统一补 id、序号与缺省字段，并把 options 清单转成 select 节点。 */
+ *  统一补序号与缺省字段，并把 options 清单转成 select 节点。
+ *  导入是**纯增补**：后端按 node_key 对齐，导入源里多余的 id 不再有意义（新节点 id 由服务端生成）。 */
 export function normalizeImportNodes(input: unknown): ApiInfoTreeImportNode[] {
   if (Array.isArray(input)) return normalizeImportLevel(input as Record<string, unknown>[]);
   const container = input as { nodes?: unknown; info_nodes?: unknown } | null;
@@ -335,28 +386,34 @@ export function normalizeImportNodes(input: unknown): ApiInfoTreeImportNode[] {
 function mapFormToLevel(map: Record<string, unknown>): Record<string, unknown>[] {
   return Object.entries(map).map(([title, value], index) => {
     if (Array.isArray(value)) {
-      return { title, sort_order: index, content_type: 'select', options: value };
+      return { title, sort_order: (index + 1) * 10, content_type: 'select', options: value };
     }
     if (value && typeof value === 'object') {
-      return { title, sort_order: index, children: mapFormToLevel(value as Record<string, unknown>) };
+      return { title, sort_order: (index + 1) * 10, children: mapFormToLevel(value as Record<string, unknown>) };
     }
-    return { title, sort_order: index, value: typeof value === 'string' ? value : '' };
+    return { title, sort_order: (index + 1) * 10, value: typeof value === 'string' ? value : '' };
   });
 }
 
 function normalizeImportLevel(items: Record<string, unknown>[]): ApiInfoTreeImportNode[] {
   return items.map((item, index) => {
+    const value = item.value as { selected?: unknown; options?: unknown } | null | undefined;
     const options = Array.isArray(item.options)
       ? (item.options as unknown[]).filter((option): option is string => typeof option === 'string')
-      : [];
+      : Array.isArray(value?.options)
+        ? value.options.filter((option): option is string => typeof option === 'string')
+        : [];
     const contentType =
       typeof item.content_type === 'string' ? item.content_type : options.length ? 'select' : 'text';
+    const rawValue = item.value ?? null;
     const node: ApiInfoTreeImportNode = {
-      id: typeof item.id === 'string' && item.id ? item.id : genId(),
       title: typeof item.title === 'string' && item.title ? item.title : '未命名节点',
       content_type: contentType,
-      value: normalizeImportValue(item.value ?? (options.length ? { selected: '', options } : null)),
-      sort_order: typeof item.sort_order === 'number' ? item.sort_order : index,
+      // 下拉节点的选项属于字段定义：值里带上供后端写进节点 config
+      value: options.length
+        ? { selected: typeof value?.selected === 'string' ? value.selected : '', options }
+        : normalizeImportValue(rawValue),
+      sort_order: typeof item.sort_order === 'number' ? item.sort_order : (index + 1) * 10,
     };
     const children = Array.isArray(item.children) ? (item.children as Record<string, unknown>[]) : [];
     if (children.length) node.children = normalizeImportLevel(children);
@@ -364,18 +421,20 @@ function normalizeImportLevel(items: Record<string, unknown>[]): ApiInfoTreeImpo
   });
 }
 
-/** 导入值：字符串按后端 TEXT 原样保留，结构化值（{selected, options} 等）转 JSON 字符串 */
-function normalizeImportValue(value: unknown): string | null {
+/** 导入值：字符串与结构化值都按接口口径原样提交（后端按节点类型解码） */
+function normalizeImportValue(value: unknown): ApiInfoNodeValue {
   if (value === null || value === undefined) return null;
   if (typeof value === 'string') return value;
-  return encodeInfoValue(value);
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  return value as ApiInfoNodeValue;
 }
 
 /** 乐观更新：本地替换单个节点的字段（不落盘，调用方随后发 API，失败时回滚） */
 export function patchInfoNode(
   nodes: ProjectInfoNode[],
   id: string,
-  updates: Partial<Pick<ProjectInfoNode, 'title' | 'content_type' | 'value' | 'parent_id' | 'sort_order'>>,
+  updates: Partial<Pick<ProjectInfoNode,
+    'title' | 'content_type' | 'value' | 'parent_id' | 'sort_order' | 'options' | 'titleOptions'>>,
 ): ProjectInfoNode[] {
   return nodes.map((node) => (node.id === id ? { ...node, ...updates } : node));
 }

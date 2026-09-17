@@ -1,6 +1,13 @@
 // 编辑项目信息 —— 项目信息树编辑页（对照原型 routes/projects.$id_.edit.tsx + components/tree/ProjectInformationTree.tsx）。
-// 集中管理节点：新增 / 改名 / 改内容形式 / 删除 / 长按拖动调整从属 / 全部展开折叠 / 四种内容形式（文字、下拉、文件、图片）。
-// 「文件导入」打开 AI 识别弹层（ProjectInfoFileImport：Word/Markdown/Excel/文本 → 大模型识别 → 三组预览勾选确认）。
+//
+// **权限（本次改造的核心）**：字段定义与项目值分开，页面上的操作也分两类——
+//   管理员（permissions 含 'admin'）：改名 / 增删节点 / 改内容形式 / 长按拖动 / 文件导入 /
+//     详情模板；节点定义改的是「全局一份」的模板，改一次全体项目生效。
+//   普通用户：**只能填值**（文字、下拉、附件），节点编辑与节点历史照旧保留可看可点，
+//     但改不了结构——要多记表外信息就点「增补信息」，在允许增补的节点下加本项目自己的字段。
+//   后端按接口口径强制：结构类接口 Depends(get_current_admin_user)，值写入接口只认已存在节点。
+//   所以这里除了藏按钮，saveValue 也必须走值写入接口（否则普通用户一保存就 403）。
+//
 // 每行的「历史」看该节点的操作记录（时间 / 人员 / 变动；子节点被删除时记录在父节点下）。
 // 有本机没看过的新记录时历史按钮右上角出小红点：保存成功后立即出，点开该节点历史才消失；
 // 该节点所在的一级节点（根节点）同时出点，作为「这个一级标签下有未看过的变动」的汇总。
@@ -25,7 +32,6 @@ import {
   createInfoNode,
   deleteInfoNode,
   formatFileSize,
-  importInfoTemplate,
   loadCollapsedIds,
   loadHistoryLatest,
   loadHistorySeen,
@@ -38,6 +44,7 @@ import {
   removeInfoNode,
   saveCollapsedIds,
   saveHistorySeen,
+  setInfoNodeValue,
   unseenHistoryNodes,
   unseenHistoryRoots,
   updateInfoNode,
@@ -62,6 +69,8 @@ const CONTENT_TYPE_NAMES: Record<ProjectInfoContentType, string> = {
   file: '上传文件',
   image: '上传图片',
 };
+/** 增补信息可选的内容形式（增补只加末级字段，不做下拉/附件以外的东西） */
+const CUSTOM_NODE_TYPES: ProjectInfoContentType[] = ['text', 'select', 'image', 'file'];
 /** 操作记录的类型标签（与后端 action 一一对应） */
 const HISTORY_ACTION_NAMES: Record<string, string> = {
   create: '新增',
@@ -79,14 +88,14 @@ export default function ProjectInfoEdit() {
   const { id = '' } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const username = useAuthStore((s) => s.username);
-  // 详情模板入口仅管理员可见（与后端 get_current_admin_user 的判据一致）
-  const canManageTemplate = useAuthStore((s) => Array.isArray(s.permissions) && s.permissions.includes('admin'));
+  // 管理员判据与后端 get_current_admin_user 一致：结构类接口只认管理员，
+  // 普通用户这边只保留「填值 + 看历史 + 增补信息」。
+  const isAdmin = useAuthStore((s) => Array.isArray(s.permissions) && s.permissions.includes('admin'));
   const request = useMemo(() => createRequest(API_CONFIG.ADMIN.BASE_URL, 'Admin'), []);
 
   const [nodes, setNodes] = useState<ProjectInfoNode[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
-  const [importing, setImporting] = useState(false);
   const [fileImportOpen, setFileImportOpen] = useState(false);
   const [collapsedIds, setCollapsedIds] = useState<Set<string>>(() => loadCollapsedIds(id));
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -148,8 +157,6 @@ export default function ProjectInfoEdit() {
   }, [nodes]);
 
   const roots = byParent.get(null) ?? [];
-  /** 树是否为空（自动初始化只认这一条布尔，避免把每次渲染都换身份的数组放进 effect 依赖） */
-  const treeEmpty = roots.length === 0;
   // 完整度只统计当前看得见的字段（区域联动隐藏的字段不该计入「缺 N」）
   const completeness = useMemo(() => computeInfoCompleteness(visibleInfoNodes(nodes)), [nodes]);
 
@@ -237,20 +244,29 @@ export default function ProjectInfoEdit() {
     return result;
   };
 
-  const addNode = async (parent: ProjectInfoNode | null) => {
+  /** 新增节点：管理员加的是（全局）字段定义，普通用户走「增补信息」加本项目自己的字段 */
+  const addNode = async (parent: ProjectInfoNode | null, custom = false) => {
     if (parent && depthOf(parent) >= PROJECT_INFO_MAX_DEPTH) {
       Toast({ message: '信息维度过深，建议拆分或合并', theme: 'warning' });
       return;
     }
+    if (custom && !parent) {
+      Toast({ message: '增补信息需要选择挂在哪个节点下', theme: 'warning' });
+      return;
+    }
+    if (custom && parent && !parent.allow_custom) {
+      Toast({ message: `「${parent.title}」下不允许增补信息`, theme: 'warning' });
+      return;
+    }
     const siblings = byParent.get(parent?.id ?? null) ?? [];
     try {
-      // 新节点由前端生成 id、后端落库后返回，直接追加（无需乐观占位）
-      const node = await createInfoNode(id, parent?.id ?? null, siblings.length);
+      // 节点 id 由后端生成（增补节点要按 node_key 保证同项目内唯一），落库后直接追加
+      const node = await createInfoNode(id, parent?.id ?? null, siblings.length * 10, '未命名节点', !custom);
       setNodes((prev) => [...prev, node]);
       if (parent) {
         setCollapsedIds((prev) => { const next = new Set(prev); next.delete(parent.id); return next; });
       }
-      setEditingId(node.id);
+      if (!custom) setEditingId(node.id);
       void syncHistoryMeta(); // 新增记录落在新节点上：立即重算，历史按钮带红点
     } catch (err) {
       Toast({ message: `新增失败：${errMsg(err)}`, theme: 'error' });
@@ -259,14 +275,19 @@ export default function ProjectInfoEdit() {
 
   const renameNode = (node: ProjectInfoNode, title: string) =>
     void applyMutation(patchInfoNode(nodes, node.id, { title }), () => updateInfoNode(node, { title }), '名称已保存');
+  // 填值：走值写入接口（任何登录用户），不再借用改节点定义的接口
   const saveValue = (node: ProjectInfoNode, value: unknown) =>
-    void applyMutation(patchInfoNode(nodes, node.id, { value }), () => updateInfoNode(node, { value }), '内容已保存');
+    void applyMutation(patchInfoNode(nodes, node.id, { value }), () => setInfoNodeValue(node, value, id), '内容已保存');
 
   const changeContentType = (node: ProjectInfoNode, type: ProjectInfoContentType) => {
     const value = type === 'select' ? { selected: '', options: [] } : type === 'text' ? '' : {};
     void applyMutation(
       patchInfoNode(nodes, node.id, { content_type: type, value }),
-      () => updateInfoNode(node, { content_type: type, value }),
+      // 内容形式属于字段定义：先改定义，再把旧值清掉（同一个节点的值走值写入接口）
+      async () => {
+        await updateInfoNode(node, { content_type: type });
+        await setInfoNodeValue({ ...node, content_type: type }, value, id);
+      },
       '内容形式已切换',
     );
     setMenuNode(null);
@@ -296,7 +317,7 @@ export default function ProjectInfoEdit() {
         body: form,
       });
       const value = { name: file.name, resource_id: resource.id, size: file.size };
-      await updateInfoNode(node, { value });
+      await setInfoNodeValue(node, value, id);
       setNodes((prev) => patchInfoNode(prev, node.id, { value }));
       Toast({ message: '文件已上传并保存', theme: 'success' });
       void syncHistoryMeta();
@@ -308,7 +329,7 @@ export default function ProjectInfoEdit() {
   };
 
   const removeNodeFile = (node: ProjectInfoNode) => {
-    void applyMutation(patchInfoNode(nodes, node.id, { value: {} }), () => updateInfoNode(node, { value: {} }), '已移除文件引用');
+    void applyMutation(patchInfoNode(nodes, node.id, { value: {} }), () => setInfoNodeValue(node, {}, id), '已移除文件引用');
   };
 
   // —— 长按拖动调整从属（原生 Pointer 事件，不引入依赖；与设计稿一致 400ms 长按） ——
@@ -377,7 +398,7 @@ export default function ProjectInfoEdit() {
     nodes.filter((node) => (byParent.get(node.id) ?? []).length > 0).map((node) => node.id),
   ));
 
-  // —— 下拉选项管理（选项由用户自行增删） ——
+  // —— 下拉选项管理（选项属于**字段定义**，因此只有管理员能改；改的是增补节点自己的 config） ——
 
   const selectValue = (selectNode?.value ?? {}) as Partial<ProjectInfoSelectValue>;
   const saveSelectValue = (nextNode: ProjectInfoNode | null, value: Partial<ProjectInfoSelectValue>) => {
@@ -385,64 +406,64 @@ export default function ProjectInfoEdit() {
     const merged = { selected: value.selected ?? '', options: value.options ?? [] };
     void applyMutation(
       patchInfoNode(nodes, nextNode.id, { value: merged }),
-      () => updateInfoNode(nextNode, { value: merged }),
+      // options 落到节点定义（config），selected 落到本项目值：后端按定义层校验后写入
+      () => updateInfoNode(nextNode, { options: merged.options }),
       '选项已保存',
     );
     setSelectNode((prev) => (prev && prev.id === nextNode.id ? { ...prev, value: merged } : prev));
   };
 
   const openTitleOptions = (node: ProjectInfoNode) => {
-    const options = ((node.value ?? {}) as { titleOptions?: string[] }).titleOptions ?? [];
-    setDraftTitleOptions(options.join('，'));
+    setDraftTitleOptions((node.titleOptions ?? []).join('，'));
     setTitleOptionsNode(node);
     setMenuNode(null);
   };
 
   const saveTitleOptions = (options: string[]) => {
     if (!titleOptionsNode) return;
-    const value = options.length ? { titleOptions: options } : {};
     void applyMutation(
-      patchInfoNode(nodes, titleOptionsNode.id, { value }),
-      () => updateInfoNode(titleOptionsNode, { value }),
+      patchInfoNode(nodes, titleOptionsNode.id, { options }),
+      () => updateInfoNode(titleOptionsNode, { titleOptions: options }),
       options.length ? '标题备选项已保存' : '已改回手动输入标题',
     );
     setTitleOptionsNode(null);
   };
 
-  // —— 按预设模板初始化（空树项目；模板在后端 project_type → project_templates/*.yaml） ——
+  /** 增补信息：普通用户不碰模板，只在自己项目下挂一个新字段（后端记成 project_id 非空的自定义节点） */
+  const [customParent, setCustomParent] = useState<ProjectInfoNode | null>(null);
+  const [customTitle, setCustomTitle] = useState('');
+  const [customType, setCustomType] = useState<ProjectInfoContentType>('text');
 
-  /** 空树项目「按预设模板初始化」：模板与新建项目同一份定义，前端只触发，不再自带一份结构副本 */
-  const initFromTemplate = useCallback(async () => {
-    if (!id) return;
-    setImporting(true);
-    try {
-      const imported = await importInfoTemplate(id);
-      if (!imported) {
-        Toast({ message: '后端模板为空，未写入节点', theme: 'warning' });
-        return;
-      }
-      setNodes(await loadInfoNodes(id));
-      setCollapsedIds(new Set());
-      void syncHistoryMeta();
-      Toast({ message: `已按预设模板初始化 ${imported} 个节点`, theme: 'success' });
-    } catch (err) {
-      Toast({ message: `初始化失败：${errMsg(err)}`, theme: 'error' });
-    } finally {
-      setImporting(false);
+  const openCustomInfo = (parent: ProjectInfoNode) => {
+    setCustomParent(parent);
+    setCustomTitle('');
+    setCustomType('text');
+  };
+
+  const confirmCustomInfo = async () => {
+    const parent = customParent;
+    const title = customTitle.trim();
+    if (!parent) return;
+    if (!title) {
+      Toast({ message: '请填写信息名称', theme: 'warning' });
+      return;
     }
-  }, [id, syncHistoryMeta]);
-
-  // 新项目（信息树为空）进页即自动初始化，不再要求用户点「按预设模板初始化」。
-  // 接口是「替换式导入」（先清空后写入），重复触发会重复建树：按项目 id 只自动跑一次
-  // （StrictMode 双跑 effect、初始化后重读树导致的依赖变化都靠这个 ref 挡住）；
-  // 自动初始化失败/模板为空时停在空态，按钮保留作手动重试。
-  const autoInitRef = useRef('');
-  useEffect(() => {
-    if (loading || loadError || !id || !treeEmpty) return;
-    if (autoInitRef.current === id) return;
-    autoInitRef.current = id;
-    void initFromTemplate();
-  }, [loading, loadError, id, treeEmpty, initFromTemplate]);
+    const siblings = byParent.get(parent.id) ?? [];
+    setCustomParent(null);
+    try {
+      // 第二个参数 false → 走「增补」接口：节点挂在当前项目下，不动全局模板
+      const node = await createInfoNode(id, parent.id, siblings.length * 10, title, false);
+      const created = node.content_type === customType
+        ? node
+        : await updateInfoNode(node, { content_type: customType });
+      setNodes((prev) => [...prev, created]);
+      setCollapsedIds((prev) => { const next = new Set(prev); next.delete(parent.id); return next; });
+      void syncHistoryMeta();
+      Toast({ message: `已在「${parent.title}」下增补「${title}」`, theme: 'success' });
+    } catch (err) {
+      Toast({ message: `增补失败：${errMsg(err)}`, theme: 'error' });
+    }
+  };
 
   // 小红点要显示在哪些行上：有未读记录的节点本身 + 它所在的一级节点（根节点）。
   // 根节点上的点是「这个一级标签下有你没看过的变动」的汇总，判定与消失都跟子节点同一套水位：
@@ -455,7 +476,7 @@ export default function ProjectInfoEdit() {
 
   const rowProps = {
     byParent, collapsedIds, editingId, draggingId, dropTarget, uploadingNodeId,
-    historyDotIds,
+    historyDotIds, isAdmin,
     onToggle: (nodeId: string) => setCollapsedIds((current) => {
       const next = new Set(current);
       if (next.has(nodeId)) next.delete(nodeId); else next.add(nodeId);
@@ -463,6 +484,7 @@ export default function ProjectInfoEdit() {
     }),
     onEdit: setEditingId,
     onAdd: addNode,
+    onCustomInfo: openCustomInfo,
     onRename: renameNode,
     onMenu: setMenuNode,
     onHistory: openHistory,
@@ -491,7 +513,7 @@ export default function ProjectInfoEdit() {
             <div className="mac-info__actions">
               <button type="button" className="mac-btn mac-btn--ghost mac-info__iconbtn" onClick={expandAll} title="全部展开" aria-label="全部展开"><MacChevronsUpDown size={15} /></button>
               <button type="button" className="mac-btn mac-btn--ghost mac-info__iconbtn" onClick={collapseAll} title="全部折叠" aria-label="全部折叠"><MacChevronsDownUp size={15} /></button>
-              {canManageTemplate && (
+              {isAdmin && (
                 <button
                   type="button"
                   className="mac-btn mac-btn--outline mac-info__act"
@@ -508,9 +530,11 @@ export default function ProjectInfoEdit() {
               >
                 <MacUpload size={13} />文件导入
               </button>
-              <button type="button" className="mac-btn mac-btn--primary mac-info__act" onClick={() => void addNode(null)}>
-                <MacPlus size={13} />新标签
-              </button>
+              {isAdmin && (
+                <button type="button" className="mac-btn mac-btn--primary mac-info__act" onClick={() => void addNode(null)}>
+                  <MacPlus size={13} />新标签
+                </button>
+              )}
             </div>
           </div>
 
@@ -524,20 +548,12 @@ export default function ProjectInfoEdit() {
                 重新加载
               </button>
             </div>
-          ) : roots.length === 0 && importing ? (
-            <div className="mac-info__state">正在按预设模板初始化…</div>
           ) : roots.length === 0 ? (
             <div className="mac-info__state">
-              还没有信息节点，点击右上角「新标签」创建，或按预设模板初始化
-              <div className="mac-info__state-sub">保存后对所有协作者可见</div>
-              <button
-                type="button"
-                className="mac-btn mac-btn--outline"
-                style={{ marginTop: 12 }}
-                onClick={() => void initFromTemplate()}
-              >
-                按预设模板初始化
-              </button>
+              {isAdmin ? '还没有信息节点，点击右上角「新标签」创建' : '信息模板还没有配置节点，请联系管理员'}
+              <div className="mac-info__state-sub">
+                {isAdmin ? '保存后对所有项目生效' : '管理员配置好模板后，这里就能填写项目信息'}
+              </div>
             </div>
           ) : (
             <div className="mac-info__tree">
@@ -561,10 +577,14 @@ export default function ProjectInfoEdit() {
                   </span>
                 </button>
               ))
-            : (
+            : menuNode?.is_custom ? (
               <button type="button" className="mac-choice" onClick={() => menuNode && openTitleOptions(menuNode)}>
                 <span className="mac-choice__label">标题改为下拉选择</span>
               </button>
+            ) : (
+              <p className="mac-info__state-sub" style={{ padding: '10px 0' }}>
+                全局字段的标题形式请在「详情模板」里修改
+              </p>
             )}
           <button type="button" className="mac-choice" onClick={() => { setDeleteNode(menuNode); setMenuNode(null); }}>
             <span className="mac-choice__label mac-info__danger-text"><MacTrash2 size={14} />删除节点</span>
@@ -580,6 +600,31 @@ export default function ProjectInfoEdit() {
           <div className="mac-info__confirm-actions">
             <button type="button" className="mac-btn mac-btn--outline" onClick={() => setDeleteNode(null)}>取消</button>
             <button type="button" className="mac-btn mac-info__danger" onClick={confirmDelete}>删除</button>
+          </div>
+        </div>
+      </Popup>
+
+      {/* 增补信息：普通用户在某个允许增补的节点下挂一个新字段（只影响本项目，不动全局模板） */}
+      <Popup visible={!!customParent} onClose={() => setCustomParent(null)} placement="bottom" showOverlay>
+        <div className="mac-sheet">
+          <h4 className="mac-sheet__title">增补信息{customParent ? ` · ${customParent.title}` : ''}</h4>
+          <Input value={customTitle} onChange={(v: string | number) => setCustomTitle(String(v))} placeholder="信息名称，例如「临时调试口令」" />
+          <p className="mac-info__state-sub" style={{ padding: '10px 0 4px' }}>内容形式</p>
+          <div className="mac-info__actions">
+            {CUSTOM_NODE_TYPES.map((type) => (
+              <button
+                key={type}
+                type="button"
+                className={`mac-btn ${customType === type ? 'mac-btn--primary' : 'mac-btn--outline'} mac-info__act`}
+                onClick={() => setCustomType(type)}
+              >
+                {CONTENT_TYPE_NAMES[type]}
+              </button>
+            ))}
+          </div>
+          <div className="mac-info__confirm-actions" style={{ marginTop: 16 }}>
+            <button type="button" className="mac-btn mac-btn--outline" onClick={() => setCustomParent(null)}>取消</button>
+            <button type="button" className="mac-btn mac-btn--primary" onClick={() => void confirmCustomInfo()}>增补</button>
           </div>
         </div>
       </Popup>
@@ -725,9 +770,12 @@ interface InfoRowProps {
   uploadingNodeId: string | null;
   /** 历史按钮右上角要出小红点的节点 id 集合（自身有未读记录，或下辖子树里有） */
   historyDotIds: Set<string>;
+  /** 结构类操作（改名/增删/改类型/拖动）只对管理员开放；普通用户只有填值、历史、增补信息 */
+  isAdmin: boolean;
   onToggle: (id: string) => void;
   onEdit: (id: string | null) => void;
-  onAdd: (parent: ProjectInfoNode) => void;
+  onAdd: (parent: ProjectInfoNode, custom?: boolean) => void;
+  onCustomInfo: (parent: ProjectInfoNode) => void;
   onRename: (node: ProjectInfoNode, title: string) => void;
   onMenu: (node: ProjectInfoNode) => void;
   onHistory: (node: ProjectInfoNode) => void;
@@ -750,7 +798,7 @@ function InfoRow(props: InfoRowProps) {
   const level = Math.min(depth, PROJECT_INFO_MAX_DEPTH);
   const isCollapsed = props.collapsedIds.has(node.id);
   const activeDrop = props.dropTarget?.id === node.id;
-  const titleOptions = ((node.value ?? {}) as { titleOptions?: string[] }).titleOptions ?? [];
+  const titleOptions = node.titleOptions ?? [];
   // 车型节点（模板里的「车型1/车型2」或已选好/自定义的车型）：标题直接给「选车型」下拉框
   const isVehicleNode = isVehicleModelNode(node.title, props.parentTitle);
   const hasUnseenHistory = props.historyDotIds.has(node.id);
@@ -766,16 +814,18 @@ function InfoRow(props: InfoRowProps) {
     <div className={depth > 1 ? 'mac-info-subtree' : undefined}>
       <div data-info-node={node.id} className={classNames}>
         <div className="mac-info-row__main">
-          <span
-            className="mac-info-row__grip"
-            aria-label="长按拖动调整从属"
-            onPointerDown={(event) => { event.currentTarget.setPointerCapture(event.pointerId); props.onHoldStart(node.id); }}
-            onPointerMove={props.onDragMove}
-            onPointerUp={props.onDrop}
-            onPointerCancel={props.onHoldEnd}
-          >
-            <MacGripVertical size={14} />
-          </span>
+          {props.isAdmin && node.is_custom && (
+            <span
+              className="mac-info-row__grip"
+              aria-label="长按拖动调整从属"
+              onPointerDown={(event) => { event.currentTarget.setPointerCapture(event.pointerId); props.onHoldStart(node.id); }}
+              onPointerMove={props.onDragMove}
+              onPointerUp={props.onDrop}
+              onPointerCancel={props.onHoldEnd}
+            >
+              <MacGripVertical size={14} />
+            </span>
+          )}
           <button
             type="button"
             className="mac-info-row__toggle"
@@ -785,7 +835,7 @@ function InfoRow(props: InfoRowProps) {
           >
             {children.length ? (isCollapsed ? <MacChevronRight size={15} /> : <MacChevronDown size={15} />) : <span className="mac-info-row__toggle-ghost" />}
           </button>
-          {props.editingId === node.id ? (
+          {(props.isAdmin && props.editingId === node.id) ? (
             <input
               className="mac-info-row__input"
               autoFocus
@@ -799,7 +849,7 @@ function InfoRow(props: InfoRowProps) {
               }}
               onKeyDown={(event) => { if (event.key === 'Enter') event.currentTarget.blur(); }}
             />
-          ) : isVehicleNode ? (
+          ) : (props.isAdmin && isVehicleNode) ? (
             <select
               className="mac-info-row__select"
               value={isKnownVehicleModel(node.title) ? node.title : ''}
@@ -815,7 +865,7 @@ function InfoRow(props: InfoRowProps) {
                 </optgroup>
               ))}
             </select>
-          ) : !isLeaf && titleOptions.length ? (
+          ) : (props.isAdmin && !isLeaf && titleOptions.length) ? (
             <select
               className="mac-info-row__select"
               value={titleOptions.includes(node.title) ? node.title : ''}
@@ -832,20 +882,53 @@ function InfoRow(props: InfoRowProps) {
             <span className="mac-info-row__missing" title={`${props.missingCount} 项信息未填写`}>缺 {props.missingCount}</span>
           )}
           <div className="mac-info-row__ops">
-            {/* 行内编辑按钮：一步进入改名，不必展开「⋯」菜单（叶子节点的内容本来就已是行内直接编辑） */}
-            <button type="button" className="mac-info-row__op" onClick={() => props.onEdit(node.id)} aria-label={`编辑${node.title}`} title="编辑节点"><MacPencil size={15} /></button>
-            <button type="button" className="mac-info-row__op" onClick={() => props.onAdd(node)} aria-label={`在${node.title}下新增`}><MacPlus size={15} /></button>
-            <button
-              type="button"
-              className="mac-info-row__op"
-              onClick={() => props.onHistory(node)}
-              aria-label={`查看${node.title}的编辑历史`}
-              title={hasUnseenHistory ? '有新的编辑记录' : '编辑历史'}
-            >
-              <MacHistory size={15} />
-              {hasUnseenHistory && <span className="mac-info-row__op-dot" aria-hidden="true" />}
-            </button>
-            <button type="button" className="mac-info-row__op" onClick={() => props.onMenu(node)} aria-label="更多操作"><MacMoreHorizontal size={15} /></button>
+            {props.isAdmin ? (
+              <>
+                {/* 全局字段定义改不动（后端 403，只能走「详情模板」），所以结构按钮只对本项目增补的节点出 */}
+                {node.is_custom && (
+                  <>
+                    <button type="button" className="mac-info-row__op" onClick={() => props.onEdit(node.id)} aria-label={`编辑${node.title}`} title="编辑节点"><MacPencil size={15} /></button>
+                    <button type="button" className="mac-info-row__op" onClick={() => props.onMenu(node)} aria-label="更多操作"><MacMoreHorizontal size={15} /></button>
+                  </>
+                )}
+                <button type="button" className="mac-info-row__op" onClick={() => props.onAdd(node)} aria-label={`在${node.title}下新增`}><MacPlus size={15} /></button>
+                <button
+                  type="button"
+                  className="mac-info-row__op"
+                  onClick={() => props.onHistory(node)}
+                  aria-label={`查看${node.title}的编辑历史`}
+                  title={hasUnseenHistory ? '有新的编辑记录' : '编辑历史'}
+                >
+                  <MacHistory size={15} />
+                  {hasUnseenHistory && <span className="mac-info-row__op-dot" aria-hidden="true" />}
+                </button>
+              </>
+            ) : (
+              <>
+                {/* 普通用户：只留「增补信息」（父节点允许时）+ 编辑历史，结构操作一律不给 */}
+                {node.allow_custom && (
+                  <button
+                    type="button"
+                    className="mac-info-row__op"
+                    onClick={() => props.onCustomInfo(node)}
+                    aria-label={`在${node.title}下增补信息`}
+                    title="增补信息"
+                  >
+                    <MacPlus size={15} />
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className="mac-info-row__op"
+                  onClick={() => props.onHistory(node)}
+                  aria-label={`查看${node.title}的编辑历史`}
+                  title={hasUnseenHistory ? '有新的编辑记录' : '编辑历史'}
+                >
+                  <MacHistory size={15} />
+                  {hasUnseenHistory && <span className="mac-info-row__op-dot" aria-hidden="true" />}
+                </button>
+              </>
+            )}
           </div>
         </div>
         {isLeaf && <NodeContent {...props} />}
@@ -873,10 +956,12 @@ function NodeContent(props: InfoRowProps) {
           <option value="">请选择</option>
           {(data.options ?? []).map((option) => <option key={option} value={option}>{option}</option>)}
         </select>
-        <button type="button" className="mac-btn mac-btn--outline mac-info-node__manage" onClick={() => props.onOpenSelectEditor(node)}>
-          管理
-        </button>
-      </div>
+        {/* 选项属于字段定义：全局字段的选项在「详情模板」里改，这里只放本项目增补字段的 */}
+        {props.isAdmin && node.is_custom && (
+          <button type="button" className="mac-btn mac-btn--outline mac-info-node__manage" onClick={() => props.onOpenSelectEditor(node)}>
+            管理
+          </button>
+        )}      </div>
     );
   }
   if (node.content_type === 'file' || node.content_type === 'image') {

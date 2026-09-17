@@ -14,6 +14,8 @@ vi.mock('tdesign-mobile-react', () => ({ Toast: vi.fn() }));
 vi.mock('@/api/infoNodes', () => ({
   fetchInfoTree: vi.fn(),
   createInfoNodeApi: vi.fn(),
+  createCustomInfoNodeApi: vi.fn(),
+  setInfoNodeValueApi: vi.fn(),
   updateInfoNodeApi: vi.fn(),
   moveInfoNodeApi: vi.fn(),
   deleteInfoNodeApi: vi.fn(),
@@ -51,7 +53,9 @@ const TREE: ApiInfoNode[] = [
       node({ id: 'c1', parent_id: 'r1', title: '客户信息', value: '中力', sort_order: 0 }),
       node({
         id: 'c2', parent_id: 'r1', title: '项目类型', content_type: 'select', sort_order: 1,
-        value: JSON.stringify({ selected: '', options: ['PK 项目', '试点项目'] }),
+        // 选项是字段定义（节点上），selected 是本项目的值：服务端按值类型编码后下发，不再是 JSON 字符串
+        options: ['PK 项目', '试点项目'],
+        value: { selected: '', options: ['PK 项目', '试点项目'] },
       }),
     ],
   }),
@@ -62,7 +66,8 @@ const TREE: ApiInfoNode[] = [
     children: [
       node({
         id: 'c3', parent_id: 'r2', title: '载具类型', content_type: 'select', sort_order: 0,
-        value: JSON.stringify({ selected: '托盘', options: ['托盘', '料笼'] }),
+        options: ['托盘', '料笼'],
+        value: { selected: '托盘', options: ['托盘', '料笼'] },
       }),
     ],
   }),
@@ -168,7 +173,8 @@ describe('ProjectInfoCard（项目信息管理卡）', () => {
     const other = screen.getByRole('button', { name: '关注载具类型' });
     expect(other.getAttribute('aria-pressed')).toBe('false');
     fireEvent.click(other);
-    expect(toggleInfoNodeMarkApi).toHaveBeenCalledWith('c3');
+    // 展示卡不带 projectId：后端按「登录人 + 该节点」已有的标注切换
+    expect(toggleInfoNodeMarkApi).toHaveBeenCalledWith('c3', undefined);
     await waitFor(() => {
       expect(screen.getByRole('button', { name: '取消关注载具类型' })).toBeTruthy();
     });
@@ -191,7 +197,7 @@ describe('ProjectInfoCard（项目信息管理卡）', () => {
     // 第二次失败：乐观点亮后回滚为未关注
     fireEvent.click(screen.getByRole('button', { name: '关注载具类型' }));
     await waitFor(() => {
-      expect(toggleInfoNodeMarkApi).toHaveBeenCalledWith('c3');
+      expect(toggleInfoNodeMarkApi).toHaveBeenCalledWith('c3', undefined);
       expect(screen.getByRole('button', { name: '关注载具类型' }).getAttribute('aria-pressed')).toBe('false');
     });
     expect(onMarkChange).toHaveBeenCalledTimes(1);

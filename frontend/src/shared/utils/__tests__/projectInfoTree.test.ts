@@ -5,7 +5,6 @@ import {
   deleteInfoNode,
   encodeInfoValue,
   flattenInfoTree,
-  importInfoTemplate,
   importInfoTree,
   loadHistoryLatest,
   loadHistorySeen,
@@ -19,6 +18,7 @@ import {
   REGION_MAINLAND,
   removeInfoNode,
   saveHistorySeen,
+  setInfoNodeValue,
   toggleInfoNodeMark,
   unseenHistoryNodes,
   unseenHistoryRoots,
@@ -27,6 +27,7 @@ import {
   type ProjectInfoNode,
 } from '../projectInfoTree';
 import {
+  createCustomInfoNodeApi,
   createInfoNodeApi,
   deleteInfoNodeApi,
   fetchInfoNodeChangeSummaryApi,
@@ -34,9 +35,9 @@ import {
   fetchInfoNodeMarksApi,
   fetchInfoTree,
   fetchProjectActivityApi,
-  importInfoTemplateApi,
   importInfoTreeApi,
   moveInfoNodeApi,
+  setInfoNodeValueApi,
   toggleInfoNodeMarkApi,
   updateInfoNodeApi,
   type ApiInfoNode,
@@ -45,11 +46,12 @@ import {
 vi.mock('@/api/infoNodes', () => ({
   fetchInfoTree: vi.fn(),
   createInfoNodeApi: vi.fn(),
+  createCustomInfoNodeApi: vi.fn(),
+  setInfoNodeValueApi: vi.fn(),
   updateInfoNodeApi: vi.fn(),
   moveInfoNodeApi: vi.fn(),
   deleteInfoNodeApi: vi.fn(),
   importInfoTreeApi: vi.fn(),
-  importInfoTemplateApi: vi.fn(),
   fetchInfoNodeChangesApi: vi.fn(),
   fetchInfoNodeChangeSummaryApi: vi.fn(),
   fetchInfoNodeMarksApi: vi.fn(),
@@ -74,25 +76,7 @@ function apiNode(partial: Partial<ApiInfoNode> & { id: string }): ApiInfoNode {
   };
 }
 
-const parseValue = (node: { value?: string | null }) => JSON.parse(node.value ?? 'null');
 const selectOf = (node: ProjectInfoNode) => node.value as { selected: string; options: string[] };
-
-// 预设信息树模板已下沉到后端（project_templates/*.yaml），前端只触发重建；
-// 模板结构本身（13 个一级节点、≤4 层、下拉选项）由后端实例化，另有校验。
-describe('按后端模板初始化', () => {
-  beforeEach(() => vi.clearAllMocks());
-
-  it('调用 import-template 接口并返回写入的节点数', async () => {
-    vi.mocked(importInfoTemplateApi).mockResolvedValue(120);
-    await expect(importInfoTemplate('P1')).resolves.toBe(120);
-    expect(importInfoTemplateApi).toHaveBeenCalledWith('P1');
-  });
-
-  it('模板为空（后端返回 0）时不抛错，交由页面提示', async () => {
-    vi.mocked(importInfoTemplateApi).mockResolvedValue(0);
-    await expect(importInfoTemplate('P1')).resolves.toBe(0);
-  });
-});
 
 describe('后端行 <-> 页面节点（编解码）', () => {
   it('text 原样透传（含看起来像 JSON 的内容），select / file 按 content_type 解码', () => {
@@ -105,10 +89,10 @@ describe('后端行 <-> 页面节点（编解码）', () => {
           apiNode({ id: 'c1', parent_id: 'r1', title: '客户信息', value: '{"a":1}', sort_order: 0 }),
           apiNode({
             id: 'c2', parent_id: 'r1', title: '项目类型', content_type: 'select', sort_order: 1,
-            value: JSON.stringify({ selected: 'PK 项目', options: ['PK 项目', '试点项目'] }),
+            value: { selected: 'PK 项目', options: ['PK 项目', '试点项目'] },
           }),
           apiNode({ id: 'c3', parent_id: 'r1', title: '坏数据', content_type: 'select', value: 'not-json', sort_order: 2 }),
-          apiNode({ id: 'c4', parent_id: 'r1', title: '附件', content_type: 'file', sort_order: 3, value: JSON.stringify({ name: 'a.pdf', resource_id: 7, size: 100 }) }),
+          apiNode({ id: 'c4', parent_id: 'r1', title: '附件', content_type: 'file', sort_order: 3, value: { name: 'a.pdf', resource_id: '7', size: 100 } }),
         ],
       }),
     ];
@@ -118,7 +102,7 @@ describe('后端行 <-> 页面节点（编解码）', () => {
     expect(byId.get('c1')!.value).toBe('{"a":1}');
     expect(selectOf(byId.get('c2')!)).toEqual({ selected: 'PK 项目', options: ['PK 项目', '试点项目'] });
     expect(selectOf(byId.get('c3')!)).toEqual({ selected: '', options: [] });
-    expect(byId.get('c4')!.value).toEqual({ name: 'a.pdf', resource_id: 7, size: 100 });
+    expect(byId.get('c4')!.value).toEqual({ name: 'a.pdf', resource_id: '7', size: 100 });
     // 空 value 的 text 节点按空字符串处理
     expect(byId.get('r1')!.value).toBe('');
     // parent_id 以树的层级为准
@@ -126,10 +110,23 @@ describe('后端行 <-> 页面节点（编解码）', () => {
     expect(byId.get('r1')!.parent_id).toBeNull();
   });
 
-  it('encodeInfoValue：字符串原样，null 归 null，结构化值存 JSON 字符串', () => {
+  it('节点定义类字段（options / titleOptions / allow_custom / is_custom）随行下发', () => {
+    const [node] = flattenInfoTree([apiNode({
+      id: 'r1', title: '基础信息', allow_custom: true,
+      options: ['托盘', '料笼'],
+      titleOptions: ['基础信息', '项目信息'],
+    })]);
+    expect(node.options).toEqual(['托盘', '料笼']);
+    expect(node.titleOptions).toEqual(['基础信息', '项目信息']);
+    expect(node.allow_custom).toBe(true);
+    expect(node.is_custom).toBe(false); // project_id 为空的全局字段
+  });
+
+  it('encodeInfoValue：字符串去空白，空串归 null，结构化值原样交给服务端编码', () => {
     expect(encodeInfoValue('abc')).toBe('abc');
+    expect(encodeInfoValue('   ')).toBeNull();
     expect(encodeInfoValue(null)).toBeNull();
-    expect(encodeInfoValue({ selected: '是', options: ['是', '否'] })).toBe('{"selected":"是","options":["是","否"]}');
+    expect(encodeInfoValue({ selected: '是', options: ['是', '否'] })).toEqual({ selected: '是', options: ['是', '否'] });
   });
 });
 
@@ -154,26 +151,55 @@ describe('节点 CRUD（走 /api/admin/info-nodes）', () => {
     expect(nodes.map((node) => node.id)).toEqual(['r1', 'c1', 'c2']);
   });
 
-  it('createInfoNode 由前端生成 id 并调用创建接口', async () => {
-    vi.mocked(createInfoNodeApi).mockImplementation(async (_projectId, payload) =>
-      apiNode({ id: payload.id, title: payload.title ?? '', parent_id: payload.parent_id ?? null, sort_order: payload.sort_order ?? 0 }),
+  it('创建节点：id 由后端生成，管理员与「增补」走两个入口', async () => {
+    vi.mocked(createInfoNodeApi).mockResolvedValue(
+      apiNode({ id: 'server-1', project_id: null, parent_id: 'parent-1', title: '新节点', sort_order: 30 }),
     );
-    const created = await createInfoNode('P1', 'parent-1', 3, '新节点');
-    expect(createInfoNodeApi).toHaveBeenCalledWith('P1', expect.objectContaining({
-      id: expect.any(String), parent_id: 'parent-1', title: '新节点', content_type: 'text', sort_order: 3,
-    }));
-    expect(created.parent_id).toBe('parent-1');
+    vi.mocked(createCustomInfoNodeApi).mockResolvedValue(
+      apiNode({ id: 'server-2', project_id: 'P1', parent_id: 'parent-1', title: '增补字段', sort_order: 40 }),
+    );
+
+    const created = await createInfoNode('P1', 'parent-1', 30, '新节点', true);
+    // 载荷里不再带前端生成的 id（服务端按 node_key 保证唯一）
+    expect(createInfoNodeApi).toHaveBeenCalledWith('P1', {
+      parent_id: 'parent-1', title: '新节点', content_type: 'text', sort_order: 30,
+    });
+    expect(created.id).toBe('server-1');
     expect(created.title).toBe('新节点');
+
+    const custom = await createInfoNode('P1', 'parent-1', 40, '增补字段', false);
+    expect(createCustomInfoNodeApi).toHaveBeenCalledWith('P1', {
+      parent_id: 'parent-1', title: '增补字段', content_type: 'text', sort_order: 40,
+    });
+    expect(custom.id).toBe('server-2');
+    expect(custom.project_id).toBe('P1');
+    expect(custom.is_custom).toBe(false); // 接口返回的是后端口径，页面不自行推断
   });
 
-  it('updateInfoNode 把结构化值编码成 TEXT 字符串提交', async () => {
-    const node = { id: 'n1', project_id: 'P1', parent_id: null, title: '项目类型', content_type: 'select' as const, value: { selected: '', options: [] }, sort_order: 0, created_at: TS };
-    vi.mocked(updateInfoNodeApi).mockResolvedValue(
-      apiNode({ id: 'n1', content_type: 'select', value: JSON.stringify({ selected: '试点项目', options: ['试点项目'] }) }),
+  it('setInfoNodeValue 结构化值不序列化，直接交服务端按值类型编码', async () => {
+    const node: ProjectInfoNode = {
+      id: 'n1', project_id: null, parent_id: null, title: '项目类型', content_type: 'select',
+      value: { selected: '', options: [] }, sort_order: 0, created_at: TS,
+    };
+    vi.mocked(setInfoNodeValueApi).mockResolvedValue(
+      apiNode({ id: 'n1', project_id: null, content_type: 'select', value: { selected: '试点项目', options: ['试点项目'] } }),
     );
-    const updated = await updateInfoNode(node, { value: { selected: '试点项目', options: ['试点项目'] } });
-    expect(updateInfoNodeApi).toHaveBeenCalledWith('n1', { value: '{"selected":"试点项目","options":["试点项目"]}' });
+    const updated = await setInfoNodeValue(node, { selected: '试点项目', options: ['试点项目'] }, 'P1');
+    expect(setInfoNodeValueApi).toHaveBeenCalledWith('n1', 'P1', { selected: '试点项目', options: ['试点项目'] });
     expect(selectOf(updated).selected).toBe('试点项目');
+  });
+
+  it('updateInfoNode 只改定义（名称/类型/选项），不带值字段', async () => {
+    const node: ProjectInfoNode = {
+      id: 'n1', project_id: 'P1', parent_id: null, title: '项目类型', content_type: 'select',
+      value: { selected: '', options: [] }, sort_order: 0, created_at: TS, is_custom: true,
+    };
+    vi.mocked(updateInfoNodeApi).mockResolvedValue(
+      apiNode({ id: 'n1', project_id: 'P1', title: '项目类型', content_type: 'select', options: ['甲', '乙'] }),
+    );
+    const updated = await updateInfoNode(node, { title: '项目类型', options: ['甲', '乙'] });
+    expect(updateInfoNodeApi).toHaveBeenCalledWith('n1', { title: '项目类型', options: ['甲', '乙'] });
+    expect(updated.options).toEqual(['甲', '乙']);
   });
 
   it('moveInfoNode / deleteInfoNode 调用对应接口', async () => {
@@ -207,14 +233,13 @@ describe('导入内容归一化', () => {
     expect(normalizeImportNodes({ info_nodes: raw })[0].title).toBe('A');
   });
 
-  it('补 id / 序号 / 缺省字段，保留字符串值，结构化值转 JSON 字符串', () => {
+  it('补序号 / 缺省字段，保留字符串值，结构化值原样提交由后端按类型编码', () => {
     const [node] = normalizeImportNodes([
       { title: '下拉', content_type: 'select', value: { selected: '是', options: ['是'] } },
       { title: '文字', value: '原文' },
     ]);
-    expect(node.id).toBeTruthy();
-    expect(node.sort_order).toBe(0);
-    expect(node.value).toBe('{"selected":"是","options":["是"]}');
+    expect(node.sort_order).toBe(10);
+    expect(node.value).toEqual({ selected: '是', options: ['是'] });
   });
 
   it('无法识别的格式直接抛错', () => {
@@ -242,15 +267,15 @@ describe('导入内容归一化', () => {
     // 对象 → 子节点（递归）
     expect(children[1].children!.map((node) => node.title)).toEqual(['ERP']);
 
-    // 数组 → 下拉节点，值编码成后端存的 TEXT
+    // 数组 → 下拉节点，选项进节点定义（不入值）
     expect(children[2].content_type).toBe('select');
-    expect(parseValue(children[2])).toEqual({ selected: '', options: ['试点项目', '大客户项目'] });
+    expect(children[2].value).toEqual({ selected: '', options: ['试点项目', '大客户项目'] });
   });
 
   it('options 清单（后端 YAML 模板写法）自动补成下拉值', () => {
     const [node] = normalizeImportNodes([{ title: '载具类型', options: ['托盘', '料笼'] }]);
     expect(node.content_type).toBe('select');
-    expect(parseValue(node)).toEqual({ selected: '', options: ['托盘', '料笼'] });
+    expect(node.value).toEqual({ selected: '', options: ['托盘', '料笼'] });
   });
 });
 
@@ -358,14 +383,17 @@ describe('关注（星标）与项目动态', () => {
 
   it('loadInfoNodeMarks / toggleInfoNodeMark 直通关注接口', async () => {
     vi.mocked(fetchInfoNodeMarksApi).mockResolvedValue(['n1', 'n2']);
-    vi.mocked(toggleInfoNodeMarkApi).mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+    vi.mocked(toggleInfoNodeMarkApi).mockResolvedValueOnce(true).mockResolvedValueOnce(false).mockResolvedValueOnce(true);
 
     await expect(loadInfoNodeMarks('P1')).resolves.toEqual(['n1', 'n2']);
     expect(fetchInfoNodeMarksApi).toHaveBeenCalledWith('P1');
 
+    // 展示卡只给 nodeId（后端按已有标注切换），编辑页会带上 projectId
     await expect(toggleInfoNodeMark('n1')).resolves.toBe(true);
     await expect(toggleInfoNodeMark('n1')).resolves.toBe(false); // 再点即取消
-    expect(toggleInfoNodeMarkApi).toHaveBeenCalledWith('n1');
+    expect(toggleInfoNodeMarkApi).toHaveBeenCalledWith('n1', undefined);
+    await expect(toggleInfoNodeMark('n1', 'P1')).resolves.toBe(true);
+    expect(toggleInfoNodeMarkApi).toHaveBeenLastCalledWith('n1', 'P1');
   });
 
   it('loadProjectActivity 返回被关注节点的最新变动（只含变动内容所需字段）', async () => {
