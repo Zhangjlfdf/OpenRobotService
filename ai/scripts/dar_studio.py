@@ -1944,7 +1944,7 @@ def _kb_build() -> dict:
             brands = {_brand_agg(c) for c in n["children"]}
             brands.discard("")
             n["brand"] = brands.pop() if len(brands) == 1 else "混合"
-            return ""
+            return n["brand"]
         _brand_agg(root)
 
         # 公司域：品牌优先分组（0916 用户定稿——公司树第一层 自研车/华睿/科钛/通用/产品目录）。
