@@ -5,9 +5,13 @@ from typing import List, Optional, Dict, Any
 from app.core.database import get_async_db as get_db
 from app.modules.admin.resource_manager.schemas.resource import SyncBuildDeployRequest, ResourceResponse, ResourceUpdate, ResourceStats
 from app.modules.admin.resource_manager.services.resource_service import ResourceService
-from app.modules.admin.resource_manager.models.resource import ResourceType, StorageType
+from app.modules.admin.resource_manager.models.resource import Resource, ResourceType, StorageType
 from app.utils.minio_client import minio_client
-from app.modules.admin.api.auth import require_permission
+from app.modules.admin.api.auth import (
+    require_permission,
+    get_current_active_user_from_token,
+    has_permission_code,
+)
 
 router = APIRouter(prefix="/resources", tags=["resources"])
 
@@ -22,6 +26,17 @@ PERM_DOWNLOAD = "backend:resource:base:download"
 PERM_WRITE = "backend:resource:base:write"
 PERM_DELETE = "backend:resource:base:delete"
 PERM_SYNC = "backend:resource:base:sync"
+
+
+def ensure_oss_download_permission(resource: Resource, current_user: Dict[str, Any]) -> None:
+    """下载类端点的条件鉴权：仅 OSS 资源（资源管理/文件浏览页的构建产物）要求
+    PERM_DOWNLOAD；头像、项目文档等 MINIO 普通资源登录用户即可获取。
+
+    背景：头像等资源经 <img src>/window.open 访问，浏览器原生请求带不上 Authorization
+    头（token 走 ?token= 查询参数），且普通业务用户不应被授予资源下载权限码。
+    """
+    if resource.storage_type == StorageType.OSS and not has_permission_code(current_user, PERM_DOWNLOAD):
+        raise HTTPException(status_code=403, detail=f"权限不足: 缺少 {PERM_DOWNLOAD}")
 
 
 @router.get("/", response_model=List[ResourceResponse])
@@ -198,7 +213,7 @@ async def download_resource(
 async def proxy_download_resource(
     resource_id: int,
     db: AsyncSession = Depends(get_db),
-    current_user: Dict[str, Any] = require_permission(PERM_DOWNLOAD),
+    current_user: Dict[str, Any] = Depends(get_current_active_user_from_token),
 ):
     resource = await ResourceService.get_resource_by_id(db, resource_id)
     if not resource:
@@ -206,6 +221,10 @@ async def proxy_download_resource(
 
     if not resource.is_available:
         raise HTTPException(status_code=403, detail="资源不可用")
+
+    # 仅 OSS 资源（文件浏览页的构建产物）需要 download 权限；头像、项目文档等
+    # MINIO 普通资源登录用户即可获取
+    ensure_oss_download_permission(resource, current_user)
 
     try:
             from minio.error import S3Error
@@ -317,11 +336,13 @@ async def get_resource_download_url(
     resource_id: int,
     expires_minutes: int = Query(3, ge=1, le=10080, description="URL有效期（分钟），默认3分钟，最大10080分钟（7天）"),
     db: AsyncSession = Depends(get_db),
-    current_user: Dict[str, Any] = require_permission(PERM_DOWNLOAD),
+    current_user: Dict[str, Any] = Depends(get_current_active_user_from_token),
 ):
     resource = await ResourceService.get_resource_by_id(db, resource_id)
     if not resource:
         raise HTTPException(status_code=404, detail="资源未找到")
+
+    ensure_oss_download_permission(resource, current_user)
 
     download_url = ResourceService.get_download_url(resource, expires_minutes)
     return {
@@ -337,11 +358,13 @@ async def get_resource_thumbnail_url(
     resource_id: int,
     expires_minutes: int = Query(5, ge=1, le=10080, description="URL有效期（分钟），默认5分钟，最大10080分钟（7天）"),
     db: AsyncSession = Depends(get_db),
-    current_user: Dict[str, Any] = require_permission(PERM_DOWNLOAD),
+    current_user: Dict[str, Any] = Depends(get_current_active_user_from_token),
 ):
     resource = await ResourceService.get_resource_by_id(db, resource_id)
     if not resource:
         raise HTTPException(status_code=404, detail="资源未找到")
+
+    ensure_oss_download_permission(resource, current_user)
 
     if not resource.thumbnail_url:
         raise HTTPException(status_code=404, detail="该资源没有缩略图")
@@ -360,11 +383,13 @@ async def get_resource_preview_url(
     resource_id: int,
     expires_minutes: int = Query(5, ge=1, le=10080, description="URL有效期（分钟），默认5分钟，最大10080分钟（7天）"),
     db: AsyncSession = Depends(get_db),
-    current_user: Dict[str, Any] = require_permission(PERM_DOWNLOAD),
+    current_user: Dict[str, Any] = Depends(get_current_active_user_from_token),
 ):
     resource = await ResourceService.get_resource_by_id(db, resource_id)
     if not resource:
         raise HTTPException(status_code=404, detail="资源未找到")
+
+    ensure_oss_download_permission(resource, current_user)
 
     if not resource.preview_url:
         raise HTTPException(status_code=404, detail="该资源没有预览")

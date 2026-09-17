@@ -32,7 +32,9 @@
   # 选题话术服务端模板直出（不走 LLM），「点击下方按钮」是前端渲染按钮的
   # 锚点——话术含它 = 项目引导输出正常且按钮锚点在
   expect_ask_any: ["点击下方按钮", "出单前确认一下关联项目"]
-  strict: true
+  # 0916 降非 strict：flash 对信息完备的提单偶发漏判 ticket_intent（走成
+  # 先问字段），此时弹窗必选项目兜底、铁律未破——波动 WARN 提示人工看
+  strict: false
 
 - name: 诊断轮走工具循环阶段
   turns:
@@ -84,6 +86,9 @@
   turns:
     - 帮我提个工单，我们一台XQE车报错813停在货架前取不了货，车编号A027
     - 今天上午的事，货架在A区03库位，反复出现
+  followup_pool:
+    - when: 关联项目
+      say: "1"
   expect_review_any_round: true
   expect_confirm: true
   expect_db: true
@@ -100,6 +105,9 @@
   turns:
     - 帮我提个工单，XQE车报813取不了货，车编号A027
     - 今天上午十点的事，A区03库位，反复出现
+  followup_pool:
+    - when: 关联项目
+      say: "1"
   expect_review_any_round: true
   expect_confirm: true
   post_asks:
@@ -111,3 +119,22 @@
       forbid_tools: [search_kb]
   strict: true
 
+# ── 0916 持久化：原 verify_* 手跑脚本的历史事故回归（tests/manual/ 可查原始脚本）──
+- name: 诊断轮换新话题-检索词不残留（0904事故回归）
+  turns:
+    - 我们车一直报错813怎么办
+    - 明白了。那库位长度和货架宽度分别在哪里配置
+  # 第 2 轮换了全新话题：回答必须围绕新话题，不得被旧话题残留检索词顶掉
+  post_asks:
+    - ask: "那库位长度具体在哪里改"
+      expect_any: ["库位", "配置", "参数", "编辑"]
+      forbid_any: ["813", "报错813"]
+  strict: true
+
+- name: 谈论提单话题不误触提单（谈论≠要求）
+  turns:
+    - 你们这个工单提交之后一般是怎么流转的
+    - 那工程师接到单子之后会做什么
+  # 只是了解流程，不是要提单：不得出提单弹窗锚点/项目引导/确认话术
+  forbid_any: ["点击下方按钮", "出单前确认一下关联项目", "生成工单草稿"]
+  strict: false

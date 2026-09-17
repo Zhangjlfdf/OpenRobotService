@@ -366,17 +366,27 @@ async def _resolve_user_profile(username: str) -> dict:
     def _query():
         session = SessionLocal()
         try:
-            return session.execute(text(
+            row = session.execute(text(
                 "SELECT u.name, d.name, u.department, u.job_level, "
                 "       u.responsibility_modules, u.duty_text "
                 "FROM users u LEFT JOIN departments d ON u.department_id = d.id "
                 "WHERE u.username = :u LIMIT 1"
             ), {"u": key}).fetchone()
+            # 项目内角色（0916）：user_project_roles.role_id → roles.name
+            # （调度研发/实施/项目经理…）——用户画像缺的受众信号：研发可深入
+            # 原理、实施要现场动作、管理要结论优先。跨项目去重聚合。
+            roles = session.execute(text(
+                "SELECT DISTINCT r.name FROM user_project_roles upr "
+                "JOIN roles r ON r.id = upr.role_id "
+                "JOIN users u ON u.id = upr.user_id "
+                "WHERE u.username = :u AND r.name IS NOT NULL AND r.name <> ''"
+            ), {"u": key}).fetchall()
+            return row, [r[0] for r in roles if r[0]]
         finally:
             session.close()
 
     try:
-        row = await asyncio.wait_for(
+        row, project_roles = await asyncio.wait_for(
             loop.run_in_executor(None, _query), timeout=1.5)
     except Exception as e:
         logger.warning(f"[user_profile] 查询失败(降级无画像): username={key}, err={e}")
@@ -391,6 +401,7 @@ async def _resolve_user_profile(username: str) -> dict:
         "job_level_cn": _JOB_LEVEL_CN.get(row[3], ""),
         "modules_text": _flatten_resp_modules(row[4])[:120],
         "duty": ((row[5] or "").strip())[:80],
+        "project_roles": ("、".join(project_roles))[:60],
     }
     _USER_PROFILE_CACHE[key] = (now + 300, profile)
     # 打全五项：低频事件（每用户 5 分钟一次），排障时一眼看出哪些字段空
@@ -413,6 +424,8 @@ def _user_profile_block(state: "AgentState") -> str:
         seg.append(p["department"])
     if p.get("job_level_cn"):
         seg.append(p["job_level_cn"])
+    if p.get("project_roles"):
+        seg.append(p["project_roles"])
     lines = [f"【用户】{'｜'.join(seg)}"]
     _duty_parts = []
     if p.get("modules_text"):
@@ -422,8 +435,10 @@ def _user_profile_block(state: "AgentState") -> str:
     if _duty_parts:
         lines.append(f"【用户职责】{'｜'.join(_duty_parts)}")
     lines.append(
-        "（回答时可结合用户岗位与职责调整针对性与深浅，按职级适当调整"
-        "表达的正式程度与内容详略，但保持一致的专业工程师态度，"
+        "（回答时可结合用户岗位、职责与项目内角色调整针对性与深浅——"
+        "偏研发/算法背景的可深入技术细节与原理推导；偏实施/现场的给可执行的"
+        "操作步骤与检查动作；偏管理的先给结论与影响面再展开。"
+        "按职级适当调整表达的正式程度与内容详略，但保持一致的专业工程师态度，"
         "不因职级谄媚或怠慢；无需每句称呼用户名。"
         "用户询问自己的身份/姓名时，以【用户】信息直接回答——"
         "用户在问自己是谁，不是在问你（助手）的身份）")
@@ -667,6 +682,10 @@ def _is_project_field(key) -> bool:
 _PROJECT_ASK_RE = re.compile(
     r"项目名称|项目名字|哪个项目|什么项目|所在的项目|所在项目|"
     r"关联项目|所属项目|项目是哪|项目叫什")
+
+# 项目序号回应：纯序号/第N个/N号（含中文数字），供 project_choice 原话溯源门
+# 判「用户在答编号题」（还原块挂起时 LLM 按块把序号还原成项目名照抄）
+_PROJ_SEQ_RE = re.compile(r"^\s*(?:第)?\s*[0-9０-９一二三四五六七八九十]{1,3}\s*(?:个|号|项)?\s*$")
 
 
 def _strip_project_ask(text: str) -> str:
@@ -1553,7 +1572,9 @@ class AiDiagnosisPlatform:
         """
         _dm = r.domain or "team"
         _sd = (r.sub_domain or "").replace('\\', '/').strip('/')
-        _mu = f"{self.config.media_url_prefix}/kb/{_dm}/{_sd}"
+        _src = (r.source_file or "").strip("/")
+        _dir = f"{_dm}/{_src.rsplit('/', 1)[0]}" if _src else f"{_dm}/{_sd}"
+        _mu = f"{self.config.media_url_prefix}/kb/{_dir}"
         return re.sub(
             r'!\[([^\]]*)\]\((?:\./)?media/([^)]+)\)',
             rf'![\1]({_mu}/media/\2)',
@@ -1786,6 +1807,33 @@ class AiDiagnosisPlatform:
                     f"→ 缺失字段的值优先从这里提取写入 collected_info；"
                     f"其中确实没有的直接记'无'跳过，不要再问用户。\n"
                 )
+            # 用户已上传图片资料块（0916）：收集轮 sanitize 屏蔽了对话里的图片
+            # 描述（防 UI 文本污染字段），但用户发图本身就是提供信息——车型/
+            # 车编号/任务编号常在截图里，全屏蔽会让 AI 对着图瞎追问（用户实测
+            # 两起：诊断轮图里有车型被追问车型、补充轮发截图车编号没被识别）。
+            # 解法：对话流保持屏蔽，图片描述单独以资料块注入 + 使用规则——
+            # 客观信息可采信、UI 系统文案禁止当字段值（污染防线保留）。
+            _img_info_block = ""
+            if state.ticket_collecting:
+                _img_descs = []
+                for t in memory.turns:
+                    c = str(t.get("content") or "")
+                    if "图片主要内容为：" in c:
+                        _d = c.split("图片主要内容为：", 1)[1]
+                        _img_descs.append(_d.split("【回应】")[0].strip()[:300])
+                if _img_descs:
+                    _imgs_txt = "\n".join(
+                        f"【图{i}】{d}" for i, d in enumerate(_img_descs[-3:], 1))
+                    _img_info_block = (
+                        f"\n## 用户已上传的图片（VLM 识别内容，非用户原话）\n"
+                        f"{_imgs_txt}\n"
+                        f"→ 使用规则：图片是用户主动上传的现场/界面信息——其中的"
+                        f"**客观信息**（车型、车编号、任务编号、故障码、现场状况等）"
+                        f"可直接采信写入对应字段，不需要再追问用户；但界面上的"
+                        f"**系统文案**（按钮文字、标签名、状态栏字段名等）禁止当作"
+                        f"字段值或项目名。图片内容与用户文字陈述冲突时，以用户"
+                        f"文字为准。\n"
+                    )
             # 歧义挂起反问块（0829 印尼实锤）：收集轮无规划器/检索通道，
             # 项目待确认状态只能进 prompt——列候选让 LLM 自然反问。
             _amb_ask_block = ""
@@ -1820,7 +1868,7 @@ class AiDiagnosisPlatform:
             return (
                 f"你是工单填写助手。用户正在补充工单所需信息，请把对话里出现的信息记录到 collected_info。\n\n"
                 f"{ticket_collecting_context}\n\n"
-                f"{_user_block}{_ref_block}{_proj_pick_block}{_amb_ask_block}\n"
+                f"{_user_block}{_ref_block}{_proj_pick_block}{_amb_ask_block}{_img_info_block}\n"
                 f"{_proj_block}\n"
                 f"## 对话\n{conversation_text}\n\n"
                 f"---\n"
@@ -2393,6 +2441,38 @@ class AiDiagnosisPlatform:
                 if len(hs) == 1:
                     cands[id(hs[0])] = hs[0]
         return list(cands.values())
+
+    @staticmethod
+    def _project_choice_supported(choice: str, query: str, has_candidates: bool) -> bool:
+        """project_choice 原话溯源门（0916 conv1325/task835 实锤）。
+
+        事故形态：用户答编号「2」正确预填「摇人吧服务号」后，还原块按设计清空；
+        后续收集轮 LLM 从快路径注入的名下项目列表里幻觉照抄 project_choice=
+        "MMQ自测"，把已落地的正确预填覆盖掉——话术报 MMQ自测、用户弹窗手动改回，
+        预填与所选项目不一致（用户报 bug 单 835）。
+
+        支撑判定（三选一，与 planner [mention] 原话溯源门同纪律）：
+        1. choice=="last"：指代上一单（独立语义，上游有自己的数据来源校验）；
+        2. 原话直呼：choice 去空格后出现在去空格的本轮原话里；
+        3. 序号回应：还原块挂起（has_candidates）且原话是纯序号（「2」「第2个」
+           「3号」）——LLM 按 _proj_pick_block 把序号还原成完整项目名照抄，
+           原话里只有序号，不能拿「原话不含项目名」误杀。
+
+        无支撑 = LLM 幻觉（用户本轮根本没提项目），拒收——预填是单向管道，
+        已落地的正确预填不允许被无原话支撑的输出覆盖；用户改项目走弹窗
+        （设计内唯一改口入口）或原话明说（有支撑，允许覆盖）。
+        """
+        c = (choice or "").strip()
+        if not c:
+            return False
+        if c.lower() == "last":
+            return True
+        q = "".join((query or "").split())
+        if q and "".join(c.split()) in q:
+            return True
+        if has_candidates and _PROJ_SEQ_RE.match(query or ""):
+            return True
+        return False
 
     @staticmethod
     def _match_project_mention(mention: str, pool: List[Dict[str, str]]) -> Optional[Dict[str, str]]:
@@ -3414,6 +3494,9 @@ class AiDiagnosisPlatform:
             "motion_control": "🚗 车端",
             "vehicle_errors": "🚗 车端", "vehicle_implementation": "🚗 车端",
             "vehicle_calibration": "🚗 车端", "vehicle_io": "🚗 车端",
+            "vehicle_implementation/自研车实施": "🚚 自研",
+            "vehicle_implementation/华睿VDA5050接入": "🤖 华睿",
+            "vehicle_implementation/科钛VDA5050接入": "🤖 科钛",
             "vehicle_motion": "🚗 车端",
             "translation": "🌐 翻译", "USP/translation": "🌐 翻译",
             "diagnosis": "🏭 诊断", "usp/diagnosis": "🏭 诊断",
@@ -3424,6 +3507,8 @@ class AiDiagnosisPlatform:
             "usp/error_codes": "🚨 平台错误码", "USP/error_codes": "🚨 平台错误码",
             "usp/ui_pages": "🧭 页面导航", "USP/ui_pages": "🧭 页面导航",
             "usp/terminology": "🔤 术语表", "USP/terminology": "🔤 术语表",
+            "usp/algorithm": "🧮 算法", "USP/algorithm": "🧮 算法",
+            "huarui": "🤖 华睿", "USP/huarui": "🤖 华睿",
             "product_catalog": "🏢 产品", "vda5050_protocol": "🏢 协议",
             "navigation": "📐 导航", "standards": "📐 标准",
         }
@@ -5644,7 +5729,22 @@ class AiDiagnosisPlatform:
         _pf_hit_this_turn = False
         if str(parsed.get("project_choice") or "").strip():
             _choice_raw = str(parsed.get("project_choice")).strip()
-            if _choice_raw.lower() == "last":
+            # 🔴 原话溯源门（0916 conv1325/task835 实锤）：预填已落地（答编号
+            # 「2」正确命中摇人吧服务号、还原块已清空）后，后续收集轮 LLM 从
+            # 快路径注入的名下项目列表里幻觉照抄 project_choice="MMQ自测"，
+            # 把正确预填覆盖掉——话术报 MMQ自测、用户弹窗手动改回，预填与
+            # 所选项目不一致。choice 必须在本轮原话里有支撑（直呼项目名/
+            # 还原块挂起时的序号回应/last 指代），无支撑=幻觉，拒收并保留
+            # 现有预填（用户改项目走弹窗或原话明说，两者都不受限）。
+            if not self._project_choice_supported(
+                    _choice_raw, request.query,
+                    bool(state.project_candidates)):
+                logger.warning(
+                    f"[stream] project_choice 原话溯源不支撑，拒收幻觉保留现有预填: "
+                    f"{_choice_raw[:50]!r} query={(request.query or '')[:50]!r} "
+                    f"pending={getattr(state, 'pending_prefill_project', None) and state.pending_prefill_project.get('name')!r}")
+                parsed["project_choice"] = ""
+            elif _choice_raw.lower() == "last":
                 # 指代上一单项目（0828 智能感）：数据来自真实提交记录，无需校验池；
                 # 上单无项目（存量会话/未绑定）→ 按未命中处理，闸门出题兜底
                 _lt = state.last_submitted_ticket or {}
@@ -5773,8 +5873,25 @@ class AiDiagnosisPlatform:
         # → 原流程照旧。按钮路径不经此处（prepare_ticket 与项目零关联）。
         # 出题候选记入 _gate_proj_choices，收尾塞 result 事件给前端渲染可点按钮
         # （与 prepare 路径统一：点击=以用户身份发送序号走编号还原链路）。
+        # 0916 补 action=submit 触发（task835 用户实测）：信息完备的直接提单，
+        # flash 输出 submit 却漏填 ticket_intent → 闸门被绕过先问字段，违反
+        # 「提单先引导项目后补字段」规定。submit=LLM 已认定提单，更该先撞项目题
+        # （出题轮同轮预置 decide 挂收集，答完编号必进字段收集，闭环已有）。
+        # 排除 ticket_cancel：取消提单轮的 action 也是 submit，不能被截胡出题。
         _gate_proj_choices = []
-        if (parsed.get("ticket_intent") and not state.project_asked
+        logger.info(
+            "[stream] 项目闸门判定: "
+            f"ticket_intent={parsed.get('ticket_intent')!r} "
+            f"action={parsed['action']!r} "
+            f"cancel={parsed.get('ticket_cancel')!r} "
+            f"asked={state.project_asked!r} "
+            f"pending={bool(state.pending_prefill_project)!r} "
+            f"collecting={state.ticket_collecting!r} "
+            f"draft={bool(memory.metadata.get('ticket_draft'))!r}")
+        if ((parsed.get("ticket_intent")
+                or parsed.get("action") == "submit")
+                and not parsed.get("ticket_cancel", False)
+                and not state.project_asked
                 and not state.pending_prefill_project and not state.ticket_collecting
                 # 草稿已存在＝项目已进草稿（预填/弹窗已定），再出选题只会
                 # 打断草稿后的补充与追问（0903 实锤：问「没有弹窗」被出题顶掉）

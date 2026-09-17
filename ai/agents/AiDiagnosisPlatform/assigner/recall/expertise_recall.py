@@ -61,7 +61,7 @@ def _as_ts(created_at) -> Optional[float]:
 
 
 def _ticket_text(rec: dict) -> str:
-    """与 A 路入库/检索同一套四栏，缺栏写「无」。"""
+    """与相似工单同一套四栏模板；空的车型/故障码不写，避免无关单被「无」粘在一起。"""
     from ai.agents.AiDiagnosisPlatform.assigner.recall.dispatch_text import (
         build_dispatch_ticket_text,
     )
@@ -250,7 +250,7 @@ def pick_cluster_ids(
 
 
 class ExpertiseRecall:
-    """B路：自动簇上的结单实绩（已解决 + 已关闭）。"""
+    """问题簇：自动簇上的结单实绩（已解决 + 已关闭）。"""
 
     def __init__(self, config: Optional[AssignerConfig] = None):
         self._config = config or AssignerConfig()
@@ -316,7 +316,7 @@ class ExpertiseRecall:
 
         import hashlib, json
         h = hashlib.md5(
-            ("dispatch-text-v2|" + json.dumps(
+            ("source-ai-v1|dispatch-text-v2|" + json.dumps(
                 recs, sort_keys=True, ensure_ascii=False, default=str,
             )).encode()
         ).hexdigest()
@@ -330,7 +330,10 @@ class ExpertiseRecall:
         texts = [_ticket_text(r) for r in recs]
         keep = [i for i, t in enumerate(texts) if t]
         if len(keep) < self._min_size:
-            logger.info(f"[expertise_recall] 可向量化工单不足 {self._min_size}，B 路空")
+            logger.info(
+                f"[expertise_recall] AI 源可向量化工单不足 {self._min_size}"
+                f"（拉取 {len(recs)} 条），问题簇空"
+            )
             empty = _blank_cache(h)
             empty["centroids"] = np.zeros((0, 1))
             empty["ticket_total"] = len(keep)
@@ -344,7 +347,7 @@ class ExpertiseRecall:
             ec = await get_embed_client()
             raw = await ec.embed_batch(slim_texts, normalize=True)
         except Exception as e:
-            logger.warning(f"[expertise_recall] 历史单向量化失败，B 路空: {e}")
+            logger.warning(f"[expertise_recall] 历史单向量化失败，问题簇空: {e}")
             empty = _blank_cache(h)
             empty["centroids"] = np.zeros((0, 1))
             empty["ticket_total"] = len(slim_recs)
@@ -369,7 +372,7 @@ class ExpertiseRecall:
         )
         sizes = sorted((len(g) for g in groups), reverse=True)
         logger.info(
-            f"[expertise_recall] 自动簇完成: 单={len(slim_recs)} 簇={len(groups)} "
+            f"[expertise_recall] 自动簇完成: AI源单={len(slim_recs)} 簇={len(groups)} "
             f"最大簇={sizes[0] if sizes else 0} "
             f"（合并阈值={self._merge_threshold} 入簇={self._assign_threshold} "
             f"最小团={self._min_size}）"

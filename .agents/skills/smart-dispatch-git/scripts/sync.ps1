@@ -1,11 +1,11 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-  Merge origin/test into feature/smart-dispatch and/or push that branch.
+  Merge origin/test into ai-feature-dispatch and/or push that branch.
 .PARAMETER Action
   all   = fetch, merge origin/test, push (default)
   sync  = fetch + merge origin/test only
-  push  = push feature/smart-dispatch only
+  push  = push ai-feature-dispatch only
 #>
 param(
     [ValidateSet("all", "sync", "push")]
@@ -13,7 +13,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$Branch = "feature/smart-dispatch"
+$Branch = "ai-feature-dispatch"
 $Remote = "origin"
 $TestRef = "origin/test"
 

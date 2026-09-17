@@ -54,6 +54,7 @@ class AIConfig(BaseModel):
     llm_reasoning_effort: str = Field(default="low", description="思考强度: low/high/max/off")
     llm_connect_timeout: float = Field(default=3.0)
     llm_read_timeout: float = Field(default=30.0)  # Agent 回复可能较长
+    llm_stream_first_timeout: float = Field(default=30.0, description="流式首块业务数据超时(秒)")
 
     # ========== 备用模型（中转站，OpenAI 兼容接口）==========
     # 全局切换开关：llm_backend=deepseek（默认）/ relay。切到 relay 后，
@@ -271,6 +272,10 @@ def get_ai_config() -> AIConfig:
         llm_reasoning_effort=os.getenv("LLM_REASONING_EFFORT", "low"),
         llm_connect_timeout=float(os.getenv("LLM_CONNECT_TIMEOUT", "3.0")),
         llm_read_timeout=float(os.getenv("LLM_READ_TIMEOUT", "30.0")),
+        # 流式首块业务数据超时（秒）：中转 hang 时会发心跳/空行骗过 httpx
+        # read timeout（0916 实锤用户干等 257s），N 秒内没见到第一个 SSE data
+        # 块即中止重试
+        llm_stream_first_timeout=float(os.getenv("LLM_STREAM_FIRST_TIMEOUT", "30.0")),
 
         # 备用模型（中转站）
         llm_backend=os.getenv("LLM_BACKEND", "deepseek"),
