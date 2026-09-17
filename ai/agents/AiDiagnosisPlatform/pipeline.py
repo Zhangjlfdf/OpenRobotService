@@ -1572,7 +1572,9 @@ class AiDiagnosisPlatform:
         """
         _dm = r.domain or "team"
         _sd = (r.sub_domain or "").replace('\\', '/').strip('/')
-        _mu = f"{self.config.media_url_prefix}/kb/{_dm}/{_sd}"
+        _src = (r.source_file or "").strip("/")
+        _dir = f"{_dm}/{_src.rsplit('/', 1)[0]}" if _src else f"{_dm}/{_sd}"
+        _mu = f"{self.config.media_url_prefix}/kb/{_dir}"
         return re.sub(
             r'!\[([^\]]*)\]\((?:\./)?media/([^)]+)\)',
             rf'![\1]({_mu}/media/\2)',
