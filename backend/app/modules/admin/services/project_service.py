@@ -7,14 +7,14 @@ from pathlib import Path
 from datetime import datetime
 import yaml
 import requests
-from sqlalchemy import create_engine, text, inspect, bindparam
+from sqlalchemy import text, inspect, bindparam
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import sessionmaker
+from app.core.db import SessionLocal, engine  # 共享引擎（pool_pre_ping/pool_recycle），见 app/core/db.py
 from app.models.delivery import UNDERTAKE_YES, PROJECT_DELETED
 from app.models.identity import user_project_roles
 from app.modules.admin.schemas_das.request_models import ProjectBase, ProjectCreate, ProjectUpdate
 from app.modules.admin.models_das.models import Project
-from app.modules.admin.utils_das.config import DATABASE_URL, AUTH_SERVICE_BASE_URL
+from app.modules.admin.utils_das.config import AUTH_SERVICE_BASE_URL
 
 # ext_info 默认模板目录：backend/app/config/project_templates/
 # 按 project_type 选 {type}.yaml，找不到回退 default.yaml；增加模板只需加文件
@@ -102,11 +102,6 @@ def _split_template(project_type: Optional[str] = None) -> tuple[dict, list]:
     info_nodes = tpl.get("info_nodes", [])
     return ext_info, info_nodes
 
-
-_PROJECT_COLUMNS = {c.key for c in inspect(Project).mapper.column_attrs}
-
-engine = create_engine(DATABASE_URL)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 _PROJECT_COLUMNS = {c.key for c in inspect(Project).mapper.column_attrs}
 

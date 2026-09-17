@@ -20,14 +20,10 @@ import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import and_, create_engine, func, or_
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy import and_, func, or_
 
+from app.core.db import SessionLocal  # 共享引擎（pool_pre_ping/pool_recycle），见 app/core/db.py
 from app.modules.admin.models_das.models import ProjectInfoNodeChange
-from app.modules.admin.utils_das.config import DATABASE_URL
-
-engine = create_engine(DATABASE_URL)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 # 操作类型（与前端标签一一对应）
 ACTION_CREATE = "create"

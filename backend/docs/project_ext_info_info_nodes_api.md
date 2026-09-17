@@ -1,6 +1,6 @@
 # 项目扩展信息（ext_info）与项目信息树（info_nodes）后端接口变更说明
 
-> 变更日期：2026-09-14（初版）；2026-09-15 新增 5.8 文件识别接口；2026-09-16 新增 4.4 AI 项目摘要接口、5.9 / 5.10 节点操作记录（编辑历史）接口、5.11～5.13 节点关注与项目动态接口
+> 变更日期：2026-09-14（初版）；2026-09-15 新增 5.8 文件识别接口；2026-09-16 新增 4.4 AI 项目摘要接口、5.9 / 5.10 节点操作记录（编辑历史）接口、5.11～5.13 节点关注与项目动态接口；2026-09-17 4.4 的大模型客户端改为 backend 自维护的 `app/core/llm_client.py`（不再依赖仓库根 `ai/core/llm.py`，`requirements.txt` 移除 tenacity）；同日性能修复：info-nodes 组纯同步路由去 async（改走 FastAPI 线程池，避免同步 DB 阻塞事件循环）、parse-file 文件抽取移入线程池（`asyncio.to_thread`）、5.13 项目动态查询改 `GROUP BY max(id)` 按主键回查（不再全量拉历史）、info_node 三 service 与 project_service 收敛共享 `app/core/db.py` 引擎（`pool_pre_ping`/`pool_recycle`，空闲连接失效自愈）
 > 模块：`app/modules/admin`（后台管理）
 > 路由公共前缀：`/api/admin`（`/api` 来自 `API_V1_STR`，`/admin` 来自 `admin_router`）
 
@@ -213,7 +213,7 @@ Service 逻辑（`update_project`）：
 - Service 逻辑（`project_ai_summary_service.generate_for_project`）：
   1. 读该项目的完整信息树（同 5.1），为空直接 400（提示先初始化信息树）；
   2. 组装提示词（纯函数 `build_summary_prompt`）：项目 25 个已入库基础字段按中文标签逐行输出（空值跳过）+ 信息树按「父路径 / 子节点：内容」逐行渲染——text 折叠空白、select 解 `{"selected":...}`（非 JSON 旧数据按原文兜底）、file/image 取文件名；**空值节点不输出正文**，只统计为「（另有 N 个末级节点未填写）」附在末尾；正文超 12,000 字符截断；
-  3. 调大模型：接口用仓库根 `ai/core/llm.py` 的 `LLMClient`，密钥/模型取 backend 配置（`settings.LLM_API_KEY` / `LLM_API_URL` / `LLM_MODEL_NAME`，即**与文件识别（5.8）同一个 DeepSeek flash**）；temperature=0.3、max_tokens=1500、非流式、显式关闭思考链；
+  3. 调大模型：接口用 backend 自维护的 `app/core/llm_client.py` 的 `LLMClient`（httpx 异步、读超时 60s、网络异常自动重试至多 3 次，不依赖仓库根 `ai/core/llm.py` 与 tenacity），密钥/模型取 backend 配置（`settings.LLM_API_KEY` / `LLM_API_URL` / `LLM_MODEL_NAME`，即**与文件识别（5.8）同一个 DeepSeek flash**）；temperature=0.3、max_tokens=1500、非流式、显式关闭思考链；
   4. 清洗输出（去 ``` 围栏/首尾引号）后深拷贝 `ext_info` 合并 `overview.ai_summary`，走 `project_service.update_project` 落库（内部写入**不带 version**、跳过乐观锁，version 仍 +1，与企微同步同约定）；保存失败（项目被删）抛 400。
 - 响应 `200`：
 
@@ -223,7 +223,7 @@ Service 逻辑（`update_project`）：
 | `model` | string | 实际使用的模型名 |
 | `ext_info` | object | 写库后的完整 ext_info，前端直接替换本地状态即可，无需重新拉详情 |
 
-- 错误：`400`（信息树暂无节点 / 保存时项目已被删除）；`404`（项目不存在）；`503`（`LLM_API_KEY` 未配置、ai 模块缺失或大模型调用失败，detail 带中文原因）。
+- 错误：`400`（信息树暂无节点 / 保存时项目已被删除）；`404`（项目不存在）；`503`（`LLM_API_KEY` 未配置或大模型调用失败——密钥无效、限流、超时重试耗尽等，detail 带中文原因）。
 - 提示词由两部分固定文案 + 动态资料组成：system「只输出总结本身（无代码块围栏/解释/寒暄）」；user「【项目基础字段】+【项目信息管理】+【输出格式】（结构化 Markdown：固定小节顺序——项目概况/硬件与车型/系统与部署/交付与进度/风险与关注点，无资料的小节省略；每节 1～2 条要点、全文 250 字以内、加粗最多 3～4 处；**不得编造**、不重复、不用套话）」。前端用 react-markdown 渲染该 Markdown。
 
 ### 4.5 Schema 变更汇总
@@ -386,7 +386,7 @@ Service：[info_node_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/ap
 
 - 请求：无参数；**只看当前登录人自己的关注**（同 5.11）。
 - 用途：「项目动态」卡的数据源。**每个被关注节点只返回其最新一条变动**（来自 2.4 的 `project_info_node_change`，不另存一份变动），整体最近在前。
-- Service 逻辑（`info_node_mark_service.marked_activity`）：先取当前人在该项目的关注 `node_id` 列表；查这些节点的全部记录按 `created_at DESC, id DESC`（同秒用时间有序的 UUIDv7 兜底），**Python 侧按节点去重取首条**；节点/根节点标题用**当前**树的标题（记录里的 `node_title` 只是当时的快照）。上限 50 条（每节点至多一条，正常远达不到）。没记过任何操作的被关注节点不出现（无变动可展示）。
+- Service 逻辑（`info_node_mark_service.marked_activity`）：先取当前人在该项目的关注 `node_id` 列表；按 `GROUP BY node_id + max(id)` 取各节点最新记录 id（记录 id 是时间有序的 UUIDv7，同秒靠它兜底），再按主键回查这 ≤N 条记录按 `created_at DESC, id DESC` 返回——不把全量历史拉回内存（查询量只随关注数增长，不随编辑次数增长）；节点/根节点标题用**当前**树的标题（记录里的 `node_title` 只是当时的快照）。上限 50 条（每节点至多一条，正常远达不到）。没记过任何操作的被关注节点不出现（无变动可展示）。
 - 错误：`401` 同 5.11。
 - 响应 `200`：
 
@@ -427,6 +427,7 @@ Service：[info_node_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/ap
 | Schema | [schemas_das/request_models.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/schemas_das/request_models.py) |
 | API | [api/projects.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/api/projects.py)、[api/info_nodes.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/api/info_nodes.py) |
 | Service | [services/project_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/services/project_service.py)、[services/info_node_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/services/info_node_service.py)、[services/info_node_import_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/services/info_node_import_service.py)、[services/project_ai_summary_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/services/project_ai_summary_service.py)（4.4）、[services/info_node_change_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/services/info_node_change_service.py)（2.4 / 5.9 / 5.10，另被 info_node_service、info_template_service 调用写记录）、[services/info_node_mark_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/services/info_node_mark_service.py)（2.5 / 5.11～5.13，另被 info_node_service、info_template_service 调用清理标注） |
+| 公共组件 | [app/core/llm_client.py](file:///d:/CODE/9_14/OpenRobotService/backend/app/core/llm_client.py)（backend 自维护的 LLM 客户端：DeepSeek/OpenAI 兼容非流式补全 + 网络重试，供 4.4 AI 摘要等 backend 大模型功能共用；密钥/模型与「文件识别」同源于 `settings`） |
 | 测试 | [tests/test_info_node_import.py](file:///d:/CODE/9_9/OpenRobotService/backend/tests/test_info_node_import.py)（文本抽取/目录与 prompt 构造/LLM 返回解析/0.9 阈值匹配/select 校验/归属解析，13 用例）、[tests/test_project_ai_summary.py](file:///d:/CODE/9_9/OpenRobotService/backend/tests/test_project_ai_summary.py)（节点内容解码/信息树渲染/prompt 组装/输出清洗，10 用例）、[tests/test_info_node_change.py](file:///d:/CODE/9_9/OpenRobotService/backend/tests/test_info_node_change.py)（节点值→人话/逐字段变动文案/各操作类型文案/记录 id 时间有序，26 用例）、[tests/test_info_node_mark.py](file:///d:/CODE/9_9/OpenRobotService/backend/tests/test_info_node_mark.py)（根标题回溯/关注切换按人过滤（假 session）/标注清理，15 用例） |
 | 模板 | [config/project_templates/default.yaml](file:///d:/CODE/9_9/OpenRobotService/backend/app/config/project_templates/default.yaml) |
 | 路由挂载 | [modules/admin/__init__.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/__init__.py) |

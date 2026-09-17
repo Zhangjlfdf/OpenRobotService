@@ -14,17 +14,14 @@ from typing import Dict, List, Optional
 import uuid
 
 from sqlalchemy import text
-from sqlalchemy.orm import sessionmaker
 
+# 共享数据库引擎（pool_pre_ping / pool_recycle，空闲连接失效自愈），见 app/core/db.py；
+# 保留 engine / SessionLocal 模块级名字，供 info_template_service、info_node_import_service 等既有引用沿用。
+from app.core.db import SessionLocal, engine
 from app.modules.admin.models_das.models import ProjectInfoNode, Project
 from app.modules.admin.services import info_node_change_service as change_log
 from app.modules.admin.services import info_node_mark_service as node_marks
 from app.models.delivery import PROJECT_DELETED
-from app.modules.admin.utils_das.config import DATABASE_URL
-from sqlalchemy import create_engine
-
-engine = create_engine(DATABASE_URL)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
 def _now_str() -> str:

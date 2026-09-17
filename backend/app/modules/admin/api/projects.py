@@ -320,7 +320,7 @@ async def generate_project_ai_summary(
     """读取项目基础字段 +「项目信息管理」整棵信息树，大模型总结后写回 ext_info.overview.ai_summary。
 
     大模型与「文件导入（AI 识别）」同一个（backend/.env 的 LLM_API_KEY，默认 DeepSeek flash，
-    接口走仓库根目录 ai/core/llm.py 的 LLMClient）。响应返回 summary 与更新后的 ext_info。
+    接口走 app/core/llm_client.py 的 LLMClient）。响应返回 summary 与更新后的 ext_info。
     """
     project = project_service.get_project(project_id)
     if not project:

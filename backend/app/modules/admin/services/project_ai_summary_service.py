@@ -2,11 +2,9 @@
 
 用途：项目详情页（后台管理）→ 项目概况 → 「AI 项目摘要」卡片 → 生成 / 重新生成。
 
-大模型接口：仓库根目录 ai/core/llm.py 的 LLMClient。密钥/模型刻意取 backend/.env
-（settings.LLM_API_KEY / LLM_API_URL / LLM_MODEL_NAME）而不是 ai 模块自己的 get_llm_client()
-单例——后者读 ai/.env，与「文件导入（AI 识别）」的配置可能不同步；本功能要求与文件识别
-严格同一个模型（默认 DeepSeek flash），只借用 ai/core/llm.py 的请求/重试/超时能力。
-注意 ai/.env 里 LLM_READ_TIMEOUT 默认 30s，即单次生成的读超时。
+大模型接口：app/core/llm_client.py 的 LLMClient（backend 自维护，不依赖 ai 模块）。
+密钥/模型取 backend/.env（settings.LLM_API_KEY / LLM_API_URL / LLM_MODEL_NAME），
+与「文件导入（AI 识别）」共用同一配置，默认 DeepSeek flash。
 
 生成结果写回 ext_info.overview.ai_summary（default.yaml 模板的既有字段），响应同时返回
 summary 与更新后的 ext_info，前端据此刷新展示；刷新页面后从项目详情接口读回。
@@ -188,51 +186,9 @@ def build_summary_prompt(project: Dict[str, Any], nodes: List[Dict[str, Any]]) -
     )
 
 
-# ── 大模型客户端（ai/core/llm.py 的 LLMClient；密钥/模型与「文件导入」完全一致）──
+# ── 大模型客户端（app/core/llm_client.py，backend 自维护）──
 
-_client = None
-
-
-def _ensure_ai_importable() -> None:
-    """把仓库根目录挂到 sys.path，使 backend 进程可 import ai 包（ai/core/llm.py）。
-
-    仓库根 = 含 ai/core/llm.py 的祖先目录（即同时含 backend/ 与 ai/ 的那层）。
-    找不到时抛 RuntimeError（部署目录缺 ai 模块时给可读错误，而不是裸 ImportError）。
-    """
-    import sys
-    from pathlib import Path
-
-    for parent in Path(__file__).resolve().parents:
-        if (parent / "ai" / "core" / "llm.py").is_file():
-            p = str(parent)
-            if p not in sys.path:
-                sys.path.insert(0, p)
-            return
-    raise RuntimeError("未找到 ai/core/llm.py（部署目录缺少 ai 模块），无法调用大模型")
-
-
-def _get_client():
-    """懒加载 LLM 客户端：密钥/模型取 backend/.env（与文件识别完全一致，默认 DeepSeek flash）。"""
-    global _client
-    if _client is not None:
-        return _client
-    if not settings.LLM_API_KEY:
-        raise RuntimeError("AI 服务未配置：请在 backend/.env 设置 LLM_API_KEY（与文件识别共用同一密钥）")
-    _ensure_ai_importable()
-    try:
-        from ai.core.llm import LLMClient, LLMProvider
-    except Exception as exc:  # noqa: BLE001 —— ai 模块缺失/依赖不全时给可读错误
-        raise RuntimeError(f"加载大模型接口失败（ai/core/llm.py）：{exc}") from exc
-    base_url = (settings.LLM_API_URL or "https://api.deepseek.com/chat/completions").rsplit(
-        "/chat/completions", 1
-    )[0]
-    _client = LLMClient(
-        provider=LLMProvider.DEEPSEEK,
-        api_key=settings.LLM_API_KEY,
-        base_url=base_url,
-        model=settings.LLM_MODEL_NAME,
-    )
-    return _client
+from app.core.llm_client import get_llm_client
 
 
 def _clean_summary(text: str) -> str:
@@ -263,7 +219,7 @@ async def generate_for_project(project: Dict[str, Any]) -> Dict[str, Any]:
         raise ValueError("该项目还没有信息节点，请先在项目信息管理中初始化信息树后再生成摘要")
 
     prompt = build_summary_prompt(project, nodes)
-    client = _get_client()
+    client = get_llm_client()
     try:
         summary = await client.complete(
             prompt,

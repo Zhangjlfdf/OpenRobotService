@@ -14,7 +14,7 @@
 「配置阻滞权重」仅管理员及超级管理员（接口层 get_current_admin_user 把关）：把项目基础
 字段 + 该项目工单基础数据 + 管理员提示词交给大模型，模型输出最重要阻滞工单的 JSON
 （ticket_ids + summary + reasons），落 project_blocking_config 表；大模型接线与
-「AI 项目摘要」共用同一客户端（backend/.env 的 LLM_API_KEY，ai/core/llm.py 的 LLMClient）。
+「AI 项目摘要」共用同一客户端（app/core/llm_client.py 的 LLMClient，backend 自维护）。
 
 异常约定（接口层映射）：ValueError → 400；LookupError → 404；RuntimeError → 503（AI 未配置/调用失败）。
 """
@@ -29,9 +29,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.concurrency import run_in_threadpool
 
+from app.core.llm_client import get_llm_client
 from app.models.delivery import ProjectBlockingConfig
 from app.models.task import Task, TaskStatus
-from app.modules.admin.services import project_ai_summary_service
 from app.modules.admin.services.task_dashboard_service import task_dashboard_service
 from app.services.user_service import user_service
 
@@ -278,9 +278,9 @@ class ProjectTicketsService:
         tickets = [self._ticket_for_ai(task, user_map) for task in rows]
         llm_prompt = build_blocking_prompt(project, tickets, prompt)
 
-        # 与「AI 项目摘要」共用同一 LLM 客户端（backend/.env 凭据，ai/core/llm.py）：
-        # 未配置 → RuntimeError（接口层 503）；调用异常统一转可读信息
-        client = project_ai_summary_service._get_client()
+        # 与「AI 项目摘要」共用同一 LLM 客户端（app/core/llm_client.py，backend 自维护）：
+        # 未配置 → LLMError → RuntimeError（接口层 503）；调用异常统一转可读信息
+        client = get_llm_client()
         try:
             text = await client.complete(
                 llm_prompt,

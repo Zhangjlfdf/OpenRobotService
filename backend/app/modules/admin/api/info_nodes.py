@@ -6,6 +6,10 @@
 
 写接口不强制鉴权（沿用网关管控），但会尽力识别操作人，把「谁做的」记进
 project_info_node_change（编辑历史，见 services/info_node_change_service.py）。
+
+性能约定：除 parse-file（需 await 大模型调用）外，本组路由均为同步 def——
+Service 层是同步 SQLAlchemy，async def 里跑同步 DB 会阻塞事件循环、拖慢全部并发请求；
+同步 def 由 FastAPI 自动放入线程池执行（默认 40 线程），互不阻塞。
 """
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from typing import Dict, List, Optional, Any
@@ -57,14 +61,14 @@ info_node_router = APIRouter(prefix="/info-nodes", tags=["admin-info-nodes"])
 
 
 @info_node_router.get("/projects/{project_id}", summary="获取项目信息树")
-async def get_info_tree(project_id: str):
+def get_info_tree(project_id: str):
     """返回项目信息树的递归嵌套结构（每节点含 children 数组）。"""
     tree = info_node_service.get_tree(project_id)
     return tree
 
 
 @info_node_router.post("/projects/{project_id}", summary="创建信息节点", status_code=201)
-async def create_info_node(project_id: str, node: InfoNodeCreate,
+def create_info_node(project_id: str, node: InfoNodeCreate,
                            actor: Dict[str, Optional[str]] = Depends(get_request_actor_optional)):
     """创建单个信息节点。id 由客户端生成（UUID），供后续引用。"""
     return info_node_service.create_node(
@@ -74,7 +78,7 @@ async def create_info_node(project_id: str, node: InfoNodeCreate,
 
 
 @info_node_router.put("/nodes/{node_id}", summary="更新信息节点")
-async def update_info_node(node_id: str, update: InfoNodeUpdate,
+def update_info_node(node_id: str, update: InfoNodeUpdate,
                            actor: Dict[str, Optional[str]] = Depends(get_request_actor_optional)):
     """更新节点可编辑字段。parent_id 变更请用 PATCH move。"""
     update_data = {k: v for k, v in update.model_dump().items() if v is not None}
@@ -90,7 +94,7 @@ async def update_info_node(node_id: str, update: InfoNodeUpdate,
 
 
 @info_node_router.patch("/nodes/{node_id}/move", summary="移动信息节点")
-async def move_info_node(node_id: str, move: InfoNodeMove,
+def move_info_node(node_id: str, move: InfoNodeMove,
                          actor: Dict[str, Optional[str]] = Depends(get_request_actor_optional)):
     """移动节点到新父节点下并设置排序位置（拖拽排序）。"""
     result = info_node_service.move_node(
@@ -103,7 +107,7 @@ async def move_info_node(node_id: str, move: InfoNodeMove,
 
 
 @info_node_router.delete("/nodes/{node_id}", summary="删除信息节点(含子树)")
-async def delete_info_node(node_id: str,
+def delete_info_node(node_id: str,
                            actor: Dict[str, Optional[str]] = Depends(get_request_actor_optional)):
     """删除节点及其全部子树（递归 CTE 找后代，批量删除）。
 
@@ -118,7 +122,7 @@ async def delete_info_node(node_id: str,
 
 
 @info_node_router.post("/projects/{project_id}/import", summary="批量导入信息树")
-async def import_info_tree(project_id: str, data: InfoNodeImport,
+def import_info_tree(project_id: str, data: InfoNodeImport,
                            actor: Dict[str, Optional[str]] = Depends(get_request_actor_optional)):
     """批量导入信息树（如从 a.json 的 info_nodes 导入）。
     先清空旧节点再导入。返回导入数量。
@@ -132,7 +136,7 @@ async def import_info_tree(project_id: str, data: InfoNodeImport,
 
 @info_node_router.post("/projects/{project_id}/import-template",
                        summary="按项目模板重建信息树")
-async def import_info_template(project_id: str,
+def import_info_template(project_id: str,
                                actor: Dict[str, Optional[str]] = Depends(get_request_actor_optional)):
     """用后端模板（project_type → {type}.yaml，缺省 default.yaml）重建整棵信息树。
 
@@ -152,7 +156,7 @@ async def import_info_template(project_id: str,
 # ── 编辑历史（节点操作记录） ──────────────────────────
 
 @info_node_router.get("/projects/{project_id}/changes", summary="获取节点操作记录")
-async def get_info_node_changes(
+def get_info_node_changes(
     project_id: str,
     node_id: Optional[str] = Query(None, description="节点ID；给了则只返回该节点的历史（含其直接子节点的删除记录）"),
     limit: int = Query(100, ge=1, le=500, description="最多返回条数（最新在前）"),
@@ -168,7 +172,7 @@ async def get_info_node_changes(
 
 @info_node_router.get("/projects/{project_id}/changes/summary",
                       summary="各节点最新记录 id（小红点）")
-async def get_info_node_change_summary(project_id: str):
+def get_info_node_change_summary(project_id: str):
     """返回 {节点id: 最新记录 id}，用于前端判断哪些节点的「历史」有新变动（小红点）：
     与本机已读水位（也是记录 id）不一致即未读。
 
@@ -193,7 +197,7 @@ def _require_operator(actor: Dict[str, Optional[str]]) -> str:
 
 
 @info_node_router.get("/projects/{project_id}/marks", summary="获取当前用户关注的节点ID列表")
-async def get_info_node_marks(project_id: str,
+def get_info_node_marks(project_id: str,
                               actor: Dict[str, Optional[str]] = Depends(get_request_actor_optional)):
     """返回当前登录人在该项目关注的节点 id（「项目信息管理」卡据它点亮星标）。
 
@@ -204,7 +208,7 @@ async def get_info_node_marks(project_id: str,
 
 
 @info_node_router.post("/nodes/{node_id}/mark", summary="切换当前用户的节点关注状态")
-async def toggle_info_node_mark(node_id: str,
+def toggle_info_node_mark(node_id: str,
                                 actor: Dict[str, Optional[str]] = Depends(get_request_actor_optional)):
     """点星标：未关注→关注，已关注→取消。返回 {"marked": 切换后是否被关注}。
 
@@ -222,7 +226,7 @@ async def toggle_info_node_mark(node_id: str,
 
 @info_node_router.get("/projects/{project_id}/activity",
                       summary="项目动态（当前用户被关注节点的最新变动）")
-async def get_project_activity(project_id: str,
+def get_project_activity(project_id: str,
                                actor: Dict[str, Optional[str]] = Depends(get_request_actor_optional)):
     """当前登录人关注的每个节点只返回其**最新一条**变动（整体最新在前）。
 
@@ -255,7 +259,7 @@ async def parse_import_file(project_id: str, file: UploadFile = File(...)):
 # ── 详情模板（管理员可编辑；保存后同步到所有项目的节点） ──
 
 @info_node_router.get("/template", summary="获取项目详情模板（仅管理员）")
-async def get_info_template(current_user: Dict[str, Any] = Depends(get_current_admin_user)):
+def get_info_template(current_user: Dict[str, Any] = Depends(get_current_admin_user)):
     """返回详情模板（数据库模板；首次访问用 YAML 默认模板补种）与项目数量。
 
     返回字段：nodes（节点树，含稳定 id）/ name / updated_at / updated_by /
@@ -265,7 +269,7 @@ async def get_info_template(current_user: Dict[str, Any] = Depends(get_current_a
 
 
 @info_node_router.post("/template", summary="保存项目详情模板并同步所有项目（仅管理员）")
-async def save_info_template(
+def save_info_template(
     payload: InfoTemplateSave,
     current_user: Dict[str, Any] = Depends(get_current_admin_user),
 ):

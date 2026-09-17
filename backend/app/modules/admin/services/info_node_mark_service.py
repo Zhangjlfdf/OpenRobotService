@@ -21,14 +21,10 @@ operator 取 JWT sub（网关管控路由，识别不到用户身份的请求由
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional
 
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy import func
 
+from app.core.db import SessionLocal  # 共享引擎（pool_pre_ping/pool_recycle），见 app/core/db.py
 from app.modules.admin.models_das.models import ProjectInfoNode, ProjectInfoNodeChange, ProjectInfoNodeMark
-from app.modules.admin.utils_das.config import DATABASE_URL
-
-engine = create_engine(DATABASE_URL)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 # 项目动态一次最多返回多少条（每个被关注节点至多一条，正常远小于此）
 ACTIVITY_LIMIT = 50
@@ -145,23 +141,25 @@ class InfoNodeMarkService:
             if not node_ids:
                 return []
 
-            rows = db.query(ProjectInfoNodeChange).filter(
+            # 每个被关注节点只取最新一条：先 GROUP BY node_id + max(id) 拿到各节点
+            # 最新记录 id（id 时间有序，见 info_node_change_service._new_id），再按
+            # 主键回查这 ≤N 条。避免把全部历史行（含 detail 大文本）拉回内存再丢弃——
+            # 旧实现每次请求的读取量随编辑次数线性增长。
+            latest_id_rows = db.query(
+                func.max(ProjectInfoNodeChange.id),
+            ).filter(
                 ProjectInfoNodeChange.project_id == project_id,
                 ProjectInfoNodeChange.node_id.in_(node_ids),
+            ).group_by(ProjectInfoNodeChange.node_id).all()
+            latest_ids = [rid for (rid,) in latest_id_rows if rid]
+            if not latest_ids:
+                return []
+
+            latest = db.query(ProjectInfoNodeChange).filter(
+                ProjectInfoNodeChange.id.in_(latest_ids),
             ).order_by(
                 ProjectInfoNodeChange.created_at.desc(), ProjectInfoNodeChange.id.desc(),
-            ).all()
-
-            # 记录已按时间倒序：每个节点第一次出现的就是它最新的一条变动
-            seen = set()
-            latest = []
-            for row in rows:
-                if row.node_id in seen:
-                    continue
-                seen.add(row.node_id)
-                latest.append(row)
-                if len(latest) >= limit:
-                    break
+            ).limit(limit).all()
 
             nodes = {
                 item.id: {"title": item.title, "parent_id": item.parent_id}

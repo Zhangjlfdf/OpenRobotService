@@ -15,6 +15,7 @@ DeepSeek flash，即 settings.LLM_MODEL_NAME）抽取「信息条目」，再与
 """
 from __future__ import annotations
 
+import asyncio
 import difflib
 import io
 import json
@@ -645,7 +646,9 @@ async def analyze_import_file(project_id: str, filename: str, data: bytes) -> Di
     if len(data) > MAX_FILE_BYTES:
         raise ValueError(f"文件不能超过 {MAX_FILE_BYTES // (1024 * 1024)}MB，请拆分后再导入")
 
-    text = extract_text(filename, data)
+    # docx 解压 / xlsx 解析是 CPU 密集的同步代码，放线程池执行，
+    # 避免大文件解析期间阻塞事件循环、冻结其他并发请求
+    text = await asyncio.to_thread(extract_text, filename, data)
     truncated = len(text) > MAX_TEXT_CHARS
     if truncated:
         text = text[:MAX_TEXT_CHARS]
