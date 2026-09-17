@@ -258,10 +258,16 @@ export default function AdminDataAssistant() {
           let cards: AnalysisCard[] | null = null;
           if (m.metadata_) {
             try {
-              const meta = JSON.parse(m.metadata_);
-              mode = meta.mode;
-              if (Array.isArray(meta.charts)) charts = meta.charts;
-              if (Array.isArray(meta.cards)) cards = meta.cards;
+              // metadata_ 可能被后端二次 JSON 编码（历史双重编码数据）：首次 parse
+              // 得到字符串时再 parse 一次得到对象，否则 mode/charts/cards 全部丢失
+              let meta: unknown = JSON.parse(m.metadata_);
+              if (typeof meta === 'string') meta = JSON.parse(meta);
+              if (meta && typeof meta === 'object') {
+                const obj = meta as Record<string, unknown>;
+                mode = typeof obj.mode === 'string' ? obj.mode : undefined;
+                if (Array.isArray(obj.charts)) charts = obj.charts as AnalysisChart[];
+                if (Array.isArray(obj.cards)) cards = obj.cards as AnalysisCard[];
+              }
             } catch { /* 元数据损坏忽略 */ }
           }
           return { id: uid(), role: (m.role === 'user' ? 'user' : 'assistant') as 'user' | 'assistant', content: m.content, mode, charts, cards };
