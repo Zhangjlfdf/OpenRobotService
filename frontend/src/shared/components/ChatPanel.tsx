@@ -4,7 +4,7 @@ import { memo, useState, useEffect, useRef, useCallback, useMemo, type ReactNode
 import { createPortal } from 'react-dom';
 import { useNavigate } from 'react-router-dom';
 
-import { Textarea, Toast, Popup, Tag, Loading } from 'tdesign-mobile-react';
+import { Textarea, Toast, Popup, Tag, Loading, Popover } from 'tdesign-mobile-react';
 import { ArrowUp, Plus, MessageSquarePlus, TicketPlus, Paperclip, ThumbsUp, ThumbsDown, Copy, Pencil, Check, X, FolderClosed, User, CheckCircle2 } from 'lucide-react';
 import { DatePicker } from 'antd';
 import dayjs from 'dayjs';
@@ -313,7 +313,7 @@ const mergeDbMessages = (prev: Message[], fresh: Message[]): Message[] => {
 // 单条消息气泡（React.memo）：流式期间仅最后一条 content/streaming 变化，历史消息跳过整列表重渲染，消除抖动
 const MessageBubble = memo(function MessageBubble({
   msg, editingId, compact, expandedDesc, onToggleDesc, onToggleReaction, onCopy, onEditStart, onEditChange, onEditSave,   onEditCancel, onImageClick, onOpenTicket, onRedispatch, onProjectChoice, answered, selectedChoice,
-  selectMode, checked, onCheck, onEnterSelect,
+  selectMode, checked, onCheck, onLongPress,
 }: {
   msg: Message;
   editingId: string | null;
@@ -334,13 +334,14 @@ const MessageBubble = memo(function MessageBubble({
   // 禁用防重复发序号）；selectedChoice=答复序号对应按钮（加深显示）
   answered?: boolean;
   selectedChoice?: number;
-  // 转发多选（0911）：长按消息进入多选；多选模式下点击整条切换勾选
+  // 转发多选（0911）：多选模式下点击整条切换勾选；长按唤起操作菜单（复制/多选，微信式）
   selectMode?: boolean;
   checked?: boolean;
   onCheck?: (id: string) => void;
-  onEnterSelect?: (id: string) => void;
+  onLongPress?: (id: string, rect: DOMRect) => void;
 }) {
-  // 长按 500ms 进入多选（转发记录）。编辑中/流式中不触发；语音长按在输入区不冲突。
+  // 长按 500ms 唤起操作菜单（复制/多选）。编辑中/流式中不触发；语音长按在输入区不冲突。
+  const wrapRef = useRef<HTMLDivElement | null>(null);
   const pressTimerRef = useRef<number | null>(null);
   const clearPress = () => {
     if (pressTimerRef.current !== null) {
@@ -348,11 +349,12 @@ const MessageBubble = memo(function MessageBubble({
       pressTimerRef.current = null;
     }
   };
-  // 长按触发后置真，抑制紧随的 click（防多选刚开就误触气泡内部交互）
+  // 长按触发后置真，抑制紧随的 click（防菜单刚弹就误触气泡内部交互）
   const suppressClickRef = useRef(false);
-  const canLongPress = !!onEnterSelect && editingId !== msg.id && !msg.streaming && !msg.uploading && !msg.phase;
+  const canLongPress = !!onLongPress && editingId !== msg.id && !msg.streaming && !msg.uploading && !msg.phase;
   return (
     <div
+      ref={wrapRef}
       className={`chat-bubble-wrap ${msg.role === 'user' ? 'is-right' : 'is-left'}${selectMode ? ' is-selecting' : ''}${selectMode && checked ? ' is-checked' : ''}`}
       data-msg-id={msg.id}
       onPointerDown={canLongPress && !selectMode ? (e) => {
@@ -361,17 +363,25 @@ const MessageBubble = memo(function MessageBubble({
         clearPress();
         pressTimerRef.current = window.setTimeout(() => {
           suppressClickRef.current = true;
-          onEnterSelect?.(msg.id);
+          const rect = wrapRef.current?.getBoundingClientRect();
+          if (rect) onLongPress?.(msg.id, rect);
+          if (navigator.vibrate) navigator.vibrate(15);
           if (navigator.vibrate) navigator.vibrate(15);
         }, 500);
       } : undefined}
       onPointerUp={clearPress}
       onPointerLeave={clearPress}
       onPointerCancel={clearPress}
-      onClick={selectMode ? () => {
-        if (suppressClickRef.current) { suppressClickRef.current = false; return; }
-        onCheck?.(msg.id);
-      } : undefined}
+      // 长按弹菜单后松手的那次 click 在捕获阶段吞掉——此时 selectMode 未开，气泡内
+      // 图片/工单卡自己的 onClick 先于 wrap 的 bubble onClick 触发，bubble 阶段拦不住
+      onClickCapture={(e) => {
+        if (suppressClickRef.current) {
+          suppressClickRef.current = false;
+          e.preventDefault();
+          e.stopPropagation();
+        }
+      }}
+      onClick={selectMode ? () => onCheck?.(msg.id) : undefined}
     >
       {selectMode && (
         <div className={`chat-select-check${checked ? ' is-on' : ''}`} aria-hidden>
@@ -728,8 +738,9 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
   }, [isCall]);
   const rotatingPlaceholder = isCall ? AI_INPUT_PLACEHOLDER_TIPS[inputTipIndex] : '发消息…';
 
-  // ── 聊天记录转发（0911）：长按消息进入多选 → 生成品牌化长图（宣传引流场景：
-  // 把「我问 AI 答」的记录转给同事/客户，证明摇人吧能解决问题）。仅 call 场景。
+  // ── 聊天记录转发（0911）：长按唤起操作菜单（0918 改：复制/多选两项，多选才进
+  // 转发勾选）→ 生成品牌化长图（宣传引流场景：把「我问 AI 答」的记录转给同事/客户，
+  // 证明摇人吧能解决问题）。仅 call 场景。
   const [selectMode, setSelectMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [forwardImage, setForwardImage] = useState<string | null>(null);
@@ -743,6 +754,33 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
     setSelectMode(false);
     setSelectedIds(new Set());
   }, []);
+
+  // ── 长按操作菜单（微信式，0918）：长按气泡唤起「复制/多选」──
+  // 修复 0911 转发功能上线后长按被多选独占、原生复制被禁且复制钮 hover-only
+  // 手机上够不着的问题。菜单承载抄 DiscussionPanel：TDesign Popover + 透明
+  // 代理锚点定位到被长按气泡的 rect（不拦截气泡交互/滚动）。
+  const [pressMenu, setPressMenu] = useState<{ id: string; rect: DOMRect } | null>(null);
+  const openPressMenu = useCallback((id: string, rect: DOMRect) => {
+    setPressMenu({ id, rect });
+  }, []);
+  const closePressMenu = useCallback(() => setPressMenu(null), []);
+  const handlePressSelect = useCallback(() => {
+    if (!pressMenu) return;
+    const id = pressMenu.id;
+    setPressMenu(null);
+    enterSelect(id);
+  }, [pressMenu, enterSelect]);
+  // 菜单打开期间滚动即自动关闭（仿微信，防 fixed 锚点与气泡实际位置脱节）；
+  // scroll 不冒泡用捕获监听，wheel 兜底 PC 端 overflow 容器外滚轮
+  useEffect(() => {
+    if (!pressMenu) return;
+    window.addEventListener('scroll', closePressMenu, true);
+    window.addEventListener('wheel', closePressMenu, true);
+    return () => {
+      window.removeEventListener('scroll', closePressMenu, true);
+      window.removeEventListener('wheel', closePressMenu, true);
+    };
+  }, [pressMenu, closePressMenu]);
   const toggleCheck = useCallback((id: string) => {
     setSelectedIds((prev) => {
       const next = new Set(prev);
@@ -2875,6 +2913,31 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
     }
   };
 
+  // 长按菜单「复制」：复用 copyContent（Clipboard API + execCommand 降级），
+  // 先关菜单再复制——Toast 与菜单不同层，关了再弹不冲突
+  const handlePressCopy = useCallback(() => {
+    if (!pressMenu) return;
+    const m = messages.find((x) => x.id === pressMenu.id);
+    setPressMenu(null);
+    if (m?.content) copyContent(m.content);
+  }, [pressMenu, messages, copyContent]);
+
+  // 长按菜单渲染参数：可复制判定 + 代理锚点样式 + 上/下翻转（贴近容器顶部时翻到下方）
+  const pressMenuMsg = pressMenu ? messages.find((x) => x.id === pressMenu.id) : undefined;
+  // 可复制=有文本内容的消息；工单卡片/纯图片不出复制项（与微信一致，卡片没有可复制的正文）
+  const pressMenuCopyable = !!pressMenuMsg?.content?.trim() && pressMenuMsg.subtype !== 'ticket_overview';
+  const pressAnchorStyle: CSSProperties = pressMenu ? {
+    position: 'fixed',
+    left: pressMenu.rect.left,
+    top: pressMenu.rect.top,
+    width: pressMenu.rect.width,
+    height: pressMenu.rect.height,
+    pointerEvents: 'none',
+    background: 'transparent',
+  } : { display: 'none' };
+  const pressPlacement: 'top' | 'bottom' = pressMenu && messagesContainerRef.current
+    && (pressMenu.rect.top - messagesContainerRef.current.getBoundingClientRect().top) >= 64 ? 'top' : 'bottom';
+
   // 「猜你想问」：仅首次新建会话（无消息）且输入为空 → 随机 3 条（可换一批）；有输入 → 基于防抖关键词检索（最多 3 条）
   const suggestedList: string[] = debouncedKeyword
     ? matchQuestions(debouncedKeyword, 3)
@@ -2884,7 +2947,8 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
   return (
     <div className={`chat-panel${compact ? ' is-compact' : ''}`}>
 
-      {/* 长按消息区禁微信原生菜单（iOS callout/文本选择、安卓 contextmenu），复制走每条消息的复制钮 */}
+      {/* 长按消息区禁微信原生菜单（iOS callout/文本选择、安卓 contextmenu）——复制由长按
+          菜单接管（0918：原生复制被 0911 转发禁掉后手机端无复制出口），桌面端走每条消息的复制钮 */}
       <div
         className="chat-view__messages"
         ref={messagesContainerRef}
@@ -2951,12 +3015,34 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
             selectMode={isCall && selectMode}
             checked={selectedIds.has(msg.id)}
             onCheck={toggleCheck}
-            onEnterSelect={enterSelect}
+            onLongPress={openPressMenu}
           />
           );
         })}
         <div ref={messagesEndRef} />
       </div>
+
+      {/* 长按操作菜单：TDesign Popover（自带箭头/动画/外点关闭），代理锚点定位到被长按气泡。
+          复制=有正文的文本消息；多选=进入转发勾选（原长按行为挪到此处） */}
+      <Popover
+        visible={!!pressMenu}
+        placement={pressPlacement}
+        showArrow
+        theme="light"
+        closeOnClickOutside
+        onVisibleChange={(v) => { if (!v) setPressMenu(null); }}
+        style={pressAnchorStyle}
+        content={
+          pressMenu ? (
+            <div className="detail-chat-menu">
+              {pressMenuCopyable && (
+                <button type="button" className="detail-chat-menu__item" onClick={handlePressCopy}>复制</button>
+              )}
+              <button type="button" className="detail-chat-menu__item" onClick={handlePressSelect}>多选</button>
+            </div>
+          ) : null
+        }
+      />
 
       {/* 「猜你想问」：文档流内嵌于消息区与输入栏之间（不遮挡对话内容） */}
       {suggestedList.length > 0 && (
