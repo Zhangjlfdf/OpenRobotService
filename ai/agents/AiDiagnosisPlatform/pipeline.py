@@ -366,17 +366,27 @@ async def _resolve_user_profile(username: str) -> dict:
     def _query():
         session = SessionLocal()
         try:
-            return session.execute(text(
+            row = session.execute(text(
                 "SELECT u.name, d.name, u.department, u.job_level, "
                 "       u.responsibility_modules, u.duty_text "
                 "FROM users u LEFT JOIN departments d ON u.department_id = d.id "
                 "WHERE u.username = :u LIMIT 1"
             ), {"u": key}).fetchone()
+            # 项目内角色（0916）：user_project_roles.role_id → roles.name
+            # （调度研发/实施/项目经理…）——用户画像缺的受众信号：研发可深入
+            # 原理、实施要现场动作、管理要结论优先。跨项目去重聚合。
+            roles = session.execute(text(
+                "SELECT DISTINCT r.name FROM user_project_roles upr "
+                "JOIN roles r ON r.id = upr.role_id "
+                "JOIN users u ON u.id = upr.user_id "
+                "WHERE u.username = :u AND r.name IS NOT NULL AND r.name <> ''"
+            ), {"u": key}).fetchall()
+            return row, [r[0] for r in roles if r[0]]
         finally:
             session.close()
 
     try:
-        row = await asyncio.wait_for(
+        row, project_roles = await asyncio.wait_for(
             loop.run_in_executor(None, _query), timeout=1.5)
     except Exception as e:
         logger.warning(f"[user_profile] 查询失败(降级无画像): username={key}, err={e}")
@@ -391,6 +401,7 @@ async def _resolve_user_profile(username: str) -> dict:
         "job_level_cn": _JOB_LEVEL_CN.get(row[3], ""),
         "modules_text": _flatten_resp_modules(row[4])[:120],
         "duty": ((row[5] or "").strip())[:80],
+        "project_roles": ("、".join(project_roles))[:60],
     }
     _USER_PROFILE_CACHE[key] = (now + 300, profile)
     # 打全五项：低频事件（每用户 5 分钟一次），排障时一眼看出哪些字段空
@@ -413,6 +424,8 @@ def _user_profile_block(state: "AgentState") -> str:
         seg.append(p["department"])
     if p.get("job_level_cn"):
         seg.append(p["job_level_cn"])
+    if p.get("project_roles"):
+        seg.append(p["project_roles"])
     lines = [f"【用户】{'｜'.join(seg)}"]
     _duty_parts = []
     if p.get("modules_text"):
@@ -422,8 +435,10 @@ def _user_profile_block(state: "AgentState") -> str:
     if _duty_parts:
         lines.append(f"【用户职责】{'｜'.join(_duty_parts)}")
     lines.append(
-        "（回答时可结合用户岗位与职责调整针对性与深浅，按职级适当调整"
-        "表达的正式程度与内容详略，但保持一致的专业工程师态度，"
+        "（回答时可结合用户岗位、职责与项目内角色调整针对性与深浅——"
+        "偏研发/算法背景的可深入技术细节与原理推导；偏实施/现场的给可执行的"
+        "操作步骤与检查动作；偏管理的先给结论与影响面再展开。"
+        "按职级适当调整表达的正式程度与内容详略，但保持一致的专业工程师态度，"
         "不因职级谄媚或怠慢；无需每句称呼用户名。"
         "用户询问自己的身份/姓名时，以【用户】信息直接回答——"
         "用户在问自己是谁，不是在问你（助手）的身份）")
@@ -1557,7 +1572,9 @@ class AiDiagnosisPlatform:
         """
         _dm = r.domain or "team"
         _sd = (r.sub_domain or "").replace('\\', '/').strip('/')
-        _mu = f"{self.config.media_url_prefix}/kb/{_dm}/{_sd}"
+        _src = (r.source_file or "").strip("/")
+        _dir = f"{_dm}/{_src.rsplit('/', 1)[0]}" if _src else f"{_dm}/{_sd}"
+        _mu = f"{self.config.media_url_prefix}/kb/{_dir}"
         return re.sub(
             r'!\[([^\]]*)\]\((?:\./)?media/([^)]+)\)',
             rf'![\1]({_mu}/media/\2)',
@@ -1790,6 +1807,33 @@ class AiDiagnosisPlatform:
                     f"→ 缺失字段的值优先从这里提取写入 collected_info；"
                     f"其中确实没有的直接记'无'跳过，不要再问用户。\n"
                 )
+            # 用户已上传图片资料块（0916）：收集轮 sanitize 屏蔽了对话里的图片
+            # 描述（防 UI 文本污染字段），但用户发图本身就是提供信息——车型/
+            # 车编号/任务编号常在截图里，全屏蔽会让 AI 对着图瞎追问（用户实测
+            # 两起：诊断轮图里有车型被追问车型、补充轮发截图车编号没被识别）。
+            # 解法：对话流保持屏蔽，图片描述单独以资料块注入 + 使用规则——
+            # 客观信息可采信、UI 系统文案禁止当字段值（污染防线保留）。
+            _img_info_block = ""
+            if state.ticket_collecting:
+                _img_descs = []
+                for t in memory.turns:
+                    c = str(t.get("content") or "")
+                    if "图片主要内容为：" in c:
+                        _d = c.split("图片主要内容为：", 1)[1]
+                        _img_descs.append(_d.split("【回应】")[0].strip()[:300])
+                if _img_descs:
+                    _imgs_txt = "\n".join(
+                        f"【图{i}】{d}" for i, d in enumerate(_img_descs[-3:], 1))
+                    _img_info_block = (
+                        f"\n## 用户已上传的图片（VLM 识别内容，非用户原话）\n"
+                        f"{_imgs_txt}\n"
+                        f"→ 使用规则：图片是用户主动上传的现场/界面信息——其中的"
+                        f"**客观信息**（车型、车编号、任务编号、故障码、现场状况等）"
+                        f"可直接采信写入对应字段，不需要再追问用户；但界面上的"
+                        f"**系统文案**（按钮文字、标签名、状态栏字段名等）禁止当作"
+                        f"字段值或项目名。图片内容与用户文字陈述冲突时，以用户"
+                        f"文字为准。\n"
+                    )
             # 歧义挂起反问块（0829 印尼实锤）：收集轮无规划器/检索通道，
             # 项目待确认状态只能进 prompt——列候选让 LLM 自然反问。
             _amb_ask_block = ""
@@ -1824,7 +1868,7 @@ class AiDiagnosisPlatform:
             return (
                 f"你是工单填写助手。用户正在补充工单所需信息，请把对话里出现的信息记录到 collected_info。\n\n"
                 f"{ticket_collecting_context}\n\n"
-                f"{_user_block}{_ref_block}{_proj_pick_block}{_amb_ask_block}\n"
+                f"{_user_block}{_ref_block}{_proj_pick_block}{_amb_ask_block}{_img_info_block}\n"
                 f"{_proj_block}\n"
                 f"## 对话\n{conversation_text}\n\n"
                 f"---\n"
@@ -3450,6 +3494,9 @@ class AiDiagnosisPlatform:
             "motion_control": "🚗 车端",
             "vehicle_errors": "🚗 车端", "vehicle_implementation": "🚗 车端",
             "vehicle_calibration": "🚗 车端", "vehicle_io": "🚗 车端",
+            "vehicle_implementation/自研车实施": "🚚 自研",
+            "vehicle_implementation/华睿VDA5050接入": "🤖 华睿",
+            "vehicle_implementation/科钛VDA5050接入": "🤖 科钛",
             "vehicle_motion": "🚗 车端",
             "translation": "🌐 翻译", "USP/translation": "🌐 翻译",
             "diagnosis": "🏭 诊断", "usp/diagnosis": "🏭 诊断",
@@ -3460,6 +3507,8 @@ class AiDiagnosisPlatform:
             "usp/error_codes": "🚨 平台错误码", "USP/error_codes": "🚨 平台错误码",
             "usp/ui_pages": "🧭 页面导航", "USP/ui_pages": "🧭 页面导航",
             "usp/terminology": "🔤 术语表", "USP/terminology": "🔤 术语表",
+            "usp/algorithm": "🧮 算法", "USP/algorithm": "🧮 算法",
+            "huarui": "🤖 华睿", "USP/huarui": "🤖 华睿",
             "product_catalog": "🏢 产品", "vda5050_protocol": "🏢 协议",
             "navigation": "📐 导航", "standards": "📐 标准",
         }

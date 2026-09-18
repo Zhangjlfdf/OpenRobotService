@@ -5,9 +5,9 @@
 //    52px 液态玻璃圆钮 + 常显小标签 + 可拖拽自由定位；差异点是色相换为深一号蓝（--blue-2）、
 //    呼吸闪烁放慢至 3.6s。
 //  - 点开为右侧抽屉式聊天对话框（窄屏自动全宽），气泡样式复用全局 .chat-bubble 体系，与摇人对话观感一致。
-//  - 问答走真实接口：POST /api/ai/analysis/chat（AiDataAnalysisPlatform 快速对话，非流式 JSON），
+//  - 问答走真实接口：POST /api/ai/analysis/chat/stream（AiDataAnalysisPlatform 快速对话，流式 SSE），
 //    兼容三种模式：chat（普通聊天）、analysis（数据分析+口径回显）、clarify（澄清追问+候选按钮），
-//    澄清多轮自动携带 conversation_id 关联上下文。
+//    澄清多轮自动携带 conversation_id 关联上下文；流式协议：meta（模式/图表/卡片先行）→ delta（逐块文本）→ done。
 //  - 会话持久化：独立表 dataqa_conversations/messages（/api/dataqa/*），与摇人对话库表完全隔离：
 //    首问自动建会话（标题=首问截断）并逐轮落库；头部可新建会话、查看历史会话列表（恢复完整记录）
 //    并可删除历史会话。
@@ -17,10 +17,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation } from 'react-router-dom';
 import { Popup, Button, Toast } from 'tdesign-mobile-react';
-import { Bot, Calendar, Hash, History, MessageSquarePlus, RotateCcw, Send, Sparkles, Target, Trash2, X } from 'lucide-react';
+import { Bot, Calendar, Hash, History, MessageSquarePlus, RotateCcw, Send, Sparkles, Square, Target, Trash2, X } from 'lucide-react';
 import MarkdownRenderer from '@/shared/components/MarkdownRenderer';
 import ReactECharts from '@/shared/components/ReactECharts';
-import { analysisChat, type AnalysisCard, type AnalysisChart, type AnalysisPlan } from '@/api/analysis';
+import { analysisChatStream, type AnalysisCard, type AnalysisChart, type AnalysisPlan } from '@/api/analysis';
 import {
   createConversation,
   listMyConversations,
@@ -52,21 +52,21 @@ interface AdaMessage {
   plan?: AnalysisPlan | null;
   /** clarify 模式下的候选选项，前端渲染为可点按钮 */
   suggestions?: string[];
+  /** 用户主动停止思考后置位：clarify 候选按钮不再可点 */
+  stopped?: boolean;
   /** 图表列表（analysis 模式，后端采集数据生成） */
   charts?: AnalysisChart[] | null;
   /** 单值指标卡片（analysis 模式，后端采集数据生成） */
   cards?: AnalysisCard[] | null;
 }
 
-/** 空态推荐问题 */
+/** 空态推荐问题（覆盖四大维度常用问法） */
 const CHIP_QUESTIONS = [
-  '今天服务号有多少新报障？',
-  '本周工单处理情况怎么样？',
-  '服务号最近用户增长如何？',
-  '本月报障集中在哪些车型？',
+  '本周工单处理情况',
+  '近7天哪些项目的搬运效率为空',
 ];
 
-/** 指标 key → 中文标签映射（与后端 metric_registry.py 对齐，25 个指标） */
+/** 指标 key → 中文标签映射（与后端 metric_registry.py 对齐，38 个指标） */
 const METRIC_LABEL_MAP: Record<string, string> = {
   'ticket.total': '工单总数',
   'ticket.new_count': '新增工单数',
@@ -86,6 +86,7 @@ const METRIC_LABEL_MAP: Record<string, string> = {
   'project.on_hold_count': '暂停项目数',
   'project.by_status': '项目状态分布',
   'project.items': '项目明细',
+  'project.no_data_items': '无数据项目',
   'risk.total': '风险总数',
   'risk.new_count': '新增风险数',
   'risk.closed_count': '已关闭风险数',
@@ -93,6 +94,18 @@ const METRIC_LABEL_MAP: Record<string, string> = {
   'risk.by_status': '风险状态分布',
   'risk.by_category': '风险分类分布',
   'risk.items': '风险明细',
+  'collection.total_tasks': '总任务数',
+  'collection.carry_task_count': '搬运任务数量',
+  'collection.effective_work_hours': '有效工作时长',
+  'collection.fault_hours': '机器人故障时长',
+  'collection.idle_hours': '空闲无任务时间',
+  'collection.avg_error_count': '平均错误次数',
+  'collection.avg_fault_duration_minutes': '平均单次故障时间',
+  'collection.avg_carry_duration_minutes': '平均单次搬运任务时间',
+  'collection.avg_manual_switch_count': '平均切手动次数',
+  'collection.manual_intervention_rate': '人工干预率',
+  'collection.robot_group_compare': '各组数据对比',
+  'collection.items': '采集数据明细',
 };
 
 /** 指标 key 转中文标签；未注册的 key 直接返回原值 */
@@ -110,7 +123,7 @@ const TIME_RANGE_LABELS: Record<string, string> = {
   custom: '自定义',
 };
 
-const WELCOME_TEXT = `你好，我是**后台数据助手** 👋 可以问我服务号的运营情况：新增报障、处理时效、用户增长、项目进展……`;
+const WELCOME_TEXT = `你好，我是**后台数据助手** 👋 工单、项目、风险和搬运效率都可以问我，例如：`;
 
 /** 「问数据」按钮可见性权限码（后台管理-权限管理里维护，按角色勾选授予） */
 const DATA_ASSISTANT_PERMISSION = 'frontend:dataqa:view';
@@ -181,6 +194,10 @@ export default function AdminDataAssistant() {
   const [input, setInput] = useState('');
   const [conversationId, setConversationId] = useState<string | null>(null);
   const thinking = messages.some((m) => m.typing);
+  const lastMsg = messages[messages.length - 1];
+  // 思考中出现澄清追问：视为同一思考过程（停止按钮仍可用，点候选继续思考链）
+  const awaitingClarify = !!lastMsg && lastMsg.role === 'assistant' && lastMsg.mode === 'clarify' && !lastMsg.stopped;
+  const inThought = thinking || awaitingClarify;
   const userTurnCount = messages.filter((m) => m.role === 'user').length;
   // 在途请求：发新问题 / 清空 / 关抽屉 / 卸载时 abort，杜绝迟到响应回写已关闭的对话框
   const pendingRef = useRef<AbortController | null>(null);
@@ -241,10 +258,16 @@ export default function AdminDataAssistant() {
           let cards: AnalysisCard[] | null = null;
           if (m.metadata_) {
             try {
-              const meta = JSON.parse(m.metadata_);
-              mode = meta.mode;
-              if (Array.isArray(meta.charts)) charts = meta.charts;
-              if (Array.isArray(meta.cards)) cards = meta.cards;
+              // metadata_ 可能被后端二次 JSON 编码（历史双重编码数据）：首次 parse
+              // 得到字符串时再 parse 一次得到对象，否则 mode/charts/cards 全部丢失
+              let meta: unknown = JSON.parse(m.metadata_);
+              if (typeof meta === 'string') meta = JSON.parse(meta);
+              if (meta && typeof meta === 'object') {
+                const obj = meta as Record<string, unknown>;
+                mode = typeof obj.mode === 'string' ? obj.mode : undefined;
+                if (Array.isArray(obj.charts)) charts = obj.charts as AnalysisChart[];
+                if (Array.isArray(obj.cards)) cards = obj.cards as AnalysisCard[];
+              }
             } catch { /* 元数据损坏忽略 */ }
           }
           return { id: uid(), role: (m.role === 'user' ? 'user' : 'assistant') as 'user' | 'assistant', content: m.content, mode, charts, cards };
@@ -306,9 +329,15 @@ export default function AdminDataAssistant() {
   /** 发送问题：思考占位 → 持久化用户消息 → POST /api/ai/analysis/chat → 定稿并持久化回答
    *  - 兼容三种模式：chat（普通聊天）、analysis（数据分析+口径回显）、clarify（澄清追问+候选按钮）
    *  - 澄清多轮时自动携带 conversation_id 关联上下文 */
-  const ask = async (raw: string) => {
+  const ask = async (raw: string, opts: { force?: boolean } = {}) => {
     const text = raw.trim();
-    if (!text || thinking || sendingRef.current) return;
+    if (!text) return;
+    // 上一条问题还在处理中：给出提示而不是静默丢弃（否则用户会以为“点了没反应”）
+    // force：澄清候选续问（同一思考链，思考中出现澄清时允许点击继续）
+    if (!opts.force && (thinking || sendingRef.current)) {
+      Toast({ message: '上一条问题正在处理中，请稍候', theme: 'warning' });
+      return;
+    }
     sendingRef.current = true;
     const thinkingId = uid();
     setMessages((prev) => [
@@ -342,7 +371,15 @@ export default function AdminDataAssistant() {
     }
 
     try {
-      const result = await analysisChat(
+      // 流式问答：meta 先行（模式/图表/卡片/口径），delta 逐块追加回答文本
+      let answerAcc = '';
+      let modeAcc: 'chat' | 'analysis' | 'clarify' = 'analysis';
+      let planAcc: AnalysisPlan | null = null;
+      let suggestionsAcc: string[] | undefined;
+      let chartsAcc: AnalysisChart[] | null = null;
+      let cardsAcc: AnalysisCard[] | null = null;
+
+      await analysisChatStream(
         {
           question: text,
           user_id: userId || undefined,
@@ -351,39 +388,64 @@ export default function AdminDataAssistant() {
             : undefined,
           conversation_id: conversationId ?? undefined,
         },
+        {
+          onMeta: (meta) => {
+            if (controller.signal.aborted) return;
+            modeAcc = meta.mode;
+            planAcc = meta.plan ?? null;
+            suggestionsAcc = meta.suggestions ?? undefined;
+            chartsAcc = meta.charts ?? null;
+            cardsAcc = meta.cards ?? null;
+            // 更新会话ID（首问/澄清时后端生成，后续轮次带上）
+            if (meta.conversation_id) {
+              setConversationId(meta.conversation_id);
+            }
+            setMessages((prev) => prev.map((m) =>
+              m.id === thinkingId ? {
+                ...m,
+                mode: meta.mode,
+                plan: meta.plan ?? null,
+                suggestions: meta.suggestions ?? undefined,
+                charts: meta.charts ?? null,
+                cards: meta.cards ?? null,
+              } : m));
+          },
+          onDelta: (content) => {
+            if (controller.signal.aborted) return;
+            answerAcc += content;
+            setMessages((prev) => prev.map((m) =>
+              m.id === thinkingId ? { ...m, content: answerAcc, typing: false } : m));
+          },
+          onDone: () => { /* 定稿与持久化在流结束后统一处理 */ },
+        },
         controller.signal,
       );
       if (controller.signal.aborted) return;
-
-      // 更新会话ID（clarify 时后端返回新 ID，后续轮次带上）
-      if (result.conversation_id) {
-        setConversationId(result.conversation_id);
-      }
 
       setMessages((prev) => prev.map((m) =>
         m.id === thinkingId ? {
           id: m.id,
           role: 'assistant' as const,
-          content: result.answer,
-          mode: result.mode,
-          plan: result.plan ?? null,
-          suggestions: result.suggestions,
-          charts: result.charts ?? null,
-          cards: result.cards ?? null,
+          content: answerAcc,
+          mode: modeAcc,
+          plan: planAcc,
+          suggestions: suggestionsAcc,
+          charts: chartsAcc,
+          cards: cardsAcc,
         } : m));
       if (cid !== null) {
         try {
-          await appendMessage(cid, 'assistant', result.answer, JSON.stringify({
-            mode: result.mode,
-            charts: result.charts ?? null,
-            cards: result.cards ?? null,
+          await appendMessage(cid, 'assistant', answerAcc, JSON.stringify({
+            mode: modeAcc,
+            charts: chartsAcc,
+            cards: cardsAcc,
           }));
         } catch { /* 落库失败不阻断问答 */ }
       }
       if (isNewConv) void refreshList();
     } catch (err) {
       if (controller.signal.aborted || isKickingToLogin()) {
-        // 主动中止（切换会话/新建/关抽屉）：撤下思考占位气泡
+        // 主动中止（切换会话/新建/关抽屉/停止思考/候选续问）：撤下思考占位气泡
         setMessages((prev) => prev.filter((m) => m.id !== thinkingId));
         return;
       }
@@ -400,9 +462,34 @@ export default function AdminDataAssistant() {
           ? { id: m.id, role: 'assistant' as const, content: `⚠️ 回答失败：${reason}\n\n请稍后重新提问。` }
           : m));
     } finally {
-      if (pendingRef.current === controller) pendingRef.current = null;
-      sendingRef.current = false;
+      // 仅在本次请求仍持有在途标记时清理；若已被新请求接管（停止后重问/候选续问），不动共享状态
+      if (pendingRef.current === controller) {
+        pendingRef.current = null;
+        sendingRef.current = false;
+      }
     }
+  };
+
+  /** 停止思考：中止在途流；若停留在澄清环节则禁用候选按钮，允许重新提问 */
+  const stopThought = () => {
+    abortPending();
+    sendingRef.current = false;
+    setMessages((prev) => {
+      const next = prev.filter((m) => !m.typing);
+      const last = next[next.length - 1];
+      if (last && last.role === 'assistant' && last.mode === 'clarify' && !last.stopped) {
+        next[next.length - 1] = { ...last, stopped: true };
+      }
+      return next;
+    });
+    Toast({ message: '已停止思考，可以重新提问', theme: 'success' });
+  };
+
+  /** 思考中出现澄清追问时点击候选：中止当前流，立即以候选值继续同一思考链 */
+  const continueThought = (s: string) => {
+    abortPending();
+    sendingRef.current = false;
+    void ask(s, { force: true });
   };
 
   const onSend = () => { void ask(input); };
@@ -611,24 +698,28 @@ export default function AdminDataAssistant() {
                           ))}
                         </div>
                       )}
-                      {/* 图表：分布（饼/柱）与趋势（折线），由后端采集数据生成 */}
+                      {/* 图表：分布（饼/柱）与趋势（折线），由后端采集数据生成；
+                          多指标趋势图（全为折线）时两列网格展示避免纵向过长 */}
                       {m.mode === 'analysis' && m.charts && m.charts.length > 0 && (
-                        <div className="ada-charts">
+                        <div className={`ada-charts${m.charts.every((c) => c.chart_type === 'line') ? ' ada-charts--grid' : ''}`}>
                           {m.charts.map((c, i) => (
                             <div key={`${c.title}-${i}`} className="ada-chart">
                               <div className="ada-chart__title">{c.title}</div>
                               <ReactECharts
                                 option={c.option}
                                 notMerge
-                                style={{ height: c.chart_type === 'pie' ? 180 : 200 }}
+                                style={{ height: 200 }}
                               />
                             </div>
                           ))}
                         </div>
                       )}
                       <MarkdownRenderer content={m.content} compact />
-                      {/* clarify 候选按钮：clarify 模式且有 suggestions 时显示 */}
-                      {m.mode === 'clarify' && m.suggestions && m.suggestions.length > 0 && (
+                      {/* clarify 候选按钮：仅最新一条且未被停止的 clarify 消息可点——历史 clarify 按钮
+                          点击后会以旧上下文发起新一轮请求（后端缓存已随分析完成清除），
+                          造成“点了又回到澄清”的困惑；思考中出现澄清视为同一思考，点击候选即继续 */}
+                      {m.mode === 'clarify' && m.suggestions && m.suggestions.length > 0
+                        && !m.stopped && m.id === messages[messages.length - 1].id && (
                         <div className="ada-clarify">
                           <div className="ada-clarify__hint">
                             {m.plan?.missing_fields?.includes('time_range') ? '请选择时间范围' :
@@ -641,7 +732,7 @@ export default function AdminDataAssistant() {
                                 key={s}
                                 type="button"
                                 className="ada-clarify__chip"
-                                onClick={() => void ask(s)}
+                                onClick={() => void continueThought(s)}
                               >
                                 <Sparkles size={11} strokeWidth={2} />
                                 {s}
@@ -681,15 +772,28 @@ export default function AdminDataAssistant() {
                 onKeyDown={onInputKeyDown}
               />
             </div>
-            <button
-              type="button"
-              className="ada-send"
-              aria-label="发送"
-              disabled={thinking || !input.trim()}
-              onClick={onSend}
-            >
-              <Send size={16} strokeWidth={2} />
-            </button>
+            {/* 思考中（含澄清环节）：发送钮切换为停止思考钮，点击后中止并可重新提问 */}
+            {inThought ? (
+              <button
+                type="button"
+                className="ada-stop"
+                aria-label="停止思考"
+                title="停止思考"
+                onClick={stopThought}
+              >
+                <Square size={14} strokeWidth={2} />
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="ada-send"
+                aria-label="发送"
+                disabled={!input.trim()}
+                onClick={onSend}
+              >
+                <Send size={16} strokeWidth={2} />
+              </button>
+            )}
           </div>
             </>
           )}

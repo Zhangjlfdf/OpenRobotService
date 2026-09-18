@@ -33,11 +33,59 @@ async def _do(q: str, qdrant: str, ptr: dict) -> dict:
     from ai.agents.AiDiagnosisPlatform.pipeline import AgentState, get_diagnosis_platform
     platform = await get_diagnosis_platform()
     await platform._ensure_clients()
+    # 探针是冷进程（subprocess.run）：首次检索常因 reranker 加载 + 大集合检索串行超时
+    # 吞域。monkey patch _three_way_retrieve 里的 wait_for 把超时放长到 120s，
+    # 让热启动能完成；第二次调用拿热态结果才是探针要看的内容。
+    import asyncio as _asyncio
     state = AgentState(session_id=f"dar_probe_{os.getpid()}", original_query=q)
-    ctx = await platform._retrieve_with_context(state.session_id, state)
-    chunks = parse_retrieval_chunks(ctx, max_chunks=20, text_cap=300)
+    if hasattr(platform, "_three_way_retrieve"):
+        _orig_one = platform._three_way_retrieve.__wrapped__ if hasattr(platform._three_way_retrieve, "__wrapped__") else None
+        if _orig_one is None:
+            # 直接 replace 整个方法
+            _orig_three = platform._three_way_retrieve
+            async def _three_long(query):
+                async def _one(domain, top_k):
+                    try:
+                        dense_res, sparse_res = await _asyncio.wait_for(
+                            platform._retriever.retrieve_domain_dual(query, domain, top_k=8),
+                            timeout=120.0,
+                        )
+                        for r in list(dense_res) + list(sparse_res):
+                            r.domain = domain
+                        return list(dense_res)[:top_k], list(sparse_res)[:top_k]
+                    except Exception as e:
+                        return [], []
+                t = _asyncio.create_task(_one("team", 5))
+                c = _asyncio.create_task(_one("company", 4))
+                i = _asyncio.create_task(_one("industry", 3))
+                gathered = await _asyncio.gather(t, c, i, return_exceptions=True)
+                # 还原原始 _three_way_retrieve 的后续处理结构（list of
+                # RetrievalResult），下游按 .id 访问属性。
+                results = []
+                seen = set()
+                for grp in gathered:
+                    if isinstance(grp, BaseException):
+                        continue
+                    for sub in grp:        # grp = (dense[:top_k], sparse[:top_k])
+                        for r in sub:
+                            if id(r) not in seen and getattr(r, "id", None) is not None:
+                                seen.add(id(r))
+                                results.append(r)
+                return results
+            platform._three_way_retrieve = _three_long
+            try:
+                ctx = await platform._retrieve_with_context(state.session_id, state)
+                ctx_warm = await platform._retrieve_with_context(state.session_id, state)
+            finally:
+                platform._three_way_retrieve = _orig_three
+        else:
+            ctx_warm = await platform._retrieve_with_context(state.session_id, state)
+    else:
+        ctx = await platform._retrieve_with_context(state.session_id, state)
+        ctx_warm = ctx
+    chunks = parse_retrieval_chunks(ctx_warm, max_chunks=20, text_cap=300)
     return {"query": q, "qdrant": qdrant, "pointers": ptr,
-            "ctx_len": len(ctx or ""), "n_chunks": (ctx or "").count("---") // 2,
+            "ctx_len": len(ctx_warm or ""), "n_chunks": (ctx_warm or "").count("---") // 2,
             "chunks": chunks}
 
 

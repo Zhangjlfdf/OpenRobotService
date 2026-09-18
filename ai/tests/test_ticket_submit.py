@@ -1270,6 +1270,64 @@ class TestTicketBoundaryPrefill:
         assert "南京本川项目（编号: NJBC01）" in s
 
 
+class TestImageInfoBlock:
+    """收集轮图片资料块（0916）：sanitize 屏蔽对话流图片描述的同时，
+    单独注入「VLM 识别资料块」——用户发图补充信息（车编号/任务编号在
+    截图里）不再被 AI 瞎追问；客观信息可采信、UI 系统文案禁止当字段值"""
+
+    def test_collect_prompt_injects_image_block(self, platform, make_state):
+        import types
+        """收集模式 + 历史有图片描述轮 → prompt 注入资料块和使用规则"""
+        state = make_state(
+            phase="diagnosing", problem_summary="机器人离线",
+            ticket_fast_lane=True,
+            required_fields={"contact": "联系方式"},
+            collected_info={"contact": "张三"},
+            ticket_collecting=["robot_type"],
+        )
+        fake_mem = types.SimpleNamespace(turns=[
+            {"role": "user", "content": "帮我看看这个界面",
+             },
+            {"role": "user", "content": "我上传了 1 个文件：sched.png。"
+             "图片主要内容为：调度界面截图，车辆编号 B103，车型 XQE-169，任务编号 T001"},
+            {"role": "assistant", "content": "已收到截图。"},
+        ])
+        s = platform._build_diagnosis_prompt(state, fake_mem, "")
+        assert "用户已上传的图片" in s
+        assert "【图1】" in s
+        assert "车辆编号 B103" in s        # 客观信息进块
+        assert "可直接采信" in s            # 使用规则在
+        assert "禁止当作字段值或项目名" in s  # UI 文案防线在
+        # 对话流仍被 sanitize（双重通道：资料块进，对话流屏蔽）
+        assert "[图片已附截图，仅展示用，不作为字段提取来源]" in s
+
+    def test_collect_prompt_no_images_no_block(self, platform, make_state):
+        import types
+        """无图片轮 → 不注入空块"""
+        state = make_state(
+            phase="diagnosing", problem_summary="机器人离线",
+            ticket_fast_lane=True,
+            required_fields={"contact": "联系方式"},
+            ticket_collecting=["robot_type"],
+        )
+        fake_mem = types.SimpleNamespace(turns=[
+            {"role": "user", "content": "帮我提单，车不动"},
+        ])
+        s = platform._build_diagnosis_prompt(state, fake_mem, "")
+        assert "用户已上传的图片" not in s
+
+    def test_non_collect_prompt_not_injected(self, platform, make_state):
+        import types
+        """非收集模式（普通诊断）→ 不注入资料块（sanitize 语义不变）"""
+        state = make_state(phase="diagnosing", problem_summary="机器人离线")
+        fake_mem = types.SimpleNamespace(turns=[
+            {"role": "user", "content": "我上传了 1 个文件：a.png。"
+             "图片主要内容为：调度界面，车编号 B103"},
+        ])
+        s = platform._build_diagnosis_prompt(state, fake_mem, "")
+        assert "用户已上传的图片" not in s
+
+
 # ================================================================
 # 运行入口
 # ================================================================

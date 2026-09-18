@@ -174,6 +174,43 @@ async def quick_chat(request: QuickChatRequest) -> ChatResponse:
         raise HTTPException(status_code=500, detail="对话服务内部错误") from exc
 
 
+@router.post("/chat/stream", summary="快速对话（流式 SSE）")
+async def quick_chat_stream(request: QuickChatRequest):
+    """快速对话问答（流式）。与 /chat 同语义，事件流输出。
+
+    SSE 事件协议（data 字段为 JSON）：
+        {"type":"meta","mode":"analysis|clarify|chat","plan":{...},
+         "charts":[...],"cards":[...],"suggestions":[...],"conversation_id":"..."}
+        {"type":"delta","content":"..."}   逐块回答文本
+        {"type":"done","conversation_id":"...","mode":"..."}
+        {"type":"error","error":"..."}
+    """
+    agent = get_agent()
+    payload = _merge_chat_context(request)
+    # chat_stream 不接收 period/date（指标对话流程由 plan 决定时间范围）
+    payload.pop("period", None)
+    payload.pop("date", None)
+
+    async def stream_generator():
+        try:
+            async for event in agent.chat_stream(**payload):
+                yield "data: " + json.dumps(event, ensure_ascii=False) + _SSE_NEWLINE
+        except ValueError as exc:
+            yield "data: " + json.dumps(
+                {"type": "error", "error": str(exc)}, ensure_ascii=False
+            ) + _SSE_NEWLINE
+        except Exception:
+            logger.exception("流式对话失败")
+            yield "data: " + json.dumps(
+                {"type": "error", "error": "对话服务内部错误"}, ensure_ascii=False
+            ) + _SSE_NEWLINE
+
+    return StreamingResponse(
+        stream_generator(),
+        media_type="text/event-stream",
+    )
+
+
 @router.get("/types", summary="分析类型列表")
 async def list_analysis_types():
     """返回支持的分析类型枚举。"""

@@ -1,8 +1,9 @@
 /// <reference types="vitest" />
-import { defineConfig } from 'vite';
+import { defineConfig, loadEnv } from 'vite';
 import type { ProxyOptions } from 'vite';
 import react from '@vitejs/plugin-react';
 import path from 'path';
+import { fileURLToPath } from 'url';
 import { compression } from 'vite-plugin-compression2';
 
 // ── dev 代理目标：业务后端与 AI 服务已拆分（与 deploy/nginx/conf/conf.d/app_gateway.conf 对齐）─────
@@ -10,8 +11,10 @@ import { compression } from 'vite-plugin-compression2';
 //    AI 服务：  ai/run.py      @8401（/api/ai/*，含 SSE 流式）
 //    本地需同时启动两者；可用环境变量覆盖目标地址：
 //      VITE_DEV_BACKEND_TARGET=http://localhost:8400 VITE_DEV_AI_TARGET=http://localhost:8401 npm run dev
-const DEV_BACKEND_TARGET = process.env.VITE_DEV_BACKEND_TARGET || 'http://localhost:8400';
-const DEV_AI_TARGET = process.env.VITE_DEV_AI_TARGET || 'http://localhost:8401';
+//    本地开发（测试环境端口 9400/9401）由 frontend/.env.development 提供，直接 npm run dev 即可。
+//    注意：Vite 在 config 评估之后才加载 .env 文件（process.env 读不到其内容），
+//    必须用 loadEnv 显式读取；shell 环境变量优先级高于 .env 文件。
+const CONFIG_DIR = path.dirname(fileURLToPath(import.meta.url));
 
 // ── 构建基础路径（生产环境前缀）─────────────────────────────────────────────────
 //    dev 不设（默认 '/'）；构建时通过 CLI --base 指定（见 package.json build:test/build:prod）：
@@ -20,7 +23,12 @@ const DEV_AI_TARGET = process.env.VITE_DEV_AI_TARGET || 'http://localhost:8401';
 //    前端 API 前缀由 src/config/api.ts 据 base 自动推导，无需在此重复配置。
 const APP_BASE = process.env.VITE_APP_BASE || '/';
 
-export default defineConfig(({ command }) => {
+export default defineConfig(({ command, mode }) => {
+  // 优先级：shell 环境变量 > .env.[mode] 文件 > 生产默认（8400/8401，与 nginx 对齐）
+  const env = loadEnv(mode, CONFIG_DIR, '');
+  const DEV_BACKEND_TARGET = process.env.VITE_DEV_BACKEND_TARGET || env.VITE_DEV_BACKEND_TARGET || 'http://localhost:8400';
+  const DEV_AI_TARGET = process.env.VITE_DEV_AI_TARGET || env.VITE_DEV_AI_TARGET || 'http://localhost:8401';
+
   // 仅 dev(serve) 生效的代理；build 不启动 dev server，生产走 nginx 分发
   // 显式标注类型：否则空对象分支会被推断为 { '/api/ai'?: undefined } 联合类型，与 server.proxy 不兼容
   const proxy: Record<string, ProxyOptions> = command === 'serve' ? {
