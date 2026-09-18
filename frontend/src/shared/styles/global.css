@@ -2863,15 +2863,18 @@ html, body, #root {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* 人员流转箭头：参与 flex 流式布局，紧随参与人堆叠之后、处理人之前。
+   不可用 absolute 居中——那样箭头不占位，堆叠会被挤到箭头左侧且头像会盖住箭头。 */
 .task-card2__person-arrow {
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  transform: translate(-50%, -50%);
-  color: var(--muted-foreground);
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  flex-shrink: 0;
+  /* 不加 margin auto：剩余空间由「处理人」的 margin-left:auto 独占，
+     保证箭头紧跟参与人堆叠、处理人贴右，且两者间距均匀 */
+  margin-left: 2px;
+  margin-right: 2px;
+  color: var(--muted-foreground);
   /* SVG 是 inline 元素，默认基线对齐会在底部留出几像素空隙 → 置 0 让箭头垂直居中精确 */
   line-height: 0;
 }
@@ -7897,14 +7900,15 @@ html, body, #root {
   text-overflow: ellipsis;
 }
 .task-card2__person-arrow {
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  transform: translate(-50%, -50%);
-  color: var(--muted-foreground);
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  flex-shrink: 0;
+  /* 不加 margin auto：剩余空间由「处理人」的 margin-left:auto 独占，
+     保证箭头紧跟参与人堆叠、处理人贴右，且两者间距均匀 */
+  margin-left: 2px;
+  margin-right: 2px;
+  color: var(--muted-foreground);
   /* SVG 是 inline 元素，默认基线对齐会在底部留出几像素空隙 → 置 0 让箭头垂直居中精确 */
   line-height: 0;
 }
