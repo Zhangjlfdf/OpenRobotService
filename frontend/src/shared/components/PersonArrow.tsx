@@ -18,7 +18,7 @@
 type Props = {
   /** 线身粗细（= 头部描边宽，px）。默认 1.2，比旧图标（2）更细 */
   strokeWidth?: number;
-  /** 头部尺寸：宽（翅展的一半 = 两翼水平投影，px）。高度自动按 2 倍换算（两翼 45°） */
+  /** 头部尺寸：宽（两翼水平投影，px）。高度 = 宽 × 1.5（两翼与水平夹角约 37°，设计稿箭头实测比例） */
   headWidth?: number;
 };
 
@@ -26,8 +26,9 @@ type Props = {
 export const HEAD_WIDTH = 7;
 
 export default function PersonArrow({ strokeWidth = 1.2, headWidth = HEAD_WIDTH }: Props) {
-  // 头部 viewBox：宽 = headWidth（翼尖到两翼开口端的水平距离），高 = 2 × headWidth（45°）
-  const headHeight = headWidth * 2;
+  // 头部 viewBox：宽 = headWidth（翼尖到两翼开口端的水平距离），高 = 1.5 × headWidth
+  // （翼角约 37°：设计稿箭头像素实测 头高:头宽 ≈ 34:23 ≈ 1.5，头高:线粗 ≈ 8.5 ≈ 10.5:1.2）
+  const headHeight = headWidth * 1.5;
   return (
     <span className="task-card2__person-arrow" aria-hidden="true">
       {/* 线身：flex:1 自适应撑满；右端探入头部开口、直达翼尖，保证中线连续 */}

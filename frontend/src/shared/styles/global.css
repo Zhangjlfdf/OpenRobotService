@@ -2832,6 +2832,7 @@ html, body, #root {
   gap: 6px;
   margin-bottom: 12px;
   position: relative;
+  transform: translateY(4px); /* 整行（发起人/箭头/堆叠头像/处理人）视觉下移 4px，缓解贴顶；下方有 12px margin 兜底不重叠 */
 }
 .task-card2__person {
   display: flex;
@@ -2877,7 +2878,7 @@ html, body, #root {
   top: 50%;
   left: 50%;
   width: 32px; /* 无堆叠：总长约一个头像（32px）＝线身 25 + 头部 7 */
-  height: 14px; /* = 头部 SVG 高（headWidth 7 → 2×7），线在容器垂直中心 */
+  height: 10.5px; /* = 头部 SVG 高（headWidth 7 → 1.5×7），线在容器垂直中心 */
   transform: translate(-50%, -50%);
   display: flex;
   align-items: center;
@@ -2890,6 +2891,7 @@ html, body, #root {
    不再依赖「相对整行 flow 求解」的绝对定位（那会把线拉成整行宽、并顶到行底）。 */
 .task-card2__flow--stacked {
   flex: 0 1 auto; /* ⚠️ 覆盖基础类的 flex:1，否则永远撑满整行、无法跟随堆叠宽 */
+  margin-left: auto; /* 与处理人 margin-left:auto 各分剩余空间一半 → 堆叠+箭头组在发起/处理人间居中（⚠️ 不可再加 margin-right:auto，否则成三个 auto 边距三分空间、组偏左 F/6） */
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -2927,7 +2929,7 @@ html, body, #root {
   position: static; /* 归入常规流：宽度直接决定 flow 内容宽，箭头据此撑开 */
   left: auto;
   bottom: auto;
-  transform: none;
+  transform: translateY(-4px); /* 头像整体上移 4px，与下方箭头直线留出间隙（纯视觉位移，不改布局尺寸） */
   z-index: 1;
   order: 1; /* 头像在线上方 */
 }
@@ -7967,7 +7969,7 @@ html, body, #root {
   top: 50%;
   left: 50%;
   width: 32px; /* 无堆叠：总长约一个头像（32px）＝线身 25 + 头部 7，与块 A 同步 */
-  height: 14px; /* = 头部 SVG 高（headWidth 7 → 2×7），线在容器垂直中心 */
+  height: 10.5px; /* = 头部 SVG 高（headWidth 7 → 1.5×7），线在容器垂直中心 */
   transform: translate(-50%, -50%);
   display: flex;
   align-items: center;
@@ -7978,6 +7980,7 @@ html, body, #root {
 /* 有堆叠：流线区收缩为内容宽 + 纵向居中列（与块 A 同步） */
 .task-card2__flow--stacked {
   flex: 0 1 auto;
+  margin-left: auto; /* 堆叠组在发起/处理人间居中（与块 A 同步，勿加 margin-right） */
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -7992,7 +7995,7 @@ html, body, #root {
   bottom: auto;
   transform: none;
   width: calc(100% + 12px); /* 100% = flow 内容宽 = 堆叠宽 → 左右各溢出 6px */
-  margin-top: -6px; /* 盒高 14、线居中 → 线中心贴头像底下方 ~1px */
+  margin-top: -4.25px; /* 盒高 10.5、线居中 → 线中心贴头像底下方 ~1px */
   order: 2;
 }
 .person-arrow__line {
