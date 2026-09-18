@@ -17,6 +17,7 @@ import {
 } from '@/shared/components/macaronIcons';
 import {
   computeInfoCompleteness,
+  countInfoValues,
   formatFileSize,
   isInfoNodeVisible,
   loadCardCollapsed,
@@ -120,6 +121,16 @@ export default function ProjectInfoCard({ projectId, canEdit, onMarkChange }: {
   const roots = byParent.get(null) ?? [];
   const visibleRoots = selected.size === 0 ? roots : roots.filter((node) => selected.has(node.id));
   const completeness = useMemo(() => computeInfoCompleteness(nodes), [nodes]);
+  // 有值的节点数：整棵没值的分支在渲染时被裁掉，标签点开也只有空白
+  const valueCounts = useMemo(() => countInfoValues(nodes), [nodes]);
+  // 选中的标签整片没值（含未选中任何标签但整棵树都没写过的情形）→ 不渲染内容，改为提示补充
+  const noSelectedValue =
+    !loading && !loadError && visibleRoots.length > 0
+    && visibleRoots.every((node) => (valueCounts.get(node.id) ?? 0) === 0);
+  const emptyTagTitles = visibleRoots
+    .filter((node) => (valueCounts.get(node.id) ?? 0) === 0)
+    .map((node) => node.title)
+    .join('、');
 
   // 标签池红点：该一级标签下（含标签自身）有本机没看过的操作记录。
   // 与编辑页行内红点共用水位（项目+登录用户存本机的已读记录 id）——
@@ -216,7 +227,7 @@ export default function ProjectInfoCard({ projectId, canEdit, onMarkChange }: {
               </span>
             </p>
           )}
-          <p className="mac-info__hint">不选择标签时显示全部内容</p>
+          <p className="mac-info__hint">不选择标签时显示全部内容；只展示已填写的信息</p>
           {loading ? (
             <div className="mac-info__state">正在加载信息节点…</div>
           ) : loadError ? (
@@ -232,10 +243,36 @@ export default function ProjectInfoCard({ projectId, canEdit, onMarkChange }: {
               暂无内容，点击右上角「编辑」添加信息节点
               <div className="mac-info__state-sub">信息节点对所有协作者共享</div>
             </div>
+          ) : noSelectedValue ? (
+            /* 选中的标签整片没填过内容：不给空壳正文，直接提示补充（带「!」的标签点开就是这里） */
+            <div className="mac-info__state">
+              信息不足请补充
+              <div className="mac-info__state-sub">
+                「{emptyTagTitles}」下还没有任何已填写的信息，请补充后再查看
+              </div>
+              {canEdit && (
+                <button
+                  type="button"
+                  className="mac-btn mac-btn--outline"
+                  style={{ marginTop: 12 }}
+                  onClick={() => navigate(`/admin/project-detail/${projectId}/edit`)}
+                >
+                  <MacPencil size={13} />去补充信息
+                </button>
+              )}
+            </div>
           ) : (
             <article className="mac-doc">
               {visibleRoots.map((root) => (
-                <DocSection key={root.id} node={root} depth={1} byParent={byParent} marked={marked} onToggleMark={toggleMark} />
+                <DocSection
+                  key={root.id}
+                  node={root}
+                  depth={1}
+                  byParent={byParent}
+                  marked={marked}
+                  onToggleMark={toggleMark}
+                  valueCounts={valueCounts}
+                />
               ))}
             </article>
           )}
@@ -246,18 +283,25 @@ export default function ProjectInfoCard({ projectId, canEdit, onMarkChange }: {
 }
 
 /** 文档式节点：标题与内容同一行并列（层级用缩进与字号/颜色区分，不再分行堆叠）；分支节点只占一行标题 */
-function DocSection({ node, depth, byParent, marked, onToggleMark }: {
+function DocSection({ node, depth, byParent, marked, onToggleMark, valueCounts }: {
   node: ProjectInfoNode;
   depth: number;
   byParent: Map<string | null, ProjectInfoNode[]>;
   marked: Set<string>;
   onToggleMark: (nodeId: string) => void;
+  /** 各节点名下已填写的末级字段数：为 0 的整棵不渲染（父组件已保证根节点 > 0） */
+  valueCounts: Map<string, number>;
 }) {
-  const allChildren = byParent.get(node.id) ?? [];
+  // 只展示有信息的内容：没填的字段不占位、也不显示「（未填写）」；空分支连标题一起去掉，
+  // 免得留下一个只有字段名、点进去什么都没有的空壳
+  const allChildren = (byParent.get(node.id) ?? [])
+    .filter((child) => (valueCounts.get(child.id) ?? 0) > 0);
   // 与编辑页一致：区域细分字段按所选区域显隐（节点仍在数据里，只是不渲染）
   const children = allChildren.filter((child) => isInfoNodeVisible(child, allChildren));
   const level = Math.min(depth, 4);
-  const isLeaf = allChildren.length === 0;
+  // 末级判定看的是整棵树里有没有子节点，不是「有值的子节点」——叶子字段自己就是有值才渲染到这里，
+  // 用 allChildren 判会把「子节点全空、自己也没值」的分支误判成叶子，多渲染一个空的（未填写）
+  const isLeaf = (byParent.get(node.id) ?? []).length === 0;
   const isMedia = isLeaf && (node.content_type === 'file' || node.content_type === 'image');
   const isMarked = marked.has(node.id);
   const rowClass = [
@@ -290,7 +334,7 @@ function DocSection({ node, depth, byParent, marked, onToggleMark }: {
         )}
       </div>
       {children.map((child) => (
-        <DocSection key={child.id} node={child} depth={depth + 1} byParent={byParent} marked={marked} onToggleMark={onToggleMark} />
+        <DocSection key={child.id} node={child} depth={depth + 1} byParent={byParent} marked={marked} onToggleMark={onToggleMark} valueCounts={valueCounts} />
       ))}
     </section>
   );

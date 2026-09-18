@@ -555,6 +555,38 @@ function isEmptyLeaf(node: ProjectInfoNode): boolean {
   return !(typeof node.value === 'string' && node.value.trim());
 }
 
+/** 末级字段是否有值：下拉看选中项，附件看文件名，其余按去空白后的文本判断 */
+export function hasFieldValue(node: ProjectInfoNode): boolean {
+  return !isEmptyLeaf(node);
+}
+
+/**
+ * 每个节点名下「有值的末级字段」个数 {节点id: 条数}。
+ * 展示页只用它来裁剪：条数为 0 的分支整棵不渲染(空分组只剩标签名的空壳)，
+ * 一级标签条数为 0 时提示「信息不足请补充」。一次遍历算出全部节点，避免逐节点重复递归。
+ */
+export function countInfoValues(nodes: ProjectInfoNode[]): Map<string, number> {
+  const byParent = new Map<string | null, ProjectInfoNode[]>();
+  nodes.forEach((node) => {
+    const list = byParent.get(node.parent_id) ?? [];
+    list.push(node);
+    byParent.set(node.parent_id, list);
+  });
+
+  const counts = new Map<string, number>();
+  const walk = (node: ProjectInfoNode): number => {
+    const children = byParent.get(node.id) ?? [];
+    const total = children.length === 0
+      ? (isEmptyLeaf(node) ? 0 : 1)
+      : children.reduce((sum, child) => sum + walk(child), 0);
+    counts.set(node.id, total);
+    return total;
+  };
+
+  (byParent.get(null) ?? []).forEach(walk);
+  return counts;
+}
+
 /** 只要一级标签下存在空的末级节点即视为信息不全（卡片标签上显示「!」角标） */
 export function computeInfoCompleteness(nodes: ProjectInfoNode[]): Map<string, TagCompleteness> {
   const byParent = new Map<string | null, ProjectInfoNode[]>();

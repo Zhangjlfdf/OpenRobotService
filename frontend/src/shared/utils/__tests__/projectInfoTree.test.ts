@@ -1,10 +1,12 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import {
   computeInfoCompleteness,
+  countInfoValues,
   createInfoNode,
   deleteInfoNode,
   encodeInfoValue,
   flattenInfoTree,
+  hasFieldValue,
   importInfoTree,
   loadHistoryLatest,
   loadHistorySeen,
@@ -432,5 +434,44 @@ describe('本地纯函数', () => {
     const completeness = computeInfoCompleteness(base);
     expect(completeness.get('a')).toEqual({ total: 1, empty: 1, incomplete: true }); // a → b → c，末级只有 C 且未填写
     expect(completeness.get('d')).toEqual({ total: 1, empty: 1, incomplete: true });
+  });
+});
+
+describe('已填写信息统计（展示页裁剪空内容的依据）', () => {
+  const leaf = (id: string, parent: string | null, title: string, value: unknown, type = 'text'): ProjectInfoNode =>
+    ({ id, project_id: 'P1', parent_id: parent, title, content_type: type as ProjectInfoNode['content_type'], value, sort_order: 0, created_at: TS });
+
+  // a ─┬─ b（有值）  a 自身没值：只剩一个空的父节点，父节点不该被当成字段
+  //    └─ e ─┬─ f（有值）
+  //          └─ g（空，两种类型各测一遍）
+  const tree: ProjectInfoNode[] = [
+    leaf('a', null, '基础信息', ''),
+    leaf('b', 'a', '客户信息', '中力'),
+    leaf('e', 'a', '区域', ''),
+    leaf('f', 'e', '省份', '浙江'),
+    leaf('g', 'e', '地区', ''),
+    leaf('h', null, '硬件', ''),
+    leaf('i', 'h', '载具', '', 'select'),
+  ];
+
+  it('只数末级字段，父节点按子树里已填写的条数累计', () => {
+    const counts = countInfoValues(tree);
+    expect(counts.get('b')).toBe(1);
+    expect(counts.get('g')).toBe(0);
+    expect(counts.get('e')).toBe(1); // e 自己不落值，靠 f
+    expect(counts.get('a')).toBe(2); // b + f
+    expect(counts.get('h')).toBe(0); // 底下只有一个空的下拉
+  });
+
+  it('hasFieldValue 按类型判空：下拉看选中项、附件看文件名、文本去空白', () => {
+    expect(hasFieldValue(leaf('t1', null, 'A', ' x '))).toBe(true);
+    expect(hasFieldValue(leaf('t2', null, 'A', '   '))).toBe(false);
+    expect(hasFieldValue(leaf('t3', null, 'A', ''))).toBe(false);
+    expect(hasFieldValue(leaf('t4', null, 'A', null))).toBe(false);
+    expect(hasFieldValue(leaf('s1', null, 'A', { selected: '托盘', options: [] }, 'select'))).toBe(true);
+    expect(hasFieldValue(leaf('s2', null, 'A', { selected: '', options: ['托盘'] }, 'select'))).toBe(false);
+    expect(hasFieldValue(leaf('f1', null, 'A', { name: '方案.pdf' }, 'file'))).toBe(true);
+    expect(hasFieldValue(leaf('f2', null, 'A', { name: '' }, 'file'))).toBe(false);
+    expect(hasFieldValue(leaf('f3', null, 'A', {}, 'image'))).toBe(false);
   });
 });

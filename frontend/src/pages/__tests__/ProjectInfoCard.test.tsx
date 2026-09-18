@@ -96,12 +96,13 @@ describe('ProjectInfoCard（项目信息管理卡）', () => {
     expect(screen.getByRole('button', { name: /硬件/ })).toBeTruthy();
   });
 
-  it('文档式渲染：文字内容与已选项直接展示，未选择显示提示', async () => {
+  it('文档式渲染：只展示已填写的信息，没填的字段不出占位', async () => {
     renderCard('CODE-1');
     expect(await screen.findByText('客户信息')).toBeTruthy();
     expect(screen.getByText('中力')).toBeTruthy();
-    // c2 未选择、c3 已选「托盘」
-    expect(screen.getAllByText('未选择').length).toBe(1);
+    // c2（项目类型，未选择）没填过：不渲染它，也不出「未选择」这类占位
+    expect(screen.queryByText('项目类型')).toBeNull();
+    expect(screen.queryByText('未选择')).toBeNull();
     expect(screen.getByText('托盘')).toBeTruthy();
   });
 
@@ -120,8 +121,105 @@ describe('ProjectInfoCard（项目信息管理卡）', () => {
 
     // 每个根节点一个一级分组（相邻分组之间由 CSS 画浅灰横线）
     expect(document.querySelectorAll('.mac-doc__section--d1').length).toBe(2);
-    // 二级节点整体缩进一级
-    expect(document.querySelectorAll('.mac-doc__section--d2').length).toBe(3);
+    // 二级节点整体缩进一级：只有填过值的那些（基础信息下 c2 空 → 只剩 1 个）
+    expect(document.querySelectorAll('.mac-doc__section--d2').length).toBe(2);
+  });
+
+  it('整片没值的标签：点开不展示内容，提示信息不足请补充', async () => {
+    const emptyTree: ApiInfoNode[] = [
+      node({
+        id: 'r1',
+        title: '基础信息',
+        sort_order: 0,
+        children: [node({ id: 'c1', parent_id: 'r1', title: '客户信息', value: null, sort_order: 0 })],
+      }),
+      node({
+        id: 'r2',
+        title: '硬件',
+        sort_order: 1,
+        children: [
+          node({
+            id: 'c3', parent_id: 'r2', title: '载具类型', content_type: 'select', sort_order: 0,
+            options: ['托盘', '料笼'],
+            value: { selected: '托盘', options: ['托盘', '料笼'] },
+          }),
+        ],
+      }),
+    ];
+    vi.mocked(fetchInfoTree).mockResolvedValue(emptyTree);
+    renderCard('CODE-1');
+
+    // 默认展示全部：空标签下的字段不渲染，有条目的标签照常展示
+    await screen.findByText('载具类型');
+    expect(screen.queryByText('客户信息')).toBeNull();
+
+    // 点开空标签 → 不展示内容，改为提示补充
+    fireEvent.click(screen.getByRole('button', { name: /^基础信息/ }));
+    expect(screen.queryByText('客户信息')).toBeNull();
+    expect(document.querySelector('.mac-doc')).toBeNull();
+    expect(screen.getByText('信息不足请补充')).toBeTruthy();
+    expect(screen.getByText(/「基础信息」下还没有任何已填写的信息/)).toBeTruthy();
+    // 有编辑权限时给出补充入口（普通用户不回编辑页）
+    expect(screen.getByRole('button', { name: /去补充信息/ })).toBeTruthy();
+  });
+
+  it('无编辑权限时提示里不给「去补充信息」入口', async () => {
+    const emptyTree: ApiInfoNode[] = [
+      node({
+        id: 'r1',
+        title: '基础信息',
+        sort_order: 0,
+        children: [node({ id: 'c1', parent_id: 'r1', title: '客户信息', value: null, sort_order: 0 })],
+      }),
+    ];
+    vi.mocked(fetchInfoTree).mockResolvedValue(emptyTree);
+    renderCard('CODE-1', false);
+
+    fireEvent.click(await screen.findByRole('button', { name: /^基础信息/ }));
+    expect(screen.getByText('信息不足请补充')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /去补充信息/ })).toBeNull();
+  });
+
+  it('全树都没写过内容：不出文档空壳，直接提示补充', async () => {
+    vi.mocked(fetchInfoTree).mockResolvedValue([
+      node({
+        id: 'r1',
+        title: '基础信息',
+        sort_order: 0,
+        children: [node({ id: 'c1', parent_id: 'r1', title: '客户信息', value: '   ', sort_order: 0 })],
+      }),
+    ]);
+    renderCard('CODE-1');
+    expect(await screen.findByText('信息不足请补充')).toBeTruthy();
+    expect(screen.queryByText('客户信息')).toBeNull();
+  });
+
+  it('空分支（子节点全没值、自己也没值）连标题一起不渲染，不留下空壳', async () => {
+    vi.mocked(fetchInfoTree).mockResolvedValue([
+      node({
+        id: 'r1',
+        title: '基础信息',
+        sort_order: 0,
+        children: [
+          node({ id: 'c1', parent_id: 'r1', title: '客户信息', value: '中力', sort_order: 0 }),
+          node({
+            id: 'g1', parent_id: 'r1', title: '联系方式', sort_order: 1,
+            children: [
+              node({ id: 'd1', parent_id: 'g1', title: '电话', value: '', sort_order: 0 }),
+              node({ id: 'd2', parent_id: 'g1', title: '邮箱', value: null, sort_order: 1 }),
+            ],
+          }),
+        ],
+      }),
+    ]);
+    renderCard('CODE-1');
+    await screen.findByText('客户信息');
+    // 有值的字段照常；空分支的标题与它的空字段都不出现
+    expect(screen.getByText('中力')).toBeTruthy();
+    expect(screen.queryByText('联系方式')).toBeNull();
+    expect(screen.queryByText('电话')).toBeNull();
+    expect(screen.queryByText('邮箱')).toBeNull();
+    expect(screen.queryByText('（未填写）')).toBeNull();
   });
 
   it('点选一级标签只显示该标签下的内容', async () => {
@@ -151,11 +249,13 @@ describe('ProjectInfoCard（项目信息管理卡）', () => {
 
   // —— 关注星标（子节点右侧）：点它把节点订进「项目动态」 ——
 
-  it('只有子节点（一级标签之下）带关注星标，一级标签本身没有', async () => {
+  it('只给已填写信息的子节点出关注星标，一级标签本身没有', async () => {
     renderCard('CODE-1');
     await screen.findByText('客户信息');
     expect(screen.getByRole('button', { name: '关注客户信息' })).toBeTruthy();
     expect(screen.getByRole('button', { name: '关注载具类型' })).toBeTruthy();
+    // 没填过的节点不渲染，自然也没有星标
+    expect(screen.queryByRole('button', { name: '关注项目类型' })).toBeNull();
     // 根节点（基础信息 / 硬件）不出星标
     expect(screen.queryByRole('button', { name: /关注基础信息/ })).toBeNull();
     expect(screen.queryByRole('button', { name: /关注硬件/ })).toBeNull();
