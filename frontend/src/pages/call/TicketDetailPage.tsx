@@ -11,7 +11,8 @@ import ClearableInput from '@/shared/components/ClearableInput';
 import TitleEllipsis from '@/shared/components/TitleEllipsis';
 import { setupWechatShare } from '@/shared/utils/wechatJsSdk';
 import { WECHAT_CONFIG } from '@/config/wechat';
-import { ArrowRight, Folder, UserRound, Clock, AlarmClock, Download, FileImage, FileText, FileSpreadsheet, FileCode, FileArchive, Paperclip, Bell, Upload, Undo2, Pencil } from 'lucide-react';
+import { Folder, UserRound, Clock, AlarmClock, Download, FileImage, FileText, FileSpreadsheet, FileCode, FileArchive, Paperclip, Bell, Upload, Undo2, Pencil } from 'lucide-react';
+import PersonArrow from '@/shared/components/PersonArrow';
 import { getMyProjects, getProjectMembers, type ProjectItem, type ProjectMember } from '@/api/projects';
 import { qaGetTicket, fetchWithAuth } from '@/api/ai';
 import { cancelTicket, urgeTicket, reportTicket, uploadCommentAttachment } from '@/api/ticket';
@@ -885,7 +886,7 @@ export default function TicketDetailPage() {
                   <span className="task-card2__person-name">{ticket.created_by_name || ticket.created_by || '-'}</span>
                 </span>
               </div>
-              <span className="task-card2__person-arrow"><ArrowRight size={16} strokeWidth={2} /></span>
+              <span className="task-card2__person-arrow"><PersonArrow width={28} /></span>
               {isDispatching ? (
                 <div className="task-card2__person task-card2__person--assignee" title="U老师 正在派单，稍候自动更新" aria-label="U老师 正在派单，稍候自动更新">
                   <span className="task-card2__avatar task-card2__avatar--assignee task-card2__avatar--dispatching"><i className="dispatch-pulse" /></span>

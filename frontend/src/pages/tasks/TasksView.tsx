@@ -22,7 +22,8 @@ import { normalizeStatus, STATUS_DISPLAY_MAP, PRIORITY_DISPLAY_MAP, TICKET_TYPE_
 import { formatDateTime } from '@/shared/utils/url';
 // 相关性分类过滤条件：列表查询与分类角标计数共用（底部导航「待我处理」角标复用同一口径）
 import { buildRelevanceFilters, type TicketFilterCondition } from '@/shared/utils/ticketFilters';
-import { Search, ArrowRight, Calendar, SlidersHorizontal, ChevronDown, Star } from 'lucide-react';
+import { Search, Calendar, SlidersHorizontal, ChevronDown, Star } from 'lucide-react';
+import PersonArrow from '@/shared/components/PersonArrow';
 import { isSameUser } from '@/shared/utils/userIdentity';
 import { avatarUrl } from '@/api/profile';
 import { useHorizontalScroll } from '@/shared/hooks/useHorizontalScroll';
@@ -355,7 +356,7 @@ const TicketCard = memo(function TicketCard({ t, onOpen, avatarMap, currentUserI
           onLocate={onLocateParticipant ? (p) => onLocateParticipant(t.id, p) : undefined}
         />
         <span className="task-card2__person-arrow">
-          <ArrowRight size={14} strokeWidth={2} />
+          <PersonArrow width={28} />
         </span>
         <div className="task-card2__person task-card2__person--assignee" title={`处理人：${assignee}`} aria-label={`处理人：${assignee}`}>
           <span className="task-card2__person-name">{assignee}</span>

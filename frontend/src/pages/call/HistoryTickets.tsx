@@ -6,7 +6,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Loading, Toast, Button, Popup, DialogPlugin } from 'tdesign-mobile-react';
 import AppButton from '@/shared/components/AppButton';
-import { Search, ArrowRight } from 'lucide-react';
+import { Search } from 'lucide-react';
 import { qaListTickets, type AiTicketBrief } from '@/api/ai';
 import { urgeTicket, reportTicket, cancelTicket, reDispatchTicket, fetchRedispatch } from '@/api/ticket';
 import type { RedispatchCandidate } from '@/api/ticket';
@@ -19,6 +19,7 @@ import PullToRefresh from '@/shared/components/PullToRefresh';
 import UserSelect from '@/shared/components/UserSelect';
 import TitleEllipsis from '@/shared/components/TitleEllipsis';
 import ParticipantStack, { type ParticipantItem } from '@/shared/components/ParticipantStack';
+import PersonArrow from '@/shared/components/PersonArrow';
 import { formatDateTime } from '@/shared/utils/url';
 import type { UserItem } from '@/api/users';
 
@@ -407,7 +408,7 @@ export default function HistoryTickets({ showHeader = true }: { showHeader?: boo
                   <span className="history-row__tip-text">{t.redispatch_tip}</span>
                 </div>
               )}
-              {/* 人员流转（设计稿：发起人头像+姓名 | 参与人头像堆叠（无箭头） | ArrowRight | 处理人）。
+              {/* 人员流转（设计稿：发起人头像+姓名 | 参与人头像堆叠（无箭头） | 线条箭头 | 处理人）。
                   派单中（status=new 且处理人未写入，AI 派单 Worker 60s 轮询中）：显示「派单中」呼吸动效 */}
               <div className="task-card2__people">
                 <div className="task-card2__person task-card2__person--creator" title={`发起人：${t.created_by_name || t.created_by || '-'}`} aria-label={`发起人：${t.created_by_name || t.created_by || '-'}`}>
@@ -418,7 +419,7 @@ export default function HistoryTickets({ showHeader = true }: { showHeader?: boo
                   participants={(t.participants || []) as ParticipantItem[]}
                   onLocate={(p) => { if (p?.username) openParticipantDiscussion(t.id, p.username); }}
                 />
-                <span className="task-card2__person-arrow"><ArrowRight size={16} strokeWidth={2} /></span>
+                <span className="task-card2__person-arrow"><PersonArrow width={28} /></span>
                 {(t.status === 'new' && !t.assigned_to && !t.assigned_to_name) ? (
                   <div className="task-card2__person task-card2__person--assignee" title="U老师 正在派单" aria-label="U老师 正在派单">
                     <span className="task-card2__avatar task-card2__avatar--assignee task-card2__avatar--dispatching"><i className="dispatch-pulse" /></span>

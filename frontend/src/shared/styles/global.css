@@ -2872,6 +2872,12 @@ html, body, #root {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  /* SVG 是 inline 元素，默认基线对齐会在底部留出几像素空隙 → 置 0 让箭头垂直居中精确 */
+  line-height: 0;
+}
+.task-card2__person-arrow .person-arrow-svg {
+  display: block;
+  overflow: visible;
 }
 /* 中间参与人头像堆叠（设计稿：size-6 24px gray-soft + ring-2 card + -space-x-1.5 叠加） */
 .task-card2__participants {
@@ -7899,6 +7905,12 @@ html, body, #root {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  /* SVG 是 inline 元素，默认基线对齐会在底部留出几像素空隙 → 置 0 让箭头垂直居中精确 */
+  line-height: 0;
+}
+.task-card2__person-arrow .person-arrow-svg {
+  display: block;
+  overflow: visible;
 }
 
 /* 讨论区 AI 执行过程（DiscussionPanel 使用） */
