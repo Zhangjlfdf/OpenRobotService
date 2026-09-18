@@ -17,6 +17,7 @@ from typing import Dict, List, Optional
 from fastapi import APIRouter, Depends, UploadFile, File, Form, Query, Request, Header, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+from starlette.concurrency import run_in_threadpool
 
 from ai.core.logging import get_logger
 
@@ -1411,6 +1412,15 @@ async def list_all_tickets(
                     _seen.add(_lr.task_id)
                     tip_map[_lr.task_id] = await _redispatch_tip_for_log(_lr, user_map)
 
+            # 评论区参与人堆叠：批量聚合（评论数排序 + 未读红点），一次 IN 查询无 N+1。
+            # 复用 backend 的 participant_service，口径与系统任务列表完全一致。
+            participants_map: Dict[int, list] = {}
+            if _ids:
+                from app.modules.tasks.participant_service import build_participants_map
+                participants_map = await run_in_threadpool(
+                    build_participants_map, db, _ids, username or None
+                )
+
             items = []
             for r in rows:
                 d = task_to_dict(r)
@@ -1435,6 +1445,9 @@ async def list_all_tickets(
                     "assigned_to_name": user_map.get(assigned_to, assigned_to) if assigned_to else "",
                     # 二次派单感知增强（M3）：派单结果提醒一句话摘要（无提醒为 null）
                     "redispatch_tip": tip_map.get(r.id) or None,
+                    # 评论区参与人头像堆叠（发起人 | 堆叠 | 处理人），
+                    # 复用后端同一聚合服务，保证两个列表口径一致（含红点 has_unread）。
+                    "participants": participants_map.get(r.id, []),
                 })
             return {"code": 0, "data": {"total": total, "skip": skip, "limit": limit, "items": items,
                                         "by_status": by_status, "active_total": active_total}}
