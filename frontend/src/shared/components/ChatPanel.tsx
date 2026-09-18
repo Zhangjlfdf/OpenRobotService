@@ -771,6 +771,15 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
     setPressMenu(null);
     enterSelect(id);
   }, [pressMenu, enterSelect]);
+  // 「选择文字」全文视图（0918）：部分复制入口——气泡内长按已被菜单占用，
+  // 原生拖蓝放进受控全文视图做；视图挂 body，不受 .chat-view__messages 禁选影响
+  const [textViewMsgId, setTextViewMsgId] = useState<string | null>(null);
+  const handlePressSelectText = useCallback(() => {
+    if (!pressMenu) return;
+    const id = pressMenu.id;
+    setPressMenu(null);
+    setTextViewMsgId(id);
+  }, [pressMenu]);
   // 菜单打开期间滚动即自动关闭（仿微信，防 fixed 锚点与气泡实际位置脱节）；
   // scroll 不冒泡用捕获监听，wheel 兜底 PC 端 overflow 容器外滚轮
   useEffect(() => {
@@ -3092,7 +3101,10 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
           pressMenu ? (
             <div className="chat-press-menu">
               {pressMenuCopyable && (
-                <button type="button" className="chat-press-menu__item" onClick={handlePressCopy}>复制</button>
+                <>
+                  <button type="button" className="chat-press-menu__item" onClick={handlePressCopy}>复制</button>
+                  <button type="button" className="chat-press-menu__item" onClick={handlePressSelectText}>选择文字</button>
+                </>
               )}
               <button type="button" className="chat-press-menu__item" onClick={handlePressSelect}>多选</button>
             </div>
@@ -3644,6 +3656,63 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
           </div>,
           document.body,
         )}
+
+        {/* 选择文字全文视图（0918）：部分复制入口——长按拖蓝出系统选择菜单，
+            复制的是选中的那部分；挂 body 不受消息区禁选规则影响 */}
+        {textViewMsgId && (() => {
+          const m = messages.find((x) => x.id === textViewMsgId);
+          if (!m) return null;
+          return createPortal(
+            <div
+              onClick={() => setTextViewMsgId(null)}
+              style={{
+                position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, zIndex: 1200,
+                background: 'rgba(10, 12, 20, .72)', display: 'flex',
+                alignItems: 'center', justifyContent: 'center', padding: 16, boxSizing: 'border-box',
+              }}
+            >
+              <button
+                aria-label="关闭"
+                onClick={() => setTextViewMsgId(null)}
+                style={{
+                  position: 'absolute', top: 10, right: 12, width: 34, height: 34,
+                  borderRadius: '50%', border: 'none', cursor: 'pointer',
+                  background: 'rgba(255,255,255,.14)', color: '#fff', fontSize: 18, lineHeight: 1,
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  WebkitTouchCallout: 'none', userSelect: 'none', WebkitUserSelect: 'none',
+                }}
+              >
+                ✕
+              </button>
+              <div
+                onClick={(e) => e.stopPropagation()}
+                style={{
+                  background: 'var(--card)', borderRadius: 'var(--radius-xl)', maxWidth: 420, width: '100%',
+                  maxHeight: '80vh', display: 'flex', flexDirection: 'column',
+                  overflow: 'hidden', boxSizing: 'border-box',
+                }}
+              >
+                <div
+                  style={{
+                    flex: 1, minHeight: 0, overflowY: 'auto', padding: 16, WebkitOverflowScrolling: 'touch',
+                    userSelect: 'text', WebkitUserSelect: 'text', WebkitTouchCallout: 'default',
+                  }}
+                >
+                  <MarkdownRenderer content={m.content} compact={compact} />
+                </div>
+                <div
+                  style={{
+                    padding: '10px 14px 12px', fontSize: '12.5px', color: 'var(--muted-foreground)', textAlign: 'center', flexShrink: 0,
+                    WebkitTouchCallout: 'none', userSelect: 'none', WebkitUserSelect: 'none',
+                  }}
+                >
+                  长按文字拖动选区，即可复制选中部分
+                </div>
+              </div>
+            </div>,
+            document.body,
+          );
+        })()}
       </div>
     </div>
   );
