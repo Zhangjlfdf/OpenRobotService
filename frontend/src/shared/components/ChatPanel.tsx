@@ -363,7 +363,8 @@ const MessageBubble = memo(function MessageBubble({
         clearPress();
         pressTimerRef.current = window.setTimeout(() => {
           suppressClickRef.current = true;
-          const rect = wrapRef.current?.getBoundingClientRect();
+          const rect = (wrapRef.current?.querySelector(':scope > .chat-bubble')
+            ?? wrapRef.current)?.getBoundingClientRect();
           if (rect) onLongPress?.(msg.id, rect);
           if (navigator.vibrate) navigator.vibrate(15);
           if (navigator.vibrate) navigator.vibrate(15);
@@ -2934,6 +2935,7 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
     height: pressMenu.rect.height,
     pointerEvents: 'none',
     background: 'transparent',
+    padding: 0,
   } : { display: 'none' };
   const pressPlacement: 'top' | 'bottom' = pressMenu && messagesContainerRef.current
     && (pressMenu.rect.top - messagesContainerRef.current.getBoundingClientRect().top) >= 64 ? 'top' : 'bottom';
@@ -3034,11 +3036,11 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
         style={pressAnchorStyle}
         content={
           pressMenu ? (
-            <div className="detail-chat-menu">
+            <div className="chat-press-menu">
               {pressMenuCopyable && (
-                <button type="button" className="detail-chat-menu__item" onClick={handlePressCopy}>复制</button>
+                <button type="button" className="chat-press-menu__item" onClick={handlePressCopy}>复制</button>
               )}
-              <button type="button" className="detail-chat-menu__item" onClick={handlePressSelect}>多选</button>
+              <button type="button" className="chat-press-menu__item" onClick={handlePressSelect}>多选</button>
             </div>
           ) : null
         }

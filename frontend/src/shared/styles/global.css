@@ -6495,6 +6495,33 @@ html, body, #root {
 .detail-chat-menu__item:active { background: var(--muted); }
 .detail-chat-menu__item.is-danger { color: var(--destructive); }
 
+/* 聊天长按操作菜单（ChatPanel 复制/多选，0918）：比讨论区菜单更紧凑——
+   13px 字号 + 7×13 条目内边距；外层 Popover 内容层的默认 12px 内边距对
+   本菜单关掉（:has 向上选父级，整体尺寸 145×66 → ~105×33） */
+.t-popover__content:has(> .chat-press-menu) { padding: 0; }
+.chat-press-menu {
+  display: flex;
+  flex-direction: row;
+  align-items: stretch;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.chat-press-menu__item {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 7px 13px;
+  background: none;
+  border: none;
+  font-size: 13px;
+  color: var(--foreground);
+  cursor: pointer;
+  border-right: 1px solid var(--border);
+  white-space: nowrap;
+}
+.chat-press-menu__item:last-child { border-right: none; }
+.chat-press-menu__item:active { background: var(--muted); }
+
 /* 气泡删除按钮（仅自己消息，hover/长按显示） */
 .detail-chat-bubble__del {
   position: absolute;
