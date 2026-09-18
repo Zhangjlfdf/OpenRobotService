@@ -58,7 +58,7 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}
           AUTOMATION_ENV: local
         run: |
-          pytest automation/config/tests/ automation/src/logger/tests/ automation/src/clients/tests/ automation/src/assertions/tests/ automation/src/fixtures/tests/ automation/src/ai_metrics/tests/ automation/ci_ai_gen/tests/ automation/tests/infrastructure/ -v --alluredir=automation/output/allure-results --junitxml=automation/output/junit-infra.xml
+          pytest automation/config/tests/ automation/src/logger/tests/ automation/src/clients/tests/ automation/src/assertions/tests/ automation/src/fixtures/tests/ automation/src/ai_metrics/tests/ automation/src/runtime/tests/ automation/src/client/tests/ automation/src/contract/tests/ automation/src/remote/tests/ automation/src/ticket_pipeline/tests/ automation/src/reporting/tests/ automation/ci_ai_gen/tests/ automation/mcp_server/tests/ automation/tests/infrastructure/ -v --alluredir=automation/output/allure-results --junitxml=automation/output/junit-infra.xml
 
       - name: Upload Allure results
         if: always()
@@ -166,6 +166,18 @@ jobs:
           REAL_ADMIN_PASSWORD: usp2026@EP
         run: |
           pytest automation/tests/real -m smoke -v --alluredir=automation/output/allure-results --junitxml=automation/output/junit-real.xml
+
+      - name: Run OpenAPI contract smoke
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+          AUTOMATION_ENV: local
+          CONTRACT_TEST_ENABLED: "1"
+          OPENAPI_SCHEMA_URL: http://localhost:8400/api/openapi.json
+          OPENAPI_BASE_URL: http://localhost:8400
+          CONTRACT_INCLUDE_PATH_REGEX: ^/api/(health|auth/login)$
+          CONTRACT_MAX_EXAMPLES: "5"
+        run: |
+          pytest automation/tests/contract -m contract -v --alluredir=automation/output/allure-results --junitxml=automation/output/junit-contract.xml
 
       - name: Upload Allure results
         if: always()
