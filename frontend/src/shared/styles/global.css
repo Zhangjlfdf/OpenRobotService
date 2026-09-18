@@ -2863,15 +2863,52 @@ html, body, #root {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* 人员流转「流线区」：占据发起人与处理人之间的剩余宽度。
+   长直线横贯全区（箭头样式不变、只拉长线身），右端收箭头头部；
+   有堆叠时线退至底部作头像的「下划线」，堆叠头像（24px 小两号）在线上方。 */
+.task-card2__flow {
+  position: relative;
+  flex: 1;
+  align-self: stretch;
+  min-width: 48px;
+}
 .task-card2__person-arrow {
   position: absolute;
-  left: 50%;
+  left: 0;
+  right: 0;
   top: 50%;
-  transform: translate(-50%, -50%);
-  color: var(--muted-foreground);
-  display: inline-flex;
+  height: 12px; /* = 头部 SVG 高，线在容器垂直中心 */
+  transform: translateY(-50%);
+  display: flex;
   align-items: center;
-  justify-content: center;
+  color: var(--muted-foreground);
+  /* 子元素含 inline SVG，基线对齐会在底部留出几像素空隙 → 置 0 让箭头垂直居中精确 */
+  line-height: 0;
+}
+/* 有堆叠：线退到底部（行底上方 6px），似堆叠的下划线 */
+.task-card2__flow--stacked .task-card2__person-arrow {
+  top: auto;
+  bottom: 0;
+  transform: none;
+}
+.person-arrow__line {
+  flex: 1;
+  min-width: 12px;
+  border-radius: 1px;
+  background: currentColor;
+}
+.person-arrow__head {
+  display: block;
+  flex-shrink: 0;
+  overflow: visible;
+}
+/* 有堆叠：头像（24px）在长直线上方，水平居中，与线留 ~2px 间隙 */
+.task-card2__flow--stacked .participant-stack-wrap {
+  position: absolute;
+  left: 50%;
+  bottom: 8px;
+  transform: translateX(-50%);
+  z-index: 1;
 }
 /* 中间参与人头像堆叠（设计稿：size-6 24px gray-soft + ring-2 card + -space-x-1.5 叠加） */
 .task-card2__participants {
@@ -2943,6 +2980,14 @@ html, body, #root {
   width: 24px;
   height: 24px;
   font-size: 10px;
+}
+/* 堆叠头像统一 24px（比两侧 32px 头像小两号）。
+   图片头像 participant-stack__img 原本无尺寸规则、会落回 task-card2__avatar 的 32px，
+   与 fallback 大小不一致 → 用双类选择器一并锁定 */
+.participant-stack__item .participant-stack__img,
+.participant-stack__item .participant-stack__fallback {
+  width: 24px;
+  height: 24px;
 }
 /* 红点：头像右上角，2px 描边随卡片底色，避免与头像混色 */
 .participant-stack__dot {
@@ -7890,15 +7935,41 @@ html, body, #root {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.task-card2__flow {
+  position: relative;
+  flex: 1;
+  align-self: stretch;
+  min-width: 48px;
+}
 .task-card2__person-arrow {
   position: absolute;
-  left: 50%;
+  left: 0;
+  right: 0;
   top: 50%;
-  transform: translate(-50%, -50%);
-  color: var(--muted-foreground);
-  display: inline-flex;
+  height: 12px; /* = 头部 SVG 高，线在容器垂直中心 */
+  transform: translateY(-50%);
+  display: flex;
   align-items: center;
-  justify-content: center;
+  color: var(--muted-foreground);
+  /* 子元素含 inline SVG，基线对齐会在底部留出几像素空隙 → 置 0 让箭头垂直居中精确 */
+  line-height: 0;
+}
+/* 有堆叠：线退到底部（行底上方 6px），似堆叠的下划线 */
+.task-card2__flow--stacked .task-card2__person-arrow {
+  top: auto;
+  bottom: 0;
+  transform: none;
+}
+.person-arrow__line {
+  flex: 1;
+  min-width: 12px;
+  border-radius: 1px;
+  background: currentColor;
+}
+.person-arrow__head {
+  display: block;
+  flex-shrink: 0;
+  overflow: visible;
 }
 
 /* 讨论区 AI 执行过程（DiscussionPanel 使用） */
