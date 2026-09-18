@@ -138,3 +138,45 @@
   # 只是了解流程，不是要提单：不得出提单弹窗锚点/项目引导/确认话术
   forbid_any: ["点击下方按钮", "出单前确认一下关联项目", "生成工单草稿"]
   strict: false
+
+# ── 0916 853/855 回归：答编号定序 + 越界拦截 + 摇人吧提及预填 ──
+- name: 项目引导答序号-预填列表对应项目（855回归）
+  turns:
+    - 帮我提个工单，XQE车报错813停在货架前取不了货，车编号A027
+    - "1"
+  # 答序号「1」→ 服务端定序预填候选第 1 项，LLM 不得幻觉照抄其他项目
+  expect_review_any_round: true
+  followup_pool:
+    - when: 时间
+      say: 今天上午十点左右开始的
+    - when: 位置
+      say: A区03库位那边
+  strict: true
+
+- name: 越界序号不预填列表外项目（855回归）
+  turns:
+    - 帮我提个工单，XQE车报错813停在货架前取不了货，车编号A027
+    - "7"
+  # 「7」超出候选数量：服务端置空 choice，弹窗必选兜底，绝不预填列表外项目
+  expect_review_any_round: true
+  forbid_any: ["项目已预填为"]
+  followup_pool:
+    - when: 时间
+      say: 今天上午十点
+  strict: true
+
+- name: 提及摇人吧界面-提单直接预填不重复出题（853回归）
+  turns:
+    - 摇人界面ai回复，需要支持部分复制
+    - 帮我提个工单，就是这个界面的问题
+    - 想复制AI回复里的故障描述部分，现在只能整条复制
+  # 「摇人界面」= 指称摇人吧服务号项目（0916 放开平台名豁免）：提单时
+  # 直接预填弹窗，不得重复出项目题
+  expect_review_any_round: true
+  forbid_ask_any: ["出单前确认一下关联项目"]
+  followup_pool:
+    - when: 时间
+      say: 今天上午开始的
+    - when: 复制
+      say: 就想复制回复里的故障描述那段
+  strict: true

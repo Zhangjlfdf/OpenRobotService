@@ -125,6 +125,25 @@ FAST_PATH_CASES: list[dict] = [
         "action": "summary",
         "scope_type": "global",
     },
+    {
+        # 回归：「哪些项目」类问法 → 项目明细清单（名称/状态等逐项展示），
+        # 不再落兜底只给项目个数与状态分布
+        "question": "现在有哪些项目",
+        "metric_keys": ["project.items"],
+        "time_type": "recent_days",
+        "time_explicit": False,
+        "action": "summary",
+        "scope_type": "global",
+    },
+    {
+        # 回归：「项目列表/清单」类问法 → 项目明细清单
+        "question": "项目列表",
+        "metric_keys": ["project.items"],
+        "time_type": "recent_days",
+        "time_explicit": False,
+        "action": "summary",
+        "scope_type": "global",
+    },
     # 风险维度
     {
         "question": "今天新增了多少风险",

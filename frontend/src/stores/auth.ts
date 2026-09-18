@@ -72,7 +72,7 @@ export interface AuthState {
   fetchUserDetails: (user: string, authToken: string) => Promise<boolean>;
   checkLoginStatus: () => void;
   setProfile: (data: { name?: string; avatarResourceId?: number | null }) => void;
-  hasPermission: (prefix: string) => boolean;
+  hasPermission: (required: string) => boolean;
   /** 主动预刷新：token 临近过期时先换新；失败静默（仍由 401 分支兜底） */
   ensureFreshToken: () => Promise<void>;
 }
@@ -293,12 +293,21 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     set({ isLoading: false });
   },
 
-  hasPermission: (prefix: string) => {
+  hasPermission: (required: string) => {
     const { permissions } = get();
     if (!permissions || permissions.length === 0) return false;
     // admin 通配权限：与后端 require_permission 的「permissions 含 admin 直通」对齐，
     // 否则 admin 用户（permissions=['admin']）在前端看不到「其他」等按权限码控制的入口
     if (permissions.includes('admin')) return true;
-    return permissions.some(p => p.startsWith(prefix) || p === `${prefix}:*` || p === '*');
+    // 逐段匹配：与后端 auth.py _match_permission 语义一致
+    // - 段数必须相同，* 匹配任意一段
+    // - 裸 * 通配所有
+    return permissions.some(p => {
+      if (p === '*') return true;
+      const pParts = p.split(':');
+      const rParts = required.split(':');
+      if (pParts.length !== rParts.length) return false;
+      return pParts.every((part, i) => part === '*' || part === rParts[i]);
+    });
   },
 }));
