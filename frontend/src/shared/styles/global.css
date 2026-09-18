@@ -8521,6 +8521,16 @@ html, body, #root {
 .mac-tpl-row--d4 { border-color: var(--mac-tree-4); background: #fff; }
 .mac-tpl-row__head { display: flex; align-items: center; gap: 4px; min-height: 36px; padding: 6px 8px; }
 .mac-tpl-row--d1 .mac-tpl-row__head { padding: 7px 10px; }
+/* 一级标签的折叠开关（只有根节点有）：收起后整棵子树不渲染，纯显示状态 */
+.mac-tpl-row__toggle {
+  display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0;
+  width: 22px; height: 22px; padding: 0; border: none; border-radius: 7px;
+  background: none; color: inherit; cursor: pointer;
+}
+.mac-tpl-row__toggle:disabled { cursor: default; opacity: 0.7; }
+.mac-tpl-row__toggle-ghost { display: inline-block; width: 15px; }
+.mac-tpl-row--d1 .mac-tpl-row__toggle { color: #fff; }
+.mac-tpl-row--d1 .mac-tpl-row__toggle:active { background: rgba(255, 255, 255, 0.15); }
 .mac-tpl-row__title {
   flex: 1; min-width: 0; display: block; margin: 0; padding: 2px 0; border: none; background: none;
   text-align: left; font: inherit; font-size: 12.5px; font-weight: 600; color: var(--mac-fg); cursor: pointer;
@@ -8546,6 +8556,14 @@ html, body, #root {
   background: #fff; font: inherit; font-size: 12px; color: var(--mac-fg); outline: none;
 }
 .mac-tpl-row__options-input:focus { box-shadow: 0 0 0 1px var(--mac-blue-2); }
+/* 一级标签不选内容类型，用一个静态「分组」标签占住类型选择器的位置 */
+.mac-tpl-row__grouptag {
+  flex-shrink: 0; padding: 4px 8px; border-radius: 999px; font-size: 11px;
+  background: var(--mac-secondary); color: var(--mac-muted-fg);
+}
+.mac-tpl-row--d1 .mac-tpl-row__grouptag { background: rgba(255, 255, 255, 0.16); color: rgba(255, 255, 255, 0.85); }
+.mac-tpl-row__fill { flex-shrink: 0; padding: 5px 10px; font-size: 11px; }
+/* 「允许增补信息」勾选行：挂在行尾下方的浅底条，与下拉选项条同款 */
 .mac-tpl-row--d1 .mac-info-row__op { color: rgba(255, 255, 255, 0.85); }
 .mac-tpl-row--d1 .mac-info-row__op:active { background: rgba(255, 255, 255, 0.15); }
 .mac-tpl__preview-list { margin-top: 10px; max-height: 180px; overflow-y: auto; border-top: 1px solid var(--mac-border); }

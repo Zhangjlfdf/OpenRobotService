@@ -22,6 +22,7 @@ import {
   type ProjectInfoNode,
   type ProjectInfoSelectValue,
 } from '@/shared/utils/projectInfoTree';
+import { isKnownVehicleModel, VEHICLE_MODEL_CODES } from '@/shared/utils/vehicleModels';
 
 /** 未匹配条目没有建议归属时的兜底根节点（按需创建，与设计稿一致） */
 const FALLBACK_ROOT_TITLE = '导入信息';
@@ -174,8 +175,24 @@ export default function ProjectInfoFileImport({ visible, onClose, projectId, nod
           }
           parentId = fallbackRootId;
         }
-        const createdNode = await createInfoNode(projectId, parentId, nextSort(parentId), fresh.title.slice(0, 80), true);
-        await setInfoNodeValue(createdNode, fresh.value, projectId);
+        // 车型型号（车型目录里的一款）落成**下拉节点**而不是「标题=型号」的文本节点：
+        // 车型是选出来的值，做成下拉后各项目能各自选、也能在编辑页里改选。
+        const isModel = isKnownVehicleModel(fresh.title);
+        const createdNode = await createInfoNode(
+          projectId, parentId, nextSort(parentId), fresh.title.slice(0, 80), true,
+          isModel ? 'select' : 'text',
+        );
+        await setInfoNodeValue(
+          createdNode,
+          isModel ? { selected: fresh.title, options: [...VEHICLE_MODEL_CODES] } : fresh.value,
+          projectId,
+        );
+        // 车型条目自带数量：给新建的车型节点补一个「数量」子节点 —— 与匹配到既有
+        // 车型节点时「数量落子节点」保持同一形状（后端 match_items 同样处理）
+        if (isModel && fresh.quantity) {
+          const qtyNode = await createInfoNode(projectId, createdNode.id, nextSort(createdNode.id), '数量', true);
+          await setInfoNodeValue(qtyNode, fresh.quantity, projectId);
+        }
         created += 1;
       }
       Toast({ message: `已填写 ${filled} 项，覆盖 ${overwritten} 项，新增 ${created} 项`, theme: 'success' });
@@ -261,6 +278,7 @@ export default function ProjectInfoFileImport({ visible, onClose, projectId, nod
                           {row.group === 'unmatched' && (
                             <span className="mac-import__note">
                               建议归属：{row.fresh?.suggested_parent_path || `${FALLBACK_ROOT_TITLE}（将自动创建）`}
+                              {row.fresh?.quantity ? ` · 数量 ${row.fresh.quantity}（落车型子节点）` : ''}
                             </span>
                           )}
                         </span>

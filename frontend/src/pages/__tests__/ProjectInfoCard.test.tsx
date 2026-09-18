@@ -222,6 +222,41 @@ describe('ProjectInfoCard（项目信息管理卡）', () => {
     expect(screen.queryByText('（未填写）')).toBeNull();
   });
 
+  it('车型1（下拉 + 数量子节点）：型号已选、数量未填时，型号照常展示且分支不被裁掉', async () => {
+    vi.mocked(fetchInfoTree).mockResolvedValue([
+      node({
+        id: 'r2',
+        title: '硬件',
+        sort_order: 0,
+        children: [
+          node({
+            id: 'v1', parent_id: 'r2', title: '车辆', sort_order: 0,
+            children: [
+              node({
+                id: 'm1', parent_id: 'v1', title: '车型1', content_type: 'select', sort_order: 0,
+                options: ['XC1051', 'XCD061'],
+                value: { selected: 'XC1051', options: ['XC1051', 'XCD061'] },
+                children: [
+                  node({ id: 'q1', parent_id: 'm1', title: '数量', value: '', sort_order: 0 }),
+                ],
+              }),
+            ],
+          }),
+        ],
+      }),
+    ]);
+    renderCard('CODE-1');
+
+    // 车型1 带子节点，但它自己的下拉选中项要展示出来（不是只当分支标题）
+    expect(await screen.findByText('车型1')).toBeTruthy();
+    const rows = Array.from(document.querySelectorAll('.mac-doc__row'));
+    const modelRow = rows.find((row) => row.querySelector('.mac-doc__label')?.textContent === '车型1');
+    expect(modelRow?.querySelector('.mac-doc__value')?.textContent).toBe('XC1051');
+    // 没填的「数量」不出占位，但它的存在没把整条分支判成空
+    expect(screen.queryByText('数量')).toBeNull();
+    expect(screen.queryByText('信息不足请补充')).toBeNull();
+  });
+
   it('点选一级标签只显示该标签下的内容', async () => {
     renderCard('CODE-1');
     fireEvent.click(await screen.findByRole('button', { name: /^硬件/ }));
@@ -273,8 +308,8 @@ describe('ProjectInfoCard（项目信息管理卡）', () => {
     const other = screen.getByRole('button', { name: '关注载具类型' });
     expect(other.getAttribute('aria-pressed')).toBe('false');
     fireEvent.click(other);
-    // 展示卡不带 projectId：后端按「登录人 + 该节点」已有的标注切换
-    expect(toggleInfoNodeMarkApi).toHaveBeenCalledWith('c3', undefined);
+    // 必须带上 projectId：全局节点各项目共用同一 node_id，后端推不出是哪个项目里关注的
+    expect(toggleInfoNodeMarkApi).toHaveBeenCalledWith('c3', 'CODE-1');
     await waitFor(() => {
       expect(screen.getByRole('button', { name: '取消关注载具类型' })).toBeTruthy();
     });
@@ -297,7 +332,7 @@ describe('ProjectInfoCard（项目信息管理卡）', () => {
     // 第二次失败：乐观点亮后回滚为未关注
     fireEvent.click(screen.getByRole('button', { name: '关注载具类型' }));
     await waitFor(() => {
-      expect(toggleInfoNodeMarkApi).toHaveBeenCalledWith('c3', undefined);
+      expect(toggleInfoNodeMarkApi).toHaveBeenCalledWith('c3', 'CODE-1');
       expect(screen.getByRole('button', { name: '关注载具类型' }).getAttribute('aria-pressed')).toBe('false');
     });
     expect(onMarkChange).toHaveBeenCalledTimes(1);

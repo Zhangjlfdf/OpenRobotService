@@ -94,14 +94,14 @@ export default function ProjectInfoCard({ projectId, canEdit, onMarkChange }: {
     });
     flip(!wasMarked);
     try {
-      const nowMarked = await toggleInfoNodeMark(nodeId);
+      const nowMarked = await toggleInfoNodeMark(nodeId, projectId);
       flip(nowMarked);
       onMarkChange?.();
     } catch (err) {
       flip(wasMarked);
       Toast({ message: `关注操作失败: ${err instanceof Error ? err.message : ''}`, theme: 'error' });
     }
-  }, [marked, onMarkChange]);
+  }, [marked, onMarkChange, projectId]);
 
   useEffect(() => { setSelected(loadSelectedTags(projectId)); }, [projectId]);
 
@@ -302,19 +302,22 @@ function DocSection({ node, depth, byParent, marked, onToggleMark, valueCounts }
   // 末级判定看的是整棵树里有没有子节点，不是「有值的子节点」——叶子字段自己就是有值才渲染到这里，
   // 用 allChildren 判会把「子节点全空、自己也没值」的分支误判成叶子，多渲染一个空的（未填写）
   const isLeaf = (byParent.get(node.id) ?? []).length === 0;
-  const isMedia = isLeaf && (node.content_type === 'file' || node.content_type === 'image');
+  // 有没有自己的值：末级节点都有；非末级节点只有下拉/附件这类才有，纯文本分组没有。
+  // 车型1 就是「有值又有子节点」——它下面还挂着数量，但自己的下拉选中项同样要展示。
+  const showsValue = isLeaf || node.content_type !== 'text';
+  const isMedia = showsValue && (node.content_type === 'file' || node.content_type === 'image');
   const isMarked = marked.has(node.id);
   const rowClass = [
     'mac-doc__row',
     `mac-doc__row--d${level}`,
-    isLeaf ? '' : 'mac-doc__row--branch',
+    showsValue ? '' : 'mac-doc__row--branch',
     isMedia ? 'mac-doc__row--media' : '',
   ].filter(Boolean).join(' ');
   return (
     <section className={`mac-doc__section mac-doc__section--d${level}`}>
       <div className={rowClass}>
         <span className="mac-doc__label">{node.title}</span>
-        {isLeaf && (
+        {showsValue && (
           <div className="mac-doc__value">
             <DocContent node={node} />
           </div>

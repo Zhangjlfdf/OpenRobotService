@@ -45,8 +45,9 @@ import {
   saveCollapsedIds,
   saveHistorySeen,
   setInfoNodeValue,
+  subtreeNodeIds,
+  unseenHistoryChain,
   unseenHistoryNodes,
-  unseenHistoryRoots,
   updateInfoNode,
   visibleInfoNodes,
   type ProjectInfoContentType,
@@ -55,12 +56,6 @@ import {
   type ProjectInfoSelectValue,
 } from '@/shared/utils/projectInfoTree';
 import type { ApiInfoNodeChange } from '@/api/infoNodes';
-import {
-  isKnownVehicleModel,
-  isVehicleModelNode,
-  VEHICLE_MODEL_DATALIST_ID,
-  VEHICLE_MODEL_SERIES,
-} from '@/shared/utils/vehicleModels';
 
 type DropMode = 'child' | 'before';
 const CONTENT_TYPE_NAMES: Record<ProjectInfoContentType, string> = {
@@ -161,12 +156,15 @@ export default function ProjectInfoEdit() {
   const completeness = useMemo(() => computeInfoCompleteness(visibleInfoNodes(nodes)), [nodes]);
 
   // 编辑历史（后端每个节点操作都有记录）：拉「各节点最新记录时间」对比本机已读水位，
-  // 算哪些节点的历史按钮要出小红点。水位只在「点开该节点历史」时推进——包括自己刚保存的改动，
-  // 没点开过就一直带红点（谁没看过谁自己看到）。
+  // 算哪些节点的历史按钮要出小红点。水位只在「点开历史」时推进——包括自己刚保存的改动，
+  // 没点开过就一直带红点（谁没看过谁自己看到）。最新记录 id 存一份在 ref 里，
+  // 点开历史时要按它把整棵子树一起标记已读。
+  const latestHistoryRef = useRef<Record<string, string>>({});
   const syncHistoryMeta = useCallback(async () => {
     if (!id) return;
     try {
       const latest = await loadHistoryLatest(id);
+      latestHistoryRef.current = latest;
       setUnseenHistoryIds(unseenHistoryNodes(latest, loadHistorySeen(id, username)));
     } catch {
       // 红点只是辅助提示：拉取失败静默，不打扰主流程
@@ -193,7 +191,9 @@ export default function ProjectInfoEdit() {
     }
   };
 
-  // 打开某节点的编辑历史；打开即把该节点标记为已读（小红点消失）
+  // 打开某节点的编辑历史。点开即已读，而且**整棵子树一起读**：
+  // 红点是「这一片有你没看过的变动」，从更新的节点一路点到一级标签，看到的都是同一片变动，
+  // 所以点开链上任一处的历史，这一串小红点就该一起消失。
   const openHistory = async (node: ProjectInfoNode) => {
     setHistoryNode(node);
     setHistoryChanges([]);
@@ -204,18 +204,20 @@ export default function ProjectInfoEdit() {
       const records = await loadInfoNodeChanges(id, node.id);
       if (historyRequestRef.current !== node.id) return; // 期间切到了别的节点，丢弃本次结果
       setHistoryChanges(records);
-      // 点开即已读：水位记成该节点最新记录的 id（与后端 summary 同口径取最大 id），
-      // 小红点消失，直到这个节点再出现新记录
-      const latestId = records.reduce((acc, record) => (record.id > acc ? record.id : acc), '');
-      if (latestId) {
-        const seen = loadHistorySeen(id, username);
-        if (seen[node.id] !== latestId) { seen[node.id] = latestId; saveHistorySeen(id, seen, username); }
-      }
+      // 水位推进：子树里每个节点都记成它的最新记录 id（summary 里那份；缺了就用本节点的记录兜底）
+      const subtree = subtreeNodeIds(nodes, node.id);
+      const seen = loadHistorySeen(id, username);
+      subtree.forEach((nodeId) => {
+        const latestId = latestHistoryRef.current[nodeId];
+        if (latestId && seen[nodeId] !== latestId) seen[nodeId] = latestId;
+      });
+      const ownLatest = records.reduce((acc, record) => (record.id > acc ? record.id : acc), '');
+      if (ownLatest && seen[node.id] !== ownLatest) seen[node.id] = ownLatest;
+      saveHistorySeen(id, seen, username);
+      const subtreeSet = new Set(subtree);
       setUnseenHistoryIds((prev) => {
-        if (!prev.has(node.id)) return prev;
-        const next = new Set(prev);
-        next.delete(node.id);
-        return next;
+        const next = new Set([...prev].filter((nodeId) => !subtreeSet.has(nodeId)));
+        return next.size === prev.size ? prev : next;
       });
     } catch {
       if (historyRequestRef.current === node.id) setHistoryError(true);
@@ -252,10 +254,6 @@ export default function ProjectInfoEdit() {
     }
     if (custom && !parent) {
       Toast({ message: '增补信息需要选择挂在哪个节点下', theme: 'warning' });
-      return;
-    }
-    if (custom && parent && !parent.allow_custom) {
-      Toast({ message: `「${parent.title}」下不允许增补信息`, theme: 'warning' });
       return;
     }
     const siblings = byParent.get(parent?.id ?? null) ?? [];
@@ -465,12 +463,12 @@ export default function ProjectInfoEdit() {
     }
   };
 
-  // 小红点要显示在哪些行上：有未读记录的节点本身 + 它所在的一级节点（根节点）。
-  // 根节点上的点是「这个一级标签下有你没看过的变动」的汇总，判定与消失都跟子节点同一套水位：
-  // 没点开过该节点的历史就带点，点开后该节点不再贡献，根节点上没有其它未读变动时点也随之消失。
-  // 展示页标签池的红点（ProjectInfoCard）复用同一个归并函数 unseenHistoryRoots。
+  // 小红点要显示在哪些行上：有未读记录的节点本身 + 它的**每一层上级**（一直冒到一级标签）。
+  // 判定与消失都走同一套水位：没点开过就带点；点开链上任一处的历史时，
+  // openHistory 会把那棵子树整体标记已读，这一串点随之一起消失。
+  // 展示页标签池只到一级标签，仍用 unseenHistoryRoots（ProjectInfoCard）。
   const historyDotIds = useMemo(
-    () => new Set([...unseenHistoryIds, ...unseenHistoryRoots(nodes, unseenHistoryIds)]),
+    () => unseenHistoryChain(nodes, unseenHistoryIds),
     [nodes, unseenHistoryIds],
   );
 
@@ -565,27 +563,36 @@ export default function ProjectInfoEdit() {
         </section>
       </div>
 
-      {/* 节点操作菜单：内容形式（仅末级）/ 标题备选项（非末级）/ 删除；改名走行内的铅笔按钮 */}
+      {/* 节点操作菜单：内容形式 / 标题备选项 / 删除；改名走行内的铅笔按钮。
+          内容形式对**除一级标签外**的节点都开放——「只有末级才能改类型」的限制已取消，
+          下拉车型这种「自带值又带子节点」的节点同样要能改。
+          菜单只对本项目增补节点弹出（全局字段只读，改动走「详情模板」）。 */}
       <Popup visible={!!menuNode} onClose={() => setMenuNode(null)} placement="bottom" showOverlay>
         <div className="mac-sheet">
           <h4 className="mac-sheet__title">节点操作{menuNode ? ` · ${menuNode.title}` : ''}</h4>
-          {menuNode && (byParent.get(menuNode.id) ?? []).length === 0
-            ? (Object.keys(CONTENT_TYPE_NAMES) as ProjectInfoContentType[]).map((type) => (
-                <button key={type} type="button" className="mac-choice" onClick={() => menuNode && changeContentType(menuNode, type)}>
-                  <span className="mac-choice__label">
-                    {CONTENT_TYPE_NAMES[type]}{menuNode.content_type === type ? ' · 当前' : ''}
-                  </span>
-                </button>
-              ))
-            : menuNode?.is_custom ? (
-              <button type="button" className="mac-choice" onClick={() => menuNode && openTitleOptions(menuNode)}>
-                <span className="mac-choice__label">标题改为下拉选择</span>
-              </button>
-            ) : (
+          {menuNode && (menuNode.parent_id
+            ? (
+              <>
+                {(Object.keys(CONTENT_TYPE_NAMES) as ProjectInfoContentType[]).map((type) => (
+                  <button key={type} type="button" className="mac-choice" onClick={() => menuNode && changeContentType(menuNode, type)}>
+                    <span className="mac-choice__label">
+                      {CONTENT_TYPE_NAMES[type]}{menuNode.content_type === type ? ' · 当前' : ''}
+                    </span>
+                  </button>
+                ))}
+                {/* 非末级还可以把标题也做成下拉（标题备选项）；一级标签以外的分组节点都可能用到 */}
+                {(byParent.get(menuNode.id) ?? []).length > 0 && (
+                  <button type="button" className="mac-choice" onClick={() => menuNode && openTitleOptions(menuNode)}>
+                    <span className="mac-choice__label">标题改为下拉选择</span>
+                  </button>
+                )}
+              </>
+            )
+            : (
               <p className="mac-info__state-sub" style={{ padding: '10px 0' }}>
-                全局字段的标题形式请在「详情模板」里修改
+                一级标签只作分组，不单独填值
               </p>
-            )}
+            ))}
           <button type="button" className="mac-choice" onClick={() => { setDeleteNode(menuNode); setMenuNode(null); }}>
             <span className="mac-choice__label mac-info__danger-text"><MacTrash2 size={14} />删除节点</span>
           </button>
@@ -732,17 +739,6 @@ export default function ProjectInfoEdit() {
         </div>
       </Popup>
 
-      {/* 车型备选（datalist）：行内改名输入框共用一份，避免每一行重复渲染 50 个 option */}
-      <datalist id={VEHICLE_MODEL_DATALIST_ID}>
-        {VEHICLE_MODEL_SERIES.map((series) => (
-          <optgroup key={series.series} label={series.series}>
-            {series.models.map((model) => (
-              <option key={model.code} value={model.code}>{model.name}</option>
-            ))}
-          </optgroup>
-        ))}
-      </datalist>
-
       {/* 一键回到顶部：滚动超过 200px 时出现在右下角（滚动容器是 MainLayout 的 .tabbar-shell__content） */}
       <BackTop
         container={() => document.querySelector('.tabbar-shell__content') as HTMLElement}
@@ -759,8 +755,6 @@ export default function ProjectInfoEdit() {
 interface InfoRowProps {
   node: ProjectInfoNode;
   depth: number;
-  /** 父节点标题：车型节点识别用（挂在「车辆」下的自定义车型也能随时切回下拉） */
-  parentTitle?: string;
   missingCount?: number | undefined;
   byParent: Map<string | null, ProjectInfoNode[]>;
   collapsedIds: Set<string>;
@@ -795,12 +789,13 @@ function InfoRow(props: InfoRowProps) {
   // 区域联动字段按所选区域显隐（节点仍在，只是不渲染）；是否存在子节点按完整列表判断
   const children = allChildren.filter((child) => isInfoNodeVisible(child, allChildren));
   const isLeaf = allChildren.length === 0;
+  // 有没有自己的值：末级节点都有；非末级节点只有下拉/附件这类才有（纯文本分组没有）。
+  // 车型1 是「有值又有子节点」的典型——下拉选中的型号和下面的数量都要能编辑。
+  const showsValue = isLeaf || node.content_type !== 'text';
   const level = Math.min(depth, PROJECT_INFO_MAX_DEPTH);
   const isCollapsed = props.collapsedIds.has(node.id);
   const activeDrop = props.dropTarget?.id === node.id;
   const titleOptions = node.titleOptions ?? [];
-  // 车型节点（模板里的「车型1/车型2」或已选好/自定义的车型）：标题直接给「选车型」下拉框
-  const isVehicleNode = isVehicleModelNode(node.title, props.parentTitle);
   const hasUnseenHistory = props.historyDotIds.has(node.id);
   const classNames = [
     'mac-info-row',
@@ -840,8 +835,6 @@ function InfoRow(props: InfoRowProps) {
               className="mac-info-row__input"
               autoFocus
               defaultValue={node.title}
-              // 车型节点手动输入时也带车型备选（目录里没有的车型直接输入即可）
-              list={isVehicleNode ? VEHICLE_MODEL_DATALIST_ID : undefined}
               onBlur={(event) => {
                 const title = event.target.value.trim();
                 if (title && title !== node.title) props.onRename(node, title);
@@ -849,22 +842,6 @@ function InfoRow(props: InfoRowProps) {
               }}
               onKeyDown={(event) => { if (event.key === 'Enter') event.currentTarget.blur(); }}
             />
-          ) : (props.isAdmin && isVehicleNode) ? (
-            <select
-              className="mac-info-row__select"
-              value={isKnownVehicleModel(node.title) ? node.title : ''}
-              aria-label="选择车型"
-              onChange={(event) => event.target.value && props.onRename(node, event.target.value)}
-            >
-              <option value="" disabled>{node.title}</option>
-              {VEHICLE_MODEL_SERIES.map((series) => (
-                <optgroup key={series.series} label={series.series}>
-                  {series.models.map((model) => (
-                    <option key={model.code} value={model.code}>{model.code} · {model.name}</option>
-                  ))}
-                </optgroup>
-              ))}
-            </select>
           ) : (props.isAdmin && !isLeaf && titleOptions.length) ? (
             <select
               className="mac-info-row__select"
@@ -905,8 +882,9 @@ function InfoRow(props: InfoRowProps) {
               </>
             ) : (
               <>
-                {/* 普通用户：只留「增补信息」（父节点允许时）+ 编辑历史，结构操作一律不给 */}
-                {node.allow_custom && (
+                {/* 普通用户：只留「增补信息」（任何节点下都能加，只要还没到第 4 层）+ 编辑历史，
+                    结构操作一律不给。层数是唯一的边界（2026-09-18 起 allow_custom 不再是闸门） */}
+                {depth < PROJECT_INFO_MAX_DEPTH && (
                   <button
                     type="button"
                     className="mac-info-row__op"
@@ -931,16 +909,16 @@ function InfoRow(props: InfoRowProps) {
             )}
           </div>
         </div>
-        {isLeaf && <NodeContent {...props} />}
+        {showsValue && <NodeContent {...props} />}
       </div>
       {!isCollapsed && children.map((child) => (
-        <InfoRow key={child.id} {...props} node={child} depth={depth + 1} parentTitle={node.title} missingCount={undefined} />
+        <InfoRow key={child.id} {...props} node={child} depth={depth + 1} missingCount={undefined} />
       ))}
     </div>
   );
 }
 
-// —— 末级节点内容编辑（四种内容形式） ——
+// —— 节点内容编辑（四种内容形式）：末级节点 + 自带值类型的非末级节点（下拉车型）都走这里 ——
 
 function NodeContent(props: InfoRowProps) {
   const { node } = props;

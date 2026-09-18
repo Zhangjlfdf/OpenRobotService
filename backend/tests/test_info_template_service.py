@@ -86,7 +86,11 @@ class TestNormalize:
         assert top["title"] == "基础信息"                     # 去空白
         assert top["sort_order"] == 10                        # 按下标派生的步长 10
         assert top["value_type"] == "text" and top["content_type"] == "text"
-        assert top["required"] is False and top["allow_custom"] is False
+        assert top["required"] is False
+        # allow_custom 一律 true：所有节点都能被各项目增补（2026-09-18 取消开关），
+        # 提交里显式带 false 也被归一（老前端/历史模板提交的树）
+        assert top["allow_custom"] is True
+        assert normalize_template_nodes([{"title": "甲", "allow_custom": False}])[0]["allow_custom"] is True
         # 同级第二个节点位次 20
         assert [c["sort_order"] for c in top["children"]] == [10, 20]
         assert top["children"][1]["value_type"] == "select"
@@ -119,8 +123,6 @@ class TestNormalize:
         cases = [
             ([], "不能为空"),
             ([{"title": "  "}], "标题不能为空"),
-            ([{"title": "下拉", "value_type": "select",
-               "children": [{"title": "子"}]}], "不能有子节点"),
         ]
         for nodes, keyword in cases:
             try:
@@ -129,6 +131,30 @@ class TestNormalize:
                 assert keyword in str(exc), f"{keyword} 未出现在：{exc}"
             else:
                 raise AssertionError(f"应拒绝：{keyword}")
+
+    def test_下拉节点允许带子节点(self):
+        # 车型1 就是「下拉选中型号 + 数量子节点」：值类型与子节点互不排斥
+        got = normalize_template_nodes([
+            {"title": "硬件", "children": [
+                {"title": "车辆", "children": [
+                    {"title": "车型1", "value_type": "select", "options": ["XC1051"],
+                     "children": [{"title": "数量"}]},
+                ]},
+            ]},
+        ])
+        model = got[0]["children"][0]["children"][0]
+        assert model["value_type"] == "select"
+        assert model["content_type"] == "select"
+        assert model["options"] == ["XC1051"]
+        assert model["children"][0]["title"] == "数量"
+
+    def test_根节点值类型归一为text(self):
+        # 一级标签只作分组、自己不填值：传什么类型都归一到 text
+        got = normalize_template_nodes([
+            {"title": "硬件", "value_type": "select", "options": ["托盘"]},
+        ])
+        assert got[0]["value_type"] == "text"
+        assert got[0]["content_type"] == "text"
 
     def test_超过四层被拒(self):
         leaf = {"title": "第五层"}

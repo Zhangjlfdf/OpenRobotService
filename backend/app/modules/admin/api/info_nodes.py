@@ -13,8 +13,8 @@
 
   值类写接口 = 填「项目数据」：`PUT /nodes/{id}/value`
   → 任何登录用户都能写，且只能写**已存在节点**的值，不能改结构、不能加节点。
-  普通用户要记表外信息，走 `POST /projects/{id}/custom-nodes`（受父节点
-  allow_custom 闸门约束）——即「增补信息」，全局定义不受影响。
+  普通用户要记表外信息，走 `POST /projects/{id}/custom-nodes`——即「增补信息」，
+  任何节点下都能加（层数 ≤ 4），全局定义不受影响。
 
   读接口（树 / 历史 / 关注 / 动态 / 模板读取）沿用网关管控，不额外鉴权：
   普通用户本来就要看项目信息。
@@ -116,7 +116,7 @@ def create_info_node(project_id: str, node: InfoNodeCreate,
                      actor: Dict[str, Optional[str]] = Depends(get_request_actor_optional)):
     """在某项目范围内增补一个自定义字段（不动全局模板，别的项目看不到）。
 
-    普通用户请走 /custom-nodes——那条路径受父节点 allow_custom 闸门约束，
+    普通用户请走 /custom-nodes——那条路径只改本项目、且限 4 层，
     本接口假定调用者有意在项目里直接加字段。
     """
     name = node.node_name or node.title
@@ -142,13 +142,13 @@ def create_info_node(project_id: str, node: InfoNodeCreate,
 
 
 @info_node_router.post("/projects/{project_id}/custom-nodes",
-                       summary="增补信息（登录用户，受 allow_custom 闸门约束）", status_code=201)
+                       summary="增补信息（登录用户，任意节点下都可加，限 4 层）", status_code=201)
 def add_custom_node(project_id: str, node: InfoNodeCreate,
                     actor: Dict[str, Optional[str]] = Depends(get_request_actor_optional)):
-    """普通用户「增补信息」的唯一入口：在允许增补的节点下加一条本项目自己的字段。
+    """普通用户「增补信息」的唯一入口：加一条本项目自己的字段。
 
-    与管理员接口的区别：父节点必须 `allow_custom=true`（模板说这个位置可以加，才允许加），
-    且只能加在本项目下；层级不得超过 4 层。
+    与管理员接口的区别：只能加在本项目下，层级不得超过 4 层。
+    任何节点下都能增补（allow_custom 闸门已于 2026-09-18 取消）。
     """
     name = node.node_name or node.title
     if not name or not name.strip():
@@ -359,7 +359,8 @@ def toggle_info_node_mark(node_id: str,
 
     project_id 缺省时：增补节点用它自己的 project_id；全局节点则按当前用户在该节点上
     已有的标注整体切换（有就删、没有就报 404，因为没有项目就无从记录新关注）。
-    「项目信息管理」展示卡（ProjectInfoCard）只传 nodeId，走的就是这条回退路径。
+    展示卡（ProjectInfoCard）必须传 project_id——新结构下节点几乎全是全局的，
+    不传就只能取消关注、无法新增。
     """
     operator = _require_operator(actor)
     try:
@@ -430,7 +431,8 @@ def save_info_template(
 
     模板里移除的字段是**停用**（status='disabled'）而非删除：项目已填的值
     原样留在 project_info_value，字段重新加回来即恢复。
-    校验失败返回 400（层级过深 / 末级字段带子节点 / 标题为空 / 同层重名等）。
+    校验失败返回 400（层级过深 / 标题为空 / 同层重名等）。
+    节点可以既带值又有子节点（如下拉的车型 + 该车型的数量）；根节点的值类型一律归为 text。
     """
     try:
         if payload.dry_run:

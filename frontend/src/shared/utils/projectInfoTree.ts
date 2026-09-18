@@ -2,7 +2,7 @@
 //
 // 后端接口（backend/app/modules/admin/api/info_nodes.py）在本次改造后分成两类写操作：
 // - **结构**（增删改节点/位置/类型/导入/模板）＝管理员，服务端有 get_current_admin_user 闸门；
-//   普通用户要记表外信息走「增补信息」：createCustomInfoNode，受父节点 allow_custom 约束。
+//   普通用户要记表外信息走「增补信息」：createCustomInfoNode，任何节点下都能加（层数 ≤ 4）。
 // - **值**（填内容）＝任何登录用户，走 setInfoNodeValue，只能写已存在节点的值。
 //   普通用户的编辑权限就到此为止——他改不了节点名/类型/位置，也加不了节点。
 // - 值由服务端按值类型编码后下发（下拉/布尔 {selected, options}、附件 {name, resource_id, size}），
@@ -196,9 +196,9 @@ export async function loadInfoNodes(projectId: string): Promise<ProjectInfoNode[
 
 /**
  * 增补一个节点到本项目。
- * - 普通用户（isAdmin=false）走 /custom-nodes：父节点必须 allow_custom=true，
- *   且必须指定 parentId；这是普通用户唯一能加节点的途径。
- * - 管理员走 /projects/{id}：不受 allow_custom 约束。
+ * - 普通用户（isAdmin=false）走 /custom-nodes：必须指定 parentId，
+ *   任何节点下都能加（层数 ≤ 4）；这是普通用户唯一能加节点的途径。
+ * - 管理员走 /projects/{id}：加的是全局字段定义。
  */
 export async function createInfoNode(
   projectId: string,
@@ -206,11 +206,12 @@ export async function createInfoNode(
   sortOrder: number,
   title = '未命名节点',
   isAdmin = false,
+  contentType: ProjectInfoContentType = 'text',
 ): Promise<ProjectInfoNode> {
   const payload = {
     parent_id: parentId,
     title,
-    content_type: 'text',
+    content_type: contentType,
     sort_order: sortOrder,
   };
   const raw = isAdmin
@@ -343,6 +344,50 @@ export function unseenHistoryRoots(
     roots.add(current);
   });
   return roots;
+}
+
+/**
+ * 未读节点 + 它的**每一层上级**（编辑页行内红点用它）：
+ * 某个节点有更新时，从它自己一直到一级标签都出小红点；
+ * 点开其中任一处的历史（openHistory 按子树推进水位）后，这一串点一起消失。
+ * 节点已从树里删除（只剩记录）不出点、也不往上归。
+ */
+export function unseenHistoryChain(
+  nodes: Array<Pick<ProjectInfoNode, 'id' | 'parent_id'>>,
+  unseen: Set<string>,
+): Set<string> {
+  const parentOf = new Map(nodes.map((node) => [node.id, node.parent_id]));
+  const result = new Set<string>();
+  unseen.forEach((nodeId) => {
+    if (!parentOf.has(nodeId)) return;
+    result.add(nodeId);
+    let current: string | null = parentOf.get(nodeId) ?? null;
+    for (let depth = 0; current && depth < PROJECT_INFO_MAX_DEPTH; depth += 1) {
+      result.add(current);
+      current = parentOf.get(current) ?? null;
+    }
+  });
+  return result;
+}
+
+/** 某节点及其全部子孙的 id（点开一处历史 = 这棵子树都算看过；只按本地树的 parent_id 关系展开） */
+export function subtreeNodeIds(
+  nodes: Array<Pick<ProjectInfoNode, 'id' | 'parent_id'>>,
+  rootId: string,
+): string[] {
+  const children = new Map<string | null, string[]>();
+  nodes.forEach((node) => {
+    const list = children.get(node.parent_id) ?? [];
+    list.push(node.id);
+    children.set(node.parent_id, list);
+  });
+  const ids: string[] = [];
+  const walk = (nodeId: string) => {
+    ids.push(nodeId);
+    (children.get(nodeId) ?? []).forEach(walk);
+  };
+  walk(rootId);
+  return ids;
 }
 
 // —— 关注（星标）与项目动态：关注按登录人隔离（后端落库，服务端按 token 过滤），动态按本人关注节点聚合 ——
@@ -537,7 +582,8 @@ export function visibleInfoNodes(nodes: ProjectInfoNode[]): ProjectInfoNode[] {
   return nodes.filter((node) => isInfoNodeVisible(node, byParent.get(node.parent_id) ?? []));
 }
 
-// —— 信息完整度（对照原型 node-completeness：统计每个一级标签下末级节点的填写情况） ——
+// —— 信息完整度（统计每个一级标签下「可填节点」的填写情况） ——
+// 可填 = 末级字段 + 自带值类型的非末级节点（下拉车型 + 数量的组合）；纯文本分组不算可填。
 
 export interface TagCompleteness {
   total: number;
@@ -545,7 +591,7 @@ export interface TagCompleteness {
   incomplete: boolean;
 }
 
-function isEmptyLeaf(node: ProjectInfoNode): boolean {
+function isEmptyNodeValue(node: ProjectInfoNode): boolean {
   if (node.content_type === 'select') {
     return !(node.value as ProjectInfoSelectValue | null)?.selected;
   }
@@ -555,13 +601,22 @@ function isEmptyLeaf(node: ProjectInfoNode): boolean {
   return !(typeof node.value === 'string' && node.value.trim());
 }
 
-/** 末级字段是否有值：下拉看选中项，附件看文件名，其余按去空白后的文本判断 */
+/** 字段是否有值：下拉看选中项，附件看文件名，其余按去空白后的文本判断 */
 export function hasFieldValue(node: ProjectInfoNode): boolean {
-  return !isEmptyLeaf(node);
+  return !isEmptyNodeValue(node);
 }
 
 /**
- * 每个节点名下「有值的末级字段」个数 {节点id: 条数}。
+ * 节点自己带不带值。末级节点一律带（它就是让人填的字段）；非末级节点只有下拉/附件
+ * 这类才带——纯文本的非末级节点是分组，它没有自己的值。
+ * 「车型1」是典型的两者兼具：下拉选中型号，下面还挂着「数量」子节点。
+ */
+function nodeFillsValue(node: ProjectInfoNode, hasChildren: boolean): boolean {
+  return !hasChildren || node.content_type !== 'text';
+}
+
+/**
+ * 每个节点名下「有值的字段」个数 {节点id: 条数}——**含节点自己的值**。
  * 展示页只用它来裁剪：条数为 0 的分支整棵不渲染(空分组只剩标签名的空壳)，
  * 一级标签条数为 0 时提示「信息不足请补充」。一次遍历算出全部节点，避免逐节点重复递归。
  */
@@ -576,9 +631,9 @@ export function countInfoValues(nodes: ProjectInfoNode[]): Map<string, number> {
   const counts = new Map<string, number>();
   const walk = (node: ProjectInfoNode): number => {
     const children = byParent.get(node.id) ?? [];
-    const total = children.length === 0
-      ? (isEmptyLeaf(node) ? 0 : 1)
-      : children.reduce((sum, child) => sum + walk(child), 0);
+    // 自己的值也算一条：车型1 选好型号、数量还没填时，整条分支不该被判成「没值」而裁掉
+    const self = nodeFillsValue(node, children.length > 0) && !isEmptyNodeValue(node) ? 1 : 0;
+    const total = self + children.reduce((sum, child) => sum + walk(child), 0);
     counts.set(node.id, total);
     return total;
   };
@@ -587,7 +642,7 @@ export function countInfoValues(nodes: ProjectInfoNode[]): Map<string, number> {
   return counts;
 }
 
-/** 只要一级标签下存在空的末级节点即视为信息不全（卡片标签上显示「!」角标） */
+/** 只要一级标签下存在值为空的可填节点即视为信息不全（卡片标签上显示「!」角标） */
 export function computeInfoCompleteness(nodes: ProjectInfoNode[]): Map<string, TagCompleteness> {
   const byParent = new Map<string | null, ProjectInfoNode[]>();
   nodes.forEach((node) => {
@@ -599,10 +654,9 @@ export function computeInfoCompleteness(nodes: ProjectInfoNode[]): Map<string, T
   const result = new Map<string, TagCompleteness>();
   const walk = (node: ProjectInfoNode, acc: { total: number; empty: number }) => {
     const children = byParent.get(node.id) ?? [];
-    if (children.length === 0) {
+    if (nodeFillsValue(node, children.length > 0)) {
       acc.total += 1;
-      if (isEmptyLeaf(node)) acc.empty += 1;
-      return;
+      if (isEmptyNodeValue(node)) acc.empty += 1;
     }
     children.forEach((child) => walk(child, acc));
   };

@@ -141,10 +141,12 @@ ORM 定义：[delivery.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/mode
 | `value` | 预置值（可选）：`text` 用字符串，其余按 `content_type` 的结构 |
 | `children` | 子节点（递归） |
 
-- 模板结构有两条硬约束，改 YAML 时必须满足（前端 UI 的既定行为）：
+- 模板结构有两条硬约束（前端 UI 的既定行为）：
   1. **最深 4 层**（`PROJECT_INFO_MAX_DEPTH = 4`，第 4 层不可再挂子节点）；
-  2. **`select` 节点必须是末级**（前端只对叶子节点渲染内容编辑器）。
-  - 思维导图里第 5 层的「可选值清单」因此统一表达为 `content_type: select` + `options`，不展开成子节点。
+  2. **一级标签只作分组**：根节点的值类型一律归为 `text`（`normalize_template_nodes` 归一），模板页也不给它渲染内容类型选择器。
+  - 「`select` 必须是末级」这条旧约束已在 2026-09-18 取消：一个节点可以既带值又有子节点（车型1 = 下拉选型号 + 其下「数量」子节点）。可填值的判据统一为 `有子节点 ? content_type !== 'text' : true`，前后端同一口径。
+- **增补的唯一边界是层级（2026-09-18 起）**：`allow_custom` 闸门已取消——「详情模板」页不再有「允许各项目在此节点下增补信息」勾选框，`add_custom_node` 也不读这个字段，任何节点下都能增补（新建节点与模板保存一律写 `allow_custom = true`，存量行由迁移 `5b8e3f2a9c47` 补齐）。唯一的边界是层级——**最多 4 层**，第 5 层起 `400「信息层级最多 4 层，该位置不能再往下加」`（`MAX_INFO_DEPTH`）。
+  - 思维导图里第 5 层的「可选值清单」仍表达为 `content_type: select` + `options`，不必展开成子节点。
 - **区域联动**（仅前端渲染行为，接口与数据不变）：`基础信息 → 项目区域/地点` 下，`区域选项` 这个下拉含 `大陆(China Mainland)` 选项。前端据此联动——选「大陆」时显示 `省份`/`地区`，选其它非空区域时显示 `具体国家`，未选择时三者都不显示；节点始终在数据里（切回时原值还在），只是隐藏渲染。`省份`/`地区`/`具体国家` 三个标题不能改名，否则联动失效（实现见前端 `projectInfoTree.ts` 的 `isInfoNodeVisible`）。旧版模板初始化过的项目若缺 `具体国家` 节点，需补一个同级节点才能生效。
 
 实现：[project_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/services/project_service.py) 中的 `_get_ext_info_template()` / `_split_template()` / `get_info_nodes_template()` / `template_node_value()`。
@@ -321,10 +323,11 @@ Service：[info_node_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/ap
 - Service 逻辑（`info_node_import_service.analyze_import_file`）：
   1. 校验大小/格式并抽取正文；正文超过 100,000 字符截断（响应 `truncated=true`）；
   2. 读该项目信息树，展平为「节点目录」（每行 `路径<TAB>类型[<TAB>(末级)][<TAB>可选项：a|b]`）——只把目录与文件正文放进 prompt，**不要求大模型输出整树**；
-  3. 调大模型（与「摇人」共用 `settings.LLM_API_KEY` / `LLM_API_URL` / `LLM_MODEL_NAME`，即 DeepSeek flash；temperature=0.2、超时 120s、非流式），要求只输出 JSON `{"items":[{"title","value","nodeTitle","suggestedParentPath"}]}`；prompt 要求「把握 ≥ 0.9 才填 nodeTitle，否则给 suggestedParentPath」「select 节点 value 必须命中可选项，否则按未匹配」；
+  3. 调大模型（与「摇人」共用 `settings.LLM_API_KEY` / `LLM_API_URL` / `LLM_MODEL_NAME`，即 DeepSeek flash；temperature=0.2、超时 120s、非流式），要求只输出 JSON `{"items":[{"title","value","nodeTitle","quantity","suggestedParentPath"}]}`；prompt 要求「把握 ≥ 0.9 才填 nodeTitle，否则给 suggestedParentPath」「select 节点 value 必须命中可选项，否则按未匹配」「车型条目一款一条、数量写在 `quantity`（不要另起「数量」条目），旧型号 XS1161 一律写作 XS1201」；
   4. 解析返回（容忍 ```json 围栏与前后杂文字）后由**后端做权威匹配**（大模型的 nodeTitle 仅作提示）：
-     - 节点标题/完整路径去空白标点后精确匹配优先，`difflib.SequenceMatcher` 相似度 **≥ 0.9（满分 1）** 兜底模糊匹配；同名节点用 `suggestedParentPath` 消歧；
-     - select 节点 value 未命中可选项 → 降级为未匹配；同节点多条去重；识别值与节点现值一致则跳过；
+     - 节点标题/完整路径去空白标点后精确匹配优先，`difflib.SequenceMatcher` 相似度 **≥ 0.9（满分 1）** 兜底模糊匹配；同名节点按 `suggestedParentPath` 消歧，路径也消歧不了时优先取「能装下这个值的下拉」（项目下常残留旧导入造的 text 版「车型1」，不能写进那个孤儿节点）；
+     - select 节点 value 未命中可选项 → 降级为未匹配；**车型目录内的型号放宽一层**（大小写/连字符差异、旧型号名、值里夹带中文全称或数量、括号后缀），一个值里认出多个不同型号时仍按未匹配（宁可让用户手动归属）；同节点多条去重；识别值与节点现值一致则跳过；
+     - 车型条目的 `quantity` 直接落进该车型节点下的「数量」子节点（不靠大模型另给一条「数量」条目——同名子节点在各车型下都有）；该车型下还没有「数量」子节点时，把数量推成一条 `unmatched`（`suggestedParentPath` = 车型节点的路径），由前端创建成「数量」子节点；
   5. 分桶返回三类：节点现值为空 → `fill`；非空且与识别值不同 → `overwrite`；无匹配节点 → `unmatched`（`suggestedParentPath` 逐段解析为 `suggested_parent_id`，层级上提到 ≤4 层，解析不到则 null，由前端用「导入信息」根兜底）。
 - 响应 `200`：
 
@@ -333,7 +336,7 @@ Service：[info_node_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/ap
 | `file_name` / `model` | string | 文件名 / 实际使用的模型名 |
 | `text_length` / `truncated` / `extracted` | int / bool / int | 抽取字符数 / 是否截断 / 大模型识别条目数 |
 | `fill` / `overwrite` | 数组 | 元素：`node_id, path, title, content_type, current, value`（`current` 为空串=将填写） |
-| `unmatched` | 数组 | 元素：`title, value, suggested_parent_id, suggested_parent_path` |
+| `unmatched` | 数组 | 元素：`title, value, quantity, suggested_parent_id, suggested_parent_path`（`quantity` 为车型条目自带数量、该车型下没有「数量」子节点时的兜底提示，通常为 null） |
 
 - 错误：`400`（格式不支持/内容为空/项目无数节点）；`503`（`LLM_API_KEY` 未配置或大模型调用失败，detail 带中文原因）。
 - **本接口不写库**：前端预览勾选后，用 5.3 更新（fill/overwrite）与 5.2 创建（unmatched）逐节点落库；未匹配且无归属的条目挂到按需创建的「导入信息」根节点下。

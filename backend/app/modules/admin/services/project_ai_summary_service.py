@@ -131,8 +131,11 @@ def _display_value(node: Dict[str, Any]) -> str:
 def render_project_info(nodes: List[Dict[str, Any]], max_chars: int = MAX_INFO_CHARS) -> Tuple[str, int, int]:
     """信息树 → 提示词正文。
 
-    返回 (正文, 已填写条目数, 未填写末级节点数)。每行「父路径 / 子节点：内容」；
+    返回 (正文, 已填写条目数, 未填写可填节点数)。每行「父路径 / 子节点：内容」；
     值为空的节点不输出正文（避免大模型把空节点当真信息），只计入未填写数。
+
+    「可填节点」= 末级字段，或本身带值类型的分组（如「车型1」既是下拉又有「数量」子节点）。
+    纯 text 的非末级节点是分组，不计入未填写——否则每个分叉都会虚报一项缺信息。
     """
     lines: List[str] = []
     filled = 0
@@ -148,7 +151,7 @@ def render_project_info(nodes: List[Dict[str, Any]], max_chars: int = MAX_INFO_C
             if text:
                 lines.append(f"{path}：{text}")
                 filled += 1
-            elif not children:
+            elif not children or (node.get("content_type") or "text") != "text":
                 empty_leaf += 1
             walk(children, path)
 
@@ -179,7 +182,7 @@ def build_summary_prompt(project: Dict[str, Any], nodes: List[Dict[str, Any]]) -
     if filled == 0:
         info_body = "（信息树中的条目均未填写）"
     elif empty_leaf:
-        info_body += f"\n（另有 {empty_leaf} 个末级节点未填写）"
+        info_body += f"\n（另有 {empty_leaf} 个节点未填写）"
     return _PROMPT_TEMPLATE.format(
         fields=_format_project_fields(project),
         info=info_body,

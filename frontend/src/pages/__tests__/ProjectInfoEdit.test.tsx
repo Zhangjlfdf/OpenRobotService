@@ -152,7 +152,10 @@ describe('ProjectInfoEdit（信息树编辑页）', () => {
     expect(await screen.findByText('基础信息2')).toBeTruthy();
   });
 
-  it('车型节点标题直接给「选车型」下拉框（8 系列 50 款，选中写回节点名）', async () => {
+  it('车型1（下拉 + 数量子节点）：选中型号写进值，数量子节点照常可填', async () => {
+    // 车型改下拉后，型号是**值**不是节点名：全局节点各项目共用同一行，
+    // 把型号写进标题会被后端 403（全局字段定义只能在「详情模板」改），
+    // 而且会串改所有项目的车型。
     const vehicleTree: ApiInfoNode[] = [
       node({
         id: 'h1', title: '硬件', sort_order: 0,
@@ -161,7 +164,9 @@ describe('ProjectInfoEdit（信息树编辑页）', () => {
             id: 'v1', parent_id: 'h1', title: '车辆', sort_order: 0,
             children: [
               node({
-                id: 'm1', parent_id: 'v1', title: '车型1', sort_order: 0,
+                id: 'm1', parent_id: 'v1', title: '车型1', content_type: 'select', sort_order: 0,
+                options: ['XC1051', 'XCD061'],
+                value: { selected: '', options: ['XC1051', 'XCD061'] },
                 children: [node({ id: 'q1', parent_id: 'm1', title: '数量', value: '2', sort_order: 0 })],
               }),
             ],
@@ -170,24 +175,22 @@ describe('ProjectInfoEdit（信息树编辑页）', () => {
       }),
     ];
     vi.mocked(fetchInfoTree).mockResolvedValue(vehicleTree);
-    vi.mocked(updateInfoNodeApi).mockImplementation(async (nodeId, updates) =>
-      node({ id: nodeId, title: updates.title ?? '节点' }),
+    vi.mocked(setInfoNodeValueApi).mockResolvedValue(
+      node({ id: 'm1', title: '车型1', content_type: 'select' }),
     );
     renderEdit();
 
-    const select = (await screen.findByLabelText('选择车型')) as HTMLSelectElement;
-    // 8 个系列分组、50 款可选；未选择时显示节点原名占位
-    expect(select.querySelectorAll('optgroup')).toHaveLength(8);
-    expect(select.querySelectorAll('option:not([value=""])')).toHaveLength(50);
-    expect(select.value).toBe('');
-    // 「数量」等子节点不受影响，仍是普通节点
-    expect(screen.getAllByLabelText('选择车型')).toHaveLength(1);
+    // 非末级节点照样渲染自己的值编辑器：下拉与「数量」子行同时在
+    const select = (await screen.findByLabelText('车型1内容')) as HTMLSelectElement;
+    expect(Array.from(select.options).map((o) => o.value)).toEqual(['', 'XC1051', 'XCD061']);
     expect(screen.getByText('数量')).toBeTruthy();
 
     fireEvent.change(select, { target: { value: 'XC1051' } });
-    await waitFor(() => expect(updateInfoNodeApi).toHaveBeenCalledWith('m1', { title: 'XC1051' }));
-    // 保存后下拉框回显该车型
-    expect((screen.getByLabelText('选择车型') as HTMLSelectElement).value).toBe('XC1051');
+    await waitFor(() => expect(setInfoNodeValueApi).toHaveBeenCalledWith(
+      'm1', 'P1', { selected: 'XC1051', options: ['XC1051', 'XCD061'] },
+    ));
+    // 改的是值，节点定义一个字都不动
+    expect(updateInfoNodeApi).not.toHaveBeenCalled();
   });
 
   it('「新标签」先建后端节点再进入改名态', async () => {
@@ -312,11 +315,12 @@ describe('ProjectInfoEdit（信息树编辑页）', () => {
     expect(screen.queryByText('新标签')).toBeNull();
   });
 
-  it('「增补信息」：普通用户在允许增补的节点下加本项目字段，不碰全局模板', async () => {
+  it('「增补信息」：普通用户在任意节点下加本项目字段，不碰全局模板', async () => {
     authState.permissions = [];
+    // 夹具里没有任何 allow_custom：所有节点都能增补（2026-09-18 取消了逐节点开关）
     vi.mocked(fetchInfoTree).mockResolvedValue([
       node({
-        id: 'r1', title: '基础信息', sort_order: 0, allow_custom: true,
+        id: 'r1', title: '基础信息', sort_order: 0,
         children: [node({ id: 'c1', parent_id: 'r1', title: '客户信息', value: '中力', sort_order: 0 })],
       }),
     ]);
@@ -344,6 +348,30 @@ describe('ProjectInfoEdit（信息树编辑页）', () => {
     // 普通用户没有结构操作入口
     expect(screen.queryByLabelText('编辑基础信息')).toBeNull();
     expect(screen.queryByLabelText('更多操作')).toBeNull();
+  });
+
+  it('任何节点下都能增补，到第 4 层封顶', async () => {
+    authState.permissions = [];
+    // 层级：基础信息 1 → 车辆 2 → 车型3 3 → 数量 4；夹具不带 allow_custom，一律可增补
+    vi.mocked(fetchInfoTree).mockResolvedValue([
+      node({
+        id: 'r1', title: '基础信息', sort_order: 0,
+        children: [node({
+          id: 'c1', parent_id: 'r1', title: '车辆', sort_order: 0,
+          children: [node({
+            id: 'c2', parent_id: 'c1', title: '车型3', sort_order: 0,
+            children: [node({ id: 'c3', parent_id: 'c2', title: '数量', sort_order: 0 })],
+          })],
+        })],
+      }),
+    ]);
+    renderEdit();
+
+    // 模板里没开过增补的位置（车辆）和增补出来的节点（车型3）一样能加
+    expect(await screen.findByLabelText('在车辆下增补信息')).toBeTruthy();
+    expect(screen.getByLabelText('在车型3下增补信息')).toBeTruthy();
+    // 第 4 层不再给入口：层数是唯一的边界（后端同样会拒）
+    expect(screen.queryByLabelText('在数量下增补信息')).toBeNull();
   });
 
   it('历史弹层展示后端的操作记录：人员 / 变动 / 时间；子节点删除记录挂在父节点下', async () => {
@@ -512,7 +540,7 @@ describe('ProjectInfoEdit（信息树编辑页）', () => {
     expect(screen.getByLabelText('查看基础信息的编辑历史').querySelector('.mac-info-row__op-dot')).toBeTruthy();
   });
 
-  it('深层节点（第 4 层）有新变动时，红点一路汇总到最外层一级节点', async () => {
+  it('深层节点（第 4 层）有新变动时，它的每一层上级都出小红点', async () => {
     const deepTree: ApiInfoNode[] = [
       node({
         id: 'h1', title: '硬件', sort_order: 0,
@@ -535,10 +563,49 @@ describe('ProjectInfoEdit（信息树编辑页）', () => {
 
     const leafBtn = await screen.findByLabelText('查看数量的编辑历史');
     await waitFor(() => expect(leafBtn.querySelector('.mac-info-row__op-dot')).toBeTruthy());
-    // 只汇总到一级节点：中间层「车辆」「车型1」不出点
+    // 数量 → 车型1 → 车辆 → 硬件，一路都带点
+    expect(screen.getByLabelText('查看车型1的编辑历史').querySelector('.mac-info-row__op-dot')).toBeTruthy();
+    expect(screen.getByLabelText('查看车辆的编辑历史').querySelector('.mac-info-row__op-dot')).toBeTruthy();
     expect(screen.getByLabelText('查看硬件的编辑历史').querySelector('.mac-info-row__op-dot')).toBeTruthy();
-    expect(screen.getByLabelText('查看车辆的编辑历史').querySelector('.mac-info-row__op-dot')).toBeNull();
-    expect(screen.getByLabelText('查看车型1的编辑历史').querySelector('.mac-info-row__op-dot')).toBeNull();
+  });
+
+  it('点开链上任意一处的历史，整条小红点一起消失（子树整体标记已读）', async () => {
+    const deepTree: ApiInfoNode[] = [
+      node({
+        id: 'h1', title: '硬件', sort_order: 0,
+        children: [
+          node({
+            id: 'v1', parent_id: 'h1', title: '车辆', sort_order: 0,
+            children: [
+              node({
+                id: 'm1', parent_id: 'v1', title: '车型1', sort_order: 0,
+                children: [node({ id: 'q1', parent_id: 'm1', title: '数量', value: '2', sort_order: 0 })],
+              }),
+            ],
+          }),
+        ],
+      }),
+    ];
+    vi.mocked(fetchInfoTree).mockResolvedValue(deepTree);
+    vi.mocked(fetchInfoNodeChangeSummaryApi).mockResolvedValue({ q1: 'h-q1' });
+    vi.mocked(fetchInfoNodeChangesApi).mockResolvedValue([
+      change({ id: 'h-q1', node_id: 'q1', parent_id: 'm1', node_title: '数量', detail: '把内容从「2」改为「6」' }),
+    ]);
+    renderEdit();
+
+    const carBtn = await screen.findByLabelText('查看车辆的编辑历史');
+    await waitFor(() => expect(carBtn.querySelector('.mac-info-row__op-dot')).toBeTruthy());
+
+    // 点的是用户看得见的那个点（车辆），不是真正变动的叶子节点
+    fireEvent.click(carBtn);
+    expect(await screen.findByText('把内容从「2」改为「6」')).toBeTruthy();
+
+    await waitFor(() => {
+      expect(screen.getByLabelText('查看车辆的编辑历史').querySelector('.mac-info-row__op-dot')).toBeNull();
+      expect(screen.getByLabelText('查看数量的编辑历史').querySelector('.mac-info-row__op-dot')).toBeNull();
+      expect(screen.getByLabelText('查看车型1的编辑历史').querySelector('.mac-info-row__op-dot')).toBeNull();
+      expect(screen.getByLabelText('查看硬件的编辑历史').querySelector('.mac-info-row__op-dot')).toBeNull();
+    });
   });
 
   it('已删除节点的记录（树里没有这一行）不会把红点挂到别处', async () => {

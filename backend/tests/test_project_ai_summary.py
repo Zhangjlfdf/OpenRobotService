@@ -92,7 +92,7 @@ def test_build_summary_prompt_contains_fields_and_info():
     assert "控制器选择：自研" in prompt
     assert "系统/外设对接：DAS、客户WMS" in prompt
     assert "硬件 / 车辆 / XCD061：6 台" in prompt
-    assert "另有 1 个末级节点未填写" in prompt
+    assert "另有 1 个节点未填写" in prompt
     # 空值字段被跳过
     assert "项目经理" not in prompt
     # 结构化 Markdown 输出要求与硬约束在提示词里
@@ -100,6 +100,31 @@ def test_build_summary_prompt_contains_fields_and_info():
     assert "## 项目概况" in prompt
     assert "## 风险与关注点" in prompt
     assert "不得编造" in prompt
+
+
+def test_render_project_info_counts_value_bearing_groups():
+    """「有值又有子节点」的节点（下拉车型 + 数量）自己也是一条可填项。
+
+    选中了型号、数量还没填时，不能整片算成「未填写」——否则摘要会漏掉车型，
+    展示页也会把这条分支当成空分支裁掉。
+    """
+    tree = [
+        {"title": "硬件", "value": None, "content_type": "text", "children": [
+            {"title": "车辆", "value": None, "content_type": "text", "children": [
+                {"title": "车型1", "content_type": "select",
+                 "value": json.dumps({"selected": "XC1051", "options": ["XC1051"]}),
+                 "children": [
+                     {"title": "数量", "value": "", "content_type": "text", "children": []},
+                 ]},
+            ]},
+        ]},
+    ]
+    body, filled, empty_leaf = render_project_info(tree)
+    assert "硬件 / 车辆 / 车型1：XC1051" in body
+    assert filled == 1
+    assert empty_leaf == 1  # 车型1 下的「数量」未填
+    # 纯文本分组（硬件 / 车辆）自己没有值，不该被算成未填写
+    assert "硬件 / 车辆：" not in body
 
 
 def test_build_summary_prompt_empty_tree():

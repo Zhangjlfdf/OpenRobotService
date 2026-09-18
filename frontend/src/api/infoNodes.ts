@@ -46,7 +46,7 @@ export interface ApiInfoNode {
   value_type?: string;
   /** 该字段在模板里是否必填 */
   required?: boolean;
-  /** 该节点下是否允许普通用户「增补信息」 */
+  /** 节点下是否允许「增补信息」——2026-09-18 起不再是闸门，所有节点都可增补（服务端恒为 true） */
   allow_custom?: boolean;
   /** 下拉类字段的可选项（定义在节点上，全员共用） */
   options?: string[];
@@ -210,8 +210,8 @@ export async function fetchInfoNodeMarksApi(projectId: string): Promise<string[]
 }
 
 /** 切换节点关注状态，返回切换后是否被关注（404 = 节点不存在）。
- *  projectId 可选：不传时后端按该节点已有标注切换（增补节点用自己的项目）——
- *  「项目信息管理」展示卡只传 nodeId，接口保持向后兼容。 */
+ *  projectId 必须传：全局节点各项目共用同一 node_id，后端推不出是哪个项目里关注的，
+ *  不传的话新关注记不下来（只能取消已有的）。只有本项目增补节点能省略。 */
 export async function toggleInfoNodeMarkApi(nodeId: string, projectId?: string): Promise<boolean> {
   const suffix = projectId ? `?project_id=${encodeURIComponent(projectId)}` : '';
   const data = await request()<{ marked?: boolean }>(
@@ -263,6 +263,8 @@ export interface ApiParseMatchedItem {
 export interface ApiParseNewItem {
   title: string;
   value: string;
+  /** 车型条目自带的数量（如「6 台」）：新建车型节点时补一个「数量」子节点填进去 */
+  quantity?: string | null;
   /** 建议归属节点（后端已解析并校验层级）；null=前端用「导入信息」兜底 */
   suggested_parent_id: string | null;
   suggested_parent_path: string | null;
@@ -317,7 +319,7 @@ export async function parseImportFileApi(projectId: string, file: File): Promise
 
 // —— 项目详情模板（仅管理员）：编辑模板 → 保存并同步到所有项目的节点 ——
 
-/** 模板节点（递归树；id 是模板侧稳定 UUID，即项目节点同步锚点） */
+/** 模板节点（递归树；id 是节点身份的稳定 UUID，改名不换 id，历史与关注不断线） */
 export interface ApiInfoTemplateNode {
   id: string;
   title: string;
@@ -325,6 +327,10 @@ export interface ApiInfoTemplateNode {
   /** 仅 select 节点：可选项 */
   options?: string[];
   sort_order?: number;
+  /** 该字段是否必填（当前仅透传保存，前端暂不强制校验） */
+  required?: boolean;
+  /** 恒为 true：所有节点都允许各项目在其下「增补信息」（2026-09-18 取消逐节点开关） */
+  allow_custom?: boolean;
   children?: ApiInfoTemplateNode[];
 }
 

@@ -25,7 +25,9 @@ const genId = (): string => {
 };
 
 export function newTemplateNode(title = '新节点'): ApiInfoTemplateNode {
-  return { id: genId(), title, content_type: 'text', children: [] };
+  // allow_custom 写 true：所有节点都允许各项目在其下增补信息（2026-09-18 取消开关，
+  // 后端 normalize_template_nodes 也会一律归一到 true）
+  return { id: genId(), title, content_type: 'text', allow_custom: true, children: [] };
 }
 
 export function countTemplateNodes(nodes: ApiInfoTemplateNode[]): number {
@@ -115,6 +117,21 @@ export function moveTemplateSibling(
     if (!containsId(children, id)) return node;
     return { ...node, children: moveTemplateSibling(children, id, delta) };
   });
+}
+
+/**
+ * 「降一级」会归入谁：上一个同级节点的 id；已是同级第一个（降不了）返回 null。
+ * 页面用它把落点展开——否则节点降进一个收起的分支里，看上去像"点了没反应"。
+ */
+export function indentTargetId(nodes: ApiInfoTemplateNode[], id: string): string | null {
+  const index = nodes.findIndex((node) => node.id === id);
+  if (index >= 0) return index === 0 ? null : nodes[index - 1].id;
+  for (const node of nodes) {
+    const hit = indentTargetId(node.children ?? [], id);
+    if (hit !== null) return hit;
+    if (containsId(node.children ?? [], id)) return null; // 找到了，但它是那一层的第一个
+  }
+  return null;
 }
 
 /**

@@ -133,36 +133,30 @@ check('增补节点 project_id=A', custom['project_id'] == A)
 check('增补节点 is_custom=true', custom.get('is_custom') is True)
 check('增补节点 node_key 带 custom 前缀', str(custom['node_key']).startswith('custom.'))
 
-print('\n=== Case 4：A 新增自定义层级（特殊设备 → 品牌/型号/协议） ===')
+print('\n=== Case 4：A 新增自定义层级（特殊设备 → 型号，直到第 4 层封顶） ===')
 s.add_custom_node(A, pt['id'], '特殊设备', 'text', operator='zhang')
 group = find_by_name(s.get_tree(A), '特殊设备')
 check('自定义层级父节点已建立', group is not None)
-# add_custom_node 写死的 allow_custom=False，自定义节点下再加子节点会被闸门挡住
+# 新增节点自带 allow_custom=True：增补出来的节点下面还能接着增补
+check('增补出来的节点自己允许再增补', group.get('allow_custom') is True)
 try:
-    s.add_custom_node(A, group['id'], '型号', 'text', operator='zhang')
+    model_raw = s.add_custom_node(A, group['id'], '型号', 'text', operator='zhang')
     nested = True
 except PermissionError:
     nested = False
-check('自定义节点下能否再挂子节点（记录现状，非断言失败）', True,
-      f'目前 {"可以" if nested else "被 allow_custom 闸门拒绝"}')
+check('自定义节点下能再挂子节点（仅受层数限制）', nested)
 if nested:
     model = find_by_name(s.get_tree(A), '型号')
     s.set_value(A, model['id'], 'X-200', operator='zhang')
     check('两级自定义的值正确', find_by_name(s.get_tree(A), '型号')['value'] == 'X-200')
     check('B 依然看不到自定义层级', find_by_name(s.get_tree(B), '特殊设备') is None)
     check('B 也看不到二级自定义', find_by_name(s.get_tree(B), '型号') is None)
-else:
-    # 一级平铺：同一 allow_custom 父节点下并列多个自定义字段
-    s.add_custom_node(A, pt['id'], '品牌', 'text', operator='zhang')
-    model = s.add_custom_node(A, pt['id'], '型号', 'text', operator='zhang')
-    s.add_custom_node(A, pt['id'], '通讯协议', 'text', operator='zhang')
-    s.set_value(A, model['id'], 'X-200', operator='zhang')
-    check('并列的 3 个自定义字段都挂在同一父节点下',
-          find_by_name(s.get_tree(A), '型号')['parent_id'] == pt['id'])
-    check('自定义字段的值正确', find_by_name(s.get_tree(A), '型号')['value'] == 'X-200')
-    check('B 看不到 A 的任何一个自定义字段',
-          all(find_by_name(s.get_tree(B), t) is None
-              for t in ('特殊设备', '品牌', '型号', '通讯协议')))
+    # 特殊设备在第 3 层，型号第 4 层 —— 再往下必须被层数挡住
+    try:
+        s.add_custom_node(A, model['id'], '再深一层', 'text', operator='zhang')
+        check('第 5 层被层数上限挡住', False, '竟然加上了')
+    except ValueError as exc:
+        check('第 5 层被层数上限挡住', True, str(exc)[:50])
 
 print('\n=== Case 5：历史按项目隔离 ===')
 hist_a = hist.list_project_changes(A, 500)
@@ -280,12 +274,12 @@ check('库里没有落 B 的脏值',
       scalar("SELECT COUNT(*) FROM project_info_value WHERE project_id=%s AND node_id=%s",
              (B, custom['id'])) == 0)
 
-print('\n=== 附加：约束与闸门 ===')
-try:
-    s.add_custom_node(A, gid, '不该能加', 'text', operator='zhang')
-    check('allow_custom=false 的节点下增补被拒', False, '竟然加上了')
-except PermissionError as exc:
-    check('allow_custom=false 的节点下增补被拒', True, str(exc)[:50])
+print('\n=== 附加：约束与层级 ===')
+# allow_custom 不再是闸门（2026-09-18 用户要求「所有节点都默认可以增加」）：
+# 模板里没开过增补的位置也能加，唯一的边界是层数。
+extra = s.add_custom_node(A, gid, '任意节点下都能加', 'text', operator='zhang')
+check('任何节点下都能增补（allow_custom 闸门已取消）', extra.get('is_custom') is True,
+      f"挂在「客户信息」下 {extra.get('node_key')}")
 
 try:
     s.update_node(gid, {'title': '想改全局'}, operator='zhang')

@@ -4,6 +4,7 @@ import {
   appendTemplateNode,
   countTemplateNodes,
   findTemplateNode,
+  indentTargetId,
   indentTemplateNode,
   moveTemplateSibling,
   newTemplateNode,
@@ -32,11 +33,12 @@ const tree = (): ApiInfoTemplateNode[] => [
 const ids = (nodes: ApiInfoTemplateNode[]): string[] => nodes.map((node) => node.id);
 
 describe('infoTemplateTree（模板树操作）', () => {
-  it('newTemplateNode：默认 text 节点、id 唯一', () => {
+  it('newTemplateNode：默认 text 节点、允许增补、id 唯一', () => {
     const first = newTemplateNode();
     const second = newTemplateNode();
     expect(first.id).not.toBe(second.id);
-    expect(first).toMatchObject({ title: '新节点', content_type: 'text' });
+    // allow_custom 恒为 true：所有节点都允许各项目在其下增补信息
+    expect(first).toMatchObject({ title: '新节点', content_type: 'text', allow_custom: true });
     expect(newTemplateNode('项目类型').title).toBe('项目类型');
   });
 
@@ -123,5 +125,14 @@ describe('infoTemplateTree（模板树操作）', () => {
     expect(outdentTemplateNode(nodes, 'a')).toBe(nodes); // 根层无父可升
     const top = outdentTemplateNode(nodes, 'a2');
     expect(ids(top)).toEqual(['a', 'a2', 'b']);
+  });
+
+  it('indentTargetId：与 indentTemplateNode 的落点一致，降不动的返回 null', () => {
+    const nodes = tree();
+    expect(indentTargetId(nodes, 'b')).toBe('a');      // b 归入 a
+    expect(indentTargetId(nodes, 'a2')).toBe('a1');    // 深层：a2 归入 a1
+    expect(indentTargetId(nodes, 'a')).toBeNull();     // 根层第一个，无上一个同级
+    expect(indentTargetId(nodes, 'a1')).toBeNull();    // 同层第一个
+    expect(indentTargetId(nodes, '不存在')).toBeNull();
   });
 });

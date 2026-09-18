@@ -21,7 +21,9 @@ import {
   removeInfoNode,
   saveHistorySeen,
   setInfoNodeValue,
+  subtreeNodeIds,
   toggleInfoNodeMark,
+  unseenHistoryChain,
   unseenHistoryNodes,
   unseenHistoryRoots,
   updateInfoNode,
@@ -375,6 +377,35 @@ describe('编辑历史（操作记录读接口 + 本机已读水位）', () => {
     expect(unseenHistoryRoots(nodes, new Set(['missing']))).toEqual(new Set());
     expect(unseenHistoryRoots(nodes, new Set())).toEqual(new Set());
   });
+
+  it('unseenHistoryChain：未读节点自己 + 每一层上级都出点', () => {
+    const nodes = [
+      { id: 'r1', parent_id: null },
+      { id: 'c1', parent_id: 'r1' },
+      { id: 'g1', parent_id: 'c1' },
+      { id: 'r2', parent_id: null },
+    ];
+    // g1 未读：g1 → c1 → r1 三行都带点；r2 那支不受影响
+    expect(unseenHistoryChain(nodes, new Set(['g1']))).toEqual(new Set(['g1', 'c1', 'r1']));
+    // 根自身未读只带自己；两处未读合并且不重复
+    expect(unseenHistoryChain(nodes, new Set(['r2']))).toEqual(new Set(['r2']));
+    expect(unseenHistoryChain(nodes, new Set(['g1', 'r2']))).toEqual(new Set(['g1', 'c1', 'r1', 'r2']));
+    // 树里已删除（只剩记录）的节点不出点、也不往上挂
+    expect(unseenHistoryChain(nodes, new Set(['missing']))).toEqual(new Set());
+  });
+
+  it('subtreeNodeIds：节点自己 + 全部子孙（点开一处历史 = 这棵子树都算看过）', () => {
+    const nodes = [
+      { id: 'r1', parent_id: null },
+      { id: 'c1', parent_id: 'r1' },
+      { id: 'g1', parent_id: 'c1' },
+      { id: 'r2', parent_id: null },
+    ];
+    expect(subtreeNodeIds(nodes, 'r1').sort()).toEqual(['c1', 'g1', 'r1']);
+    expect(subtreeNodeIds(nodes, 'c1').sort()).toEqual(['c1', 'g1']);
+    expect(subtreeNodeIds(nodes, 'r2')).toEqual(['r2']);
+    expect(subtreeNodeIds(nodes, 'missing')).toEqual(['missing']); // 树里没有的 id 只回它自己
+  });
 });
 
 describe('关注（星标）与项目动态', () => {
@@ -473,5 +504,33 @@ describe('已填写信息统计（展示页裁剪空内容的依据）', () => {
     expect(hasFieldValue(leaf('f1', null, 'A', { name: '方案.pdf' }, 'file'))).toBe(true);
     expect(hasFieldValue(leaf('f2', null, 'A', { name: '' }, 'file'))).toBe(false);
     expect(hasFieldValue(leaf('f3', null, 'A', {}, 'image'))).toBe(false);
+  });
+
+  // 「有值又有子节点」的节点：车型1 是下拉（选中型号），下面还挂着「数量」
+  const withValues: ProjectInfoNode[] = [
+    leaf('h', null, '硬件', ''),
+    leaf('v', 'h', '车辆', ''),
+    leaf('m', 'v', '车型1', { selected: 'XC1051', options: ['XC1051'] }, 'select'),
+    leaf('q', 'm', '数量', ''), // 数量没填
+  ];
+
+  it('节点自己的值也计入：车型1 选了型号、数量没填时整条分支仍然有值', () => {
+    const counts = countInfoValues(withValues);
+    expect(counts.get('m')).toBe(1); // 型号本身，数量为空不算
+    expect(counts.get('v')).toBe(1); // 车辆自己没有值，靠车型1
+    expect(counts.get('h')).toBe(1);
+  });
+
+  it('完整度统计把带值的非末级节点算成一条：数量空 → 该标签信息不全', () => {
+    // 可填的是 车型1（已填）与 数量（空）；纯文本的 硬件 / 车辆 是分组，不算条目
+    expect(computeInfoCompleteness(withValues).get('h'))
+      .toEqual({ total: 2, empty: 1, incomplete: true });
+  });
+
+  it('车型1 与数量都填好时该标签信息完整', () => {
+    const filled = withValues.map((node) =>
+      node.id === 'q' ? { ...node, value: '6 台' } : node);
+    expect(computeInfoCompleteness(filled).get('h'))
+      .toEqual({ total: 2, empty: 0, incomplete: false });
   });
 });

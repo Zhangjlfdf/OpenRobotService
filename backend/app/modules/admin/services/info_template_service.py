@@ -106,6 +106,10 @@ def normalize_template_nodes(nodes: Any, depth: int = 1) -> List[Dict]:
 
     规则：标题非空、整树最深 MAX_TEMPLATE_DEPTH 层、（另由 _assert_keys_unique 保证）
     同级节点标识不重复。返回规范化后的新树。不合法直接抛 ValueError（接口层转 400）。
+
+    **值类型与子节点互不排斥**：一个节点可以既有自己的值（如下拉选中的车型）又有子节点
+    （如该车型的数量）。原先「select/attachment 必须是末级」的限制已取消，只有根节点例外
+    ——根节点是一级标签、只作分组用，值类型锁死 text。
     """
     if not isinstance(nodes, list) or not nodes:
         raise ValueError("模板不能为空，至少保留一个节点")
@@ -125,8 +129,9 @@ def normalize_template_nodes(nodes: Any, depth: int = 1) -> List[Dict]:
         content_type = raw.get("content_type")
         value_type = _to_value_type(content_type or raw.get("value_type"))
         children = raw.get("children") or []
-        if value_type in ("select", "attachment") and children:
-            raise ValueError(f"「{title}」是末级字段，不能有子节点")
+        if depth == 1:
+            # 根节点=一级标签，只作分组：它自己不带值，类型锁死 text（传了别的也归一）
+            value_type = "text"
 
         node: Dict[str, Any] = {
             "id": raw.get("id") or None,
@@ -135,13 +140,15 @@ def normalize_template_nodes(nodes: Any, depth: int = 1) -> List[Dict]:
             "content_type": _to_content_type(value_type),
             "sort_order": (index + 1) * 10,
             "required": bool(raw.get("required")),
-            "allow_custom": bool(raw.get("allow_custom")),
+            # 所有节点都允许各项目在其下增补信息（2026-09-18 起取消「详情模板」页的开关），
+            # 提交里带什么都归一到 true —— 闸门没了，增补的唯一边界是层数（4 层）
+            "allow_custom": True,
             "children": normalize_template_nodes(children, depth + 1) if children else [],
         }
         if value_type == "select":
             node["options"] = _flatten_options(raw.get("options"))
-        elif node["allow_custom"] and raw.get("options"):
-            # 允许增补的父节点也可以带默认选项（当前无此用法，保留透传避免丢数据）
+        elif raw.get("options"):
+            # 非下拉节点也可能带 options（历史数据/预留用法），保留透传避免丢数据
             node["options"] = _flatten_options(raw.get("options"))
         normalized.append(node)
     return normalized
@@ -258,7 +265,8 @@ class InfoTemplateService:
         """保存模板 = 把全局节点行改成提交的这棵树（不再有「同步到项目」这一步）。
 
         三件事在同一事务里完成：
-          1. 提交树里已有的节点 → 改名 / 改类型 / 改排序 / 改 allow_custom；
+          1. 提交树里已有的节点 → 改名 / 改类型 / 改排序
+             （allow_custom 一律写 true：所有节点都可被各项目增补，2026-09-18 起无开关）；
           2. 提交树里没有的全局节点 → status='disabled'（软停用，不动 project_info_value，
              字段重新加回来时项目已填的值还在）；
           3. 提交树里的新节点 → 按标题路径派生稳定 id 插入。
@@ -355,6 +363,8 @@ class InfoTemplateService:
             # node_type 与迁移播种同一套规则：最顶层是 root（哪怕它有子节点），
             # 非顶层且有子节点才是 group。两处不一致会让同一棵树在
             # 「迁移播种的节点」和「管理员保存过的节点」之间出现类型漂移。
+            # 注意 node_type 只看**结构**：既带值又带子节点的节点（下拉+数量）仍是 group，
+            # 值的那一面由 value_type 表达，两者互不影响。
             if parent_id is None:
                 node_type = "root"
             elif children:

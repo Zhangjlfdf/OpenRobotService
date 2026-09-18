@@ -11,7 +11,7 @@
   结构改动（新增/改名/移动/删除/改值类型）→ 只有管理员能改全局节点
     （路由层 get_current_admin_user；本层再校验「非本项目增补节点不得由普通写路径改动」）；
   值写入 → 任何登录用户都能写**已存在**节点的值，但不能改结构、不能新增节点。
-普通用户要多记东西，走 add_custom_node（受父节点 allow_custom 闸门 + 层数限制）——
+普通用户要多记东西，走 add_custom_node（任何节点下都能增补，只受层数限制，最多 4 层）——
 「增补信息」而非「改树」。
 
 所有写操作在同一事务里追加历史（info_node_change_service.add_history）：
@@ -205,6 +205,7 @@ def _node_to_dict(node: ProjectInfoNode, value, children: List[Dict]) -> Dict:
     与编辑页的读渲染完全不必改；新字段（node_key / node_type / value_type /
     required / allow_custom / is_custom）作为附加信息给出，供编辑页区分
     「全局字段」与「本项目增补字段」并决定是否允许增删改。
+    （allow_custom 已不再是增补闸门，保留下发只为兼容既有前端契约。）
     """
     return {
         "id": node.id,
@@ -438,8 +439,11 @@ class InfoNodeService:
         """在项目里增补一个自定义节点（可选带初始值）。
 
         与「改树」的区别：这里**只动本项目**（project_id=A），全局定义不受影响，
-        别的项目也看不到。父节点必须允许增补（allow_custom）——这是 SKILL 第 5.10 节
-        的闸门：模板说这个位置可以加字段，才允许加。
+        别的项目也看不到。
+
+        任何节点下都能增补（2026-09-18 用户要求「所有节点都默认可以增加」，
+        allow_custom 不再是闸门），层层套下去直到 MAX_INFO_DEPTH 为止——
+        第 4 层是唯一的边界。
         """
         name = (node_name or '').strip()
         if not name:
@@ -453,10 +457,6 @@ class InfoNodeService:
             if parent_id:
                 parent = self._require_node(db, parent_id)
                 self._assert_writable_scope(db, project_id, parent)
-                if not parent.allow_custom:
-                    raise PermissionError(
-                        f"「{parent.node_name}」下不允许增补自定义信息，请选择其它位置"
-                    )
                 if self._depth_of(db, parent_id) + 1 > MAX_INFO_DEPTH:
                     raise ValueError(f"信息层级最多 {MAX_INFO_DEPTH} 层，该位置不能再往下加")
 
@@ -479,7 +479,9 @@ class InfoNodeService:
                 value_type=value_type,
                 sort_order=sort_order,
                 required=False,
-                allow_custom=False,
+                # 一律 true：所有节点都可被增补（2026-09-18 起 allow_custom 不再是闸门，
+                # 从此只是「此节点下允许增补」这个事实的记录）
+                allow_custom=True,
                 config=None,
                 status=PROJECT_INFO_NODE_ACTIVE,
                 created_by=operator,
@@ -551,6 +553,10 @@ class InfoNodeService:
                 new_type = update_data.get('value_type') or update_data.get('content_type')
                 if new_type not in PROJECT_INFO_VALUE_TYPES:
                     raise ValueError(f"不支持的节点类型：{new_type}")
+                if node.parent_id is None and new_type != 'text':
+                    # 一级标签只作分组、自己不填值（前端也不给它渲染值编辑器），
+                    # 与 info_template_service.normalize_template_nodes 的根节点规则一致
+                    raise ValueError("一级标签只作分组，不能设置内容类型")
                 node.value_type = new_type
             if 'sort_order' in update_data and update_data['sort_order'] is not None:
                 node.sort_order = int(update_data['sort_order'])
@@ -780,7 +786,9 @@ class InfoNodeService:
                         value_type=value_type,
                         sort_order=item.get("sort_order", order * 10),
                         required=False,
-                        allow_custom=False,
+                        # 与 add_custom_node 同一口径：新增的节点自己开放增补，
+                        # 层数由上面的 depth 校验（MAX_INFO_DEPTH）兜底
+                        allow_custom=True,
                         config=config,
                         status=PROJECT_INFO_NODE_ACTIVE,
                         created_by=operator,

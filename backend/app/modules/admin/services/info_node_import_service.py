@@ -43,81 +43,91 @@ LLM_TIMEOUT_SECONDS = 120.0
 
 SYSTEM_PROMPT = "你是项目信息整理助手，只输出 JSON，不输出任何解释文字或 Markdown 代码块。"
 
-# AGV 车型目录（8 大系列 50 款）——信息树里存在车辆/车型节点时注入提示词，规范车型写法。
-# 与前端 frontend/src/shared/utils/vehicleModels.ts 的 VEHICLE_MODEL_SERIES 保持一致，改动时两边同步。
-VEHICLE_MODEL_SERIES: List[Tuple[str, List[Tuple[str, str]]]] = [
-    ("潜伏小车系列", [
-        ("XC1051", "背负式搬运机器人 500 kg"),
-        ("XC1061", "跟随潜伏式机器人 600 kg"),
-        ("XCD031", "潜伏顶升搬运机器人 300 kg"),
-        ("XCD061", "潜伏顶升搬运机器人 600 kg"),
-        ("XCD101", "潜伏顶升搬运机器人 1000 kg"),
-        ("XCD151", "潜伏顶升搬运机器人 1500 kg"),
-        ("XCD301", "全向潜伏顶升式机器人 3000 kg"),
-        ("XCD501", "重载潜伏顶升式机器人 5000 kg"),
-    ]),
-    ("自动搬运车系列", [
-        ("EXP15", "极简自动搬运车 1500 kg"),
-        ("RPG201", "踏板式自动搬运车 2000 kg"),
-        ("XPC151", "极简智能搬运车 1500 kg"),
-        ("XPG151", "步行式自动搬运车 1500 kg"),
-        ("XSG121", "堆高式自动搬运车 1200 kg"),
-    ]),
-    ("智能搬运车系列", [
-        ("XCF101", "潜伏式叉车机器人 1000 kg"),
-        ("XP1151", "点对点智能搬运机器人 1500 kg"),
-        ("XP1152", "点对点智能搬运机器人 1500 kg"),
-        ("XP1201", "薄背搬运式机器人 2000 kg"),
-        ("XP3201", "室内外多场景智能搬运机器人 2000 kg"),
-        ("XPL201", "高速重载智能搬运机器人 2000 kg"),
-        ("XPL201P", "物流专用高速搬运机器人 2000 kg"),
-        ("XPL201T", "薄背物流专用搬运机器人 2000 kg"),
-        ("XPL301", "高速重载智能搬运机器人 3000 kg"),
-        ("XPL501", "高速重载智能搬运机器人 5000 kg"),
-    ]),
-    ("智能堆高系列", [
-        ("XFL201", "平衡重式机器人 2000 kg"),
-        ("XNA101", "双侧叉平衡重式机器人 1000 kg"),
-        ("XNA121", "双侧叉平衡重式机器人 1200 kg"),
-        ("XNA151", "单侧叉平衡重式机器人 1500 kg"),
-        ("XQE151", "平衡重式机器人 1500 kg"),
-        ("XS1151", "薄背堆高机器人 1500 kg"),
-        ("XS1152", "薄背堆高机器人 1500 kg"),
-        ("XS1161", "超薄托盘堆垛机器人 1600 kg"),
-        ("XS2201", "重载堆高机器人 2000 kg"),
-        ("XSC081", "平衡重式堆高机器人 800 kg"),
-        ("XSC121", "平衡重式堆高机器人 1200 kg"),
-        ("XSC151", "平衡重式堆高机器人 1500 kg"),
-        ("XSC201", "平衡重式堆高机器人 2000 kg"),
-        ("XSF101", "单侧叉堆高式机器人 1000 kg"),
-    ]),
-    ("智能前移系列", [
-        ("XQC161", "室内前移式机器人 1600 kg"),
-        ("XQC201", "室内前移式机器人 2000 kg"),
-        ("XQE122", "室内前移式机器人 1200 kg"),
-        ("XQS151", "室外前移式机器人 1500 kg"),
-        ("XQS181", "室外前移式机器人 1800 kg"),
-    ]),
-    ("智能牵引系列", [
-        ("XCART", "智能观光车 500 kg"),
-        ("XCT201", "室内牵引式机器人 2000 kg"),
-        ("XTD401", "室外牵引式机器人 4000 kg"),
-        ("XTD601", "室外牵引式机器人 6000 kg"),
-    ]),
-    ("智能拣料系列", [
-        ("XCU0051", "料箱存取机器人 50/50+50×4 kg"),
-    ]),
-    ("具身机器人系列", [
-        ("XCB031", "单臂具身机器人 背负 300 kg / 抓取 2-5 kg"),
-        ("XCL0051", "料箱转运具身机器人 50×4 kg"),
-        ("XCO0051", "料箱拣选具身机器人 5/50+50 kg"),
-    ]),
+# AGV 车型目录（66 款）——信息树里存在车辆/车型节点时注入提示词，规范车型写法。
+# 型号清单与前端 frontend/src/shared/utils/vehicleModels.ts 的 VEHICLE_MODEL_CODES
+# **必须一字不差**，改动时两边同步；库里车型1/车型2 的 config.options 由
+# 迁移 4a7c2e9d1b53 同步，别只改代码。
+VEHICLE_MODEL_CODES: List[str] = [
+    'UHX-01', 'EXP15', 'RPG201', 'XCART', 'XC1031', 'XC1051', 'XC1061', 'XCS101U',
+    'XCU0051', 'XCL0051', 'XCO0051', 'XCB031', 'XCF101', 'XFC001', 'XFC002', 'XCD0051',
+    'XCD031', 'XCD061', 'XCD062', 'XCD101', 'XCD151', 'XCD202Y', 'XCD301', 'XCD501',
+    'XCT201', 'XTD401', 'XTD601', 'XPA152', 'XPC151', 'XPG151', 'XP1151', 'XP1152',
+    'XP1153', 'XP1201', 'XP3201', 'XPL201', 'XPL201P', 'XPL201T', 'XPL301', 'XPL501',
+    'XQE122', 'XQE151', 'XQC161', 'XQC163', 'XQC201', 'XQS151', 'XQS181', 'XS1151',
+    'XS1152', 'XS1201', 'XS2201', 'XSC081', 'XSC121', 'XSC151', 'XSC201', 'XSF101',
+    'XSG121', 'XNA101', 'XNA121', 'XNA151', 'XFL151E', 'XFL201', 'XFL301', 'XFL351',
+    'XORD1', 'XORD3',
 ]
+
+# 旧型号名 → 现型号（文件里可能还写着老名字，别让它因为改名而匹配不上下拉）。
+# 只有改过号的才登记；比对时两边都过 _norm，所以大小写/连字符差异不用写在这里。
+VEHICLE_MODEL_ALIASES: Dict[str, str] = {
+    'XS1161': 'XS1201',
+}
+
+# 型号 → 中文全称，只给提示词用（文件里写「潜伏顶升搬运机器人 1500kg」时靠它对上 XCD151）。
+# 没登记名称的型号在提示词里只出现型号本身——宁可不写，也别把猜测的载重/结构写进去。
+VEHICLE_MODEL_NAMES: Dict[str, str] = {
+    'XC1051': '背负式搬运机器人 500 kg',
+    'XC1061': '跟随潜伏式机器人 600 kg',
+    'XCD031': '潜伏顶升搬运机器人 300 kg',
+    'XCD061': '潜伏顶升搬运机器人 600 kg',
+    'XCD101': '潜伏顶升搬运机器人 1000 kg',
+    'XCD151': '潜伏顶升搬运机器人 1500 kg',
+    'XCD301': '全向潜伏顶升式机器人 3000 kg',
+    'XCD501': '重载潜伏顶升式机器人 5000 kg',
+    'EXP15': '极简自动搬运车 1500 kg',
+    'RPG201': '踏板式自动搬运车 2000 kg',
+    'XPC151': '极简智能搬运车 1500 kg',
+    'XPG151': '步行式自动搬运车 1500 kg',
+    'XSG121': '堆高式自动搬运车 1200 kg',
+    'XCF101': '潜伏式叉车机器人 1000 kg',
+    'XP1151': '点对点智能搬运机器人 1500 kg',
+    'XP1152': '点对点智能搬运机器人 1500 kg',
+    'XP1201': '薄背搬运式机器人 2000 kg',
+    'XP3201': '室内外多场景智能搬运机器人 2000 kg',
+    'XPL201': '高速重载智能搬运机器人 2000 kg',
+    'XPL201P': '物流专用高速搬运机器人 2000 kg',
+    'XPL201T': '薄背物流专用搬运机器人 2000 kg',
+    'XPL301': '高速重载智能搬运机器人 3000 kg',
+    'XPL501': '高速重载智能搬运机器人 5000 kg',
+    'XFL201': '平衡重式机器人 2000 kg',
+    'XNA101': '双侧叉平衡重式机器人 1000 kg',
+    'XNA121': '双侧叉平衡重式机器人 1200 kg',
+    'XNA151': '单侧叉平衡重式机器人 1500 kg',
+    'XQE151': '平衡重式机器人 1500 kg',
+    'XS1151': '薄背堆高机器人 1500 kg',
+    'XS1152': '薄背堆高机器人 1500 kg',
+    'XS1201': '超薄托盘堆垛机器人 2000 kg',   # 原 XS1161 改号（产品资料：2.0 吨超薄托盘堆垛）
+    'XS2201': '重载堆高机器人 2000 kg',
+    'XSC081': '平衡重式堆高机器人 800 kg',
+    'XSC121': '平衡重式堆高机器人 1200 kg',
+    'XSC151': '平衡重式堆高机器人 1500 kg',
+    'XSC201': '平衡重式堆高机器人 2000 kg',
+    'XSF101': '单侧叉堆高式机器人 1000 kg',
+    'XQC161': '室内前移式机器人 1600 kg',
+    'XQC201': '室内前移式机器人 2000 kg',
+    'XQE122': '室内前移式机器人 1200 kg',
+    'XQS151': '室外前移式机器人 1500 kg',
+    'XQS181': '室外前移式机器人 1800 kg',
+    'XCART': '智能观光车 500 kg',
+    'XCT201': '室内牵引式机器人 2000 kg',
+    'XTD401': '室外牵引式机器人 4000 kg',
+    'XTD601': '室外牵引式机器人 6000 kg',
+    'XCU0051': '料箱存取机器人 50/50+50×4 kg',
+    'XCB031': '单臂具身机器人 背负 300 kg / 抓取 2-5 kg',
+    'XCL0051': '料箱转运具身机器人 50×4 kg',
+    'XCO0051': '料箱拣选具身机器人 5/50+50 kg',
+    'XFC001': '数智飞仓',
+    'XFC002': '数智飞仓',
+}
 
 _W_NS = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 
 # 相似度比较前抹掉的空白与标点（中英文标点、括号、分隔符、连接符等）
 _NORM_STRIP_RE = re.compile(r"[\s　()（）\[\]【】<>《》\"'“”‘’,，。.：:；;、·|/\\\-—_~]+")
+# 从识别值里抠型号用：字母/数字/连字符组成的片段（「XCD101 潜伏顶升搬运机器人」→ XCD101）
+_MODEL_TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9\-]*")
 
 
 # ── 小工具 ────────────────────────────────────────────────────────
@@ -163,11 +173,19 @@ def project_name_mismatch(system_name: str, file_name: Optional[str]) -> bool:
 
 
 def _select_state(node: Dict) -> Tuple[str, List[str]]:
-    """下拉节点的 (selected, options)；坏数据按空处理。"""
+    """下拉节点的 (selected, options)；坏数据按空处理。
+
+    value 有两种形态：接口树里已是 {selected, options} 字典（_encode_value 现拼的），
+    旧调用方（如导入源）给的是同结构 JSON 字符串——两种都认。只认字符串会让所有下拉
+    在这里退化成空：选项空 → 值匹配不上、当前值读成空串。
+    """
+    raw = node.get("value")
     parsed: Any = None
-    if isinstance(node.get("value"), str):
+    if isinstance(raw, dict):
+        parsed = raw
+    elif isinstance(raw, str):
         try:
-            parsed = json.loads(node["value"])
+            parsed = json.loads(raw)
         except (json.JSONDecodeError, TypeError):
             parsed = None
     if not isinstance(parsed, dict):
@@ -321,13 +339,22 @@ def flatten_tree(roots: List[Dict]) -> List[Dict]:
     return flat
 
 
+def is_fillable_node(node: Dict) -> bool:
+    """该节点自己能不能填值：末级字段，或本身带值类型的分组。
+
+    与前端渲染规则、模板校验同一口径——纯 text 的非末级节点只是分组，自己没有值；
+    而「车型1」（下拉 + 「数量」子节点）两者兼具，既在下拉里选型号、又要能匹配到。
+    """
+    return (not node["has_children"]) or (node.get("content_type") or "text") != "text"
+
+
 def build_node_catalog(flat: List[Dict]) -> str:
-    """给大模型看的节点清单：每行「节点路径<TAB>内容类型[<TAB>可选项]」，末级另标注。"""
+    """给大模型看的节点清单：每行「节点路径<TAB>内容类型[<TAB>可选项]」，可填值的另标注。"""
     lines: List[str] = []
     for node in flat:
-        leaf_mark = "" if node["has_children"] else "\t(末级)"
+        fill_mark = "\t(可填)" if is_fillable_node(node) else ""
         options = f"\t可选项：{'|'.join(node['options'])}" if node["options"] else ""
-        lines.append(f"{node['path']}\t{node['content_type']}{leaf_mark}{options}")
+        lines.append(f"{node['path']}\t{node['content_type']}{fill_mark}{options}")
     return "\n".join(lines)
 
 
@@ -350,10 +377,10 @@ def find_vehicle_parent_path(flat: List[Dict]) -> Optional[str]:
 
 
 def build_vehicle_model_catalog() -> str:
-    """AGV 车型清单（分系列，「型号（名称）」）——仅信息树有车辆/车型节点时进提示词。"""
-    return "\n".join(
-        f"{series}：" + "、".join(f"{code}（{name}）" for code, name in models)
-        for series, models in VEHICLE_MODEL_SERIES
+    """AGV 车型清单（「型号（中文全称）」，没登记名称的只写型号）——仅信息树有车辆/车型节点时进提示词。"""
+    return "、".join(
+        f"{code}（{VEHICLE_MODEL_NAMES[code]}）" if code in VEHICLE_MODEL_NAMES else code
+        for code in VEHICLE_MODEL_CODES
     )
 
 
@@ -368,12 +395,13 @@ def build_import_prompt(
     同时把「本次导入的目标项目名称」告知大模型，并要求它回传「文件里自己写的项目名称」
     （projectName），供后端比对、提醒用户可能导错了文件。
     信息树里有车辆/车型节点时（vehicle_parent_path 非空）额外注入 AGV 车型清单，
-    让车型信息的 title 直接用车型型号（与编辑页的车型下拉框同一份目录）。
+    让车型落到「车型N」下拉框的值上（与模板页「填入车型目录」同一份目录），
+    数量随同一条的 quantity 字段给出，由 match_items 填进该车型下的「数量」子节点。
     """
     target = project_name or "（未提供）"
     rules = """1. 只抽取文件里明确写到的信息，禁止编造、外推或用常识补全；文件里没写的节点不要出现在结果里。
 2. 每条信息给出简洁准确的内容 value（保留型号、IP、端口、日期、数量等原文细节），不超过 200 字。
-3. 节点匹配从严：只有当该信息与某个末级节点语义一致、把握 ≥ 0.9（满分 1）时，nodeTitle 才填该节点的标题（逐字复制清单里的文字，不含路径）；把握不足时 nodeTitle 填 null，并在 suggestedParentPath 里给出建议归属的节点路径（从清单里选最贴切的一级/二级路径）。
+3. 节点匹配从严：只有当该信息与某个「(可填)」节点语义一致、把握 ≥ 0.9（满分 1）时，nodeTitle 才填该节点的标题（逐字复制清单里的文字，不含路径）；把握不足时 nodeTitle 填 null，并在 suggestedParentPath 里给出建议归属的节点路径（从清单里选最贴切的一级/二级路径）。
 4. 若匹配到内容类型为 select 的节点，value 必须是该节点可选项中的某一项（逐字一致）；没有合适选项就按未匹配处理（nodeTitle 填 null）。
 5. 同一个节点最多匹配一条信息；一条信息最多匹配一个节点。
 6. 与项目无关或零散无法归类的信息不要输出。
@@ -381,16 +409,19 @@ def build_import_prompt(
     vehicle_block = ""
     if vehicle_parent_path:
         rules += f"""
-8. 文件中提到的 AGV 车型（设备型号）属于车辆信息：title 直接用车型型号（文件写法与下面车型清单不同时，用清单里的型号，如「XC1051」）；value 填该车型的数量或其它明确信息（文件只写了车型、没有别的信息时，value 填清单里该车型的完整名称）；nodeTitle 填 null，suggestedParentPath 填「{vehicle_parent_path}」。"""
+8. 文件中提到的 AGV 车型（设备型号）属于车辆信息，一个车型输出**一条**信息：
+   - 车型型号写进**车型节点的值**，不是写进标题：该车型若对应清单里「{vehicle_parent_path}」下某个「车型N」节点（内容类型 select），把 nodeTitle 填成该节点标题、value 填**清单里的车型型号**（文件写法不同时用清单写法，如「XC1051」，旧型号 XS1161 一律写 XS1201）；
+   - 该车型的数量放进同一条的 quantity 字段（如「6 台」），后端会填到该车型节点下的「数量」子节点；文件没写数量就填 null。不要再单独输出「数量」条目；
+   - 清单里的「车型N」节点数不够（车型比节点多）时，多出来的车型 nodeTitle 填 null、suggestedParentPath 填「{vehicle_parent_path}」，title 填清单里的车型型号，quantity 照填。"""
         vehicle_block = f"""
-下面是 AGV 车型清单（按系列分组，「型号（名称）」），用于规范车型信息的写法：
+下面是 AGV 车型清单（「型号（中文全称）」，没带名称的型号只有型号本身），用于规范车型信息的写法：
 <<<车型清单
 {build_vehicle_model_catalog()}
 >>>
 """
     return f"""本次导入的目标项目名称是：「{target}」（仅供你参考上下文，不要假设文件一定属于该项目）。
 
-下面是一个项目的「信息节点清单」（每行：节点路径<TAB>内容类型[<TAB>可选项]，“/”表示层级，末级节点才能填写内容）：
+下面是一个项目的「信息节点清单」（每行：节点路径<TAB>内容类型[<TAB>可选项]，“/”表示层级，标了「(可填)」的节点才能填内容）：
 <<<节点清单
 {catalog}
 >>>
@@ -404,7 +435,7 @@ def build_import_prompt(
 {rules}
 
 只输出如下 JSON（不要输出 Markdown 代码块或任何解释；没有识别到信息时 items 为空数组）：
-{{"projectName": "文件中出现的项目名称，没有则 null", "items": [{{"title": "信息名称（尽量用清单中的节点标题）", "value": "信息内容", "nodeTitle": "匹配到的节点标题，或 null", "suggestedParentPath": "建议归属的节点路径，或 null"}}]}}"""
+{{"projectName": "文件中出现的项目名称，没有则 null", "items": [{{"title": "信息名称（尽量用清单中的节点标题）", "value": "信息内容", "nodeTitle": "匹配到的节点标题，或 null", "quantity": "车型数量（只有车型条目填，其它一律 null）", "suggestedParentPath": "建议归属的节点路径，或 null"}}]}}"""
 
 
 # ── 第三步：解析大模型输出 ─────────────────────────────────────────
@@ -443,12 +474,16 @@ def _normalize_items(items: Any) -> List[Dict[str, Optional[str]]]:
         node_title = str(node_title).strip() if isinstance(node_title, str) and node_title.strip() else None
         parent_path = item.get("suggestedParentPath")
         parent_path = str(parent_path).strip() if isinstance(parent_path, str) and parent_path.strip() else None
+        # 车型条目自带的「数量」（如「6 台」）：匹配后落进该车型节点的「数量」子节点
+        quantity = item.get("quantity")
+        quantity = str(quantity).strip() if quantity is not None else ""
         if not value or not (title or node_title):
             continue
         normalized.append({
             "title": title,
             "value": value,
             "node_title": node_title,
+            "quantity": quantity or None,
             "suggested_parent_path": parent_path,
         })
     return normalized
@@ -520,9 +555,60 @@ def _pick_same_title(candidates: List[Dict], parent_hint: Optional[str]) -> Dict
     return next((c for c in candidates if hint and hint in _norm(c["path"])), candidates[0])
 
 
+def _prefer_value_holder(candidates: List[Dict], parent_hint: Optional[str], value: str) -> Dict:
+    """同名节点消歧：建议归属路径 → 能装下这个值的下拉 → 第一个。
+
+    旧版导入把车型写成「标题=型号」的文本节点，项目下于是留下过 text 版「车型1」，
+    与全局的「车型1」下拉同名。按标题取第一个常取到那个孤儿节点，值写进文本节点、
+    下拉始终空着——所以要优先挑真能装下这个值的那一个。
+    """
+    picked = _pick_same_title(candidates, parent_hint)
+    hint = _norm(parent_hint or "")
+    if len(candidates) == 1 or not value or (hint and hint in _norm(picked["path"])):
+        return picked
+    holder = next((c for c in candidates
+                   if c["content_type"] == "select" and snap_select_value(value, c["options"]) is not None), None)
+    return holder if holder is not None else picked
+
+
+def snap_select_value(value: str, options: List[str]) -> Optional[str]:
+    """识别值 → 节点可选项（对不上返回 None，由调用方按未匹配处理）。
+
+    先精确比（忽略大小写、空白与常见标点）；不中时，**只有可选项是车型型号**才再放宽一层：
+    型号大小写/连字符差异、旧型号名（XS1161→XS1201）、值里夹带中文全称或数量
+    （「XCD101 潜伏顶升搬运机器人」「2 台 XCD101」）。一个值里认出多个不同型号时
+    返回 None —— 宁可让用户手动归属，也不要蒙一个。
+    普通下拉（项目类型等）不放宽：「试点项目一期」不该被吸到「试点项目」上。
+    """
+    exact = next((option for option in options if _norm(option) == _norm(value)), None)
+    if exact is not None:
+        return exact
+    if not value:
+        return None
+
+    by_norm = {_norm(code): code for code in VEHICLE_MODEL_CODES}
+    model_options = {_norm(option): option for option in options if _norm(option) in by_norm}
+    if not model_options:
+        return None
+
+    hits: List[str] = []
+    for token in _MODEL_TOKEN_RE.findall(value):
+        key = _norm(token)
+        key = _norm(VEHICLE_MODEL_ALIASES.get(key.upper(), key))
+        code = by_norm.get(key)
+        if code is None or _norm(code) not in model_options:
+            continue
+        option = model_options[_norm(code)]
+        if option not in hits:
+            hits.append(option)
+    return hits[0] if len(hits) == 1 else None
+
+
 def match_items(flat: List[Dict], items: List[Dict[str, Optional[str]]]) -> Dict[str, List[Dict]]:
     """识别条目 → 现有节点匹配，返回 {fill, overwrite, unmatched} 三类预览数据。"""
-    leaves = [n for n in flat if not n["has_children"] and n["content_type"] in ("text", "select")]
+    # 候选=能填值的节点。不能只看末级：车型1 是下拉且带「数量」子节点，
+    # 按「末级」筛会把它整个排除在匹配之外，车型永远只能当新节点建。
+    leaves = [n for n in flat if is_fillable_node(n) and n["content_type"] in ("text", "select")]
     by_title: Dict[str, List[Dict]] = {}
     by_path: Dict[str, Dict] = {}
     for leaf in leaves:
@@ -550,10 +636,10 @@ def match_items(flat: List[Dict], items: List[Dict[str, Optional[str]]]) -> Dict
                 match = by_path[key_norm]
                 break
             if key_norm in by_title:
-                match = _pick_same_title(by_title[key_norm], parent_hint)
+                match = _prefer_value_holder(by_title[key_norm], parent_hint, value)
                 break
 
-        # 2) 相似度兜底：与末级节点标题做序列相似度，达到阈值（0.9）才认
+        # 2) 相似度兜底：与可填节点标题做序列相似度，达到阈值（0.9）才认
         if match is None:
             best: Optional[Dict] = None
             best_score = 0.0
@@ -567,9 +653,9 @@ def match_items(flat: List[Dict], items: List[Dict[str, Optional[str]]]) -> Dict
             if best is not None and best_score >= SIMILARITY_THRESHOLD:
                 match = best
 
-        # 3) 匹配到下拉节点：识别值必须命中可选项，否则按未匹配处理
+        # 3) 匹配到下拉节点：识别值必须命中可选项（车型型号再放宽一层），否则按未匹配处理
         if match is not None and match["content_type"] == "select":
-            canonical = next((option for option in match["options"] if _norm(option) == _norm(value)), None)
+            canonical = snap_select_value(value, match["options"])
             if canonical is None:
                 match = None
             else:
@@ -580,6 +666,7 @@ def match_items(flat: List[Dict], items: List[Dict[str, Optional[str]]]) -> Dict
             unmatched.append({
                 "title": title or (node_title or ""),
                 "value": value,
+                "quantity": item.get("quantity") or None,
                 "suggested_parent_id": parent_id,
                 "suggested_parent_path": parent_path,
             })
@@ -590,19 +677,44 @@ def match_items(flat: List[Dict], items: List[Dict[str, Optional[str]]]) -> Dict
         seen_node_ids.add(match["id"])
 
         current = _current_text(match)
-        if _norm(current) == _norm(value):
-            continue  # 与现有内容一致，无需变更
-        row = {
-            "node_id": match["id"],
-            "path": match["path"],
-            "title": match["title"],
-            "content_type": match["content_type"],
-            "current": current,
-            "value": value,
-        }
-        (overwrite if current.strip() else fill).append(row)
+        if _norm(current) != _norm(value):  # 与现有内容一致时不产生变更
+            (overwrite if current.strip() else fill).append(_matched_row(match, value))
+
+        # 车型条目自带的「数量」直接落到该车型的下一个子节点（通常是「数量」）：
+        # 不靠大模型再给一条 nodeTitle=数量 的条目——同名子节点在车型1/车型2 下都有，
+        # 让它自己说清属于哪辆车太不可靠。落到子节点后进同一个 fill/overwrite 预览。
+        quantity = item.get("quantity")
+        if quantity and match["content_type"] == "select":
+            child = _find_child(flat, match, "数量")
+            if child is not None and child["id"] not in seen_node_ids and is_fillable_node(child):
+                seen_node_ids.add(child["id"])
+                child_current = _current_text(child)
+                if _norm(child_current) != _norm(quantity):
+                    (overwrite if child_current.strip() else fill).append(_matched_row(child, quantity))
+            elif child is None:
+                # 该车型下还没有「数量」子节点（只有一个光杆下拉，如 车型3）：数量不能吞掉，
+                # 推成一条未匹配，导到车型节点下增补出「数量」——与既有车型的形状保持一致
+                unmatched.append({
+                    "title": "数量",
+                    "value": quantity,
+                    "quantity": None,
+                    "suggested_parent_id": match["id"],
+                    "suggested_parent_path": match["path"],
+                })
 
     return {"fill": fill, "overwrite": overwrite, "unmatched": unmatched}
+
+
+def _matched_row(node: Dict, value: str) -> Dict:
+    """匹配条目 → 预览行（fill / overwrite 共用）。"""
+    return {
+        "node_id": node["id"],
+        "path": node["path"],
+        "title": node["title"],
+        "content_type": node["content_type"],
+        "current": _current_text(node),
+        "value": value,
+    }
 
 
 # ── 第五步：调大模型 + 编排 ────────────────────────────────────────
