@@ -415,8 +415,8 @@ export default function HistoryTickets({ showHeader = true }: { showHeader?: boo
                   <span className="task-card2__avatar">{(t.created_by_name || t.created_by || '?').slice(0, 1).toUpperCase()}</span>
                   <span className="task-card2__person-name">{t.created_by_name || t.created_by || '-'}</span>
                 </div>
-                <div className="task-card2__flow">
-                  {/* 线在前、堆叠在后：堆叠盖在线上方（骑线） */}
+                <div className={(t.participants || []).length > 0 ? 'task-card2__flow task-card2__flow--stacked' : 'task-card2__flow'}>
+                  {/* 线在前、堆叠在后：有堆叠时线退到底部作下划线，头像在线上方 */}
                   <PersonArrow />
                   <ParticipantStack
                     participants={(t.participants || []) as ParticipantItem[]}
