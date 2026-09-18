@@ -687,6 +687,46 @@ _PROJECT_ASK_RE = re.compile(
 # 判「用户在答编号题」（还原块挂起时 LLM 按块把序号还原成项目名照抄）
 _PROJ_SEQ_RE = re.compile(r"^\s*(?:第)?\s*[0-9０-９一二三四五六七八九十]{1,3}\s*(?:个|号|项)?\s*$")
 
+_CN_NUM = {"一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6,
+           "七": 7, "八": 8, "九": 9, "十": 10}
+
+
+def _parse_seq_reply(query: str) -> Optional[int]:
+    """纯序号回应 → 序号 int；非纯序号 → None。
+    支持阿拉伯/中文数字 + 可选「第/个/号/项」修饰（「2」「第2个」「3号」）。"""
+    q = (query or "").strip()
+    if not _PROJ_SEQ_RE.match(q):
+        return None
+    core = re.sub(r"[第个号项\s]", "", q)
+    if core.isdigit():
+        return int(core)
+    for ch, n in _CN_NUM.items():
+        if core == ch:
+            return n
+    if len(core) == 2 and core[0] == "十":
+        return 10 + _CN_NUM.get(core[1], 0)
+    if len(core) == 2 and core[1] == "十":
+        return _CN_NUM.get(core[0], 0) * 10
+    return None
+
+
+def _resolve_seq_choice(query: str, candidates: List[Dict[str, str]]) -> tuple:
+    """答编号轮服务端定序还原（0916 task835 三连实锤后的机械兜底）。
+
+    返回 (handled, choice)：
+    - handled=False：本轮原话不是纯序号回应，交回 LLM 照抄/其他链路
+    - handled=True, choice=项目：有效序号，服务端定序成功（LLM 输出被覆盖）
+    - handled=True, choice=None：序号越界（如按钮 5 个用户回「7」）——项目
+      置空不预填，防两类实锤幻觉：①越界序号被 LLM 照抄成上下文项目
+      ②序号撞某项目 code 走精确匹配预填了列表外项目
+    """
+    seq = _parse_seq_reply(query)
+    if seq is None or not candidates:
+        return False, None
+    if 1 <= seq <= len(candidates):
+        return True, candidates[seq - 1]
+    return True, None
+
 
 def _strip_project_ask(text: str) -> str:
     """追问话术后验门：删除问项目的问句（按句切分，命中模式的句子整句删除）。
@@ -1305,9 +1345,12 @@ _PLANNER_TOOLS = [
                        "项目名、不要判断它对应哪个项目——对应关系由服务端校验）。"
                        "拿不准时也算疑似，调用（服务端会自行校验是否真匹配到项目，"
                        "匹配不上或歧义会自动忽略）。"
-                       "🔴 只认**本轮用户消息文字里**的称呼：本对话平台/服务号自身"
-                       "的名称、只在助手回复或历史上下文里出现过的名称，都不是项目"
-                       "提及，绝不调用。"
+                       "🔴 只认**本轮用户消息文字里**的称呼：只在助手回复或历史"
+                       "上下文里出现过的名称，不是用户主动提及，不调用。"
+                       "0916 放开：用户提到本平台相关称呼（「摇人吧」「摇人界面」等）"
+                       "也算项目提及，正常调用——服务号自身也是真实项目（摇人吧服务"
+                       "号），用户报平台问题/提需求时指的就是它；服务端子串唯一性"
+                       "校验兜底，不会收错。"
                        "用户明确指代**上一张工单**的项目（如「项目还是上次提单的项目」"
                        "「跟上个单一个项目」）时，project_name 填 \"last\"。纯设备"
                        "故障/操作咨询、完全没提任何公司/客户/产品/场地时，不用调。",
@@ -1360,9 +1403,8 @@ _PLANNER_SYSTEM = (
     "- 用户询问自己名下的项目清单（有哪些项目/参与了哪些项目/关联的项目），"
     "或询问项目整体/某个项目的进度、状态等管理情况 → "
     "list_user_projects（系统按登录身份查询，无需参数；结果自带标准边界话术，照着答）\n"
-    "- 用户消息里出现具体项目名/简称（如「本川项目」）→ mention_project"
-    "（记录跨轮记忆，与 route 并列输出；没提项目名就不调——平台/服务号自身的"
-    "名称不算项目提及）\n"
+    "- 用户消息里出现具体项目名/简称（如「本川项目」「摇人吧界面」）→ mention_project"
+    "（记录跨轮记忆，与 route 并列输出；没提项目名就不调）\n"
     "- 🔴 拿不准要不要查知识库、或消息包含任何具体故障/错误码/操作疑问 → 调用 search_kb"
     "（宁多勿漏，错误码含义必须查）\n\n"
     "route 每轮必调；只输出工具调用，不要输出任何解释文字。"
@@ -5727,6 +5769,25 @@ class AiDiagnosisPlatform:
         # _pf_hit_this_turn：本轮预填「新鲜命中」（choice/last/mention 提升任一），
         # 供 _pf_fresh 区分「刚答编号该弹窗」与「陈旧预填误触发」。
         _pf_hit_this_turn = False
+        # 🔴 答编号轮服务端定序（0916 task835 三连实锤）：候选挂起 + 用户纯序号
+        # 回应时序号语义唯一（按钮列表位置），机械映射服务端直接定——LLM 照抄
+        # 有两类实锤幻觉：越界「7」被抄成上下文项目（预填对话内项目）、序号撞
+        # 项目 code 走精确匹配预填列表外项目。有效序号强制覆盖 LLM 输出；越界
+        # 置空不预填（弹窗必选兜底），防「预填了不在按钮列表里的项目」。
+        if (state.project_candidates
+                and _parse_seq_reply(request.query) is not None):
+            _handled, _seq_choice = _resolve_seq_choice(
+                request.query, state.project_candidates)
+            if _handled:
+                if _seq_choice is not None:
+                    parsed["project_choice"] = _seq_choice.get("name") or ""
+                    logger.info(f"[stream] 答编号轮服务端定序: 序号命中 "
+                                f"{_seq_choice.get('name')!r}（覆盖 LLM 输出）")
+                else:
+                    parsed["project_choice"] = ""
+                    logger.warning(
+                        f"[stream] 答编号越界: 序号超出候选范围 "
+                        f"(1-{len(state.project_candidates)})，project_choice 置空")
         if str(parsed.get("project_choice") or "").strip():
             _choice_raw = str(parsed.get("project_choice")).strip()
             # 🔴 原话溯源门（0916 conv1325/task835 实锤）：预填已落地（答编号
