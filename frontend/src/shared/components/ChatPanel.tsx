@@ -887,76 +887,124 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
         // 文本预栅格化：html2canvas 按 CJK/拉丁分 baseline 画文本（英文数字画沉 6~7px，
         // 三平台实锤、字体/行高均治不了）——把文本节点替换成 canvas 亲手画的 img
         // （fillText 中英混排天然同基线），html2canvas 只画图片+色块，平台无关
+                // ── 块级文本栅格化（0918 重构，替代 0911 的逐文本节点替换）──
+        // 逐「叶子块」（无块级子孙的元素：p/li/h/纯文本 div）整体处理：
+        //  ① 纯文本块与混排行内元素的块（文字**加粗**文字）统一在 canvas 里按
+        //     run（逐文本节点的字体/粗细/颜色）手排版绘制——canvas 同基线，
+        //     中英数字不再沉 6px；加粗保持在句中原位，不再被整宽 img 挤成
+        //     独立段落把句子切三截（实测「1. 电池/供电检查」数字符号沉底）。
+        //  ② 含非行内子孙（img/嵌套块等）的块放弃栅格化，交回 html2canvas 原生画。
+        // 行高/首行基线沿用旧算法：y = i*lh + (lh + fontSize*0.72)/2。
+        const INLINE_TAGS = new Set(['STRONG', 'EM', 'B', 'I', 'U', 'A', 'CODE', 'SPAN', 'MARK', 'SMALL', 'SUB', 'SUP', 'DEL', 'S', 'KBD', 'BR', 'TIME', 'ABBR', 'CITE', 'Q', 'VAR', 'WBR']);
         const rasterizeTexts = (rootEl: HTMLElement) => {
-          const walker = document.createTreeWalker(rootEl, NodeFilter.SHOW_TEXT);
-          const texts: Text[] = [];
-          while (walker.nextNode()) {
-            const n = walker.currentNode as Text;
-            if (n.textContent && n.textContent.trim()) texts.push(n);
-          }
-          for (const node of texts) {
-            const el = node.parentElement;
-            if (!el) continue;
-            const cs = getComputedStyle(el);
-            if (cs.display === 'none' || cs.visibility === 'hidden') continue;
-            // 0916：行内元素（如 md-inline-code）不栅格化——inline 盒跨行时
-            // getBoundingClientRect 返回整行包围盒，availW 失真导致自绘 img
-            // 超宽溢出/与相邻文字重叠（转发长图乱版实锤）；退回 html2canvas
-            // 原生画，代价仅 code 内英文数字基线沉 6px（远轻于版面崩坏）
-            if (cs.display === 'inline') continue;
-            // 0918：混排行内元素的容器（如「文字**加粗**文字」→ p 内 [text][strong][text]）
-            // 不栅格化——文本节点被独立画成整段宽 inline-block img，会把中间的
-            // strong/a 挤到单独一行、句子被切成三截（含空隙）。容器含任何元素
-            // 子节点即整容器放弃栅格化，交回 html2canvas 原生文本流（纯中文段落
-            // 无基线问题；代价=混排英文数字在该段沉 6px，同 0916 取舍）
-            if (el.children.length > 0) continue;
-            const raw = node.textContent ?? '';
-            const fontSize = parseFloat(cs.fontSize) || 13;
-            const font = `${cs.fontStyle} ${cs.fontWeight} ${fontSize}px ${cs.fontFamily}`;
-            const meas = document.createElement('canvas').getContext('2d');
-            if (!meas) continue;
-            meas.font = font;
-            const elW = el.getBoundingClientRect().width;
-            const availW = Math.max(elW - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight), 40) || 300;
-            const lines: string[] = [];
-            for (const seg of raw.split('\n')) {
-              let cur = '';
-              for (const ch of seg) {
-                if (meas.measureText(cur + ch).width > availW && cur) {
-                  lines.push(cur);
-                  cur = ch;
-                } else cur += ch;
-              }
-              lines.push(cur);
+          const meas = document.createElement('canvas').getContext('2d');
+          if (!meas) return;
+          const candidates: HTMLElement[] = [];
+          for (const el of Array.from(rootEl.querySelectorAll<HTMLElement>('*'))) {
+            if (!el.textContent || !el.textContent.trim()) continue;
+            const d = getComputedStyle(el).display;
+            if (d === 'none' || d === 'inline' || d === 'inline-block') continue;
+            // 子孙必须全为行内元素，才可作为「叶子块」整块排版
+            let inlineOnly = true;
+            for (const desc of Array.from(el.querySelectorAll('*'))) {
+              if (!INLINE_TAGS.has(desc.tagName)) { inlineOnly = false; break; }
             }
-            const lh = parseFloat(cs.lineHeight) || fontSize * 1.5;
+            if (!inlineOnly) continue;
+            candidates.push(el);
+          }
+          for (const block of candidates) {
+            const csB = getComputedStyle(block);
+            if (csB.visibility === 'hidden') continue;
+            const fsB = parseFloat(csB.fontSize) || 13;
+            const lhRaw = parseFloat(csB.lineHeight);
+            const lh = Number.isFinite(lhRaw) && lhRaw > 0 ? lhRaw : fsB * 1.5;
+            const availW = Math.max(
+              block.getBoundingClientRect().width - (parseFloat(csB.paddingLeft) || 0) - (parseFloat(csB.paddingRight) || 0),
+              40);
+            // 收集 run：顺序遍历文本节点（样式取各自父元素）；<br> 记为强制换行
+            type Run = { text: string; font: string; color: string; bg: string | null; underline: boolean; br?: boolean };
+            const runs: Run[] = [];
+            const walker = document.createTreeWalker(block, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT);
+            let cur = walker.nextNode();
+            while (cur) {
+              if (cur.nodeType === Node.ELEMENT_NODE) {
+                if ((cur as Element).tagName === 'BR') runs.push({ text: '', font: '', color: '', bg: null, underline: false, br: true });
+              } else {
+                const raw = cur.textContent ?? '';
+                if (raw.trim()) {
+                  const p = (cur as Text).parentElement;
+                  if (p) {
+                    const c = getComputedStyle(p);
+                    runs.push({
+                      text: raw,
+                      font: `${c.fontStyle} ${c.fontWeight} ${c.fontSize} ${c.fontFamily}`,
+                      color: c.color,
+                      bg: c.backgroundColor !== 'rgba(0, 0, 0, 0)' && c.backgroundColor !== 'transparent' ? c.backgroundColor : null,
+                      underline: c.textDecorationLine.includes('underline'),
+                    });
+                  }
+                }
+              }
+              cur = walker.nextNode();
+            }
+            if (!runs.length) continue;
+            // 逐 run 贪心换行（逐字符，与旧路径一致）；跨 run 共享同一行宽预算
+            type Seg = { text: string; font: string; color: string; bg: string | null; underline: boolean; w: number };
+            const lines: Seg[][] = [];
+            let line: Seg[] = [];
+            let lineW = 0;
+            const newLine = () => { if (line.length) lines.push(line); line = []; lineW = 0; };
+            for (const run of runs) {
+              if (run.br) { newLine(); continue; }
+              meas.font = run.font;
+              let buf = '';
+              const flush = () => {
+                if (!buf) return;
+                const w = meas.measureText(buf).width;
+                line.push({ text: buf, font: run.font, color: run.color, bg: run.bg, underline: run.underline, w });
+                lineW += w;
+                buf = '';
+              };
+              for (const ch of run.text) {
+                if (ch === '\n') { flush(); newLine(); continue; }
+                if (lineW + meas.measureText(buf + ch).width > availW && buf) {
+                  flush();
+                  newLine();
+                }
+                buf += ch;
+              }
+              flush();
+            }
+            newLine();
+            if (!lines.length) continue;
+            const wTotal = Math.ceil(Math.max(...lines.map((segs) => segs.reduce((s, seg) => s + seg.w, 0)), 1)) + 2;
+            // 宽度安全阀（沿用 0916）：自绘超可用宽 → 不替换，防溢出叠字
+            if (wTotal > availW + 2) continue;
+            const hTotal = Math.ceil(lines.length * lh) + 2;
             const dpr = 2;
-            const w = Math.ceil(Math.max(...lines.map((l) => meas.measureText(l).width), 1)) + 2;
-            const h = Math.ceil(lines.length * lh) + 2;
-            // 0916 宽度安全阀：自绘后仍超可用宽（无断点长路径/URL 等）→ 不替换，
-            // 保留原生文本交给浏览器 overflow 规则，防 inline-block 超宽溢出叠字
-            if (w > availW + 2) continue;
             const c = document.createElement('canvas');
-            c.width = Math.ceil(w * dpr);
-            c.height = Math.ceil(h * dpr);
+            c.width = wTotal * dpr;
+            c.height = hTotal * dpr;
             const g = c.getContext('2d');
             if (!g) continue;
             g.scale(dpr, dpr);
-            g.font = font;
-            // 0916：先画背景再画字——行内代码/pre 的灰底不丢（此前 canvas 只画
-            // 文字，栅格化后灰底消失，截图呈「空白灰块」）
-            const _bg = cs.backgroundColor;
-            if (_bg && _bg !== 'rgba(0, 0, 0, 0)' && _bg !== 'transparent') {
-              g.fillStyle = _bg;
-              g.fillRect(0, 0, w, h);
-            }
-            g.fillStyle = cs.color;
             g.textBaseline = 'alphabetic';
-            lines.forEach((l, i) => g.fillText(l, 1, i * lh + (lh + fontSize * 0.72) / 2));
+            lines.forEach((segs, i) => {
+              const y = i * lh + (lh + fsB * 0.72) / 2;
+              let sx = 1;
+              for (const seg of segs) {
+                g.font = seg.font;
+                if (seg.bg) { g.fillStyle = seg.bg; g.fillRect(sx, i * lh + 1, seg.w, lh - 1); }
+                g.fillStyle = seg.color;
+                g.fillText(seg.text, sx, y);
+                if (seg.underline) { g.fillStyle = seg.color; g.fillRect(sx, y + 2, seg.w, 1); }
+                sx += seg.w;
+              }
+            });
             const img = document.createElement('img');
             img.src = c.toDataURL('image/png');
-            img.style.cssText = `display:inline-block;vertical-align:top;width:${w}px;height:${h}px;`;
-            node.replaceWith(img);
+            img.style.cssText = `display:block;vertical-align:top;width:${wTotal}px;height:${hTotal}px;margin:0;`;
+            block.replaceChildren(img);
           }
         };
         rasterizeTexts(root);
@@ -3554,6 +3602,20 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
               alignItems: 'center', justifyContent: 'center', padding: 16, boxSizing: 'border-box',
             }}
           >
+            {/* 右上角悬浮关闭：不占卡片空间，点遮罩也可关 */}
+            <button
+              aria-label="关闭"
+              onClick={() => setForwardImage(null)}
+              style={{
+                position: 'absolute', top: 10, right: 12, width: 34, height: 34,
+                borderRadius: '50%', border: 'none', cursor: 'pointer',
+                background: 'rgba(255,255,255,.14)', color: '#fff', fontSize: 18, lineHeight: 1,
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                WebkitTouchCallout: 'none', userSelect: 'none', WebkitUserSelect: 'none',
+              }}
+            >
+              ✕
+            </button>
             <div
               onClick={(e) => e.stopPropagation()}
               style={{
@@ -3562,47 +3624,21 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
                 overflow: 'hidden', boxSizing: 'border-box',
               }}
             >
+              <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: 12, WebkitOverflowScrolling: 'touch' }}>
+                <img src={forwardImage} alt="转发图" style={{ width: '100%', display: 'block', borderRadius: 'var(--radius-sm)' }} />
+              </div>
+              {/* 提示放底部（微信式）：长按动作发生在图上，视线看完图自然下落；0909 的
+                  「下载图片」按钮删除——微信里长按即可保存/转发，按钮冗余 */}
               <div
                 onContextMenu={(e) => e.preventDefault()}
                 style={{
-                  padding: '10px 14px 6px', fontSize: '12.5px', color: 'var(--muted-foreground)', textAlign: 'center', flexShrink: 0,
+                  padding: '10px 14px 12px', fontSize: '12.5px', color: 'var(--muted-foreground)', textAlign: 'center', flexShrink: 0,
                   // 禁长按弹原生菜单（只设在文本上，不设在容器——安卓长按图片的
                   // 保存/转发菜单走 contextmenu，容器级拦截会杀掉它）
                   WebkitTouchCallout: 'none', userSelect: 'none', WebkitUserSelect: 'none',
                 }}
               >
                 长按图片可直接发送给朋友，或保存图片
-              </div>
-              <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '0 12px', WebkitOverflowScrolling: 'touch' }}>
-                <img src={forwardImage} alt="转发图" style={{ width: '100%', display: 'block', borderRadius: 'var(--radius-sm)' }} />
-              </div>
-              <div
-                style={{ display: 'flex', gap: 10, padding: 12, flexShrink: 0, WebkitTouchCallout: 'none', userSelect: 'none', WebkitUserSelect: 'none' }}
-                onContextMenu={(e) => e.preventDefault()}
-              >
-                <button
-                  style={{
-                    flex: 1.6, background: 'var(--blue-2)', border: 'none', color: '#fff',
-                    fontWeight: 600, borderRadius: 'var(--radius-md)', padding: '11px 0', fontSize: 14, cursor: 'pointer',
-                  }}
-                  onClick={() => {
-                    const a = document.createElement('a');
-                    a.href = forwardImage;
-                    a.download = `摇人吧对话记录_${Date.now()}.png`;
-                    a.click();
-                  }}
-                >
-                  下载图片
-                </button>
-                <button
-                  style={{
-                    flex: 1, background: 'var(--card)', border: '1px solid var(--border)', color: 'var(--foreground)',
-                    borderRadius: 'var(--radius-md)', padding: '11px 0', fontSize: 14, cursor: 'pointer',
-                  }}
-                  onClick={() => setForwardImage(null)}
-                >
-                  关闭
-                </button>
               </div>
             </div>
           </div>,
