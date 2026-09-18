@@ -90,6 +90,10 @@ _PROJECT_STATUS_CN = {
     "suspended": "已暂停",
 }
 
+# 项目明细（project.items）按状态分组后，每组最多列出的项目数；
+# 超出部分只计数量（已截断标记），避免全量明细喂 LLM 撑爆上下文。
+_PROJECT_ITEMS_PER_GROUP_LIMIT = 30
+
 _RISK_STATUS_CN = {
     "open": "未关闭",
     "opened": "未关闭",
@@ -855,19 +859,34 @@ class ReportDataCollector:
                 members_by_project = self._get_project_members_map(
                     db, [p.id for p in projects if p.id]
                 )
-                items = []
+                # 按状态分组输出，组内截断：
+                # - 「状态」提为组标签，组内条目不再重复状态字段；
+                # - 每组最多 _PROJECT_ITEMS_PER_GROUP_LIMIT 条，超出只计数量；
+                # - 组按项目数降序，先呈现大头状态。
+                groups: dict[str, list[dict]] = {}
                 for p in projects:
-                    items.append({
+                    label = _cn_label(_PROJECT_STATUS_CN, p.status, "未知")
+                    groups.setdefault(label, []).append({
                         "项目ID": p.id,
                         "项目代码": p.code,
                         "项目名称": p.name,
-                        "状态": _cn_label(_PROJECT_STATUS_CN, p.status, "未知"),
                         "问题数": p.issues,
                         "风险数": p.risks,
                         "对接人": p.contact_person,
                         "成员": members_by_project.get(p.id, []),
                     })
-                result["items"] = items
+                result["items_by_status"] = [
+                    {
+                        "状态": label,
+                        "项目数": len(group),
+                        "项目": group[: _PROJECT_ITEMS_PER_GROUP_LIMIT],
+                        "已截断": len(group) > _PROJECT_ITEMS_PER_GROUP_LIMIT,
+                    }
+                    for label, group in sorted(
+                        groups.items(), key=lambda kv: len(kv[1]), reverse=True
+                    )
+                ]
+                result["items_count"] = len(projects)
 
             return result
         finally:

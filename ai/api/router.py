@@ -1185,6 +1185,17 @@ class ChatRequest(BaseModel):
     max_tokens: int = Field(default=2000)
     temperature: float = Field(default=0.7, ge=0, le=2)
     system_prompt: str = Field(default="", max_length=20000, description="可选系统提示词")
+    tools: list | None = Field(
+        default=None, description="OpenAI tools 协议工具定义；非空时走工具调用模式"
+    )
+    messages: list | None = Field(
+        default=None,
+        description="完整消息列表（agentic 多轮工具循环）；非空时优先于 query/system_prompt，"
+                    "历史由调用方自行管理",
+    )
+    save_memory: bool = Field(
+        default=True, description="是否保存本轮问答到会话记忆；agentic 工具中间轮传 False"
+    )
 
 
 async def _save_memory(session_id: str, query: str, answer: str):
@@ -1216,17 +1227,43 @@ async def _build_prompt(session_id: str, query: str) -> str:
 async def chat(request: ChatRequest) -> dict:
     llm = await get_llm_client()
     try:
-        prompt = await _build_prompt(request.session_id, request.query)
         t0 = time.perf_counter()
-        answer = await llm.complete(
-            prompt=prompt,
-            system_prompt=request.system_prompt or None,
-            max_tokens=request.max_tokens,
-            temperature=request.temperature,
-        )
+        tool_calls: list = []
+        if request.messages:
+            # agentic 多轮工具循环：完整消息列表直连，调用方自管历史注入
+            resp = await llm.complete_with_tools(
+                tools=request.tools or [],
+                messages=[dict(m) for m in request.messages],
+                max_tokens=request.max_tokens,
+                temperature=request.temperature,
+            )
+            answer = resp.get("content") or ""
+            tool_calls = resp.get("tool_calls") or []
+        elif request.tools:
+            # 单轮工具调用：历史按文本拼入 prompt
+            prompt = await _build_prompt(request.session_id, request.query)
+            resp = await llm.complete_with_tools(
+                tools=request.tools,
+                prompt=prompt,
+                system_prompt=request.system_prompt or None,
+                max_tokens=request.max_tokens,
+                temperature=request.temperature,
+            )
+            answer = resp.get("content") or ""
+            tool_calls = resp.get("tool_calls") or []
+        else:
+            prompt = await _build_prompt(request.session_id, request.query)
+            answer = await llm.complete(
+                prompt=prompt,
+                system_prompt=request.system_prompt or None,
+                max_tokens=request.max_tokens,
+                temperature=request.temperature,
+            )
         total_ms = round((time.perf_counter() - t0) * 1000)
-        await _save_memory(request.session_id, request.query, answer)
-        return {"code": 0, "data": {"answer": answer, "total_ms": total_ms}}
+        # 空回答不落库（agentic 中间轮只调工具无正文时避免历史污染）
+        if request.save_memory and answer.strip():
+            await _save_memory(request.session_id, request.query, answer)
+        return {"code": 0, "data": {"answer": answer, "tool_calls": tool_calls, "total_ms": total_ms}}
     except Exception as e:
         return {"code": 1, "data": {"error": str(e)}}
 
@@ -1272,6 +1309,25 @@ async def chat_stream(request: ChatRequest):
 # 会话记忆 (prefix /api/ai/memory)
 # ============================================================
 memory_router = APIRouter(prefix="/api/ai/memory", tags=["会话记忆"])
+
+
+class MemoryTurnRequest(BaseModel):
+    session_id: str = Field(..., min_length=1, max_length=128, description="会话 ID")
+    role: str = Field(..., description="角色：user / assistant")
+    content: str = Field(..., max_length=200000, description="消息内容")
+
+
+@memory_router.post("/turn", summary="追加一条会话记忆")
+async def add_memory_turn(request: MemoryTurnRequest) -> dict:
+    """供 agentic 等自管记忆的调用方显式追加轮次。"""
+    try:
+        if request.role not in ("user", "assistant"):
+            return {"code": 1, "data": {"error": "role 必须为 user 或 assistant"}}
+        mgr = await get_memory_manager()
+        await mgr.add_turn(request.session_id, request.role, request.content)
+        return {"code": 0, "data": {"status": "ok"}}
+    except Exception as e:
+        return {"code": 1, "data": {"error": str(e)}}
 
 
 @memory_router.get("/history", summary="查看对话历史")

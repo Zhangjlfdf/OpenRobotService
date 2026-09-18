@@ -217,6 +217,10 @@ _DIMENSION_RULES: list[tuple[re.Pattern, str, list[tuple[re.Pattern | None, list
             # （同样支持「没有搬运数据」等夹入维度词的问法）
             (re.compile(r"((?:没有|无|没)(?:搬运效率|搬运|机器人|任务|效率){0,2}数据|未上报|没有上报|未采集|没有采集)"),
              ["project.no_data_items"]),
+            # 「哪些项目」「有什么项目」「项目列表/清单/明细」→ 项目明细清单
+            # （名称/状态等逐项展示；放在 no_data 之后，保证「哪些项目没有
+            # 数据」仍优先命中无数据清单）
+            (re.compile(r"(哪些|有什么|什么|列表|清单|明细)"), ["project.items"]),
             (None, ["project.total", "project.active_count", "project.by_status"]),
         ],
     ),
