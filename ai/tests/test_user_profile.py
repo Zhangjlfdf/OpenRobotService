@@ -46,18 +46,33 @@ def _patch_db(monkeypatch, session_cls):
     monkeypatch.setattr(mod, "SessionLocal", session_cls)
 
 
-def _fake_db(rows_or_error):
-    """SessionLocal 工厂：rows_or_error 为 fetchone 返回值，或抛出的异常类实例。"""
+def _fake_db(rows_or_error, project_roles=None):
+    """SessionLocal 工厂：rows_or_error 为 fetchone 返回值，或抛出的异常类实例。
+    project_roles：第二次 execute（项目内角色查询）的 fetchall 返回值，默认 []。"""
 
     class _Result:
+        def __init__(self, is_roles_query):
+            self._is_roles = is_roles_query
+
         def fetchone(self):
             if isinstance(rows_or_error, Exception):
                 raise rows_or_error
             return rows_or_error
 
+        def fetchall(self):
+            if self._is_roles:
+                return [(r,) for r in (project_roles or [])]
+            if isinstance(rows_or_error, Exception):
+                raise rows_or_error
+            return []
+
     class _Session:
+        def __init__(self):
+            self._calls = 0
+
         def execute(self, sql, params=None):
-            return _Result()
+            self._calls += 1
+            return _Result(self._calls == 2)
 
         def close(self):
             pass
@@ -137,9 +152,14 @@ class TestResolveUserProfile:
             def fetchone(self):
                 return ("张三", "调度部", None, 1, None, None)
 
+            def fetchall(self):
+                return [("调度研发",)]
+
         class _CountingSession:
+            # 计数单位=「画像解析次数」（主查询 1 次 + 角色查询 1 次/轮）：
+            # 断言两次调用只解析一轮（缓存命中不再查库）
             def execute(self, sql, params=None):
-                calls["n"] += 1
+                calls["n"] = calls.get("n", 0) + 1
                 return _Result()
 
             def close(self):
@@ -148,7 +168,7 @@ class TestResolveUserProfile:
         _patch_db(monkeypatch, _CountingSession)
         await _resolve_user_profile("zhangsan")
         p2 = await _resolve_user_profile("zhangsan")
-        assert calls["n"] == 1
+        assert calls["n"] == 2
         assert p2["name"] == "张三"
 
 

@@ -17,6 +17,7 @@ from app.utils.notification_utils import NotificationUtils
 from app.utils.image_processor import ImageProcessor
 from app.services.user_service import user_service
 from app.core.user_identity import identity_keys, to_user_id
+from app.modules.tasks import participant_service
 
 
 def convert_to_shanghai_time(dt: Optional[datetime]) -> Optional[datetime]:
@@ -695,6 +696,19 @@ class TicketService:
             followed_ids = set(followed_rows.scalars().all())
             for ticket in tickets:
                 setattr(ticket, "is_followed", ticket.id in followed_ids)
+
+        # 批量回填「评论区参与人」：一次 IN 聚合（评论数 + 未读红点），避免 N+1。
+        # participant_service 是同步 Session 操作（与 read_receipt 同构），
+        # 这里丢进线程池执行，避免阻塞事件循环。
+        # 见 participant_service.fetch_participants_map（含排序与红点口径）。
+        if tickets:
+            participants_map = await run_in_threadpool(
+                participant_service.fetch_participants_map,
+                [t.id for t in tickets],
+                current_username,
+            )
+            for ticket in tickets:
+                setattr(ticket, "participants", participants_map.get(ticket.id, []))
 
         pages = (total + size - 1) // size
 

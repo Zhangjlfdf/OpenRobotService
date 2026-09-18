@@ -366,17 +366,27 @@ async def _resolve_user_profile(username: str) -> dict:
     def _query():
         session = SessionLocal()
         try:
-            return session.execute(text(
+            row = session.execute(text(
                 "SELECT u.name, d.name, u.department, u.job_level, "
                 "       u.responsibility_modules, u.duty_text "
                 "FROM users u LEFT JOIN departments d ON u.department_id = d.id "
                 "WHERE u.username = :u LIMIT 1"
             ), {"u": key}).fetchone()
+            # 项目内角色（0916）：user_project_roles.role_id → roles.name
+            # （调度研发/实施/项目经理…）——用户画像缺的受众信号：研发可深入
+            # 原理、实施要现场动作、管理要结论优先。跨项目去重聚合。
+            roles = session.execute(text(
+                "SELECT DISTINCT r.name FROM user_project_roles upr "
+                "JOIN roles r ON r.id = upr.role_id "
+                "JOIN users u ON u.id = upr.user_id "
+                "WHERE u.username = :u AND r.name IS NOT NULL AND r.name <> ''"
+            ), {"u": key}).fetchall()
+            return row, [r[0] for r in roles if r[0]]
         finally:
             session.close()
 
     try:
-        row = await asyncio.wait_for(
+        row, project_roles = await asyncio.wait_for(
             loop.run_in_executor(None, _query), timeout=1.5)
     except Exception as e:
         logger.warning(f"[user_profile] 查询失败(降级无画像): username={key}, err={e}")
@@ -391,6 +401,7 @@ async def _resolve_user_profile(username: str) -> dict:
         "job_level_cn": _JOB_LEVEL_CN.get(row[3], ""),
         "modules_text": _flatten_resp_modules(row[4])[:120],
         "duty": ((row[5] or "").strip())[:80],
+        "project_roles": ("、".join(project_roles))[:60],
     }
     _USER_PROFILE_CACHE[key] = (now + 300, profile)
     # 打全五项：低频事件（每用户 5 分钟一次），排障时一眼看出哪些字段空
@@ -413,6 +424,8 @@ def _user_profile_block(state: "AgentState") -> str:
         seg.append(p["department"])
     if p.get("job_level_cn"):
         seg.append(p["job_level_cn"])
+    if p.get("project_roles"):
+        seg.append(p["project_roles"])
     lines = [f"【用户】{'｜'.join(seg)}"]
     _duty_parts = []
     if p.get("modules_text"):
@@ -422,8 +435,10 @@ def _user_profile_block(state: "AgentState") -> str:
     if _duty_parts:
         lines.append(f"【用户职责】{'｜'.join(_duty_parts)}")
     lines.append(
-        "（回答时可结合用户岗位与职责调整针对性与深浅，按职级适当调整"
-        "表达的正式程度与内容详略，但保持一致的专业工程师态度，"
+        "（回答时可结合用户岗位、职责与项目内角色调整针对性与深浅——"
+        "偏研发/算法背景的可深入技术细节与原理推导；偏实施/现场的给可执行的"
+        "操作步骤与检查动作；偏管理的先给结论与影响面再展开。"
+        "按职级适当调整表达的正式程度与内容详略，但保持一致的专业工程师态度，"
         "不因职级谄媚或怠慢；无需每句称呼用户名。"
         "用户询问自己的身份/姓名时，以【用户】信息直接回答——"
         "用户在问自己是谁，不是在问你（助手）的身份）")
@@ -1557,7 +1572,9 @@ class AiDiagnosisPlatform:
         """
         _dm = r.domain or "team"
         _sd = (r.sub_domain or "").replace('\\', '/').strip('/')
-        _mu = f"{self.config.media_url_prefix}/kb/{_dm}/{_sd}"
+        _src = (r.source_file or "").strip("/")
+        _dir = f"{_dm}/{_src.rsplit('/', 1)[0]}" if _src else f"{_dm}/{_sd}"
+        _mu = f"{self.config.media_url_prefix}/kb/{_dir}"
         return re.sub(
             r'!\[([^\]]*)\]\((?:\./)?media/([^)]+)\)',
             rf'![\1]({_mu}/media/\2)',

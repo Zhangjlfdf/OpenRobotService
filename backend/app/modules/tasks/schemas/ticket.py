@@ -179,6 +179,21 @@ class TicketResponse(TicketBase):
         from_attributes = True
 
 
+class TicketParticipantItem(BaseModel):
+    """列表卡片「评论区参与人」头像堆叠元素（见 participant_service）。
+
+    - ``comment_count`` / ``last_comment_at``：供前端排序展示（评论数降序 → 评论时间降序），
+      排序已在后端完成，前端按数组顺序渲染即可。
+    - ``has_unread``：当前登录用户是否**未读**该参与者发的评论 → 头像右上角红点。
+    """
+    username: str
+    name: Optional[str] = None
+    avatar_resource_id: Optional[int] = None
+    comment_count: int = 0
+    last_comment_at: Optional[str] = None
+    has_unread: bool = False
+
+
 class TicketListItemResponse(TicketBase):
     id: int
     status: TicketStatus
@@ -204,6 +219,10 @@ class TicketListItemResponse(TicketBase):
     view_count: int
     redispatch_tip: Optional[str] = Field(None, description="派单结果提醒一句话摘要（无提醒为 None，见 §3.6）")
     is_followed: bool = Field(False, description="当前登录用户是否已关注该工单（卡片星标）")
+    participants: List[TicketParticipantItem] = Field(
+        default_factory=list,
+        description="评论区参与讨论人员（头像堆叠用，已按评论数→评论时间降序，见 participant_service）",
+    )
 
     class Config:
         from_attributes = True
