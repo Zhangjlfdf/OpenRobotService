@@ -125,6 +125,7 @@ ORM 定义：[delivery.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/mode
 
 - 模板目录：[project_templates/](file:///d:/CODE/9_9/OpenRobotService/backend/app/config/project_templates)，当前提供 `default.yaml`（13 个根节点、共 121 个节点，对齐《项目信息树形图》）。
 - 选择规则：按项目的 `project_type` 找 `{type}.yaml`，文件不存在则回退 `default.yaml`；新增模板只需加文件，无需改代码。
+- **全局节点怎么进库**（新结构下 `default.yaml` 只用来播种一次，之后以库里的全局节点行为准）：历史库由迁移 `7c1e9a4b2d38` 播一次；**空库**（测试环境/新机器，不跑本机迁移历史）由后端启动时的 `info_node_seed_service.ensure_global_info_nodes()` 自动补齐——一个全局节点都没有才整棵写入，已有节点的库原样跳过，不改不删。两处播出的节点 id 都是「标题路径 → 确定性 UUIDv5」，跨环境一致。
 - 加载与缓存：模板在 Service 层集中加载，进程内按类型缓存，每次返回**深拷贝**避免调用方污染缓存。
 - **容错**：模板解析失败（缩进/编码错误）只记 error 日志并按空模板处理，不让项目接口整体 500（`ext_info` 为 NULL 的存量项目读取时也会走模板）。
 - 模板分三段：
