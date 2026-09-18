@@ -904,6 +904,12 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
             // 超宽溢出/与相邻文字重叠（转发长图乱版实锤）；退回 html2canvas
             // 原生画，代价仅 code 内英文数字基线沉 6px（远轻于版面崩坏）
             if (cs.display === 'inline') continue;
+            // 0918：混排行内元素的容器（如「文字**加粗**文字」→ p 内 [text][strong][text]）
+            // 不栅格化——文本节点被独立画成整段宽 inline-block img，会把中间的
+            // strong/a 挤到单独一行、句子被切成三截（含空隙）。容器含任何元素
+            // 子节点即整容器放弃栅格化，交回 html2canvas 原生文本流（纯中文段落
+            // 无基线问题；代价=混排英文数字在该段沉 6px，同 0916 取舍）
+            if (el.children.length > 0) continue;
             const raw = node.textContent ?? '';
             const fontSize = parseFloat(cs.fontSize) || 13;
             const font = `${cs.fontStyle} ${cs.fontWeight} ${fontSize}px ${cs.fontFamily}`;
