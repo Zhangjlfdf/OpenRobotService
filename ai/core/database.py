@@ -222,3 +222,31 @@ class Message(Base):
     sequence = Column(Integer, nullable=False, default=0, comment="消息序号")
     created_at = Column(DateTime, server_default=func.now(), comment="创建时间")
     metadata_ = Column(Text, nullable=True, comment="元数据")
+
+
+class TaskParticipant(Base):
+    """任务参与人表（只读，字段对齐 backend/app/models/task.py TaskParticipant）。
+
+    历史工单列表卡片「评论区参与人头像堆叠」的数据源；评论成功后由后端同事务幂等
+    upsert 写入（见 backend 评论端点）。AI 侧仅查询，不写入。
+    """
+    __tablename__ = "task_participants"
+
+    id = Column(BigInteger, primary_key=True, index=True, comment="参与记录ID")
+    task_id = Column(BigInteger, nullable=False, index=True, comment="任务ID")
+    username = Column(String(50), nullable=False, index=True, comment="参与人username")
+    created_at = Column(DateTime, comment="首次参与时间")
+    last_active_at = Column(DateTime, comment="最近一次参与时间")
+
+
+class TaskCommentRead(Base):
+    """评论已读游标表（只读，字段对齐 backend/app/models/task.py TaskCommentRead）。
+
+    红点判定口径：存在「作者不是我、且 comment_id > 我的游标」的评论 ⇒ 该作者头像亮红点。
+    """
+    __tablename__ = "task_comment_read"
+
+    id = Column(BigInteger, primary_key=True, index=True)
+    task_id = Column(BigInteger, nullable=False, index=True, comment="任务ID")
+    username = Column(String(50), nullable=False, index=True, comment="用户username")
+    last_read_comment_id = Column(BigInteger, nullable=True, comment="已读到的最后一条评论ID")

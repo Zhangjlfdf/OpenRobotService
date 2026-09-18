@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import { Navbar, Button, Textarea, Toast, Loading, Tag, Popup, Dialog, Form, FormItem } from 'tdesign-mobile-react';
 import AppButton from '@/shared/components/AppButton';
 import { User, UserCheck, Folder, AlarmClock, Clock, RefreshCw, Building2, Store, Download, FileImage, FileText, FileSpreadsheet, FileCode, FileArchive, Paperclip, Bot } from 'lucide-react';
@@ -155,6 +155,11 @@ const AI_NAME = 'U老师';
 export default function TaskDetailPage() {
   const { id: detailId } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  // 从列表卡片跳进来时的讨论区定位参数（点参与人头像 → focus=discussion[&author=xxx|&commentId=xxx]）
+  const [searchParams] = useSearchParams();
+  const focusDiscussion = searchParams.get('focus') === 'discussion';
+  const focusCommentId = searchParams.get('commentId');
+  const focusAuthor = searchParams.get('author');
   const request = createRequest(API_CONFIG.TASKS.BASE_URL, '工单服务');
   const adminRequest = createRequest(API_CONFIG.ADMIN.BASE_URL, '管理服务');
 
@@ -1477,6 +1482,8 @@ export default function TaskDetailPage() {
               帮我分析
             </Button>
           }
+          focusCommentId={focusDiscussion ? focusCommentId : null}
+          focusAuthor={focusDiscussion ? focusAuthor : null}
         />
 
         {(() => {

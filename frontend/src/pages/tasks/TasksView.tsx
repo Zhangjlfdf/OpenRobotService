@@ -10,6 +10,7 @@ import { Navbar, Toast, Loading, Popup, Button, Textarea, Form, FormItem } from 
 import ClearableInput from '@/shared/components/ClearableInput';
 import TitleEllipsis from '@/shared/components/TitleEllipsis';
 import AvatarImg from '@/shared/components/AvatarImg';
+import ParticipantStack, { type ParticipantItem } from '@/shared/components/ParticipantStack';
 import { createRequest } from '@/api/client';
 import API_CONFIG from '@/config/api';
 import { POLL_INTERVAL_MS } from '@/config/poll';
@@ -44,7 +45,8 @@ interface Ticket {
   contact?: string; created_at: string; updated_at: string;
   created_by?: string; created_by_name?: string;
   assigned_to?: string; assigned_to_name?: string;
-  participants?: string[];
+  /** 评论区参与讨论人员（头像堆叠；后端已按评论数→评论时间降序排好，见 participant_service） */
+  participants?: ParticipantItem[];
   // 阶段性协商（用于「轮到我且未达成一致」标识）
   curr_step_id?: number | null;
   curr_step_name?: string | null;
@@ -264,7 +266,7 @@ const buildFilterParams = (filter: {
 // 头像统一灰底白字（无头像时）/ 圆形头像图片（有 avatar_resource_id 时），
 // 信息层级靠字号与字重区分（参考 macaron-minimal-ui 设计）。
 // memo 包装：轮询回包数据不变时（sameTicketItems 复用旧引用）跳过卡片重渲染。
-const TicketCard = memo(function TicketCard({ t, onOpen, avatarMap, currentUserId, currentUsername, onToggleFollow }: { t: Ticket; onOpen: (id: string) => void; avatarMap?: AvatarMap; currentUserId?: string; currentUsername?: string; onToggleFollow?: (id: string, follow: boolean) => void }) {
+const TicketCard = memo(function TicketCard({ t, onOpen, avatarMap, currentUserId, currentUsername, onToggleFollow, onLocateParticipant }: { t: Ticket; onOpen: (id: string) => void; avatarMap?: AvatarMap; currentUserId?: string; currentUsername?: string; onToggleFollow?: (id: string, follow: boolean) => void; onLocateParticipant?: (id: string, p: ParticipantItem) => void }) {
   const creator = t.created_by_name || t.created_by || '-';
   const assignee = t.assigned_to_name || t.assigned_to || '-';
   const participants = (t.participants || []).filter(Boolean);
@@ -336,7 +338,7 @@ const TicketCard = memo(function TicketCard({ t, onOpen, avatarMap, currentUserI
         <TitleEllipsis text={t.title} lines={2} titleClassName="task-card2__title-inner" as="span" fontSize={18} lineHeight={1.35} />
       </div>
 
-      {/* 人员流转：发起人 →（参与人）→ 处理人 */}
+      {/* 人员流转：发起人 |（无箭头）参与人头像堆叠 |（有箭头）处理人 */}
       <div className="task-card2__people">
         <div className="task-card2__person" title={`发起人：${creator}`} aria-label={`发起人：${creator}`}>
           <AvatarImg
@@ -347,25 +349,11 @@ const TicketCard = memo(function TicketCard({ t, onOpen, avatarMap, currentUserI
           />
           <span className="task-card2__person-name">{creator}</span>
         </div>
-        {participants.length > 0 && (
-          <span className="task-card2__participants" title={`参与人：${participants.join('、')}`} aria-label={`参与人：${participants.join('、')}`}>
-            {participants.slice(0, 3).map((p, i) => {
-              const pid = avatarMap?.get(p);
-              return (
-                <AvatarImg
-                  key={`${p}-${i}`}
-                  className="task-card2__participant task-card2__participant--img"
-                  src={pid ? avatarUrl(pid) : null}
-                  alt={p}
-                  fallback={<span className="task-card2__participant">{p.slice(0, 1).toUpperCase()}</span>}
-                />
-              );
-            })}
-            {participants.length > 3 && (
-              <span className="task-card2__participant task-card2__participant--overflow">+{participants.length - 3}</span>
-            )}
-          </span>
-        )}
+        <ParticipantStack
+          participants={participants}
+          avatarMap={avatarMap}
+          onLocate={onLocateParticipant ? (p) => onLocateParticipant(t.id, p) : undefined}
+        />
         <span className="task-card2__person-arrow">
           <ArrowRight size={14} strokeWidth={2} />
         </span>
@@ -984,6 +972,15 @@ export default function TasksView() {
   }, [ticketDraft]);
 
   const openDetail = useCallback((id: string) => { navigateInWechat(navigate, `/tasks/${id}`); }, [navigate]);
+
+  // 点列表卡片上的参与人头像 → 进详情页并定位到讨论区。
+  // 与详情页 DiscussionPanel.locateComment 同口径：URL 带 focus=discussion 落到讨论区，
+  // 带 commentId 时再做锚点定位 + is-flash 高亮（目标页读取并消费该参数）。
+  const openParticipantDiscussion = useCallback((id: string, p: ParticipantItem) => {
+    const qs = new URLSearchParams({ focus: 'discussion' });
+    if (p?.username) qs.set('author', p.username);
+    navigateInWechat(navigate, `/tasks/${id}?${qs.toString()}`);
+  }, [navigate]);
 
   // PC 微信下点工单是整页跳转（详情页/操作记录页均为懒加载 chunk），列表挂载即预取，
   // 缩短首次点击后的下载等待；普通浏览器 / SPA 路径不受影响。
@@ -1617,7 +1614,7 @@ export default function TasksView() {
             <div className="tasks-empty">暂无工单</div>
           ) : (
             tickets.map((t) => (
-              <TicketCard key={t.id} t={t} onOpen={openDetail} avatarMap={avatarMap} currentUserId={userId} currentUsername={username} onToggleFollow={handleToggleFollow} />
+              <TicketCard key={t.id} t={t} onOpen={openDetail} avatarMap={avatarMap} currentUserId={userId} currentUsername={username} onToggleFollow={handleToggleFollow} onLocateParticipant={openParticipantDiscussion} />
             ))
           )}
           <Pagination current={page} total={total} pageSize={pageSize} onChange={setPage} />

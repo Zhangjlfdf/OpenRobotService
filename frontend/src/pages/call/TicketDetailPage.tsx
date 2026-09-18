@@ -2,7 +2,7 @@
 // 数据源：tasks 服务 GET /api/tasks/{dbId}?load_comments=true（DB id 唯一定位，AI 诊断数据从 metadata_info 提取）；操作：催办 / 上报（任务服务通知）
 // 路由 /app/call/ticket/:id 中的 :id 形如 db_<数字id>（Task.id）；session_id 直链仅作旧链接兼容
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
-import { useParams, useNavigate, useLocation } from 'react-router-dom';
+import { useParams, useNavigate, useLocation, useSearchParams } from 'react-router-dom';
 import { Navbar, Button, Toast, Loading, Tag, Popup, Textarea, DialogPlugin, Form, FormItem } from 'tdesign-mobile-react';
 import AppButton from '@/shared/components/AppButton';
 import { DatePicker } from 'antd';
@@ -169,6 +169,11 @@ export default function TicketDetailPage() {
   const { id: sessionId = '' } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const location = useLocation();
+  // 从历史工单列表点参与人头像跳进来时的讨论区定位参数
+  const [searchParams] = useSearchParams();
+  const focusDiscussion = searchParams.get('focus') === 'discussion';
+  const focusCommentId = searchParams.get('commentId');
+  const focusAuthor = searchParams.get('author');
   const request = createRequest(API_CONFIG.TASKS.BASE_URL, '工单服务');
   const { username, userId, name, isAdmin } = useAuthStore();
 
@@ -1072,6 +1077,8 @@ export default function TicketDetailPage() {
           mentionAllUsers={allUsers}
           taskId={ticket?.ticket_id}
           onTaskUpdated={handleWsTaskUpdated}
+          focusCommentId={focusDiscussion ? focusCommentId : null}
+          focusAuthor={focusDiscussion ? focusAuthor : null}
         />
 
         {/* 操作：与历史工单列表页完全一致 —— 终态（已解决/已取消/已关闭）整组不显示；
