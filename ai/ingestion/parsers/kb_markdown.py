@@ -109,7 +109,9 @@ class KBDomainIngester(BaseIngester[KBEntry]):
             # 保持叶子名稳定（vehicle_errors 等过滤器零迁移），品牌信息走 payload.brand
             if self._domain == "company" and "/" in sub_domain:
                 first = sub_domain.split("/", 1)[0]
-                if first in ("xmover", "huarui", "ksec", "common"):
+                # 中英文名都认（磁盘目录改过名，两种都得剥）
+                if first in ("自研车", "华睿", "科钛", "通用",
+                             "xmover", "huarui", "ksec", "common"):
                     sub_domain = sub_domain.split("/", 1)[1]
 
             try:
