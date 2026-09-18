@@ -7,7 +7,7 @@ import json
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 
-from ai.agents.AiDiagnosisPlatform.pipeline import AgentState
+from ai.agents.AiDiagnosisPlatform.pipeline import AgentState, AiDiagnosisPlatform
 
 
 # ================================================================
@@ -1268,6 +1268,42 @@ class TestTicketBoundaryPrefill:
         assert "以上对话已随上一张工单提交归档" in s
         assert "不算本次提到，禁止照抄" in s
         assert "南京本川项目（编号: NJBC01）" in s
+
+
+class TestResolveSeqChoice:
+    """答编号轮服务端定序（0916 task835 三连实锤：越界序号幻觉还原/code 撞号）"""
+
+    CANDS = [
+        {"name": "吃饭项目", "code": "011255555"},
+        {"name": "摇人吧服务号", "code": "Leo_test"},
+        {"name": "辽宁盘锦金龙鱼软包堆垛项目", "code": "53"},
+    ]
+
+    from ai.agents.AiDiagnosisPlatform.pipeline import _resolve_seq_choice
+
+    S = staticmethod(_resolve_seq_choice)
+    P = staticmethod(AiDiagnosisPlatform._parse_seq_reply) if hasattr(AiDiagnosisPlatform, "_parse_seq_reply") else None
+
+    def test_valid_seq_resolves(self):
+        handled, choice = self.S("2", self.CANDS)
+        assert handled and choice == {"name": "摇人吧服务号", "code": "Leo_test"}
+
+    def test_seq_variants(self):
+        for q in ("第2个", "2号", " 二 ", "2"):
+            handled, choice = self.S(q, self.CANDS)
+            assert handled and choice["name"] == "摇人吧服务号", q
+
+    def test_out_of_range_empty_choice(self):
+        """越界序号「7」→ handled + choice=None（不预填列表外项目——task835 情况2/3 回归）"""
+        handled, choice = self.S("7", self.CANDS)
+        assert handled and choice is None
+
+    def test_non_seq_not_handled(self):
+        """非纯序号（自由文字）→ 不接管，交回 LLM 照抄链路"""
+        handled, _ = self.S("就选摇人吧服务号", self.CANDS)
+        assert handled is False
+        handled, _ = self.S("2号库那边", self.CANDS)
+        assert handled is False
 
 
 class TestImageInfoBlock:
