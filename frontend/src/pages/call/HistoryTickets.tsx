@@ -408,18 +408,21 @@ export default function HistoryTickets({ showHeader = true }: { showHeader?: boo
                   <span className="history-row__tip-text">{t.redispatch_tip}</span>
                 </div>
               )}
-              {/* 人员流转（设计稿：发起人头像+姓名 | 参与人头像堆叠（无箭头） | 线条箭头 | 处理人）。
+              {/* 人员流转（设计稿：发起人头像+姓名 | 流线区——细线贯穿、参与人头像堆叠骑线居中、箭头头部收于右端 | 处理人）。
                   派单中（status=new 且处理人未写入，AI 派单 Worker 60s 轮询中）：显示「派单中」呼吸动效 */}
               <div className="task-card2__people">
                 <div className="task-card2__person task-card2__person--creator" title={`发起人：${t.created_by_name || t.created_by || '-'}`} aria-label={`发起人：${t.created_by_name || t.created_by || '-'}`}>
                   <span className="task-card2__avatar">{(t.created_by_name || t.created_by || '?').slice(0, 1).toUpperCase()}</span>
                   <span className="task-card2__person-name">{t.created_by_name || t.created_by || '-'}</span>
                 </div>
-                <ParticipantStack
-                  participants={(t.participants || []) as ParticipantItem[]}
-                  onLocate={(p) => { if (p?.username) openParticipantDiscussion(t.id, p.username); }}
-                />
-                <span className="task-card2__person-arrow"><PersonArrow width={28} /></span>
+                <div className="task-card2__flow">
+                  {/* 线在前、堆叠在后：堆叠盖在线上方（骑线） */}
+                  <PersonArrow />
+                  <ParticipantStack
+                    participants={(t.participants || []) as ParticipantItem[]}
+                    onLocate={(p) => { if (p?.username) openParticipantDiscussion(t.id, p.username); }}
+                  />
+                </div>
                 {(t.status === 'new' && !t.assigned_to && !t.assigned_to_name) ? (
                   <div className="task-card2__person task-card2__person--assignee" title="U老师 正在派单" aria-label="U老师 正在派单">
                     <span className="task-card2__avatar task-card2__avatar--assignee task-card2__avatar--dispatching"><i className="dispatch-pulse" /></span>

@@ -886,7 +886,9 @@ export default function TicketDetailPage() {
                   <span className="task-card2__person-name">{ticket.created_by_name || ticket.created_by || '-'}</span>
                 </span>
               </div>
-              <span className="task-card2__person-arrow"><PersonArrow width={28} /></span>
+              <div className="task-card2__flow">
+                <PersonArrow />
+              </div>
               {isDispatching ? (
                 <div className="task-card2__person task-card2__person--assignee" title="U老师 正在派单，稍候自动更新" aria-label="U老师 正在派单，稍候自动更新">
                   <span className="task-card2__avatar task-card2__avatar--assignee task-card2__avatar--dispatching"><i className="dispatch-pulse" /></span>

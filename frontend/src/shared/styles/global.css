@@ -2863,24 +2863,44 @@ html, body, #root {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-/* 人员流转箭头：参与 flex 流式布局，紧随参与人堆叠之后、处理人之前。
-   不可用 absolute 居中——那样箭头不占位，堆叠会被挤到箭头左侧且头像会盖住箭头。 */
-.task-card2__person-arrow {
-  display: inline-flex;
+/* 人员流转「流线区」：占据发起人与处理人之间的剩余宽度。
+   细线贯穿全区（长度自适应伸缩），参与人头像堆叠骑线居中（置于线上层，遮住身下的线），
+   箭头头部收于右端。 */
+.task-card2__flow {
+  position: relative;
+  flex: 1;
+  align-self: stretch;
+  min-width: 48px;
+  display: flex;
   align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  /* 不加 margin auto：剩余空间由「处理人」的 margin-left:auto 独占，
-     保证箭头紧跟参与人堆叠、处理人贴右，且两者间距均匀 */
-  margin-left: 2px;
-  margin-right: 2px;
+}
+.task-card2__person-arrow {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-width: 0;
   color: var(--muted-foreground);
-  /* SVG 是 inline 元素，默认基线对齐会在底部留出几像素空隙 → 置 0 让箭头垂直居中精确 */
+  /* 子元素含 inline SVG，基线对齐会在底部留出几像素空隙 → 置 0 让箭头垂直居中精确 */
   line-height: 0;
 }
-.task-card2__person-arrow .person-arrow-svg {
+.person-arrow__line {
+  flex: 1;
+  min-width: 12px;
+  border-radius: 1px;
+  background: currentColor;
+}
+.person-arrow__head {
   display: block;
+  flex-shrink: 0;
   overflow: visible;
+}
+/* 参与人头像堆叠骑线：绝对居中于流线区，且必须盖在线的上方 */
+.task-card2__flow .participant-stack-wrap {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 1;
 }
 /* 中间参与人头像堆叠（设计稿：size-6 24px gray-soft + ring-2 card + -space-x-1.5 叠加） */
 .task-card2__participants {
@@ -7899,21 +7919,32 @@ html, body, #root {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.task-card2__person-arrow {
-  display: inline-flex;
+.task-card2__flow {
+  position: relative;
+  flex: 1;
+  align-self: stretch;
+  min-width: 48px;
+  display: flex;
   align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  /* 不加 margin auto：剩余空间由「处理人」的 margin-left:auto 独占，
-     保证箭头紧跟参与人堆叠、处理人贴右，且两者间距均匀 */
-  margin-left: 2px;
-  margin-right: 2px;
+}
+.task-card2__person-arrow {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-width: 0;
   color: var(--muted-foreground);
-  /* SVG 是 inline 元素，默认基线对齐会在底部留出几像素空隙 → 置 0 让箭头垂直居中精确 */
+  /* 子元素含 inline SVG，基线对齐会在底部留出几像素空隙 → 置 0 让箭头垂直居中精确 */
   line-height: 0;
 }
-.task-card2__person-arrow .person-arrow-svg {
+.person-arrow__line {
+  flex: 1;
+  min-width: 12px;
+  border-radius: 1px;
+  background: currentColor;
+}
+.person-arrow__head {
   display: block;
+  flex-shrink: 0;
   overflow: visible;
 }
 

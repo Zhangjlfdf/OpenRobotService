@@ -1,49 +1,42 @@
-// 人员流转「线条箭头 →」（发起人 → 处理人），列表卡片 / 详情页共用。
+// 人员流转「自适应流线箭头」（发起人 ——→ 处理人），列表卡片 / 详情页共用。
 //
-// 为何不用 lucide ArrowRight：它是 24x24 正方形 viewBox 的图标，
-// 图形四周留有 padding、线身较短（头部占比大），视觉偏「粗短」，
-// 且线宽受图标几何约束、难以调细拉长。
-// 故自绘扁长 viewBox（28x12）的 SVG：横线占满主体、箭头头部小而尖，
-// 配合更细的 stroke（1.2）与圆形端点，得到「细长优雅」的线条箭头。
+// 结构：细线（<i>，flex:1 撑满流线区剩余宽度）+ 小箭头头部（SVG，round 端点），
+// 两段零间距相接，视觉上是一根完整的箭头。线身长度随可用空间自适应伸缩，
+// 参与人头像堆叠由调用方置于 .task-card2__flow 内、绝对居中骑在线上。
 //
-// 颜色用 currentColor 驱动，由父级 .task-card2__person-arrow 的 color 决定
-// （历史卡片 / 详情页的蓝色 token 覆盖自动生效）。
+// 为何不整根 SVG：线长需自适应，而 preserveAspectRatio="none" 拉伸会把箭头头部
+// 一起拉变形；固定 viewBox 的整根箭头无法只伸长线身。故拆「CSS 线身 + SVG 头部」。
+//
+// 颜色用 currentColor 驱动（本组件根节点 .task-card2__person-arrow 的 color），
+// 历史卡片 / 详情页的蓝色 token 覆盖自动生效。
 type Props = {
-  /** 箭头整体宽度（px）。默认 28，比旧图标更长 */
-  width?: number;
-  /** 描边粗细。默认 1.2，比旧图标（2）更细 */
+  /** 线身粗细（= 头部描边宽，px）。默认 1.2，比旧图标（2）更细 */
   strokeWidth?: number;
 };
 
-export default function PersonArrow({ width = 28, strokeWidth = 1.2 }: Props) {
-  // viewBox 宽高比 28:12，高度按比例随宽度缩放，保持箭头比例不失真
-  const height = Math.round((width * 12) / 28);
+export default function PersonArrow({ strokeWidth = 1.2 }: Props) {
   return (
-    <svg
-      className="person-arrow-svg"
-      width={width}
-      height={height}
-      viewBox="0 0 28 12"
-      fill="none"
-      xmlns="http://www.w3.org/2000/svg"
-      aria-hidden="true"
-      focusable="false"
-    >
-      {/* 横线：贯穿主体，留出右侧给箭头头部 */}
-      <path
-        d="M1 6 H25.5"
-        stroke="currentColor"
-        strokeWidth={strokeWidth}
-        strokeLinecap="round"
-      />
-      {/* 箭头头部：两段短斜线收拢成一个尖角，小巧锐利 */}
-      <path
-        d="M21 2 L25.8 6 L21 10"
-        stroke="currentColor"
-        strokeWidth={strokeWidth}
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
+    <span className="task-card2__person-arrow" aria-hidden="true">
+      {/* 线身：flex:1 自适应撑满，粗细与描边一致 */}
+      <i className="person-arrow__line" style={{ height: strokeWidth }} />
+      {/* 箭头头部：小而尖的 round 端点折线，左端圆帽与线身零间距相接 */}
+      <svg
+        className="person-arrow__head"
+        width={6}
+        height={12}
+        viewBox="0 0 6 12"
+        fill="none"
+        xmlns="http://www.w3.org/2000/svg"
+        focusable="false"
+      >
+        <path
+          d="M0.6 2 L5.4 6 L0.6 10"
+          stroke="currentColor"
+          strokeWidth={strokeWidth}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      </svg>
+    </span>
   );
 }

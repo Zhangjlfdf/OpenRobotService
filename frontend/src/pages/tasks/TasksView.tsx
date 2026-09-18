@@ -339,7 +339,7 @@ const TicketCard = memo(function TicketCard({ t, onOpen, avatarMap, currentUserI
         <TitleEllipsis text={t.title} lines={2} titleClassName="task-card2__title-inner" as="span" fontSize={18} lineHeight={1.35} />
       </div>
 
-      {/* 人员流转：发起人 |（无箭头）参与人头像堆叠 |（有箭头）处理人 */}
+      {/* 人员流转：发起人 | 流线区（细线贯穿、参与人头像堆叠骑线居中） | 处理人 */}
       <div className="task-card2__people">
         <div className="task-card2__person" title={`发起人：${creator}`} aria-label={`发起人：${creator}`}>
           <AvatarImg
@@ -350,14 +350,15 @@ const TicketCard = memo(function TicketCard({ t, onOpen, avatarMap, currentUserI
           />
           <span className="task-card2__person-name">{creator}</span>
         </div>
-        <ParticipantStack
-          participants={participants}
-          avatarMap={avatarMap}
-          onLocate={onLocateParticipant ? (p) => onLocateParticipant(t.id, p) : undefined}
-        />
-        <span className="task-card2__person-arrow">
-          <PersonArrow width={28} />
-        </span>
+        <div className="task-card2__flow">
+          {/* 线在前、堆叠在后：堆叠盖在线上方（骑线） */}
+          <PersonArrow />
+          <ParticipantStack
+            participants={participants}
+            avatarMap={avatarMap}
+            onLocate={onLocateParticipant ? (p) => onLocateParticipant(t.id, p) : undefined}
+          />
+        </div>
         <div className="task-card2__person task-card2__person--assignee" title={`处理人：${assignee}`} aria-label={`处理人：${assignee}`}>
           <span className="task-card2__person-name">{assignee}</span>
           <AvatarImg
