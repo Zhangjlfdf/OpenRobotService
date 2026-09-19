@@ -1,8 +1,15 @@
-"""Tests for network capture redaction."""
+"""Tests for network capture redaction and evidence."""
 
 from __future__ import annotations
 
-from automation.src.ui_regression.capture import REDACTED, redact_url, redact_value
+from automation.src.ui_regression.capture import (
+    REDACTED,
+    CapturedExchange,
+    CapturedStep,
+    build_step_evidence,
+    redact_url,
+    redact_value,
+)
 
 
 def test_redact_value_removes_credentials_and_bearer_tokens():
@@ -35,3 +42,32 @@ def test_redact_url_removes_sensitive_query_parameters():
         "http://127.0.0.1/api/tasks/1/ws"
         f"?token={REDACTED}&mode=debug&access_token={REDACTED}"
     )
+
+
+def test_build_step_evidence_summarizes_assertion_and_interfaces():
+    captured = CapturedStep(
+        step_id="S10",
+        role="U2",
+        action="确认接单",
+        exchanges=[
+            CapturedExchange(
+                sequence=1,
+                method="POST",
+                url="http://127.0.0.1/api/tasks/1/respond",
+                status=200,
+            ),
+            CapturedExchange(
+                sequence=2,
+                method="GET",
+                url="http://127.0.0.1/api/tasks/1",
+                status=None,
+            ),
+        ],
+    )
+
+    evidence = build_step_evidence(captured)
+
+    assert evidence["assertion"]["result"] == "通过"
+    assert evidence["interfaces"][0]["result"] == "通过"
+    assert evidence["interfaces"][0]["path"] == "/api/tasks/1/respond"
+    assert evidence["interfaces"][1]["result"] == "未响应"

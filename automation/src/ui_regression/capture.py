@@ -53,6 +53,42 @@ class CapturedStep:
     error: str | None = None
 
 
+def build_step_evidence(captured: CapturedStep) -> dict[str, Any]:
+    """Build a readable step result and response summary for Allure."""
+
+    interfaces = []
+    for item in captured.exchanges:
+        status = item.status
+        if status is None:
+            result = "未响应"
+        elif status < 400:
+            result = "通过"
+        else:
+            result = "失败"
+        interfaces.append(
+            {
+                "method": item.method,
+                "path": urlsplit(item.url).path,
+                "status": status,
+                "result": result,
+            }
+        )
+
+    step_passed = captured.error is None
+    return {
+        "step_id": captured.step_id,
+        "role": captured.role,
+        "action": captured.action,
+        "assertion": {
+            "name": "业务步骤执行",
+            "expected": "步骤无异常完成",
+            "actual": "无异常" if step_passed else captured.error,
+            "result": "通过" if step_passed else "失败",
+        },
+        "interfaces": interfaces,
+    }
+
+
 def redact_value(value: Any) -> Any:
     """Recursively redact credentials and bearer tokens."""
 
@@ -168,6 +204,15 @@ class NetworkCapture:
             status = item.status if item.status is not None else "未响应"
             with allure.step(f"接口：{item.method} {endpoint} -> HTTP {status}"):
                 pass
+        allure.attach(
+            json.dumps(
+                build_step_evidence(captured),
+                ensure_ascii=False,
+                indent=2,
+            ),
+            name=f"{captured.step_id}-断言与响应摘要",
+            attachment_type=allure.attachment_type.JSON,
+        )
         allure.attach(
             json.dumps(
                 {

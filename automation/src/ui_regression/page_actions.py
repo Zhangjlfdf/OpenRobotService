@@ -2,9 +2,16 @@
 
 from __future__ import annotations
 
+import time
 from datetime import datetime, timedelta
 
-from playwright.sync_api import Locator, Page, TimeoutError as PlaywrightTimeoutError, expect
+from playwright.sync_api import (
+    Locator,
+    Page,
+    Response,
+    TimeoutError as PlaywrightTimeoutError,
+    expect,
+)
 
 
 def default_end_time(days: int = 7) -> str:
@@ -64,11 +71,12 @@ class UiPageActions:
             expected_title,
             timeout=20_000,
         )
-        with self.page.expect_response(
-            lambda response: "/api/ai/qa/ticket/confirm" in response.url
-        ) as response_info:
-            self.page.get_by_test_id("chat-ticket-confirm").click()
-        response = response_info.value
+        confirm_button = self.page.get_by_test_id("chat-ticket-confirm")
+        expect(confirm_button).to_be_enabled(timeout=10_000)
+        response = self._click_and_wait_for_response(
+            confirm_button,
+            "/api/ai/qa/ticket/confirm",
+        )
         if response.status != 200:
             raise AssertionError(f"确认提单失败: HTTP {response.status}")
         data = response.json().get("data") or {}
@@ -238,3 +246,46 @@ class UiPageActions:
                 target = marker.locator("xpath=.//button[1]")
         expect(target).to_be_visible(timeout=20_000)
         return target
+
+    def _click_and_wait_for_response(
+        self,
+        target: Locator,
+        url_fragment: str,
+        timeout_ms: int = 30_000,
+    ) -> Response:
+        request_seen = False
+        response_holder: dict[str, Response] = {}
+
+        def on_request(request) -> None:
+            nonlocal request_seen
+            if url_fragment in request.url:
+                request_seen = True
+
+        def on_response(response: Response) -> None:
+            if url_fragment in response.url:
+                response_holder["value"] = response
+
+        self.page.on("request", on_request)
+        self.page.on("response", on_response)
+        started = time.monotonic()
+        deadline = started + timeout_ms / 1000
+        retried = False
+        try:
+            target.click()
+            while time.monotonic() < deadline:
+                if "value" in response_holder:
+                    return response_holder["value"]
+                if (
+                    not request_seen
+                    and not retried
+                    and time.monotonic() - started >= 2
+                ):
+                    target.click()
+                    retried = True
+                self.page.wait_for_timeout(100)
+            raise PlaywrightTimeoutError(
+                f"点击后未收到接口响应：{url_fragment}"
+            )
+        finally:
+            self.page.remove_listener("request", on_request)
+            self.page.remove_listener("response", on_response)
