@@ -8,6 +8,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Iterator
+from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
 import allure
 from playwright.sync_api import Page, Request, Response
@@ -71,6 +72,21 @@ def redact_value(value: Any) -> Any:
     return value
 
 
+def redact_url(url: str) -> str:
+    """Redact sensitive query parameters from a captured URL."""
+
+    parts = urlsplit(url)
+    query = urlencode(
+        [
+            (key, REDACTED if key.lower() in SENSITIVE_KEYS else value)
+            for key, value in parse_qsl(parts.query, keep_blank_values=True)
+        ],
+        quote_via=quote,
+        safe="[]",
+    )
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, query, parts.fragment))
+
+
 class NetworkCapture:
     """Capture actual browser traffic and attach it to Allure steps."""
 
@@ -110,7 +126,7 @@ class NetworkCapture:
         exchange = CapturedExchange(
             sequence=self._sequence,
             method=request.method,
-            url=request.url,
+            url=redact_url(request.url),
             request_headers=redact_value(dict(request.headers)),
             request_body=self._safe_payload(request.post_data),
         )
@@ -147,6 +163,11 @@ class NetworkCapture:
             return BEARER_RE.sub(rf"\1{REDACTED}", text)
 
     def _attach(self, captured: CapturedStep) -> None:
+        for item in captured.exchanges:
+            endpoint = urlsplit(item.url).path
+            status = item.status if item.status is not None else "未响应"
+            with allure.step(f"接口：{item.method} {endpoint} -> HTTP {status}"):
+                pass
         allure.attach(
             json.dumps(
                 {

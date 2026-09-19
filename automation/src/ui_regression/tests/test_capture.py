@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from automation.src.ui_regression.capture import REDACTED, redact_value
+from automation.src.ui_regression.capture import REDACTED, redact_url, redact_value
 
 
 def test_redact_value_removes_credentials_and_bearer_tokens():
@@ -24,3 +24,14 @@ def test_redact_value_removes_credentials_and_bearer_tokens():
     assert redacted["access_token"] == REDACTED
     assert redacted["headers"]["Cookie"] == REDACTED
     assert redacted["items"][0]["refresh_token"] == REDACTED
+
+
+def test_redact_url_removes_sensitive_query_parameters():
+    value = redact_url(
+        "http://127.0.0.1/api/tasks/1/ws?token=secret&mode=debug&access_token=hidden"
+    )
+
+    assert value == (
+        "http://127.0.0.1/api/tasks/1/ws"
+        f"?token={REDACTED}&mode=debug&access_token={REDACTED}"
+    )
