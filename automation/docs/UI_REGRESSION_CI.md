@@ -13,8 +13,8 @@ PR 和 fork 不触发，不接触 Secrets。
 
 ```text
 TEST_SSH_PRIVATE_KEY
-UI_REGRESSION_U1_PASSWORD
-UI_REGRESSION_U2_PASSWORD
+REAL_U1_PASSWORD
+REAL_U2_PASSWORD
 UI_REGRESSION_CLEANUP_PASSWORD
 UI_REGRESSION_DB_PASSWORD
 ```
@@ -94,4 +94,3 @@ allure-report-ui-regression-<run_number>
 3. 检查测试后端 `9400`、自动化 AI `9411` 是否健康。
 4. 检查 `automation_cleanup` 是否能连接 `helpdesk_test`。
 5. 下载 Allure artifact 查看步骤截图、接口状态和清理结果。
-

@@ -56,8 +56,8 @@ jobs:
       - name: Validate required configuration
         env:
           TEST_SSH_PRIVATE_KEY: ${{ secrets.TEST_SSH_PRIVATE_KEY }}
-          UI_REGRESSION_U1_PASSWORD: ${{ secrets.UI_REGRESSION_U1_PASSWORD }}
-          UI_REGRESSION_U2_PASSWORD: ${{ secrets.UI_REGRESSION_U2_PASSWORD }}
+          UI_REGRESSION_U1_PASSWORD: ${{ secrets.REAL_U1_PASSWORD }}
+          UI_REGRESSION_U2_PASSWORD: ${{ secrets.REAL_U2_PASSWORD }}
           UI_REGRESSION_CLEANUP_PASSWORD: ${{ secrets.UI_REGRESSION_CLEANUP_PASSWORD }}
           UI_REGRESSION_DB_PASSWORD: ${{ secrets.UI_REGRESSION_DB_PASSWORD }}
         run: |
@@ -111,8 +111,8 @@ jobs:
 
       - name: Run UI regression
         env:
-          UI_REGRESSION_U1_PASSWORD: ${{ secrets.UI_REGRESSION_U1_PASSWORD }}
-          UI_REGRESSION_U2_PASSWORD: ${{ secrets.UI_REGRESSION_U2_PASSWORD }}
+          UI_REGRESSION_U1_PASSWORD: ${{ secrets.REAL_U1_PASSWORD }}
+          UI_REGRESSION_U2_PASSWORD: ${{ secrets.REAL_U2_PASSWORD }}
           UI_REGRESSION_CLEANUP_PASSWORD: ${{ secrets.UI_REGRESSION_CLEANUP_PASSWORD }}
           UI_REGRESSION_DB_PASSWORD: ${{ secrets.UI_REGRESSION_DB_PASSWORD }}
         run: |

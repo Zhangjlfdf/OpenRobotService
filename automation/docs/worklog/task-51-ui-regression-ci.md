@@ -59,7 +59,10 @@ permitopen=127.0.0.1:3306
 
 ## 验证计划
 
-1. 配置 GitHub Secrets 和 Variables。
+1. 配置 GitHub Secrets 和 Variables。已完成：
+   - 复用 `REAL_U1_PASSWORD`、`REAL_U2_PASSWORD`。
+   - 新增 `UI_REGRESSION_CLEANUP_PASSWORD`、`UI_REGRESSION_DB_PASSWORD`。
+   - 10 个 `UI_REGRESSION_*` Repository Variables 已创建。
 2. 合并 workflow 到 test 分支。
 3. 通过 `workflow_dispatch` 人工触发。
 4. 确认 job 成功、artifact 可下载。
