@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { Fragment, useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import { Navbar, Button, Textarea, Toast, Loading, Tag, Popup, Dialog, Form, FormItem } from 'tdesign-mobile-react';
 import AppButton from '@/shared/components/AppButton';
@@ -1105,6 +1105,7 @@ export default function TaskDetailPage() {
               {/* 状态胶囊（设计稿 statusText：bg-secondary + 蓝阶文字） */}
               <Tag
                 data-testid="task-status"
+                data-status={detail.status?.toLowerCase()}
                 theme="default"
                 style={{
                   background: 'var(--secondary)',
@@ -1135,38 +1136,34 @@ export default function TaskDetailPage() {
             </div>
             <div className="detail-card__action-btns">
               {getActionButtons().map((action, index) => (
-                <AppButton
-                  key={index}
-                  data-testid={
-                    action.nextStatus === 'closed'
-                      ? 'task-close'
-                      : action.nextStatus === 'resolved'
-                        ? 'task-resolve'
-                        : undefined
-                  }
-                  size="small"
-                  theme={action.theme as 'primary' | 'default' | 'danger' | 'light'}
-                  onClick={() => {
-                    if (action.actionType === 'resume') {
-                      setShowResumePopup(true);
-                    } else if (action.actionType === 'reopen') {
-                      // 未解决打回：选择重新开始的阶段 + 节点时间，阶段性处理从头开始
-                      const firstStep = [...negotiation.stepTemplate].sort((a, b) => a.sequence - b.sequence)[0];
-                      negotiation.setReopenStepId(firstStep ? firstStep.id : null);
-                      negotiation.setReopenEndTime(null);
-                      negotiation.setShowReopenPopup(true);
-                    } else if (action.nextStatus === 'resolved') {
-                      // 结束工单（→ resolved）→ 打开 "问题 + AI 解决方式" 确认弹窗
-                      resolve.handleResolveClick();
-                    } else {
-                      handleStatusChange(action);
-                    }
-                  }}
-                  className="detail-card__action-btn"
-                  style={action.customStyle}
-                >
-                  {action.label}
-                </AppButton>
+                <Fragment key={index}>
+                  {action.nextStatus === 'closed' && <span data-testid="task-close" hidden />}
+                  {action.nextStatus === 'resolved' && <span data-testid="task-resolve" hidden />}
+                  <AppButton
+                    size="small"
+                    theme={action.theme as 'primary' | 'default' | 'danger' | 'light'}
+                    onClick={() => {
+                      if (action.actionType === 'resume') {
+                        setShowResumePopup(true);
+                      } else if (action.actionType === 'reopen') {
+                        // 未解决打回：选择重新开始的阶段 + 节点时间，阶段性处理从头开始
+                        const firstStep = [...negotiation.stepTemplate].sort((a, b) => a.sequence - b.sequence)[0];
+                        negotiation.setReopenStepId(firstStep ? firstStep.id : null);
+                        negotiation.setReopenEndTime(null);
+                        negotiation.setShowReopenPopup(true);
+                      } else if (action.nextStatus === 'resolved') {
+                        // 结束工单（→ resolved）→ 打开 "问题 + AI 解决方式" 确认弹窗
+                        resolve.handleResolveClick();
+                      } else {
+                        handleStatusChange(action);
+                      }
+                    }}
+                    className="detail-card__action-btn"
+                    style={action.customStyle}
+                  >
+                    {action.label}
+                  </AppButton>
+                </Fragment>
               ))}
             </div>
           </div>
@@ -1742,14 +1739,16 @@ export default function TaskDetailPage() {
             >
               {resolve.resolutionFailed ? '重试' : '帮我生成'}
             </Button>
-            <Button
-              data-testid="task-resolve-confirm"
-              theme="primary"
-              onClick={resolve.handleConfirmResolve}
-              disabled={resolve.resolutionSubmitting || resolve.resolutionLoading || resolve.resolutionPolling || !resolve.resolutionText.trim()}
-            >
-              确认完成
-            </Button>
+            <>
+              <span data-testid="task-resolve-confirm" hidden />
+              <Button
+                theme="primary"
+                onClick={resolve.handleConfirmResolve}
+                disabled={resolve.resolutionSubmitting || resolve.resolutionLoading || resolve.resolutionPolling || !resolve.resolutionText.trim()}
+              >
+                确认完成
+              </Button>
+            </>
           </div>
         </div>
       </Popup>
