@@ -11,11 +11,21 @@ param(
     [string]$U2Password = "",
     [string]$CleanupUsername = "",
     [string]$CleanupPassword = "",
+    [switch]$EnableDbCleanup,
+    [string]$DbCleanupUser = "",
+    [string]$DbCleanupPassword = "",
+    [string]$DbCleanupDatabase = "",
     [switch]$SkipFrontendBuild,
     [switch]$NoOpen
 )
 
 $ErrorActionPreference = "Stop"
+$utf8 = New-Object System.Text.UTF8Encoding($false)
+[Console]::InputEncoding = $utf8
+[Console]::OutputEncoding = $utf8
+$OutputEncoding = $utf8
+$env:PYTHONUTF8 = "1"
+$env:PYTHONIOENCODING = "utf-8"
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $automationRoot = Join-Path $repoRoot "automation"
@@ -218,6 +228,32 @@ $resultsDir = Join-Path $repoRoot $config.report.results_dir
 $reportDir = Join-Path $repoRoot $config.report.report_dir
 $preferredReportPort = [int]$config.report.port
 $reportStatePath = Join-Path $automationRoot "output\ui-regression-report-server.json"
+$dbCleanupEnabled = (
+    $EnableDbCleanup -or
+    [bool]$config.database_cleanup.enabled
+)
+
+if ($dbCleanupEnabled) {
+    $resolvedDbCleanupUser = if ($DbCleanupUser) {
+        $DbCleanupUser
+    } elseif ($env:UI_REGRESSION_DB_USER) {
+        $env:UI_REGRESSION_DB_USER
+    } else {
+        [string]$config.database_cleanup.user
+    }
+    $resolvedDbCleanupDatabase = if ($DbCleanupDatabase) {
+        $DbCleanupDatabase
+    } elseif ($env:UI_REGRESSION_DB_NAME) {
+        $env:UI_REGRESSION_DB_NAME
+    } else {
+        [string]$config.database_cleanup.database
+    }
+    $resolvedDbCleanupPassword = Resolve-Required `
+        -Value $DbCleanupPassword `
+        -EnvironmentName "UI_REGRESSION_DB_PASSWORD" `
+        -Prompt "Database cleanup password" `
+        -Secret
+}
 
 if (-not $SkipFrontendBuild) {
     if (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
@@ -267,6 +303,19 @@ $env:UI_REGRESSION_U2_USERNAME = $resolvedU2Username
 $env:UI_REGRESSION_U2_PASSWORD = $resolvedU2Password
 $env:UI_REGRESSION_CLEANUP_USERNAME = $resolvedCleanupUsername
 $env:UI_REGRESSION_CLEANUP_PASSWORD = $resolvedCleanupPassword
+$env:UI_REGRESSION_DB_CLEANUP_ENABLED = if ($dbCleanupEnabled) { "1" } else { "0" }
+if ($dbCleanupEnabled) {
+    $env:UI_REGRESSION_DB_HOST = [string]$config.database_cleanup.host
+    $env:UI_REGRESSION_DB_PORT = "$($config.database_cleanup.local_port)"
+    $env:UI_REGRESSION_DB_REMOTE_PORT = "$($config.database_cleanup.remote_port)"
+    $env:UI_REGRESSION_DB_LOCAL_PORT = "$($config.database_cleanup.local_port)"
+    $env:UI_REGRESSION_DB_USER = $resolvedDbCleanupUser
+    $env:UI_REGRESSION_DB_PASSWORD = $resolvedDbCleanupPassword
+    $env:UI_REGRESSION_DB_NAME = $resolvedDbCleanupDatabase
+    $env:UI_REGRESSION_CLEANUP_TITLE_PREFIX = [string]$config.database_cleanup.title_prefix
+    $env:UI_REGRESSION_CLEANUP_PROJECT_ID = [string]$config.database_cleanup.project_id
+    Write-Host "DB cleanup prefix: $env:UI_REGRESSION_CLEANUP_TITLE_PREFIX"
+}
 $env:UI_REGRESSION_HEADLESS = if ($config.tests.headless) { "1" } else { "0" }
 $env:ALLURE_AUTO_OPEN = "0"
 

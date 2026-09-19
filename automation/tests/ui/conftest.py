@@ -14,8 +14,9 @@ import pytest
 import uvicorn
 from playwright.sync_api import Browser, BrowserContext, Page, sync_playwright
 
-from automation.src.remote import free_port
+from automation.src.remote import SSHTunnel, SSHTunnelConfig, free_port
 from automation.src.ui_regression.config import UiRegressionConfig
+from automation.src.ui_regression.db_cleanup import DatabaseCleanupConfig
 from automation.src.ui_regression.gateway import create_app
 from automation.src.ui_regression.tunnels import UiTunnelManager
 
@@ -51,6 +52,7 @@ class UiRegressionRuntime:
     u2_password: str
     cleanup_username: str
     cleanup_password: str
+    db_cleanup_config: DatabaseCleanupConfig | None
 
 
 def _wait_for_gateway(url: str, server: uvicorn.Server, timeout: float = 30.0) -> None:
@@ -90,6 +92,35 @@ def ui_regression_runtime() -> Iterator[UiRegressionRuntime]:
 
     tunnel_manager = UiTunnelManager(config)
     backend_url, ai_url = tunnel_manager.start()
+
+    db_tunnel: SSHTunnel | None = None
+    db_cleanup_config: DatabaseCleanupConfig | None = None
+    if os.getenv("UI_REGRESSION_DB_CLEANUP_ENABLED", "0") == "1":
+        try:
+            db_tunnel = SSHTunnel(
+                SSHTunnelConfig(
+                    host=config.ssh_host,
+                    user=config.ssh_user,
+                    ssh_port=config.ssh_port,
+                    key_path=config.ssh_key,
+                    remote_host="127.0.0.1",
+                    remote_port=int(
+                        os.getenv("UI_REGRESSION_DB_REMOTE_PORT", "3306")
+                    ),
+                    local_host="127.0.0.1",
+                    local_port=int(
+                        os.getenv("UI_REGRESSION_DB_LOCAL_PORT", "19402")
+                    ),
+                    connect_timeout=config.tunnel_timeout,
+                )
+            )
+            db_tunnel.start()
+            db_cleanup_config = DatabaseCleanupConfig.from_env(
+                port_override=db_tunnel.local_port
+            )
+        except Exception:
+            tunnel_manager.stop()
+            raise
 
     gateway_port = free_port()
     gateway_config = UiRegressionConfig(
@@ -150,6 +181,7 @@ def ui_regression_runtime() -> Iterator[UiRegressionRuntime]:
             u2_password=u2_password,
             cleanup_username=os.getenv("UI_REGRESSION_CLEANUP_USERNAME", ""),
             cleanup_password=os.getenv("UI_REGRESSION_CLEANUP_PASSWORD", ""),
+            db_cleanup_config=db_cleanup_config,
         )
     finally:
         u1_context.close()
@@ -158,4 +190,6 @@ def ui_regression_runtime() -> Iterator[UiRegressionRuntime]:
         playwright.stop()
         server.should_exit = True
         server_thread.join(timeout=10)
+        if db_tunnel is not None:
+            db_tunnel.stop()
         tunnel_manager.stop()

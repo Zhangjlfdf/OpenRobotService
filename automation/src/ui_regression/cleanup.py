@@ -9,6 +9,11 @@ from typing import Any
 import allure
 import httpx
 
+from .db_cleanup import (
+    DatabaseCleanup,
+    DatabaseCleanupFilter,
+)
+
 
 @dataclass
 class CleanupWarning:
@@ -24,6 +29,7 @@ class CleanupResult:
 
     deleted: list[str] = field(default_factory=list)
     warnings: list[CleanupWarning] = field(default_factory=list)
+    database_deleted_rows: dict[str, int] = field(default_factory=dict)
 
     @property
     def ok(self) -> bool:
@@ -41,6 +47,7 @@ class CleanupManager:
         admin_password: str = "",
         u1_username: str = "",
         u1_password: str = "",
+        db_cleanup: DatabaseCleanup | None = None,
         client: httpx.Client | None = None,
     ):
         self.client = client or httpx.Client(
@@ -51,6 +58,7 @@ class CleanupManager:
         self.admin_password = admin_password
         self.u1_username = u1_username
         self.u1_password = u1_password
+        self.db_cleanup = db_cleanup
 
     def cleanup(
         self,
@@ -73,12 +81,14 @@ class CleanupManager:
                     "清理管理员",
                 )
                 if token:
-                    self._delete(
+                    api_deleted = self._delete(
                         f"/api/tasks/{ticket_id}",
                         token,
                         "工单",
                         result,
                     )
+                    if not api_deleted:
+                        self._database_cleanup(ticket_id, result)
 
         if conversation_id is not None:
             if not self.u1_username or not self.u1_password:
@@ -129,13 +139,51 @@ class CleanupManager:
             return ""
         return str(token)
 
+    def _database_cleanup(
+        self,
+        ticket_id: int,
+        result: CleanupResult,
+    ) -> None:
+        if self.db_cleanup is None:
+            return
+        config = self.db_cleanup.config
+        try:
+            cleanup_result = self.db_cleanup.cleanup(
+                DatabaseCleanupFilter(
+                    ticket_id=ticket_id,
+                    title_prefix=config.title_prefix,
+                    project_id=config.project_id,
+                    created_by=config.created_by,
+                    max_age_hours=config.max_age_hours,
+                ),
+                execute=True,
+            )
+        except Exception as exc:  # noqa: BLE001 - cleanup is best effort
+            result.warnings.append(
+                CleanupWarning("工单", f"数据库补偿清理异常: {exc}")
+            )
+            return
+
+        result.database_deleted_rows = cleanup_result.deleted_rows
+        if cleanup_result.deleted_rows.get("tasks", 0) > 0:
+            result.deleted.append("工单(数据库补偿)")
+            result.warnings = [
+                warning
+                for warning in result.warnings
+                if warning.resource != "工单"
+            ]
+        else:
+            result.warnings.append(
+                CleanupWarning("工单", "数据库补偿未匹配到可清理工单")
+            )
+
     def _delete(
         self,
         path: str,
         token: str,
         resource: str,
         result: CleanupResult,
-    ) -> None:
+    ) -> bool:
         try:
             response = self.client.delete(
                 path,
@@ -143,18 +191,20 @@ class CleanupManager:
             )
         except Exception as exc:  # noqa: BLE001 - cleanup is best effort
             result.warnings.append(CleanupWarning(resource, f"删除异常: {exc}"))
-            return
+            return False
         if response.status_code in (200, 204, 404):
             result.deleted.append(resource)
-            return
+            return True
         result.warnings.append(
             CleanupWarning(resource, f"删除失败: HTTP {response.status_code}")
         )
+        return False
 
     @staticmethod
     def _attach(result: CleanupResult) -> None:
         payload: dict[str, Any] = {
             "deleted": result.deleted,
+            "database_deleted_rows": result.database_deleted_rows,
             "warnings": [
                 {"resource": item.resource, "message": item.message}
                 for item in result.warnings

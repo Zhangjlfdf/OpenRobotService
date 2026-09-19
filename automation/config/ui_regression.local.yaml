@@ -25,3 +25,13 @@ report:
   report_dir: "automation/output/allure-report-ui-regression-combined"
   host: "127.0.0.1"
   port: 8086
+
+database_cleanup:
+  enabled: true
+  host: "127.0.0.1"
+  remote_port: 3306
+  local_port: 19402
+  user: "automation_cleanup"
+  database: "helpdesk_test"
+  title_prefix: "自动化链路验证-%"
+  project_id: "Leo_test"

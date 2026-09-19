@@ -11,6 +11,7 @@ from playwright.sync_api import expect
 
 from automation.src.ui_regression.capture import NetworkCapture
 from automation.src.ui_regression.cleanup import CleanupManager
+from automation.src.ui_regression.db_cleanup import DatabaseCleanup
 from automation.src.ui_regression.page_actions import UiPageActions
 
 from .conftest import UiRegressionRuntime
@@ -109,12 +110,18 @@ def test_call_qa_to_ticket_close_regression(ui_regression_runtime: UiRegressionR
                 "closed",
             )
     finally:
+        db_cleanup = (
+            DatabaseCleanup(runtime.db_cleanup_config)
+            if runtime.db_cleanup_config is not None
+            else None
+        )
         cleanup = CleanupManager(
             runtime.backend_url,
             admin_username=runtime.cleanup_username,
             admin_password=runtime.cleanup_password,
             u1_username=runtime.u1_username,
             u1_password=runtime.u1_password,
+            db_cleanup=db_cleanup,
         )
         with allure.step("清理本次测试数据"):
             result = cleanup.cleanup(

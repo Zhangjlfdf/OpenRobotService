@@ -141,3 +141,56 @@ UI 每个 S 步骤包含：
 - Smoke 只使用只读接口。
 - 密码、token、Cookie 不写入仓库。
 - 报告中的敏感字段继续使用 `[REDACTED]`。
+
+## 8. 数据库补偿清理
+
+该能力默认启用，但仍优先使用管理员删除接口。
+
+启用后，如果管理员删除工单返回 500，自动化会尝试使用数据库补偿清理：
+
+```powershell
+.\automation\scripts\run-ui-regression.ps1 `
+  -EnableDbCleanup `
+  -DbCleanupUser "automation_cleanup" `
+  -DbCleanupPassword "..." `
+  -DbCleanupDatabase "helpdesk_test"
+```
+
+只允许测试数据库。删除条件至少包含：
+
+```text
+project_id = Leo_test
+ticket_id = 本次场景工单 ID
+title LIKE 自动化链路验证-%
+```
+
+手动 dry-run：
+
+```powershell
+$env:UI_REGRESSION_DB_PASSWORD = "..."
+.\.venv\Scripts\python.exe `
+  automation\scripts\cli-cleanup-real-test-data.py `
+  --ticket-id 830
+```
+
+真正执行需要显式增加：
+
+```text
+--execute
+```
+
+数据库补偿涉及的表：
+
+```text
+task_comment_read_record
+task_comments
+task_comment_read
+task_dispatch_log
+task_operation_logs
+task_followers
+task_participants
+task_spec_doc
+tasks
+```
+
+清理过程中任何失败都只记录告警，不改变业务链路通过结果。
