@@ -1104,6 +1104,7 @@ export default function TaskDetailPage() {
             <div className="detail-card__meta">
               {/* 状态胶囊（设计稿 statusText：bg-secondary + 蓝阶文字） */}
               <Tag
+                data-testid="task-status"
                 theme="default"
                 style={{
                   background: 'var(--secondary)',
@@ -1136,6 +1137,13 @@ export default function TaskDetailPage() {
               {getActionButtons().map((action, index) => (
                 <AppButton
                   key={index}
+                  data-testid={
+                    action.nextStatus === 'closed'
+                      ? 'task-close'
+                      : action.nextStatus === 'resolved'
+                        ? 'task-resolve'
+                        : undefined
+                  }
                   size="small"
                   theme={action.theme as 'primary' | 'default' | 'danger' | 'light'}
                   onClick={() => {
@@ -1193,13 +1201,13 @@ export default function TaskDetailPage() {
                   const isAiTicket = !!detail.metadata_info?.session_id;
                   if (noAssignee && isAiTicket && detail.status === 'new') {
                     return (
-                      <span className="detail-info-item__value task-card2__person-name--dispatching">
+                      <span data-testid="task-assignee" className="detail-info-item__value task-card2__person-name--dispatching">
                         <i className="dispatch-pulse dispatch-pulse--inline" />派单中
                       </span>
                     );
                   }
                   return (
-                    <span className="detail-info-item__value">
+                    <span data-testid="task-assignee" className="detail-info-item__value">
                       {detail.assignee_name || detail.assigned_to_name || detail.assigned_to || (noAssignee ? '未指派' : '-')}
                     </span>
                   );
@@ -1708,6 +1716,7 @@ export default function TaskDetailPage() {
                 </div>
               ) : (
                 <Textarea
+                  data-testid="task-resolution-summary"
                   value={resolve.resolutionText}
                   onChange={(v) => resolve.setResolutionText(String(v))}
                   placeholder={
@@ -1734,6 +1743,7 @@ export default function TaskDetailPage() {
               {resolve.resolutionFailed ? '重试' : '帮我生成'}
             </Button>
             <Button
+              data-testid="task-resolve-confirm"
               theme="primary"
               onClick={resolve.handleConfirmResolve}
               disabled={resolve.resolutionSubmitting || resolve.resolutionLoading || resolve.resolutionPolling || !resolve.resolutionText.trim()}

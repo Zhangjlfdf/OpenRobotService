@@ -158,7 +158,7 @@ export default function StepNegotiationCard({
         </div>
         <div style={{ marginBottom: 12 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 6 }}>
-            <span className="detail-step-current">
+            <span data-testid="task-current-step" className="detail-step-current">
               <span className="detail-step-current__label">当前阶段</span>
               <span className="detail-step-current__name">「{stepName}」</span>
             </span>
@@ -224,11 +224,11 @@ export default function StepNegotiationCard({
                 stepAgreed ? (
                   isAssignee ? (
                     hasNext ? (
-                      <Button block size="small" theme="primary" loading={completing} disabled={completeDisabled} onClick={openCompleteStep}>
+                      <Button data-testid="task-complete-step" block size="small" theme="primary" loading={completing} disabled={completeDisabled} onClick={openCompleteStep}>
                         当前阶段完成
                       </Button>
                     ) : (
-                      <Button block size="small" theme="primary" onClick={onResolve}>
+                      <Button data-testid="task-resolve" block size="small" theme="primary" onClick={onResolve}>
                         最末阶段结束，处理完成
                       </Button>
                     )
@@ -254,6 +254,7 @@ export default function StepNegotiationCard({
                 isAssignee ? (
                   hasNext ? (
                     <Button
+                      data-testid="task-complete-step"
                       block
                       size="small"
                       theme="primary"
@@ -265,6 +266,7 @@ export default function StepNegotiationCard({
                     </Button>
                   ) : (
                     <Button
+                      data-testid="task-resolve"
                       block
                       size="small"
                       theme="primary"
@@ -307,6 +309,7 @@ export default function StepNegotiationCard({
                       协商节点时间
                     </Button>
                     <Button
+                      data-testid="task-accept"
                       block
                       size="small"
                       theme="primary"
@@ -435,6 +438,7 @@ export default function StepNegotiationCard({
                   下一阶段<span style={{ color: 'var(--danger)' }}>*</span>
                 </label>
                 <select
+                  data-testid="task-step-next"
                   value={completeNextStepId ?? ''}
                   onChange={(e) => setCompleteNextStepId(e.target.value ? Number(e.target.value) : null)}
                   style={{
@@ -452,6 +456,7 @@ export default function StepNegotiationCard({
                 </select>
               </div>
               <DatePicker
+                data-testid="task-step-endtime"
                 style={{ width: '100%', marginBottom: 12 }}
                 placeholder="点击选择下一阶段结束时间"
                 format="YYYY-MM-DD HH:mm"
@@ -470,7 +475,7 @@ export default function StepNegotiationCard({
               />
               <div className="ticket-edit__btns">
                 <Button theme="default" disabled={submittingComplete} onClick={() => setShowCompleteStepPopup(false)}>取消</Button>
-                <Button theme="primary" loading={submittingComplete} onClick={handleStepComplete} disabled={!completeNextStepId || !completeNextEndTime}>确认</Button>
+                <Button data-testid="task-step-submit" theme="primary" loading={submittingComplete} onClick={handleStepComplete} disabled={!completeNextStepId || !completeNextEndTime}>确认</Button>
               </div>
             </div>
           </Popup>
