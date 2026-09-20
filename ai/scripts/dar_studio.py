@@ -36,6 +36,10 @@ if BACKEND not in sys.path:
     sys.path.insert(0, BACKEND)
 if PROJ not in sys.path:
     sys.path.insert(0, PROJ)  # 让 from ai.config import _KB_DIR 可解析（知识库页签用）
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)  # 同目录共享口径模块（dar_segs 段首展开）
+
+import dar_segs  # noqa: E402  漏斗段口径：bounds 优先 + 老窗口续聊追加（0920）
 
 # seg_to_ticket 的 DB 路径（app.core.db）连接串：独立 DB 隧道 13306 → 测试库。
 # setdefault 不覆盖外部环境变量；DB 不可达时 /api/seg_to_ticket 自动 fallback csv。
@@ -760,6 +764,12 @@ def _realtime_small(env: str):
             labs_man[str(cid)] = {int(k): legacy.get(v, v) for k, v in lm.items()
                                   if str(k).isdigit()}
         bounds_man = {str(k): v for k, v in (man.get("bounds") or {}).items()}
+        frozen_len_m = {str(k): v for k, v in (man.get("frozen_len") or {}).items()
+                        if isinstance(v, int)}
+        # L3 预标段首（口径与漏斗 _seg_rows 一致：末段有预标也算「已判定」）
+        pre_cids_m = {}
+        for r in json.load(open(fj[-1], encoding="utf-8")):
+            pre_cids_m.setdefault(str(r.get("cid")), set()).add(r.get("astart"))
         convs = {}
         with open(split, encoding="utf-8") as fh:
             for line in fh:
@@ -778,8 +788,11 @@ def _realtime_small(env: str):
                 if c.get("is_tester") or not cl or len(cl) != len(c["rounds"]):
                     continue
                 if cid in bounds_man:
-                    segs = sorted({0, *(int(x) for x in bounds_man[cid]
-                                        if 0 <= int(x) < len(c["rounds"]))})
+                    # 段首统一展开（0920）：续聊追加与漏斗/标注工具同口径
+                    segs = dar_segs.effective_starts(
+                        c["rounds"], cid, bounds_man, labs_man,
+                        pre_starts=pre_cids_m.get(cid) or set(),
+                        frozen_len=frozen_len_m, n=len(cl))
                 else:
                     segs = [0] + [i for i in range(1, len(cl))
                                   if cl[i]["topic"] != cl[i - 1]["topic"]]
@@ -971,8 +984,13 @@ def _seg_rows(env):
     pre_by = {}
     for r in json.load(open(jl[-1], encoding="utf-8")):
         pre_by[(str(r.get("cid")), r.get("astart"))] = r
+    # L3 预标覆盖的段首（按会话归组）——段首展开的「末段已判定」判定锚之一
+    pre_cids = {}
+    for c_, a_ in pre_by:
+        pre_cids.setdefault(c_, set()).add(a_)
     labs_man = {}
     bounds_man = {}  # 人工切分边界（漏斗与 dar_l3/L2 指标/标注工具统一口径：bounds 优先）
+    frozen_len = {}  # 标注时的回合总数（save_manual 注入）——续聊追加的主规则锚点
     mp = _manual_path(env)
     if os.path.exists(mp):
         man = json.load(open(mp, encoding="utf-8"))
@@ -981,6 +999,8 @@ def _seg_rows(env):
             labs_man[str(cid)] = {int(k): legacy.get(v, v) for k, v in lm.items()
                                   if str(k).isdigit()}
         bounds_man = {str(k): v for k, v in (man.get("bounds") or {}).items()}
+        frozen_len = {str(k): v for k, v in (man.get("frozen_len") or {}).items()
+                      if isinstance(v, int)}
     suggested_pool = _suggested_pool()
     rows = []
     unprocessed = []  # 0915 反馈：未标注段单独成一个可点的模块，不进漏斗
@@ -997,8 +1017,12 @@ def _seg_rows(env):
             # L2 指标/标注工具同口径），无 bounds 的会话（本周新增）用 LLM 切分
             cid_s = str(c["conversation_id"])
             if cid_s in bounds_man:
-                starts = sorted({0, *(int(x) for x in bounds_man[cid_s]
-                                      if 0 <= int(x) < len(cls))})
+                # 段首统一展开（0920）：bounds 优先 + 末段已判定时续聊追加
+                # （老窗口新回合不再折叠进旧判定段，落到未标注待走查）
+                starts = dar_segs.effective_starts(
+                    c["rounds"], cid_s, bounds_man, labs_man,
+                    pre_starts=pre_cids.get(cid_s) or set(),
+                    frozen_len=frozen_len, n=len(cls))
                 seg_span = [(s, starts[i + 1] if i + 1 < len(starts) else len(cls))
                             for i, s in enumerate(starts)]
             else:
@@ -1663,10 +1687,31 @@ def save_manual(req: SaveManualReq):
         raise HTTPException(400, "数据缺 bounds/labels")
     p = _manual_path(req.env)
     os.makedirs(os.path.dirname(p), exist_ok=True)
+    # 冻结标注时的回合总数（0920）：续聊追加主规则的锚点——rounds 超过
+    # frozen_len 的部分视为标注后新增，段首展开时从冻结点切新段。
+    # 服务端统一注入，标注工具零改动；读不到 split 时保留旧值（保守）。
+    old_frozen = {}
+    if os.path.exists(p):
+        try:
+            old_frozen = json.load(open(p, encoding="utf-8")).get("frozen_len") or {}
+        except Exception:
+            old_frozen = {}
+    frozen = dict(old_frozen)
+    split = os.path.join(DATA_ROOT, req.env, "processed", "conversations_split.jsonl")
+    if os.path.exists(split):
+        n_rounds = {}
+        with open(split, encoding="utf-8") as fh:
+            for line in fh:
+                if line.strip():
+                    c = json.loads(line)
+                    n_rounds[str(c["conversation_id"])] = len(c.get("rounds") or [])
+        for cid in (d.get("bounds") or {}):
+            if cid in n_rounds:
+                frozen[str(cid)] = n_rounds[str(cid)]
+    d["frozen_len"] = frozen
     with open(p, "w", encoding="utf-8") as fh:
         json.dump(d, fh, ensure_ascii=False, indent=1)
     busy = bool(_run_state["proc"] and _run_state["proc"].poll() is None)
-    split = os.path.join(DATA_ROOT, req.env, "processed", "conversations_split.jsonl")
     if not busy and os.path.exists(split):
         subprocess.Popen([sys.executable, os.path.join(HERE, "dar_weekly.py"),
                           "--env", req.env, "l1r"],

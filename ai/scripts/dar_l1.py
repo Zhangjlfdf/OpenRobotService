@@ -20,7 +20,12 @@ from collections import Counter, defaultdict
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # 不换 wrapper 对象：pytest 捕获下替换会炸
 _PROJ = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, _PROJ)
+_HERE = os.path.dirname(os.path.abspath(__file__))
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
 os.chdir(_PROJ)
+
+import dar_segs  # noqa: E402  段首统一口径：bounds 优先 + 老窗口续聊追加（0920）
 
 from dotenv import load_dotenv
 
@@ -219,7 +224,12 @@ async def main():
             if not b:
                 continue
             n_before = len({k["topic"] for k in c["_cls"]})
-            starts = sorted({0, *(int(x) for x in b if 0 <= int(x) < len(c["_cls"]))})
+            # 段首统一展开（0920）：续聊追加的新段在 topic 重写时一并成段，
+            # 与漏斗/标注工具口径一致（新段 topic 独立编号，等下一轮判定）
+            starts = dar_segs.effective_starts(
+                c.get("rounds") or [], str(c["conversation_id"]),
+                seg, lab_all, frozen_len=rev.get("frozen_len") or {},
+                n=len(c["_cls"]))
             for tid, s in enumerate(starts):
                 e = starts[tid + 1] if tid + 1 < len(starts) else len(c["_cls"])
                 for i in range(s, e):

@@ -27,6 +27,11 @@ from datetime import datetime, timedelta
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
+
+import dar_segs  # noqa: E402  段首统一口径：bounds 优先 + 老窗口续聊追加（0920）
+
 ENV = os.environ.get("DAR_ENV", "test")
 OUT = rf"C:/Users/PAJ26020/Desktop/export_dar/{ENV}/processed"
 SPLIT = os.path.join(OUT, "conversations_split.jsonl")
@@ -93,9 +98,12 @@ def main():
     convs = [json.loads(l) for l in open(SPLIT, encoding="utf-8")]
     cls_all = {j["conversation_id"]: j["cls"] for j in
                (json.loads(l) for l in open(CLS, encoding="utf-8"))}
-    man = {}
+    man_bounds, man_labels, man_frozen = {}, {}, {}
     if os.path.exists(MANUAL):
-        man = json.load(open(MANUAL, encoding="utf-8")).get("bounds") or {}
+        _man = json.load(open(MANUAL, encoding="utf-8"))
+        man_bounds = _man.get("bounds") or {}
+        man_labels = _man.get("labels") or {}
+        man_frozen = _man.get("frozen_len") or {}
     pre = {} if args.bounds_only else load_pre()
     if args.bounds_only:
         print("切题轮：不注入预标/检索（先人工定边界，判定在边界定稿后跑）")
@@ -131,12 +139,18 @@ def main():
                 "tk": any(rt <= tt <= rt + WINDOW.total_seconds() * 1000
                           for tt in task_ts),
             })
-        # 人工边界覆盖初始切分：没导出过边界的会话仍按 LLM topic 展示
-        b = man.get(cid)
+        # 人工边界覆盖初始切分：没导出过边界的会话仍按 LLM topic 展示。
+        # 段首统一展开（0920）：末段已判定时老窗口续聊追加新段——走查工具里
+        # 能看到并保存追加段首，否则每次保存会把漏斗里的追加段洗回去。
+        # 预标段首（label 模式）作为「末段已判定」的判定锚，与漏斗同口径。
+        b = man_bounds.get(cid)
         if b:
             n_man += 1
-            starts = sorted({0, *(int(x) for x in b
-                                  if 0 <= int(x) < len(rounds))})
+            starts = dar_segs.effective_starts(
+                rounds, cid, man_bounds, man_labels,
+                pre_starts={int(x) for x in (pre.get(cid) or {})
+                            if str(x).isdigit() or isinstance(x, int)},
+                frozen_len=man_frozen)
             si = 0
             for i in range(len(rj)):
                 if si + 1 < len(starts) and i >= starts[si + 1]:
@@ -166,7 +180,7 @@ def main():
     print(f"生成 {path}")
     print(f"会话 {len(out)} 个（≥2 回合），回合 {sum(len(c['rounds']) for c in out)}"
           + (f"，滤掉纯寒暄（无咨询无工单）{n_noise} 个" if n_noise else ""))
-    if man:
+    if man_bounds:
         print(f"人工边界嵌入 {n_man} 个已切会话（初始切分=人工边界），LLM 切出多话题的 {n_llm_multi} 个")
     else:
         print(f"LLM 切出多话题的 {n_llm_multi} 个")

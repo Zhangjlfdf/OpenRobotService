@@ -49,6 +49,11 @@ from datetime import datetime as _dt, timedelta as _td
 
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 HERE = os.path.dirname(os.path.abspath(__file__))
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
+
+import dar_segs  # noqa: E402  段首统一口径：bounds 优先 + 老窗口续聊追加（0920）
+
 DATA_ROOT = r"C:/Users/PAJ26020/Desktop/export_dar"
 SSH_HOST = "usp-a@125.122.97.107"
 SSH_PORT = "8802"
@@ -244,8 +249,10 @@ def _same_denominator_compare(judge_rows):
         if not c or not cl or len(cl) != len(c["rounds"]) or c.get("is_tester"):
             continue
         rounds = c["rounds"]
-        manual = sorted({0, *(int(x) for x in (bounds.get(cid) or [])
-                              if 0 <= int(x) < len(rounds))})
+        # 段首统一展开（0920）：末段已判定时老窗口续聊追加新段——
+        # 工单时间窗/时段归属不再把标注后的新提问算进旧判定段
+        manual = dar_segs.effective_starts(
+            rounds, cid, bounds, labels, frozen_len=man.get("frozen_len") or {})
         tasks = [pts(t.get("at")) for t in c.get("tasks") or []]
         for tid, s0 in enumerate(manual):
             lab = legacy.get(lm.get(str(s0)), lm.get(str(s0)))
@@ -669,12 +676,27 @@ def step_report():
         if tot:
             rep["pre_agree_labeled"] = f"{hit}/{tot} = {hit / tot * 100:.0f}%"
 
-    # 人工标注进度
+    # 人工标注进度（0920：段数按统一口径展开——老窗口续聊追加的新段计入分母，
+    # 与漏斗/标注工具一致；无 split 时退回 bounds 原始段数）
     if os.path.exists(MANUAL):
         man = json.load(open(MANUAL, encoding="utf-8"))
         labels = man.get("labels") or {}
         bounds = man.get("bounds") or {}
-        n_seg = sum(len(v) for v in bounds.values())
+        frozen = man.get("frozen_len") or {}
+        n_rounds = {}
+        if os.path.exists(SPLIT):
+            for line in open(SPLIT, encoding="utf-8"):
+                if line.strip():
+                    c = json.loads(line)
+                    n_rounds[str(c["conversation_id"])] = c.get("rounds") or []
+        n_seg = 0
+        for cid, b in bounds.items():
+            rounds = n_rounds.get(str(cid))
+            if rounds:
+                n_seg += len(dar_segs.effective_starts(
+                    rounds, cid, bounds, labels, frozen_len=frozen))
+            else:
+                n_seg += len(b)
         n_lab = sum(1 for v in labels.values() for x in v.values()
                     if x and x != "未标")
         rep["manual_progress"] = f"{n_lab}/{n_seg} 段已标"
