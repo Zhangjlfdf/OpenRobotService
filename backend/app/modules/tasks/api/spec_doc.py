@@ -24,7 +24,7 @@ from starlette.concurrency import run_in_threadpool
 from app.core.auth_routes import get_current_active_user_from_token
 from app.core.config import settings
 from app.core.database import get_async_db as get_db
-from app.core.user_identity import actor_username, is_admin_user, user_matches
+from app.core.user_identity import actor_username, is_admin_user
 from app.core.ticket_roles import get_ticket_roles
 from app.models.task import Task, TaskSpecDoc
 from app.modules.tasks.schemas.spec_doc import (
@@ -100,10 +100,23 @@ async def _load_doc(db: AsyncSession, task_id: int):
     return result.scalar_one_or_none()
 
 
-def _can_edit(current_user: Any, task: Task) -> bool:
+async def _can_edit(db: AsyncSession, current_user: Any, task: Task) -> bool:
+    """可编辑问题文档：管理员 / 提单人(含代提) / 接单人 / 客户 / 已确认被代理人。
+
+    pending 被代理人只读；declined 被代理人无权（代理提单设计，见 ticket_roles）。
+    """
+    roles = await get_ticket_roles(db, task, current_user)
+    if roles is None:
+        return False
     if is_admin_user(current_user):
         return True
-    return user_matches(current_user, task.created_by, task.assigned_to, task.customer)
+    return bool(
+        roles.is_creator
+        or roles.is_agent
+        or roles.is_assignee
+        or roles.is_customer
+        or roles.is_principal
+    )
 
 
 def _resolve_name(username: str) -> str:
@@ -161,7 +174,7 @@ async def upsert_spec_doc(
     不传 revision 则强制覆盖（用于首次创建/明确覆盖）。
     """
     task = await _load_task_or_404(db, task_id)
-    if not _can_edit(current_user, task):
+    if not await _can_edit(db, current_user, task):
         raise HTTPException(status_code=403, detail="无权限编辑此工单文档")
 
     username = actor_username(current_user)
