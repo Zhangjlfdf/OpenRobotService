@@ -59,8 +59,8 @@ module_tree:
 |------|------|------|
 | `key` | 功能唯一标识 | 程序内部引用 |
 | `name` | 功能名（用户可读） | 前端展示 |
-| `keywords` | 关键词列表 | 生成 `module_keywords`（L3 子串） |
-| `anchor` | 语义锚文本 | 生成 `module_anchor_texts`（L2 Embedding） |
+| `keywords` | 关键词列表 | 生成 `module_keywords`（职责卡片「负责内容」+ 历史工单打标） |
+| `anchor` | 一句话说明 | 生成 `module_anchor_texts`（职责卡片「负责内容」；L2 语义召回已撤） |
 | `engineers` | 负责工程师 id 列表 | 生成 EngineerProfile 的责任模块 |
 
 ### 自动生成映射（已落地，2026-08-20）
