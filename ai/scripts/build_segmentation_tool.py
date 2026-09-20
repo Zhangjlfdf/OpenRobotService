@@ -115,8 +115,11 @@ def main():
     n_man = n_llm_multi = n_noise = 0
     for c in convs:
         rounds = c["rounds"]
-        if len(rounds) < 2:
-            continue  # 单回合无切分余地
+        # 切题轮：单回合无切分余地，跳过；标注轮保留——单问单答也要打标签，
+        # 否则漏斗「未标注」里的一问一答会话在工具里永远看不到（0920 走查实锤：
+        # 漏斗十多个未标注=14 个单回合会话，工具里一个都没有）
+        if args.bounds_only and len(rounds) < 2:
+            continue
         cid = str(c["conversation_id"])
         cls = cls_all.get(cid)
         if not cls or len(cls) != len(rounds):
