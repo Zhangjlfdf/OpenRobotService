@@ -662,6 +662,101 @@ async def get_task_stats(
         raise HTTPException(status_code=500, detail=f"获取统计信息失败: {str(e)}")
 
 
+# ⚠️ 静态路径端点必须声明在下面的贪婪路径 GET /{task_id} 之前：
+# FastAPI 按注册顺序匹配，`GET /tasks/{task_id}`（task_id: int）会抢先吃下
+# `/tasks/on-behalf-candidates`，int 解析失败 → 422 int_parsing（path.task_id）。
+@router.get("/on-behalf-candidates", response_model=List[OnBehalfCandidate])
+async def get_on_behalf_candidates(
+    project_id: Optional[str] = Query(None, description="项目ID，用于把同项目人员排在前面"),
+    keyword: Optional[str] = Query(None, description="按姓名 / username 模糊过滤"),
+    db: AsyncSession = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_active_user_from_token),
+):
+    """代他人提单选人候选（见设计文档 §3.5）。
+
+    为什么不复用现有接口：
+      - `GET /api/tasks/{id}/project-members` 需要 task_id —— 提单时工单尚不存在；
+      - `GET /api/tasks/assignable-users` 无项目参数。
+
+    返回：在职（users.status='active'）用户，`group='project'` 段在前、`'all'` 段在后。
+    **分组标记必须显式返回**：现有 project-members 的 role_name 在项目成员段可能为空，
+    前端无法靠它区分分组，只能靠位置猜，很脆。
+    """
+    try:
+        from app.core.db import SessionLocal
+        from app.models.identity import UserDB
+
+        me_id = to_user_id(current_user.get("id") if isinstance(current_user, dict) else None)
+        me_keys = set(identity_keys(actor_username(current_user))) | ({me_id} if me_id else set())
+
+        kw = (keyword or "").strip().lower()
+
+        def _query(pid: Optional[str]):
+            sync_db = SessionLocal()
+            try:
+                project_user_ids: set = set()
+                if pid:
+                    try:
+                        members = db_manager.get_project_members(pid, include_usp=False) or []
+                        for m in members:
+                            for key in ("id", "username"):
+                                val = (m.get(key) or "").strip()
+                                if val:
+                                    project_user_ids.add(val)
+                    except Exception as exc:
+                        logger_task.warning(f"代提选人：取项目成员失败 project_id={pid}: {exc}")
+
+                users = (
+                    sync_db.query(UserDB)
+                    .filter(UserDB.status == "active")
+                    .all()
+                )
+                return project_user_ids, [
+                    {
+                        "id": (u.id or "").strip(),
+                        "username": (u.username or "").strip(),
+                        "name": u.name,
+                    }
+                    for u in users
+                ]
+            finally:
+                sync_db.close()
+
+        project_user_ids, users = await run_in_threadpool(_query, project_id)
+
+        def _sort_key(u: Dict[str, Any]):
+            return (u.get("name") or u.get("username") or "").lower()
+
+        project_items: List[OnBehalfCandidate] = []
+        other_items: List[OnBehalfCandidate] = []
+
+        for u in sorted(users, key=_sort_key):
+            uid = u["id"]
+            uname = u["username"]
+            if not uid or not uname:
+                continue
+            # 排除自己（不给自己代提）
+            if uid in me_keys or uname in me_keys:
+                continue
+            if kw and kw not in (u.get("name") or "").lower() and kw not in uname.lower():
+                continue
+            in_project = bool(
+                project_user_ids and (uid in project_user_ids or uname in project_user_ids)
+            )
+            item = OnBehalfCandidate(
+                id=uid, username=uname, name=u.get("name") or uname,
+                group="project" if in_project else "all",
+            )
+            (project_items if in_project else other_items).append(item)
+
+        return project_items + other_items
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger_task.error(f"代提选人查询失败: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail="代提选人查询失败")
+
+
 @router.get("/{task_id}", response_model=TicketResponse)
 async def get_task(
     request: Request,
@@ -877,98 +972,6 @@ async def get_similar_tasks(
     except Exception as e:
         logger.error(f"相似工单检索失败: task_id={task_id}, error={str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"相似工单检索失败: {str(e)}")
-
-
-@router.get("/on-behalf-candidates", response_model=List[OnBehalfCandidate])
-async def get_on_behalf_candidates(
-    project_id: Optional[str] = Query(None, description="项目ID，用于把同项目人员排在前面"),
-    keyword: Optional[str] = Query(None, description="按姓名 / username 模糊过滤"),
-    db: AsyncSession = Depends(get_db),
-    current_user: Dict[str, Any] = Depends(get_current_active_user_from_token),
-):
-    """代他人提单选人候选（见设计文档 §3.5）。
-
-    为什么不复用现有接口：
-      - `GET /api/tasks/{id}/project-members` 需要 task_id —— 提单时工单尚不存在；
-      - `GET /api/tasks/assignable-users` 无项目参数。
-
-    返回：在职（users.status='active'）用户，`group='project'` 段在前、`'all'` 段在后。
-    **分组标记必须显式返回**：现有 project-members 的 role_name 在项目成员段可能为空，
-    前端无法靠它区分分组，只能靠位置猜，很脆。
-    """
-    try:
-        from app.core.db import SessionLocal
-        from app.models.identity import UserDB
-
-        me_id = to_user_id(current_user.get("id") if isinstance(current_user, dict) else None)
-        me_keys = set(identity_keys(actor_username(current_user))) | ({me_id} if me_id else set())
-
-        kw = (keyword or "").strip().lower()
-
-        def _query(pid: Optional[str]):
-            sync_db = SessionLocal()
-            try:
-                project_user_ids: set = set()
-                if pid:
-                    try:
-                        members = db_manager.get_project_members(pid, include_usp=False) or []
-                        for m in members:
-                            for key in ("id", "username"):
-                                val = (m.get(key) or "").strip()
-                                if val:
-                                    project_user_ids.add(val)
-                    except Exception as exc:
-                        logger_task.warning(f"代提选人：取项目成员失败 project_id={pid}: {exc}")
-
-                users = (
-                    sync_db.query(UserDB)
-                    .filter(UserDB.status == "active")
-                    .all()
-                )
-                return project_user_ids, [
-                    {
-                        "id": (u.id or "").strip(),
-                        "username": (u.username or "").strip(),
-                        "name": u.name,
-                    }
-                    for u in users
-                ]
-            finally:
-                sync_db.close()
-
-        project_user_ids, users = await run_in_threadpool(_query, project_id)
-
-        def _sort_key(u: Dict[str, Any]):
-            return (u.get("name") or u.get("username") or "").lower()
-
-        project_items: List[OnBehalfCandidate] = []
-        other_items: List[OnBehalfCandidate] = []
-
-        for u in sorted(users, key=_sort_key):
-            uid = u["id"]
-            uname = u["username"]
-            if not uid or not uname:
-                continue
-            # 排除自己（不给自己代提）
-            if uid in me_keys or uname in me_keys:
-                continue
-            if kw and kw not in (u.get("name") or "").lower() and kw not in uname.lower():
-                continue
-            in_project = bool(
-                project_user_ids and (uid in project_user_ids or uname in project_user_ids)
-            )
-            item = OnBehalfCandidate(
-                id=uid, username=uname, name=u.get("name") or uname,
-                group="project" if in_project else "all",
-            )
-            (project_items if in_project else other_items).append(item)
-
-        return project_items + other_items
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger_task.error(f"代提选人查询失败: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail="代提选人查询失败")
 
 
 @router.get("/my-followups/count")
