@@ -35,8 +35,9 @@ import dar_segs  # noqa: E402  段首统一口径：bounds 优先 + 老窗口续
 
 ENV = os.environ.get("DAR_ENV", "test")
 # 附件图片直链前缀（与 dar_studio seg_page 同源：prod=生产站点、test=测试站点）
-IMG_BASE = (("https://usp.ep-zl.com/p" if ENV == "prod"
-             else "http://125.122.97.107/t") + "/api/call/files/")
+SITE_BASE = ("https://usp.ep-zl.com/p" if ENV == "prod"
+             else "http://125.122.97.107/t")
+IMG_BASE = SITE_BASE + "/api/call/files/"
 OUT = rf"C:/Users/PAJ26020/Desktop/export_dar/{ENV}/processed"
 SPLIT = os.path.join(OUT, "conversations_split.jsonl")
 CLS = os.path.join(OUT, "conversations_classified.jsonl")
@@ -231,11 +232,14 @@ def main():
 
     tpl = open(TPL, encoding="utf-8").read()
     # </ 转义：JSON 内嵌 <script> 时，内容里出现 </script> 会提前截断脚本（JS 字符串里 \/ 合法）
-    payload = json.dumps({"convs": out, "env": ENV,
+    payload = json.dumps({"convs": out, "env": ENV, "site": SITE_BASE,
                           "mode": "bounds" if args.bounds_only else "label"},
                          ensure_ascii=False).replace("</", "<\\/")
     html = tpl.replace("__DATA__", payload)
-    path = os.path.join(OUT, "segmentation_tool.html")
+    # 切题版（--bounds-only）写独立文件：与标注版互不覆写（0920 实锤：l3 后
+    # 重跑 tool0 会把标注版工具冲回切分页）。「打开标注工具」永远指向标注版
+    path = os.path.join(OUT, "segmentation_tool_bounds.html" if args.bounds_only
+                        else "segmentation_tool.html")
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(html)
     print(f"生成 {path}")

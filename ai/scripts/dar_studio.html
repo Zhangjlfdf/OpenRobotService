@@ -261,6 +261,7 @@ label.f{display:flex;flex-direction:column;gap:5px;font-size:12px;color:var(--in
 .be-未覆盖.badge-src-man{background:#fee2e2;color:#b91c1c}
 .be-直接提单.badge-src-man,.be-建议转单.badge-src-man{background:#ffedd5;color:#c2410c}
 .be-寒暄.badge-src-man{background:#f1f5f9;color:#64748b}
+.be-猜你想问.badge-src-man{background:#fef3c7;color:#b45309}
 .repbar .rep-body b{color:#ffd43b}
 /* ── 流程向导 ── */
 .wiz{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
@@ -1832,7 +1833,7 @@ const FL = [
   {id:"undetermined", name:"未判定", kind:"gray", sub:1},
 ];
 const FLC = {main:"#3d76c4", cut:"#d97706", ok:"#2e9e5b", bad:"#d9534f", gray:"#98a2b3"};
-const LABELS = ["直答正确","未直答","未覆盖","直接提单","寒暄"];
+const LABELS = ["直答正确","未直答","未覆盖","直接提单","建议转单","寒暄","猜你想问"];
 let fData = null, fCur = {layer:"", rows:[], idx:-1};
 
 function fImgBase(){

@@ -627,7 +627,7 @@ def reset_retrieval(req: ResetReq):
 _ARTIFACT_PATTERNS = [
     "processed/weekly_*.md", "processed/weekly_*.json", "meta.json",
     "processed/unanswered_*.json",
-    "segmentation_tool.html",
+    "segmentation_tool.html", "segmentation_tool_bounds.html",
     "processed/retrieval_check_*.json",
     "processed/l3_judge_*.json",
     "processed/conversations_classified.jsonl",
@@ -1638,12 +1638,14 @@ def layer_page(env: str = "prod", layer: str = ""):
                 ("直接提单", "#d97706"), ("建议转单", "#d97706"), ("寒暄", "#98a2b3"),
                 ("猜你想问", "#b45309")]
         # 标签只属于真实咨询层+猜你想问层（0916 定调真实层走查改判；0920 补
-        # suggested——自动归层误判时就地改判，含「猜你想问」人工标签）
+        # suggested——自动归层误判时就地改判，含「猜你想问」人工标签）。
+        # qa 的三个子层（answered/unanswered/uncovered）同样是走查主战场，
+        # 必须出按钮——此前只有 qa 聚合层有，子层页面一个按钮都没有（0920 实锤）
         btns = ("".join(
             f'<button class="lb{" on" if r["eff"] == lb and r["src"] == "manual" else ""}" '
             f'style="{"" if r["eff"] == lb and r["src"] == "manual" else f"--c:{col};"}" '
             f'onclick="lab(this,{r["cid"]},{r["astart"]},\'{lb}\')">{lb}</button>'
-            for lb, col in lbls) if layer in ("qa", "chitchat", "suggested") else "")
+            for lb, col in lbls) if layer not in ("tester", "ticket") else "")
         tks = [str(t) for t in (r.get("ticket_ids") or []) + (r.get("task_ids") or [])]
         tk_span = ""
         if tks:
@@ -1804,7 +1806,7 @@ def progress(env: str = "prod"):
     return {"env": env, "steps": {
         "export": _mtime_str(os.path.join(proc, "conversations_split.jsonl")),
         "l1": latest("direct_answer_summary_*.json"),
-        "tool0": latest("segmentation_tool.html"),
+        "tool0": latest("segmentation_tool_bounds.html") or latest("segmentation_tool.html"),
         "l3": latest("segmentation_tool.html") or latest("l3_judge_all_*.json"),
         "label": _mtime_str(_manual_path(env)),
         "report": latest("weekly_*.json"),
