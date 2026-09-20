@@ -1051,15 +1051,17 @@ def _seg_rows(env):
                 # （用户拍板：混合段不过滤，真实提问跟着陪葬没道理）
                 seg_qs = [(rr.get("q") or "").strip()
                           for rr in (c.get("rounds") or [])[a0:a1] if rr.get("q")]
-                seg_has_sug = bool(seg_qs) and all(q in suggested_pool for q in seg_qs)
-                # 0920：段内只要有一轮命中推荐池即记 any_sug——混合段照常留在真实
-                # 层标注，但直答率统计时剔除（0916 口径：推荐点击不进直答统计）
+                # 0920 定稿：层判定用 ANY——段内只要有一轮命中推荐池即归 suggested
+                # 层（混合段不进直答层，用户实锤「急停」段混进直答正确）；seg_any_sug
+                # 同时作直答率剔除标记（0916 口径：推荐点击不进直答统计）。
+                # 工具标注列表不受此影响（混合段照常列为待标注，见
+                # build_segmentation_tool._has_pending_seg 的 ALL 语义）
                 seg_any_sug = any(q in suggested_pool for q in seg_qs)
                 # 0915 用户硬要求：SKIP_USER_IDS 静默归到「测试人员」层（不显示排除徽章）
                 is_skip = str(c.get("user_id") or "") in SKIP_USER_IDS
                 if c.get("is_tester") or is_skip:
                     layer = "tester"
-                elif seg_has_sug:
+                elif seg_any_sug:
                     layer = "suggested"
                 elif eff == "寒暄":
                     layer = "chitchat"
@@ -1104,7 +1106,7 @@ def _seg_rows(env):
                 # tester/suggested/寒暄 是元筛选层（不依赖 eff），保留
                 # SKIP 用户也保留在 tester 层
                 if (not eff and layer == "undetermined" and seg_answerable
-                    and not c.get("is_tester") and not seg_has_sug
+                    and not c.get("is_tester") and not seg_any_sug
                     and str(c.get("user_id") or "") not in SKIP_USER_IDS):
                     unprocessed.append({
                         "cid": c["conversation_id"], "astart": a0, "aend": a1,
