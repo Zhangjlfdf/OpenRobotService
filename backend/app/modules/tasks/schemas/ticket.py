@@ -28,6 +28,12 @@ class TicketBase(BaseModel):
 
 class TicketCreate(TicketBase):
     assigned_to: Optional[str] = Field(None, description="处理者ID")
+    on_behalf_of: Optional[str] = Field(
+        None,
+        description="代他人提单：被代理人 users.id 或 username（留空=普通自提单）。"
+                    "被代理人须为注册在职用户，后端二次校验；关系建立为 pending，"
+                    "确认跟随后获协办权。",
+    )
 
 
 class TicketUpdate(BaseModel):
@@ -224,6 +230,17 @@ class TicketListItemResponse(TicketBase):
         description="评论区参与讨论人员（头像堆叠用，已按评论数→评论时间降序，见 participant_service）",
     )
 
+    # --- 代他人提单关系（见 docs/PRODUCT/代他人提单（代理提单）功能设计方案.md）---
+    # 脱敏：非参与人不下发这些字段（由 TicketService 侧裁剪为空），
+    # 避免通过列表接口探测「谁代谁提单」。
+    proxy_relation_status: Optional[str] = Field(
+        None, description="代理关系状态：pending / acknowledged / declined（无关系为 None）"
+    )
+    proxy_agent_name: Optional[str] = Field(None, description="代理人姓名（仅参与人可见）")
+    proxy_principal_name: Optional[str] = Field(None, description="被代理人姓名（仅参与人可见）")
+    is_proxy_agent: bool = Field(False, description="当前登录用户是否为该单代理人")
+    is_principal: bool = Field(False, description="当前登录用户是否为该单被代理人")
+
     class Config:
         from_attributes = True
 
@@ -346,3 +363,46 @@ class ProjectMemberResponse(BaseModel):
     username: str
     name: Optional[str] = None
     role_name: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# 代他人提单（代理提单）—— 见 docs/PRODUCT/代他人提单（代理提单）功能设计方案.md
+# ---------------------------------------------------------------------------
+
+class OnBehalfCandidate(BaseModel):
+    """代提选人候选项。
+
+    ``group`` 必须显式返回，前端**不靠顺序猜**：
+    - ``project``：与工单项目同项目的在职人员
+    - ``all``：其他全量在职人员（兜底）
+    """
+    id: str = Field(..., description="users.id")
+    username: str = Field(..., description="username（通知/展示用）")
+    name: Optional[str] = Field(None, description="姓名")
+    group: str = Field("all", description="分组标记：project | all")
+
+
+class ProxyRelationResponse(BaseModel):
+    """代理关系（返回给前端做横幅/胶囊展示）。"""
+    id: int
+    task_id: int
+    relation_status: str = Field(..., description="pending / acknowledged / declined")
+    source: Optional[str] = Field(None, description="manual / ai / admin")
+    remark: Optional[str] = Field(None, description="拒绝原因（declined 时）")
+    # 当前登录用户视角，避免前端自行拼身份判定
+    is_agent: bool = Field(False, description="当前用户是否为代理人")
+    is_principal: bool = Field(False, description="当前用户是否为被代理人")
+    agent_name: Optional[str] = Field(None, description="代理人姓名（参与人可见）")
+    principal_name: Optional[str] = Field(None, description="被代理人姓名（参与人可见）")
+    notified_at: Optional[datetime] = None
+    acked_at: Optional[datetime] = None
+    declined_at: Optional[datetime] = None
+    created_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class ProxyRelationDeclineRequest(BaseModel):
+    """被代理人拒绝（与我无关）请求体。"""
+    remark: str = Field(..., min_length=1, max_length=500, description="与本单无关的原因（必填）")

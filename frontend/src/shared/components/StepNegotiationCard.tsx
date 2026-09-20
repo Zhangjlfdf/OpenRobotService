@@ -17,6 +17,9 @@ export interface StepCardTicket extends StepNegotiationTicket {
 interface StepRoles {
   isAssignee: boolean;
   isReporter: boolean;
+  /** 代他人提单：被代理人（**仅已确认跟进**时方可参与协商，归 creator 侧）。
+   *  pending 期间由调用方传 false（决策 10：待确认期只读、不参与回合协商）。 */
+  isPrincipal?: boolean;
 }
 
 type StepNegotiation = ReturnType<typeof useStepNegotiation>;
@@ -63,7 +66,10 @@ export default function StepNegotiationCard({
     openNegotiate, openCompleteStep,
   } = negotiation;
 
-  const { isAssignee, isReporter } = roles;
+  const { isAssignee, isReporter, isPrincipal = false } = roles;
+  // 被代理人（已确认跟进）与代理人同侧（creator 侧，代表问题方）：
+  // 谈判对象始终是「问题方 ↔ 处理人」，与后端 _actor_side 口径一致（决策 7）。
+  const isCreatorSide = isReporter || isPrincipal;
 
   const status = (detail?.status || '').toLowerCase();
   // 终态（已解决/已关闭/已取消）：保留节点信息展示，但隐藏卡内所有操作按钮
@@ -107,9 +113,9 @@ export default function StepNegotiationCard({
   const escalateCount = detail?.escalate_count ?? 0;
   const reachedMax = !isEscalated && round >= maxRound;
   const lastStepBy = detail?.step_last_updated_by;
-  const canOperate = isAssignee || isReporter;
+  const canOperate = isAssignee || isCreatorSide;
   const myTurn = (!lastStepBy && isAssignee)
-    || (lastStepBy === 'assigned' && isReporter)
+    || (lastStepBy === 'assigned' && isCreatorSide)
     || (lastStepBy === 'creator' && isAssignee);
   let pillBg = 'var(--muted)';
   let pillColor = 'var(--muted-foreground)';
@@ -187,7 +193,7 @@ export default function StepNegotiationCard({
                 (() => {
                   const proposerIsMe =
                     (lastStepBy === 'assigned' && isAssignee) ||
-                    (lastStepBy === 'creator' && isReporter);
+                    (lastStepBy === 'creator' && isCreatorSide);
                   return (
                     <span>
                       {proposerIsMe ? '你期望在' : '对方期望在'}{' '}
@@ -203,7 +209,7 @@ export default function StepNegotiationCard({
         {latestNegotiateReason && !stepAgreed && (() => {
           const proposerIsMe =
             (lastStepBy === 'assigned' && isAssignee) ||
-            (lastStepBy === 'creator' && isReporter);
+            (lastStepBy === 'creator' && isCreatorSide);
           return (
             <div style={{
               fontSize: 12, color: 'var(--foreground)', marginBottom: 12, lineHeight: 1.7,

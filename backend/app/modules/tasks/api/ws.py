@@ -277,3 +277,27 @@ def _task_updated_payload(obj) -> dict:
 
 async def ws_broadcast_task_updated(task_id: int, obj) -> None:
     await manager.broadcast(task_id, _task_updated_payload(obj))
+
+
+async def ws_broadcast_proxy_relation(
+    task_id: int,
+    relation_id: int,
+    relation_status: str,
+    principal_id: Optional[str] = None,
+    agent_id: Optional[str] = None,
+) -> None:
+    """代理关系变更事件（新增事件名，不改既有事件）。
+
+    前端据此刷新：详情页关系横幅、列表卡片关系胶囊、「待我跟进」角标。
+
+    注意：不对未参与人暴露身份——principal_id / agent_id 仅用于前端**本地**比对
+    当前登录用户，不用于展示他人信息（姓名由 REST 接口按权限返回）。
+    """
+    await manager.broadcast(task_id, {
+        "type": "proxy_relation.changed",
+        "task_id": task_id,
+        "relation_id": relation_id,
+        "relation_status": relation_status,
+        "principal_id": principal_id,
+        "agent_id": agent_id,
+    })

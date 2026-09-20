@@ -17,6 +17,11 @@ from app.models.task import (
     TaskPriority,
     TaskType,
 )
+from app.models.task_proxy_relation import (
+    TaskProxyRelation,
+    ProxyRelationStatus,
+    ProxyRelationSource,
+)
 
 Ticket = Task
 TicketComment = TaskComment
@@ -31,6 +36,9 @@ __all__ = [
     "TaskStatus",
     "TaskPriority",
     "TaskType",
+    "TaskProxyRelation",
+    "ProxyRelationStatus",
+    "ProxyRelationSource",
     "Ticket",
     "TicketComment",
     "TicketStatus",

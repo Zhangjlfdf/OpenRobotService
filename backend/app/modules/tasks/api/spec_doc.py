@@ -25,6 +25,7 @@ from app.core.auth_routes import get_current_active_user_from_token
 from app.core.config import settings
 from app.core.database import get_async_db as get_db
 from app.core.user_identity import actor_username, is_admin_user, user_matches
+from app.core.ticket_roles import get_ticket_roles
 from app.models.task import Task, TaskSpecDoc
 from app.modules.tasks.schemas.spec_doc import (
     SpecDocImageResult,
@@ -160,7 +161,7 @@ async def upsert_spec_doc(
     不传 revision 则强制覆盖（用于首次创建/明确覆盖）。
     """
     task = await _load_task_or_404(db, task_id)
-    if not _can_edit(current_user, task):
+    if not await _can_edit(db, current_user, task):
         raise HTTPException(status_code=403, detail="无权限编辑此工单文档")
 
     username = actor_username(current_user)

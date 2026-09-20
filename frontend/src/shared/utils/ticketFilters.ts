@@ -40,11 +40,31 @@ export const buildRelevanceFilters = (
             { field: 'createdBy', op: 'eq', value: username },
           ],
         },
+        // 代他人提单（决策 6+10）：我是被代理人的单——
+        //  · pending/acknowledged 均需看到（pending 需我确认跟进，acknowledged 我参与协办）
+        //  · resolved 需我确认关闭
+        // value 仅为占位，后端统一用 token 解析的当前用户，杜绝越权看他人代提关系。
+        {
+          and: [
+            { field: 'principalBy', op: 'eq', value: true },
+            { or: [...workingStatusFilters, { field: 'status', op: 'eq', value: 'resolved' }] },
+          ],
+        },
         // 回合协商：接单人刚改过 step 且尚未协商一致，轮到提单人确认/答复
         {
           and: [
             { or: workingStatusFilters },
             { field: 'createdBy', op: 'eq', value: username },
+            { field: 'stepUpdatedBy', op: 'eq', value: 'assigned' },
+            { field: 'currStepAgreed', op: 'eq', value: false },
+          ],
+        },
+        // 回合协商（被代理人，仅已确认跟进者参与）：接单人刚改过 step，轮到我答复
+        {
+          and: [
+            { or: workingStatusFilters },
+            { field: 'principalBy', op: 'eq', value: true },
+            { field: 'proxyRelationStatus', op: 'eq', value: 'acknowledged' },
             { field: 'stepUpdatedBy', op: 'eq', value: 'assigned' },
             { field: 'currStepAgreed', op: 'eq', value: false },
           ],
@@ -68,9 +88,20 @@ export const buildRelevanceFilters = (
       { field: 'customerName', op: 'contains', value: username },
       // 我参与的工单：当前用户在 task_participants 表中（评论/附件等行为触发写入）
       { field: 'participatedBy', op: 'eq', value: true },
+      // 我是被代理人（含 pending / acknowledged / declined）：代提关系建立即与我相关
+      { field: 'principalBy', op: 'eq', value: true },
     ];
     return [{ or: userRelatedFilters }];
   }
+
+  // 代他人提单：「待我跟进」= 我是被代理人 且 关系仍为 pending（尚未确认/拒绝）
+  if (relevance === 'followup') {
+    return [
+      { field: 'principalBy', op: 'eq', value: true },
+      { field: 'proxyRelationStatus', op: 'eq', value: 'pending' },
+    ];
+  }
+
   // 「项目相关」：仅展示与当前用户关联的项目（projectIds）下的工单，
   // 项目列表为空时（未加载/无项目）回退为不限制。
   return projectIds.length > 0
