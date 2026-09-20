@@ -45,7 +45,7 @@ DEFAULT_LOG_CONFIG = {
             "stream": "ext://sys.stdout"
         },
         "file": {
-            "class": "backend.app.services.logging._WindowsSafeRotatingHandler",
+            "class": "app.services.logging._WindowsSafeRotatingHandler",
             "level": "INFO",
             "formatter": "standard",
             "filename": os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'logs', 'backend.log'),
@@ -129,7 +129,9 @@ def setup_logging():
     # 生成时的绝对路径，换机器/换目录后那个路径已不存在，导致 FileNotFoundError。
     # 每次启动按 __file__ 重定位，日志总落到当前 backend/logs/backend.log。
     log_file = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'logs', 'backend.log')
-    config.setdefault('handlers', {}).setdefault('file', {})['filename'] = log_file
+    file_handler = config.setdefault('handlers', {}).setdefault('file', {})
+    file_handler['filename'] = log_file
+    file_handler['class'] = 'app.services.logging._WindowsSafeRotatingHandler'
 
     logging.config.dictConfig(config)
     
