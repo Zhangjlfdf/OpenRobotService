@@ -161,7 +161,7 @@ async def upsert_spec_doc(
     不传 revision 则强制覆盖（用于首次创建/明确覆盖）。
     """
     task = await _load_task_or_404(db, task_id)
-    if not await _can_edit(db, current_user, task):
+    if not _can_edit(current_user, task):
         raise HTTPException(status_code=403, detail="无权限编辑此工单文档")
 
     username = actor_username(current_user)
