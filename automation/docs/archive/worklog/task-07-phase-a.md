@@ -1,4 +1,4 @@
-﻿# Task-07: Phase A 架构改进
+# Task-07: Phase A 架构改进
 
 ## 变更内容
 - 重命名异常：ConnectionError -> ClientConnectionError, TimeoutError -> ClientTimeoutError

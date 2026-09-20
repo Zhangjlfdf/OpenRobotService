@@ -1,7 +1,7 @@
 # 项目架构说明
 
 > 本文是对 OpenRobotService 项目**整体架构**的描述，覆盖后端、前端、AI 三个子系统的结构、技术栈与测试布局。
-> 产品形态见 `docs/PRODUCT/PRODUCT.md`，技术设计蓝图见 `docs/PRODUCT/ARCHITECTURE.md`，后端代码现状见 `backend/CODEBASE_OVERVIEW.md`，集成设计见 `backend/INTEGRATION_DESIGN.md`。
+> 产品形态见 `docs/PRODUCT/PRODUCT.md`，技术设计蓝图见 `docs/PRODUCT/ARCHITECTURE.md`，代码现状见 `docs/CODEBASE_OVERVIEW.md`，集成设计见 `backend/INTEGRATION_DESIGN.md`。
 > 本文聚焦**测试视角**的架构理解。
 
 ---
@@ -169,7 +169,7 @@ Vitest 使用 jsdom 模拟浏览器环境，无需真实 DOM 或浏览器：
 
 | 文档 | 路径 |
 |------|------|
-| 后端代码结构总览 | `backend/CODEBASE_OVERVIEW.md` |
+| 后端代码结构总览 | `docs/CODEBASE_OVERVIEW.md` |
 | 外部任务源集成设计 | `backend/INTEGRATION_DESIGN.md` |
 | 产品需求文档 | `docs/PRD.md` |
 | 技术架构蓝图 | `docs/PRODUCT/ARCHITECTURE.md` |

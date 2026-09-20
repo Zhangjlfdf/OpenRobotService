@@ -34,5 +34,5 @@ python -m playwright install chromium
 ## 定位策略
 
 - 第一版临时使用 placeholder 和文本定位。
-- 后续按 `automation/docs/design-ui-automation-selectors.md` 补 `data-testid`。
+- 后续按 `automation/docs/archive/design-ui-automation-selectors.md`（历史设计稿）补 `data-testid`。
 - 坐标不作为 Web UI 主定位方式。

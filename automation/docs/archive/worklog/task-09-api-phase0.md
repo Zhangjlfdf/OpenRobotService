@@ -1,4 +1,4 @@
-﻿# Task-09: API Phase 0 — Smoke + Auth 测试
+# Task-09: API Phase 0 — Smoke + Auth 测试
 
 ## 基本信息
 | 字段 | 值 |

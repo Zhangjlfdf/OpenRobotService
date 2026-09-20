@@ -1,4 +1,4 @@
-﻿# Task-11: Phase 2 — WeChat API 测试
+# Task-11: Phase 2 — WeChat API 测试
 
 ## 基本信息
 | 字段 | 值 |

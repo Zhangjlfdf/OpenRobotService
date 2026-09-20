@@ -167,5 +167,12 @@ ai/.env.example
 start_all.ps1
 docs/PRODUCT/摇人吧服务号平台手册（操作指引）.md
 docs/直答率统计口径.md
-/docs
 ai/kb/kb_structure_cache.json
+
+# ===== Playwright MCP 浏览器工具产物（每次工具调用自动落盘，不入库）=====
+.playwright-mcp/
+
+# ===== 本地临时排查脚本（不入库）=====
+_tmp_*.sql
+_tmp_diag*.py
+.pr-body-tmp.json
