@@ -3,6 +3,7 @@ from typing import List, Dict, Optional, Any, Union
 from datetime import datetime
 
 from app.modules.tasks.models.ticket import TicketStatus, TicketPriority, TicketType
+from app.models.task import RelationType
 
 # 附件可以是字符串（本平台手动上传流程存的是 object_path 字符串），
 # 也可以是字典（外部任务源/微信会话写入的 {path, size, filename} 结构）。
@@ -403,6 +404,48 @@ class ProxyRelationResponse(BaseModel):
         from_attributes = True
 
 
+# ── 工单关联（task_relations）Schema ──
+
+class TaskRelationCreate(BaseModel):
+    """创建工单关联请求"""
+    target_task_id: int = Field(..., description="目标工单ID")
+    relation_type: RelationType = Field(..., description="关系类型")
+
+
+class TaskRelationBrief(BaseModel):
+    """关联工单概要（嵌入 RelationResponse）"""
+    id: int
+    title: str
+    status: TicketStatus
+    created_by_name: Optional[str] = None
+    assigned_to_name: Optional[str] = None
+
+
 class ProxyRelationDeclineRequest(BaseModel):
     """被代理人拒绝（与我无关）请求体。"""
     remark: str = Field(..., min_length=1, max_length=500, description="与本单无关的原因（必填）")
+
+
+class TaskRelationResponse(BaseModel):
+    """工单关联响应"""
+    id: int
+    source_task_id: int
+    target_task_id: int
+    relation_type: RelationType
+    created_by: Optional[str] = None
+    created_at: datetime
+    # 目标工单概要（前端展示用）
+    target: Optional[TaskRelationBrief] = None
+    # 反向关联：当当前工单是 target 时（如作为子任务的父工单回链）
+    source: Optional[TaskRelationBrief] = None
+
+    class Config:
+        from_attributes = True
+
+
+class BlockedTaskInfo(BaseModel):
+    """被阻塞工单信息（状态变更校验失败时返回）"""
+    task_id: int
+    title: str
+    status: str
+    reason: str = Field(..., description="阻塞原因：predecessor 或 subtask")

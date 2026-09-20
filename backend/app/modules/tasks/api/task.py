@@ -29,8 +29,9 @@ from app.modules.tasks.schemas.ticket import (
     TicketCreateNotificationRequest, RobotAlarmNotificationRequest, ProjectMemberResponse,
     # 代他人提单
     OnBehalfCandidate, ProxyRelationResponse, ProxyRelationDeclineRequest,
+    TaskRelationCreate, TaskRelationResponse, TaskRelationBrief, BlockedTaskInfo
 )
-from app.modules.tasks.models.ticket import TicketStatus, TicketPriority, TicketType
+from app.modules.tasks.models.ticket import TicketStatus, TicketPriority, TicketType, RelationType
 from app.modules.tasks.services.ticket_service import TicketService, convert_to_shanghai_time
 from app.modules.tasks.services.proxy_relation_service import (
     ProxyRelationService,
@@ -45,7 +46,7 @@ from app.core.ticket_roles import (
     SIDE_CREATOR,
 )
 from app.modules.tasks.services.operation_log_service import OperationLogService, get_role_prefix
-from app.models.task import OperationType, TaskStep, TaskFollower, TaskParticipant, Task
+from app.models.task import OperationType, TaskStep, TaskFollower, TaskParticipant, Task, TaskRelation
 from app.modules.tasks.api.ws import (
     ws_broadcast_comment,
     ws_broadcast_comment_deleted,
@@ -1891,6 +1892,18 @@ async def update_task_status(
                 raise HTTPException(status_code=400, detail="结束工单必须填写解决方式")
             resolution_summary = rs
 
+        # ── 前置/子任务阻塞校验 ──
+        blocked = await _check_relation_block(db, task_id, ticket.status, status_enum)
+        if blocked:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "blocked_by_related_tasks",
+                    "message": "当前工单存在未完成的前置工单或子任务，无法完成/关闭",
+                    "blocked": [b.model_dump() for b in blocked],
+                }
+            )
+
         old_status = ticket.status.value if hasattr(ticket.status, 'value') else str(ticket.status)
         updated_ticket = await TicketService.update_ticket_status(db, task_id, status_enum, token=token, operator_id=username, resolution_summary=resolution_summary)
         # ── WS 实时广播：工单状态变更 ──
@@ -3430,4 +3443,460 @@ async def download_attachment(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"下载文件失败: {str(e)}")
+
+
+# ==================== 工单关联（task_relations） ====================
+
+
+async def _check_relation_block(
+    db: AsyncSession,
+    task_id: int,
+    current_status: TicketStatus,
+    target_status: TicketStatus,
+) -> List[BlockedTaskInfo]:
+    """检查工单状态变更是否被前置工单或子任务阻塞。
+
+    阻塞规则：
+      - in_progress → resolved：所有 predecessor 前置工单需已完成（resolved/closed）
+      - resolved → closed：上述前置校验 + 所有 subtask 子工单需已完成（resolved/closed/canceled）
+
+    返回空列表表示无阻塞；返回 BlockedTaskInfo 列表表示被阻塞的工单清单。
+    """
+    blocked: List[BlockedTaskInfo] = []
+    transition = f"{current_status.value if hasattr(current_status, 'value') else str(current_status)}" \
+                 f"→{target_status.value if hasattr(target_status, 'value') else str(target_status)}"
+
+    # 前置校验：resolved 和 closed 目标状态都需检查
+    if target_status in (TicketStatus.RESOLVED, TicketStatus.CLOSED):
+        # 查询所有 predecessor 关系（source=当前工单, target=前置工单）
+        result = await db.execute(
+            select(TaskRelation, Task).join(Task, Task.id == TaskRelation.target_task_id)
+            .where(
+                TaskRelation.source_task_id == task_id,
+                TaskRelation.relation_type == RelationType.PREDECESSOR,
+            )
+        )
+        for rel, pred_task in result.unique().all():
+            pred_status = pred_task.status.value if hasattr(pred_task.status, 'value') else str(pred_task.status)
+            if pred_status not in ('resolved', 'closed'):
+                blocked.append(BlockedTaskInfo(
+                    task_id=pred_task.id,
+                    title=pred_task.title,
+                    status=pred_status,
+                    reason='predecessor',
+                ))
+
+    # 子任务校验：仅 closed 目标状态
+    if target_status == TicketStatus.CLOSED:
+        result = await db.execute(
+            select(TaskRelation, Task).join(Task, Task.id == TaskRelation.target_task_id)
+            .where(
+                TaskRelation.source_task_id == task_id,
+                TaskRelation.relation_type == RelationType.SUBTASK,
+            )
+        )
+        for rel, sub_task in result.unique().all():
+            sub_status = sub_task.status.value if hasattr(sub_task.status, 'value') else str(sub_task.status)
+            if sub_status not in ('resolved', 'closed', 'canceled'):
+                blocked.append(BlockedTaskInfo(
+                    task_id=sub_task.id,
+                    title=sub_task.title,
+                    status=sub_status,
+                    reason='subtask',
+                ))
+
+    return blocked
+
+
+async def _has_cycle(db: AsyncSession, source_id: int, target_id: int) -> bool:
+    """DFS 检测 predecessor 关系是否成环：若从 target_id 出发沿 predecessor 边能回到 source_id，则成环。"""
+    adj: Dict[int, List[int]] = {}
+    all_result = await db.execute(
+        select(TaskRelation.source_task_id, TaskRelation.target_task_id).where(
+            TaskRelation.relation_type == RelationType.PREDECESSOR
+        )
+    )
+    for s, t in all_result.all():
+        adj.setdefault(s, []).append(t)
+
+    # DFS 从 target_id 出发，看能否到达 source_id
+    visited = set()
+    stack = [target_id]
+    while stack:
+        node = stack.pop()
+        if node == source_id:
+            return True
+        if node in visited:
+            continue
+        visited.add(node)
+        stack.extend(adj.get(node, []))
+    return False
+
+
+# ── 关系树查询 ──
+
+class RelationTreeNode(BaseModel):
+    """关系树节点（一个工单的概要）"""
+    id: int
+    title: str
+    status: str
+    created_by_name: Optional[str] = None
+    assigned_to_name: Optional[str] = None
+
+
+class RelationTreeEdge(BaseModel):
+    """关系树边（两个节点间的关系）"""
+    source: int
+    target: int
+    relation_type: RelationType
+
+
+class RelationTreeResponse(BaseModel):
+    """关系树响应
+
+    root_id:    渲染根节点（subtask 树最顶层的父工单）
+    current_id: 用户实际打开的工单（用于前端高亮「当前」标签）
+    nodes:      所有可达节点
+    edges:      所有可达边
+    """
+    root_id: int
+    current_id: int
+    nodes: List[RelationTreeNode]
+    edges: List[RelationTreeEdge]
+
+
+async def _collect_relation_tree(
+    db: AsyncSession,
+    root_id: int,
+    max_depth: int = 8,
+) -> RelationTreeResponse:
+    """从 root_id 出发，沿 subtask（向下）、predecessor（向上）、duplicate（平级）
+    三个方向 BFS 遍历，收集所有可达节点和边。
+
+    防环：visited 集合避免重复；subtask 不会成环（一个子任务只挂一个父）；
+    predecessor 已有建关系时的成环校验，这里 BFS 也会兜底。
+    """
+    # 一次查出全表关系（数据量小，O(N) 可接受）
+    result = await db.execute(select(TaskRelation))
+    all_rels = result.scalars().all()
+
+    # 构建邻接表：按关系类型分组
+    # subtask: source(父) → [target(子)]，同时反向建 parent 映射
+    # predecessor: source → [target(前置)]
+    # duplicate: source ↔ target
+    subtask_children: Dict[int, List[int]] = {}
+    subtask_parent: Dict[int, int] = {}          # key=子, value=父
+    predecessor_of: Dict[int, List[int]] = {}   # key=工单, value=它的前置工单IDs
+    predecessor_dependents: Dict[int, List[int]] = {}  # key=前置工单, value=依赖它的工单IDs（反向）
+    duplicate_with: Dict[int, set] = {}           # key=工单, value=重复工单IDs
+    all_task_ids: set = {root_id}
+    for rel in all_rels:
+        if rel.relation_type == RelationType.SUBTASK:
+            subtask_children.setdefault(rel.source_task_id, []).append(rel.target_task_id)
+            subtask_parent[rel.target_task_id] = rel.source_task_id
+            all_task_ids.add(rel.source_task_id)
+            all_task_ids.add(rel.target_task_id)
+        elif rel.relation_type == RelationType.PREDECESSOR:
+            predecessor_of.setdefault(rel.source_task_id, []).append(rel.target_task_id)
+            predecessor_dependents.setdefault(rel.target_task_id, []).append(rel.source_task_id)
+            all_task_ids.add(rel.source_task_id)
+            all_task_ids.add(rel.target_task_id)
+        elif rel.relation_type == RelationType.DUPLICATE:
+            duplicate_with.setdefault(rel.source_task_id, set()).add(rel.target_task_id)
+            duplicate_with.setdefault(rel.target_task_id, set()).add(rel.source_task_id)
+            all_task_ids.add(rel.source_task_id)
+            all_task_ids.add(rel.target_task_id)
+
+    # 向上追溯真正的 subtask 根节点（确保渲染从最顶层父工单开始）
+    render_root_id = root_id
+    _seen: set = set()
+    while render_root_id in subtask_parent and render_root_id not in _seen:
+        _seen.add(render_root_id)
+        render_root_id = subtask_parent[render_root_id]
+
+    # BFS：从 render_root_id（真正的 subtask 根）出发，沿三个方向遍历
+    visited: set = set()
+    queue: List[tuple] = [(render_root_id, 0)]
+    visited.add(render_root_id)
+    reachable: set = {render_root_id, root_id}  # root_id（当前工单）也必须在内
+
+    while queue:
+        current, depth = queue.pop(0)
+        if depth >= max_depth:
+            continue
+        # subtask：向下遍历子节点
+        for child_id in subtask_children.get(current, []):
+            reachable.add(child_id)
+            if child_id not in visited:
+                visited.add(child_id)
+                queue.append((child_id, depth + 1))
+        # subtask 反向：向上遍历父节点（当 BFS 从非根节点进入子树时补全祖先）
+        if current in subtask_parent:
+            parent_id = subtask_parent[current]
+            reachable.add(parent_id)
+            if parent_id not in visited:
+                visited.add(parent_id)
+                queue.append((parent_id, depth + 1))
+        for pred_id in predecessor_of.get(current, []):
+            reachable.add(pred_id)
+            if pred_id not in visited:
+                visited.add(pred_id)
+                queue.append((pred_id, depth + 1))
+        # 反向：谁依赖 current 作为前置（dependents）
+        for dep_id in predecessor_dependents.get(current, []):
+            reachable.add(dep_id)
+            if dep_id not in visited:
+                visited.add(dep_id)
+                queue.append((dep_id, depth + 1))
+        for dup_id in duplicate_with.get(current, set()):
+            reachable.add(dup_id)
+            if dup_id not in visited:
+                visited.add(dup_id)
+                queue.append((dup_id, depth + 1))
+
+    # BFS 结束后，在 reachable 内部重新确定真正的 subtask 根节点
+    # （之前的 render_root_id 只从当前工单向上追溯，可能没追溯到真正的根）
+    has_subtask = any(
+        t in subtask_children or t in subtask_parent
+        for t in reachable
+    )
+    if has_subtask:
+        # reachable 中有 subtask 关系：找"不在 subtask_parent 里，但有 subtask 子节点"的节点
+        subtask_roots = [
+            t for t in reachable
+            if t not in subtask_parent and subtask_children.get(t)
+        ]
+        if subtask_roots:
+            render_root_id = min(subtask_roots)  # 多个根时选 ID 最小的（稳定）
+
+    if not reachable:
+        reachable = {root_id}
+    task_result = await db.execute(
+        select(Task).where(Task.id.in_(reachable))
+    )
+    task_map: Dict[int, Task] = {t.id: t for t in task_result.scalars().all()}
+
+    # 构建 nodes
+    nodes: List[RelationTreeNode] = []
+    for tid in sorted(reachable):
+        t = task_map.get(tid)
+        if not t:
+            continue
+        status_val = t.status.value if hasattr(t.status, 'value') else str(t.status)
+        nodes.append(RelationTreeNode(
+            id=t.id,
+            title=t.title,
+            status=status_val,
+            created_by_name=t.created_by_name if hasattr(t, 'created_by_name') else None,
+            assigned_to_name=t.assigned_to_name if hasattr(t, 'assigned_to_name') else None,
+        ))
+
+    # 构建 edges（只保留两端都在 reachable 内的边）
+    edges: List[RelationTreeEdge] = []
+    for rel in all_rels:
+        if rel.source_task_id in reachable and rel.target_task_id in reachable:
+            edges.append(RelationTreeEdge(
+                source=rel.source_task_id,
+                target=rel.target_task_id,
+                relation_type=rel.relation_type,
+            ))
+
+    return RelationTreeResponse(root_id=render_root_id, current_id=root_id, nodes=nodes, edges=edges)
+
+
+@router.get("/{task_id}/relations/tree", response_model=RelationTreeResponse)
+async def get_task_relation_tree(
+    task_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_active_user_from_token),
+    max_depth: int = Query(8, ge=1, le=20, description="BFS 遍历深度上限"),
+):
+    """获取工单的完整关系树（从当前工单出发，BFS 遍历 subtask/predecessor/duplicate 三个方向）"""
+    ticket = await TicketService.get_ticket_by_id(db, task_id)
+    if not ticket:
+        raise HTTPException(status_code=404, detail="工单不存在")
+    return await _collect_relation_tree(db, task_id, max_depth=max_depth)
+
+
+@router.get("/{task_id}/relations", response_model=List[TaskRelationResponse])
+async def get_task_relations(
+    task_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_active_user_from_token),
+):
+    """获取工单的所有关联（双向：当前工单作为 source 或 target 的关系）"""
+    ticket = await TicketService.get_ticket_by_id(db, task_id)
+    if not ticket:
+        raise HTTPException(status_code=404, detail="工单不存在")
+
+    # 查询双向关系
+    result = await db.execute(
+        select(TaskRelation, Task).outerjoin(
+            Task, Task.id == TaskRelation.target_task_id
+        ).where(
+            (TaskRelation.source_task_id == task_id) | (TaskRelation.target_task_id == task_id)
+        )
+    )
+
+    relations: List[TaskRelationResponse] = []
+    for rel, target in result.unique().all():
+        # 加载 source 侧工单（若当前工单是 target）
+        source = None
+        if rel.source_task_id != task_id:
+            from sqlalchemy import select as _sel
+            src_result = await db.execute(_sel(Task).where(Task.id == rel.source_task_id))
+            source = src_result.scalar_one_or_none()
+
+        # 加载 target 侧工单（若当前工单是 source）
+        target_info = None
+        if rel.target_task_id != task_id and target:
+            target_info = target
+
+        relations.append(TaskRelationResponse(
+            id=rel.id,
+            source_task_id=rel.source_task_id,
+            target_task_id=rel.target_task_id,
+            relation_type=rel.relation_type,
+            created_by=rel.created_by,
+            created_at=rel.created_at,
+            target=TaskRelationBrief.model_validate(target_info) if target_info else None,
+            source=TaskRelationBrief.model_validate(source) if source else None,
+        ))
+
+    return relations
+
+
+@router.post("/{task_id}/relations", response_model=TaskRelationResponse)
+async def create_task_relation(
+    task_id: int,
+    body: TaskRelationCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_active_user_from_token),
+):
+    """创建工单关联"""
+    ticket = await TicketService.get_ticket_by_id(db, task_id)
+    if not ticket:
+        raise HTTPException(status_code=404, detail="工单不存在")
+
+    # 权限：复用 backend:tasks:operate
+    if not has_permission_code(current_user, 'backend:tasks:operate'):
+        raise HTTPException(status_code=403, detail="无权限创建工单关联")
+
+    # 校验目标工单存在
+    target_ticket = await TicketService.get_ticket_by_id(db, body.target_task_id)
+    if not target_ticket:
+        raise HTTPException(status_code=404, detail="目标工单不存在")
+
+    # 禁止自引用
+    if task_id == body.target_task_id:
+        raise HTTPException(status_code=400, detail="不能关联自己")
+
+    # 重复检查
+    existing = await db.execute(
+        select(TaskRelation).where(
+            TaskRelation.source_task_id == task_id,
+            TaskRelation.target_task_id == body.target_task_id,
+            TaskRelation.relation_type == body.relation_type,
+        )
+    )
+    if existing.scalar_one_or_none():
+        raise HTTPException(status_code=400, detail="该关联已存在")
+
+    # subtask 唯一性：一个子任务只能挂一个父工单
+    if body.relation_type == RelationType.SUBTASK:
+        dup_sub = await db.execute(
+            select(TaskRelation).where(
+                TaskRelation.target_task_id == body.target_task_id,
+                TaskRelation.relation_type == RelationType.SUBTASK,
+            )
+        )
+        if dup_sub.scalar_one_or_none():
+            raise HTTPException(status_code=400, detail="目标工单已是子任务，只能挂一个父工单")
+
+    # predecessor 成环检测
+    if body.relation_type == RelationType.PREDECESSOR:
+        if await _has_cycle(db, task_id, body.target_task_id):
+            raise HTTPException(status_code=400, detail="该关联会形成前置工单循环，不允许")
+
+    # 冲突校验：同一对工单不能同时有 predecessor 和 subtask
+    # 检查 target 是否已经是 source 的子任务
+    conflict = await db.execute(
+        select(TaskRelation).where(
+            TaskRelation.source_task_id == task_id,
+            TaskRelation.target_task_id == body.target_task_id,
+            TaskRelation.relation_type.in_([RelationType.PREDECESSOR, RelationType.SUBTASK]),
+        )
+    )
+    if conflict.scalar_one_or_none():
+        existing_type = conflict.scalar_one().relation_type
+        raise HTTPException(
+            status_code=400,
+            detail=f"两个工单已存在 {existing_type.value} 关系，不能同时建立前置/子任务关系",
+        )
+
+    username = actor_username(current_user)
+    new_rel = TaskRelation(
+        source_task_id=task_id,
+        target_task_id=body.target_task_id,
+        relation_type=body.relation_type,
+        created_by=username,
+    )
+    db.add(new_rel)
+    await db.commit()
+    await db.refresh(new_rel)
+
+    # 组装返回（带 target/source 概要）
+    rel = new_rel
+    result = await db.execute(
+        select(TaskRelation).where(TaskRelation.id == rel.id)
+    )
+    refetched = result.scalar_one()
+    target = await db.execute(select(Task).where(Task.id == refetched.target_task_id))
+    target_t = target.scalar_one_or_none()
+    source_t = None
+    if refetched.source_task_id != task_id:
+        src = await db.execute(select(Task).where(Task.id == refetched.source_task_id))
+        source_t = src.scalar_one_or_none()
+
+    return TaskRelationResponse(
+        id=refetched.id,
+        source_task_id=refetched.source_task_id,
+        target_task_id=refetched.target_task_id,
+        relation_type=refetched.relation_type,
+        created_by=refetched.created_by,
+        created_at=refetched.created_at,
+        target=TaskRelationBrief.model_validate(target_t) if target_t else None,
+        source=TaskRelationBrief.model_validate(source_t) if source_t else None,
+    )
+
+
+@router.delete("/{task_id}/relations/{relation_id}", response_model=dict)
+async def delete_task_relation(
+    task_id: int,
+    relation_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_active_user_from_token),
+):
+    """删除工单关联"""
+    ticket = await TicketService.get_ticket_by_id(db, task_id)
+    if not ticket:
+        raise HTTPException(status_code=404, detail="工单不存在")
+
+    # 权限：复用 backend:tasks:operate
+    if not has_permission_code(current_user, 'backend:tasks:operate'):
+        raise HTTPException(status_code=403, detail="无权限删除工单关联")
+
+    result = await db.execute(
+        select(TaskRelation).where(
+            TaskRelation.id == relation_id,
+            (TaskRelation.source_task_id == task_id) | (TaskRelation.target_task_id == task_id),
+        )
+    )
+    rel = result.scalar_one_or_none()
+    if not rel:
+        raise HTTPException(status_code=404, detail="关联不存在")
+
+    await db.delete(rel)
+    await db.commit()
+    return {"message": "删除成功"}
 

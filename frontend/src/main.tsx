@@ -17,6 +17,7 @@ import { RouterProvider, createBrowserRouter, Navigate, Outlet, useRouteError, u
 import { AuthGuard } from '@/shared/utils/authGuard';
 import { RAW_BASE } from '@/config/api';
 import 'tdesign-mobile-react/es/style/index.css';
+import '@xyflow/react/dist/style.css';
 import '@/shared/styles/global.css';
 
 // 初始化认证状态

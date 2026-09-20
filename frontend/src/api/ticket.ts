@@ -304,9 +304,99 @@ export const formatDuration = (seconds: number | null | undefined): string => {
   if (!seconds || seconds <= 0) return '';
   const s = Math.floor(seconds);
   if (s < 60) return `${s} 秒`;
-  const h = Math.floor(s / 3600);
+  const h = Math.floor((s / 3600));
   const m = Math.floor((s % 3600) / 60);
   const rest = s % 60;
   if (h > 0) return rest > 0 ? `${h} 小时 ${m} 分` : `${h} 小时 ${m} 分`;
   return rest > 0 ? `${m} 分 ${rest} 秒` : `${m} 分钟`;
 };
+
+// ── 工单关联（task_relations）类型与 API ──
+
+/** 关系类型（与后端 RelationType 枚举对齐） */
+export type RelationType = 'predecessor' | 'duplicate' | 'subtask';
+
+/** 关联工单概要（target/source 侧） */
+export interface RelationBrief {
+  id: number;
+  title: string;
+  status: string;
+  created_by_name?: string | null;
+  assigned_to_name?: string | null;
+}
+
+/** 工单关联响应 */
+export interface TaskRelation {
+  id: number;
+  source_task_id: number;
+  target_task_id: number;
+  relation_type: RelationType;
+  created_by?: string | null;
+  created_at: string;
+  target?: RelationBrief | null;
+  source?: RelationBrief | null;
+}
+
+/** 阻塞工单信息（状态变更 422 错误返回） */
+export interface BlockedTaskInfo {
+  task_id: number;
+  title: string;
+  status: string;
+  reason: 'predecessor' | 'subtask';
+}
+
+/** 422 阻塞错误体 */
+export interface BlockedErrorDetail {
+  code: 'blocked_by_related_tasks';
+  message: string;
+  blocked: BlockedTaskInfo[];
+}
+
+/** 获取工单所有关联（双向） */
+export const listRelations = (taskId: number | string) =>
+  request<TaskRelation[]>(`/${Number(taskId)}/relations`);
+
+/** 创建工单关联 */
+export const createRelation = (
+  taskId: number | string,
+  targetTaskId: number,
+  relationType: RelationType,
+) =>
+  request<TaskRelation>(`/${Number(taskId)}/relations`, {
+    method: 'POST',
+    body: JSON.stringify({ target_task_id: targetTaskId, relation_type: relationType }),
+  });
+
+/** 删除工单关联 */
+export const deleteRelation = (taskId: number | string, relationId: number) =>
+  request(`/${Number(taskId)}/relations/${relationId}`, { method: 'DELETE' });
+
+// ── 关系树（树形渲染用） ──
+
+/** 关系树节点 */
+export interface RelationTreeNode {
+  id: number;
+  title: string;
+  status: string;
+  created_by_name?: string | null;
+  assigned_to_name?: string | null;
+}
+
+/** 关系树边 */
+export interface RelationTreeEdge {
+  source: number;
+  target: number;
+  relation_type: RelationType;
+}
+
+/** 关系树响应 */
+export interface RelationTreeResponse {
+  root_id: number;       // 渲染根节点（subtask 树最顶层父工单）
+  current_id: number;     // 用户实际打开的工单
+  nodes: RelationTreeNode[];
+  edges: RelationTreeEdge[];
+}
+
+/** 获取工单完整关系树 */
+export const getRelationTree = (taskId: number | string, maxDepth = 8) =>
+  request<RelationTreeResponse>(`/${Number(taskId)}/relations/tree?max_depth=${maxDepth}`);

@@ -389,3 +389,44 @@ class TaskSpecDoc(Base):
 
     def __repr__(self):
         return f"<TaskSpecDoc(id={self.id}, task_id={self.task_id}, revision={self.revision})>"
+
+
+class RelationType(str, enum.Enum):
+    """工单关联关系类型"""
+    PREDECESSOR = "predecessor"   # 前置工单（阻塞：前置未完成则阻塞当前工单完成/关闭）
+    DUPLICATE = "duplicate"       # 重复工单（仅标记，不阻塞）
+    SUBTASK = "subtask"           # 子任务（父工单关闭时校验所有子任务完成）
+
+
+class TaskRelation(Base):
+    """工单关联表：工间的结构化关系。
+
+    方向约定：
+      - predecessor: source=当前工单, target=前置工单（target 需先完成）
+      - duplicate:   source=当前工单, target=重复工单
+      - subtask:     source=父工单, target=子工单
+
+    约束：
+      - (source_task_id, target_task_id, relation_type) 唯一
+      - 禁止自引用（source == target）
+      - predecessor 禁止成环（后端 DFS 校验）
+      - subtask 同一 target 只能有一条（一个子任务只挂一个父工单）
+    """
+    __tablename__ = "task_relations"
+
+    id = Column(BigInteger, primary_key=True, index=True, comment="关联ID")
+    source_task_id = Column(BigInteger, ForeignKey("tasks.id", ondelete="CASCADE"),
+                            nullable=False, index=True, comment="源工单ID")
+    target_task_id = Column(BigInteger, ForeignKey("tasks.id", ondelete="CASCADE"),
+                            nullable=False, index=True, comment="目标工单ID")
+    relation_type: Mapped[RelationType] = mapped_column(SQLEnum(RelationType),
+                                                        nullable=False, index=True, comment="关系类型")
+    created_by = Column(String(50), nullable=True, index=True, comment="创建人username")
+    created_at = Column(DateTime, server_default=func.now(), nullable=False, comment="创建时间")
+
+    __table_args__ = (
+        UniqueConstraint("source_task_id", "target_task_id", "relation_type", name="uq_task_relation_unique"),
+    )
+
+    def __repr__(self):
+        return f"<TaskRelation(id={self.id}, {self.source_task_id}->{self.target_task_id}, type={self.relation_type})>"

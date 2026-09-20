@@ -9,7 +9,7 @@ import ClearableInput from '@/shared/components/ClearableInput';
 import TitleEllipsis from '@/shared/components/TitleEllipsis';
 import { setupWechatShare, isPcWechat } from '@/shared/utils/wechatJsSdk';
 import { WECHAT_CONFIG } from '@/config/wechat';
-import { createRequest, getToken } from '@/api/client';
+import { createRequest, getToken, ApiError } from '@/api/client';
 import API_CONFIG from '@/config/api';
 import { readStored } from '@/stores/authStorage';
 import SafeHtml from '@/shared/components/SafeHtml';
@@ -21,6 +21,8 @@ import { useStepNegotiation } from '@/shared/hooks/useStepNegotiation';
 import { useResolveTicket } from '@/shared/hooks/useResolveTicket';
 import AttachmentViewer, { type AttachmentViewItem } from '@/shared/components/AttachmentViewer';
 import DispatchFold from '@/shared/components/DispatchFold';
+import RelationBlock from '@/shared/components/RelationBlock';
+import type { BlockedErrorDetail } from '@/api/ticket';
 import UserSelect from '@/shared/components/UserSelect';
 import type { UserItem } from '@/api/users';
 import { useWorkbenchStore } from '@/stores/workbench';
@@ -204,6 +206,8 @@ export default function TaskDetailPage() {
   // deadlineDraft: undefined=未改动（保存时不提交该字段）；ISO 字符串=新时间；null=清除
   const [showDeadlinePopup, setShowDeadlinePopup] = useState(false);
   const [deadlineDraft, setDeadlineDraft] = useState<string | null | undefined>(undefined);
+  // 关联工单阻塞提示（状态变更 422 时传入 RelationBlock 展示）
+  const [blockedError, setBlockedError] = useState<BlockedErrorDetail | null>(null);
   const [submittingDeadline, setSubmittingDeadline] = useState(false);
   const [submittingComment, setSubmittingComment] = useState(false);
   const [askingAI, setAskingAI] = useState(false);
@@ -469,6 +473,8 @@ export default function TaskDetailPage() {
 
   const handleStatusChange = async (action: { nextStatus: string }) => {
     if (!detail) return;
+    // 清空前次阻塞提示
+    setBlockedError(null);
     
     try {
       await request<Ticket>(`/${detail.id}/status`, {
@@ -480,6 +486,15 @@ export default function TaskDetailPage() {
       await refreshDetail();
       Toast({ message: `状态已更新为${statusLabel}`, theme: 'success' });
     } catch (err) {
+      // 422 阻塞校验失败：提取 blocked 详情展示
+      if (err instanceof ApiError && err.statusCode === 422) {
+        const body = (err.errorBody as { detail?: BlockedErrorDetail })?.detail;
+        if (body?.code === 'blocked_by_related_tasks') {
+          setBlockedError(body);
+          Toast({ message: `被 ${body.blocked.length} 个工单阻塞`, theme: 'error' });
+          return;
+        }
+      }
       Toast({ message: `状态更新失败: ${err instanceof Error ? err.message : ''}`, theme: 'error' });
     }
   };
@@ -585,7 +600,7 @@ export default function TaskDetailPage() {
 
   // 工单阶段性处理（协商节点）+ 结束工单（解决方式）：抽到共享 hook，与历史工单详情页复用
   const negotiation = useStepNegotiation(detailId ?? '', detail, refreshDetail);
-  const resolve = useResolveTicket(detailId ?? '', detail, refreshDetail, refreshTasks);
+  const resolve = useResolveTicket(detailId ?? '', detail, refreshDetail, refreshTasks, (b) => setBlockedError(b));
 
   // ===== 公司/部门审核 =====
   const approvalInfo = (() => {
@@ -1411,6 +1426,19 @@ export default function TaskDetailPage() {
             </div>
           );
         })()}
+
+        {/* 关联工单（无关联时不显示） */}
+        {detail && (
+          <RelationBlock
+            taskId={Number(detail.id)}
+            projectName={detail.project_name}
+            projectId={detail.project_id}
+            customer={detail.customer}
+            canOperate={hasPermission('backend:tasks:operate')}
+            blockedError={blockedError}
+            hideWhenEmpty
+          />
+        )}
 
         <div className="detail-card">
           <h4 className="detail-card__h">讨论摘要</h4>
