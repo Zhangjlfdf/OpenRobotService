@@ -7,7 +7,7 @@
  *   - duplicate:  双向紫色虚线
  *   - 折叠:      UP 折叠 predecessor + 全关联，DOWN 折叠 subtask + 全关联
  */
-import { useState, useEffect, useMemo, useCallback, useRef, useLayoutEffect } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef, useLayoutEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Tag, Popup, Dialog, Form, FormItem, Input, Button } from 'tdesign-mobile-react';
 import { Link2, Plus, AlertTriangle, Copy } from 'lucide-react';
@@ -657,7 +657,7 @@ function TaskCard({
 function EdgeSvg({ layout }: { layout: LayoutResult }) {
   const src = (id: number) => layout.nodes.find(n => n.id === id);
 
-  const markers: JSX.Element[] = [
+  const markers: React.ReactNode[] = [
     <marker key="g" id="arr-g" viewBox="0 0 10 10" refX="10" refY="5"
             markerWidth="8" markerHeight="8" orient="auto">
       <path d="M 0 0 L 10 5 L 0 10 z" fill="#94a3b8" />
@@ -677,8 +677,8 @@ function EdgeSvg({ layout }: { layout: LayoutResult }) {
     </marker>,
   ];
 
-  const paths: JSX.Element[] = [];
-  const labels: JSX.Element[] = [];
+  const paths: React.ReactNode[] = [];
+  const labels: React.ReactNode[] = [];
 
   for (const edge of layout.edges) {
     const s = src(edge.source);
@@ -858,17 +858,17 @@ export default function RelationBlock({
   }, [tree, collapsed]);
 
   const handleDeleteRelation = async (relationId: number) => {
-    Dialog.confirm({
+    Dialog.confirm!({
       title: '确认删除',
       content: '确定删除该关联吗？',
       confirmBtn: { content: '删除', theme: 'danger' },
       onConfirm: async () => {
         try {
           await deleteRelation(taskId, relationId);
-          Dialog.alert({ content: '删除成功' });
+          Dialog.alert!({ content: '删除成功' });
           loadData();
         } catch (e: any) {
-          Dialog.alert({ content: `删除失败: ${e?.message || ''}` });
+          Dialog.alert!({ content: `删除失败: ${e?.message || ''}` });
         }
       },
     });
@@ -928,17 +928,17 @@ export default function RelationBlock({
   const handleSelectSearchResult = async (peerId: number) => {
     try {
       await createRelation(taskId, peerId, addingType);
-      Dialog.alert({ content: '关联创建成功' });
+      Dialog.alert!({ content: '关联创建成功' });
       setShowAdd(false); setSearchKeyword(''); setSearchResults([]);
       loadData();
     } catch (e: any) {
-      Dialog.alert({ content: `创建失败: ${e?.detail || e?.message || ''}` });
+      Dialog.alert!({ content: `创建失败: ${e?.detail || e?.message || ''}` });
     }
   };
 
   const handleCreateSubtask = async () => {
     if (!creatingSubtaskTitle.trim()) {
-      Dialog.alert({ content: '请填写子任务标题' }); return;
+      Dialog.alert!({ content: '请填写子任务标题' }); return;
     }
     setCreatingSubtaskLoading(true);
     try {
@@ -951,18 +951,18 @@ export default function RelationBlock({
       try {
         await createRelation(taskId, newTicket.id, 'subtask');
       } catch (relErr: any) {
-        Dialog.alert({
+        Dialog.alert!({
           content: `子任务已创建（#${newTicket.id}），但自动关联失败：${relErr?.detail || relErr?.message || ''}。请手动关联。`,
         });
       }
       setShowCreateSubtask(false); setCreatingSubtaskTitle(''); setCreatingSubtaskDesc('');
       loadData();
     } catch (e: any) {
-      Dialog.alert({ content: `创建子任务失败: ${e?.detail || e?.message || ''}` });
+      Dialog.alert!({ content: `创建子任务失败: ${e?.detail || e?.message || ''}` });
     } finally { setCreatingSubtaskLoading(false); }
   };
 
-  const toggleCollapsed = (id: string, direction: 'up' | 'down') => {
+  const toggleCollapsed = (id: string, direction: 'up' | 'down' | 'dup') => {
     setCollapsed(prev => {
       const key = `${direction}:${id}`;
       const next = new Set(prev);
@@ -1143,7 +1143,7 @@ export default function RelationBlock({
         height: layout.height,
         minHeight: 300,
       }}>
-        <EdgeSvg layout={layout} maps={maps} />
+        <EdgeSvg layout={layout} />
         {layout.nodes.map(ln => {
           const node = maps.nodeMap.get(ln.id);
           if (!node) return null;
@@ -1181,7 +1181,7 @@ export default function RelationBlock({
               // DUP 按钮只在 anchor 节点显示（有其他关系或为 root）
               // 纯 duplicate 叶子节点（只有 dup 关系）不显示按钮
               hasDup={dups.length > 0 && (
-                kids.length > 0 || deps.length > 0 || preds.length > 0 || ln.id === tree.root_id
+                kids.length > 0 || deps.length > 0 || preds.length > 0 || ln.id === tree?.root_id
               )}
               isUpCollapsed={isUpCollapsed}
               isDownCollapsed={isDownCollapsed}
@@ -1386,17 +1386,17 @@ export default function RelationBlock({
         <div style={{ padding: 16 }}>
           <h3 style={{ margin: '0 0 16px', fontSize: 16, fontWeight: 600 }}>创建子任务</h3>
           <Form>
-            <FormItem label="子任务标题" required>
-              <Input value={creatingSubtaskTitle} onChange={setCreatingSubtaskTitle} placeholder="请输入子任务标题" clearable />
+            <FormItem label="子任务标题" rules={[{ required: true, message: '请输入子任务标题' }]}>
+              <Input value={creatingSubtaskTitle} onChange={(v) => setCreatingSubtaskTitle(String(v))} placeholder="请输入子任务标题" clearable />
             </FormItem>
             <FormItem label="子任务描述">
-              <Input value={creatingSubtaskDesc} onChange={setCreatingSubtaskDesc} placeholder="请输入描述（选填）" clearable />
+              <Input value={creatingSubtaskDesc} onChange={(v) => setCreatingSubtaskDesc(String(v))} placeholder="请输入描述（选填）" clearable />
             </FormItem>
           </Form>
           <div style={{ fontSize: 12, color: 'var(--muted-foreground)', marginBottom: 12 }}>
             子任务将继承父工单的项目/客户信息
           </div>
-          <Button block theme="primary" size="large" loading={creatingSubtaskLoading} loadingText="创建中..."
+          <Button block theme="primary" size="large" loading={creatingSubtaskLoading}
             onClick={handleCreateSubtask}>
             创建并关联
           </Button>
