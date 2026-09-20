@@ -627,7 +627,7 @@ def reset_retrieval(req: ResetReq):
 _ARTIFACT_PATTERNS = [
     "processed/weekly_*.md", "processed/weekly_*.json", "meta.json",
     "processed/unanswered_*.json",
-    "segmentation_tool.html", "segmentation_tool_bounds.html",
+    "processed/segmentation_tool.html", "processed/segmentation_tool_bounds.html",
     "processed/retrieval_check_*.json",
     "processed/l3_judge_*.json",
     "processed/conversations_classified.jsonl",
@@ -1437,16 +1437,30 @@ def _esc_attr(s) -> str:
             .replace(">", "&gt;").replace('"', "&quot;"))
 
 
+_IMG_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".ico")
+
+
 def _img_html(f: dict, img_base: str) -> str:
-    """图片 HTML：大图（>3MB）/gif 不自动加载，占位点击；小图直接 img（lazy+onerror 重试）。"""
+    """附件渲染（0920 两修）：
+    ① 去掉 loading="lazy"——本页嵌入方式下懒加载永远不触发，图片停留在
+       alt 文本状态（用户实锤「image.webp 看不了」，eager 实测秒开）；
+    ② 非图片扩展（zip/log/txt…）渲染为下载链接——此前塞进 <img> 永远裂图。
+    大图（>3MB）/gif 仍占位点击加载。"""
+    path = img_base + f.get("object_path", "")
+    name = f.get("filename") or path.rsplit("/", 1)[-1]
     size = int(f.get("size") or 0)
-    path = _esc_attr(img_base + f.get("object_path", ""))
-    alt = _esc_attr(f.get("filename", ""))
-    if size > 3 * 1024 * 1024 or path.lower().endswith(".gif"):
+    lower = path.lower()
+    if not lower.endswith(_IMG_EXTS):
+        kb = f"{size / 1024:.0f}KB" if size < 1048576 else f"{size / 1048576:.1f}MB"
+        return (f'<a href="{_esc_attr(path)}" download="{_esc_attr(name)}" '
+                f'style="display:inline-block;margin:4px 0;font-size:12.5px;color:#3d76c4">'
+                f'📎 {_esc_attr(name)}（{kb}）· 点击下载</a>')
+    alt = _esc_attr(name)
+    if size > 3 * 1024 * 1024 or lower.endswith(".gif"):
         mb = f"{size / 1048576:.1f}"
         return (f'<span class="imgfail" onclick="loadBig(this)" '
-                f'data-path="{path}" data-alt="{alt}">🖼️ 大图 {mb}MB · 点击加载</span>')
-    return (f'<img loading="lazy" src="{path}" alt="{alt}" onerror="imgFail(this)">')
+                f'data-path="{_esc_attr(path)}" data-alt="{alt}">🖼️ 大图 {mb}MB · 点击加载</span>')
+    return f'<img src="{_esc_attr(path)}" alt="{alt}" onerror="imgFail(this)">'
 
 
 _MD_IMG_RE = re.compile(r"!\[([^\]]*)\]\(([^)]+)\)")
