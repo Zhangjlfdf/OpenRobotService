@@ -15,7 +15,7 @@
       "stream": "ext://sys.stdout"
     },
     "file": {
-      "class": "logging.handlers.TimedRotatingFileHandler",
+      "class": "app.services.logging._WindowsSafeRotatingHandler",
       "level": "INFO",
       "formatter": "standard",
       "filename": "D:\\CODE\\7_18\\OpenRobotService\\backend\\logs\\backend.log",

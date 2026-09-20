@@ -7,7 +7,10 @@
 
 from __future__ import annotations
 
-from ai.agents.AiDiagnosisPlatform.assigner.prompts.shared import person_anti_hallucination
+from ai.agents.AiDiagnosisPlatform.assigner.prompts.shared import (
+    feature_role_routing_guidance,
+    person_anti_hallucination,
+)
 
 IRON_RULES = (
     "【公共铁律】（必须遵守；违反即视为找不到人）\n"
@@ -25,13 +28,21 @@ IRON_RULES = (
 
 JUDGE_HINTS = (
     "【判断辅助】\n"
-    "- 工单类型（support/feature/bug/problem/other）仅供参考，不要只因类型改选。\n"
+    "- 工单类型（support/feature/bug/problem/other）供参考；"
+    "标成需求或正文实质是需求时，必须先看下方【仅需求单·产品/研发分流】，"
+    "不要只按精排分在产品和研发之间瞎猜。\n"
+    "- 报障/缺陷仍按现象对口，不要套用需求分流。\n"
     "- 职级 L1 一线 / L2 管理·审核 / L3 最高；用户要求上报上级时再抬职级。\n"
     "- 每人有「来源」：命中了画像 / 相似工单 / 问题簇的哪几路。名单是三路并集。\n"
     "- 总分取该人命中各路的最高绝对分（0～1），三路都不按本批第一名拉满。\n"
     "- 某路未命中不是不能接。只被历史捞回、且注明不在收紧名单的人，必须对照卡片判断能否接，不要只因历史高就派。\n"
-    "- 没有 [倾向接单人] 时优先精排 #1；有则正常采纳用户选择，派给带该标签的人。"
+    "- 没有 [倾向接单人] 时：非需求可优先精排 #1；"
+    "需求单按分流结论选人，可不等于精排 #1。"
+    "有倾向人则正常采纳用户选择，派给带该标签的人。"
 )
+
+# 与 shared 同源，便于测试与 README 检索；运行时也由此拼进仲裁 prompt。
+FEATURE_ROLE_ROUTING = feature_role_routing_guidance()
 
 # 每个产品一份附录。范围与 Step1【产品归属】对齐，不按前端/后端/算法分层。
 PRODUCT_SCOPES = {

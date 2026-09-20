@@ -18,8 +18,29 @@ AI 模块日志系统
 import logging
 import logging.config
 import os
+import sys
 from pathlib import Path
 from logging.handlers import TimedRotatingFileHandler
+
+
+class _WindowsSafeTimedRotatingFileHandler(TimedRotatingFileHandler):
+    """Windows 下日志轮转可能因多进程/旧 handler 占用文件而失败。
+
+    捕获 PermissionError 后跳过本次轮转，继续写原日志文件，避免服务控制台持续刷异常。
+    """
+
+    def doRollover(self):
+        if sys.platform != "win32":
+            super().doRollover()
+            return
+        if self.stream:
+            self.stream.close()
+            self.stream = None
+        try:
+            super().doRollover()
+        except PermissionError:
+            self.mode = "a"
+            self.stream = self._open()
 
 
 class ReadableFormatter(logging.Formatter):
@@ -96,7 +117,7 @@ def _default_config() -> dict:
                 "stream": "ext://sys.stdout",
             },
             "file": {
-                "class": "logging.handlers.TimedRotatingFileHandler",
+                "()": _WindowsSafeTimedRotatingFileHandler,
                 "level": "INFO",
                 "formatter": "standard",
                 "filename": log_file,
@@ -106,7 +127,7 @@ def _default_config() -> dict:
                 "encoding": "utf-8",
             },
             "task_agent_file": {
-                "class": "logging.handlers.TimedRotatingFileHandler",
+                "()": _WindowsSafeTimedRotatingFileHandler,
                 "level": "DEBUG",
                 "formatter": "readable",
                 "filename": task_log_file,
@@ -116,7 +137,7 @@ def _default_config() -> dict:
                 "encoding": "utf-8",
             },
             "assigner_file": {
-                "class": "logging.handlers.TimedRotatingFileHandler",
+                "()": _WindowsSafeTimedRotatingFileHandler,
                 "level": "DEBUG",
                 "formatter": "readable",
                 "filename": assigner_log_file,

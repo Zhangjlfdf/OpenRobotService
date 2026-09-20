@@ -81,6 +81,11 @@ class TestIronRulesPrompt:
         assert "用户指定倾向处理人" not in prompt
         assert "用户重派备注" not in prompt
         assert "名单中带 [倾向接单人]" not in prompt
+        assert "【仅需求单·产品/研发分流】" in prompt
+        assert "待产品澄清" in prompt
+        assert "产品已对齐" in prompt
+        assert "不要只按精排分在产品和研发之间瞎猜" in prompt
+        assert "不要只因类型改选" not in prompt
 
 
 class TestRedispatchRemarkOnly:
