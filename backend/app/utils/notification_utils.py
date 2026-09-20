@@ -497,6 +497,98 @@ class NotificationUtils:
         return {"code": 200, "message": "通知已发送"}
 
     @staticmethod
+    async def send_proxy_relation_notification(
+        ticket_id: int,
+        title: str,
+        project_name: str,
+        agent_name: str,
+        principal_name: str,
+        action: str,
+        reason: str = "",
+        user_names: List[str] = None,
+        token: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """代他人提单关系通知（一期**复用现有模板 3 / 5**，零公众号审核）。
+
+        action 语义（与设计文档 §4.2 通知矩阵对齐）：
+          - ``created``   代提成功 → 通知**被代理人**，模板 5，发起人写「张三（代你提交）」
+          - ``acked``     被代理人确认跟进 → 通知**代理人**，模板 3
+          - ``declined``  被代理人拒绝 → 通知**代理人**，模板 3（带原因）
+
+        模板字段长度硬约束：thing 类 ≤ 20 字，统一经 simplify_title 截断。
+        """
+        action = (action or "").strip().lower()
+
+        def _send():
+            try:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    processed_title = loop.run_until_complete(
+                        NotificationUtils.simplify_title(title)
+                    )
+                    processed_project = loop.run_until_complete(
+                        NotificationUtils.simplify_title(project_name or "")
+                    )
+                    # 代理人姓名 + 后缀需整体 ≤20 字
+                    operator_display = loop.run_until_complete(
+                        NotificationUtils.simplify_title(
+                            f"{agent_name}（代你提交）" if action == "created" else agent_name
+                        )
+                    )
+                finally:
+                    loop.close()
+
+                url = NotificationUtils.TICKET_HOST + f"/{ticket_id}"
+
+                if action == "created":
+                    # 模板 5：新建工单 [工单编号, 项目名称, 工单标题, 发起人, 工单截止时间]
+                    deadline_str = _format_shanghai(
+                        datetime.now(timezone.utc) + timedelta(days=7)
+                    )
+                    payload = NotificationUtils.instantiate_template(
+                        NotificationUtils.NEW_TICKET,
+                        ticket_id,
+                        processed_project or "无",
+                        processed_title,
+                        operator_display,
+                        deadline_str,
+                        user_names=user_names,
+                        url=url,
+                    )
+                else:
+                    # 模板 3：工单状态变更 [工单名称, 项目名称, 工单状态, 变更原因, 处理人]
+                    if action == "acked":
+                        link_title = "已确认跟进"
+                        reason = f"{principal_name} 已确认跟进本工单"
+                    else:
+                        link_title = "与本单无关"
+                        reason = f"{principal_name} 表示与本单无关：{reason or '未填原因'}"
+                    reason = reason if len(reason) <= 20 else reason[:20]
+                    payload = NotificationUtils.instantiate_template(
+                        NotificationUtils.STATUS_CHANGE,
+                        processed_title,
+                        processed_project or "无",
+                        link_title,
+                        reason,
+                        agent_name,
+                        user_names=user_names,
+                        url=url,
+                    )
+
+                loop2 = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop2)
+                try:
+                    loop2.run_until_complete(NotificationUtils.send_notification(payload, token))
+                finally:
+                    loop2.close()
+            except Exception as e:
+                logger.error(f"发送代提关系通知失败 ticket_id={ticket_id} action={action}: {str(e)}")
+
+        asyncio.get_event_loop().run_in_executor(_executor, _send)
+        return {"code": 200, "message": "通知已发送"}
+
+    @staticmethod
     async def send_robot_alarm_notification(
         robot_type: str,
         robot_id: str,

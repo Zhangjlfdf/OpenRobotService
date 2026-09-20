@@ -2,9 +2,22 @@ import { Button, Popup, Form, FormItem, Textarea } from 'tdesign-mobile-react';
 import { DatePicker } from 'antd';
 import dayjs from 'dayjs';
 import { AlarmClock } from 'lucide-react';
+import type { ComponentProps } from 'react';
 import type { useStepNegotiation, StepNegotiationTicket } from '@/shared/hooks/useStepNegotiation';
 import { getDeadlineRange, makeDisabledDate, makeDisabledTime, parseDeadlineString } from '@/shared/utils/deadline';
 import { formatRawDateTime } from '@/shared/utils/url';
+
+function TestMarkedButton({
+  testId,
+  ...props
+}: ComponentProps<typeof Button> & { testId: string }) {
+  return (
+    <>
+      <span data-testid={testId} hidden />
+      <Button {...props} />
+    </>
+  );
+}
 
 /** 工单阶段性处理卡所需的工单信息（阶段字段 + 展示/弹窗所需的基础字段） */
 export interface StepCardTicket extends StepNegotiationTicket {
@@ -17,6 +30,9 @@ export interface StepCardTicket extends StepNegotiationTicket {
 interface StepRoles {
   isAssignee: boolean;
   isReporter: boolean;
+  /** 代他人提单：被代理人（**仅已确认跟进**时方可参与协商，归 creator 侧）。
+   *  pending 期间由调用方传 false（决策 10：待确认期只读、不参与回合协商）。 */
+  isPrincipal?: boolean;
 }
 
 type StepNegotiation = ReturnType<typeof useStepNegotiation>;
@@ -63,7 +79,10 @@ export default function StepNegotiationCard({
     openNegotiate, openCompleteStep,
   } = negotiation;
 
-  const { isAssignee, isReporter } = roles;
+  const { isAssignee, isReporter, isPrincipal = false } = roles;
+  // 被代理人（已确认跟进）与代理人同侧（creator 侧，代表问题方）：
+  // 谈判对象始终是「问题方 ↔ 处理人」，与后端 _actor_side 口径一致（决策 7）。
+  const isCreatorSide = isReporter || isPrincipal;
 
   const status = (detail?.status || '').toLowerCase();
   // 终态（已解决/已关闭/已取消）：保留节点信息展示，但隐藏卡内所有操作按钮
@@ -107,9 +126,9 @@ export default function StepNegotiationCard({
   const escalateCount = detail?.escalate_count ?? 0;
   const reachedMax = !isEscalated && round >= maxRound;
   const lastStepBy = detail?.step_last_updated_by;
-  const canOperate = isAssignee || isReporter;
+  const canOperate = isAssignee || isCreatorSide;
   const myTurn = (!lastStepBy && isAssignee)
-    || (lastStepBy === 'assigned' && isReporter)
+    || (lastStepBy === 'assigned' && isCreatorSide)
     || (lastStepBy === 'creator' && isAssignee);
   let pillBg = 'var(--muted)';
   let pillColor = 'var(--muted-foreground)';
@@ -158,7 +177,7 @@ export default function StepNegotiationCard({
         </div>
         <div style={{ marginBottom: 12 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 6 }}>
-            <span className="detail-step-current">
+            <span data-testid="task-current-step" className="detail-step-current">
               <span className="detail-step-current__label">当前阶段</span>
               <span className="detail-step-current__name">「{stepName}」</span>
             </span>
@@ -187,7 +206,7 @@ export default function StepNegotiationCard({
                 (() => {
                   const proposerIsMe =
                     (lastStepBy === 'assigned' && isAssignee) ||
-                    (lastStepBy === 'creator' && isReporter);
+                    (lastStepBy === 'creator' && isCreatorSide);
                   return (
                     <span>
                       {proposerIsMe ? '你期望在' : '对方期望在'}{' '}
@@ -203,7 +222,7 @@ export default function StepNegotiationCard({
         {latestNegotiateReason && !stepAgreed && (() => {
           const proposerIsMe =
             (lastStepBy === 'assigned' && isAssignee) ||
-            (lastStepBy === 'creator' && isReporter);
+            (lastStepBy === 'creator' && isCreatorSide);
           return (
             <div style={{
               fontSize: 12, color: 'var(--foreground)', marginBottom: 12, lineHeight: 1.7,
@@ -224,18 +243,19 @@ export default function StepNegotiationCard({
                 stepAgreed ? (
                   isAssignee ? (
                     hasNext ? (
-                      <Button block size="small" theme="primary" loading={completing} disabled={completeDisabled} onClick={openCompleteStep}>
+                      <TestMarkedButton testId="task-complete-step" block size="small" theme="primary" loading={completing} disabled={completeDisabled} onClick={openCompleteStep}>
                         当前阶段完成
-                      </Button>
+                      </TestMarkedButton>
                     ) : (
-                      <Button block size="small" theme="primary" onClick={onResolve}>
+                      <TestMarkedButton testId="task-resolve" block size="small" theme="primary" onClick={onResolve}>
                         最末阶段结束，处理完成
-                      </Button>
+                      </TestMarkedButton>
                     )
                   ) : null
                 ) : myTurn ? (
                   <>
-                    <Button
+                    <TestMarkedButton
+                      testId="task-accept"
                       block
                       size="small"
                       theme="primary"
@@ -244,7 +264,7 @@ export default function StepNegotiationCard({
                       onClick={handleRespond}
                     >
                       确认同意
-                    </Button>
+                    </TestMarkedButton>
                     <Button block size="small" theme="danger" onClick={() => onEscalate(round, maxRound)}>
                       有异议，升级上报
                     </Button>
@@ -253,7 +273,8 @@ export default function StepNegotiationCard({
               ) : stepAgreed ? (
                 isAssignee ? (
                   hasNext ? (
-                    <Button
+                    <TestMarkedButton
+                      testId="task-complete-step"
                       block
                       size="small"
                       theme="primary"
@@ -262,16 +283,17 @@ export default function StepNegotiationCard({
                       onClick={openCompleteStep}
                     >
                       当前阶段完成
-                    </Button>
+                    </TestMarkedButton>
                   ) : (
-                    <Button
+                    <TestMarkedButton
+                      testId="task-resolve"
                       block
                       size="small"
                       theme="primary"
                       onClick={onResolve}
                     >
                       最末阶段结束，处理完成
-                    </Button>
+                    </TestMarkedButton>
                   )
                 ) : null
               ) : (
@@ -306,7 +328,8 @@ export default function StepNegotiationCard({
                     >
                       协商节点时间
                     </Button>
-                    <Button
+                    <TestMarkedButton
+                      testId="task-accept"
                       block
                       size="small"
                       theme="primary"
@@ -315,7 +338,7 @@ export default function StepNegotiationCard({
                       onClick={handleRespond}
                     >
                       确认同意
-                    </Button>
+                    </TestMarkedButton>
                   </>
                 ) : null
               )
@@ -435,6 +458,7 @@ export default function StepNegotiationCard({
                   下一阶段<span style={{ color: 'var(--danger)' }}>*</span>
                 </label>
                 <select
+                  data-testid="task-step-next"
                   value={completeNextStepId ?? ''}
                   onChange={(e) => setCompleteNextStepId(e.target.value ? Number(e.target.value) : null)}
                   style={{
@@ -452,6 +476,7 @@ export default function StepNegotiationCard({
                 </select>
               </div>
               <DatePicker
+                data-testid="task-step-endtime"
                 style={{ width: '100%', marginBottom: 12 }}
                 placeholder="点击选择下一阶段结束时间"
                 format="YYYY-MM-DD HH:mm"
@@ -470,7 +495,7 @@ export default function StepNegotiationCard({
               />
               <div className="ticket-edit__btns">
                 <Button theme="default" disabled={submittingComplete} onClick={() => setShowCompleteStepPopup(false)}>取消</Button>
-                <Button theme="primary" loading={submittingComplete} onClick={handleStepComplete} disabled={!completeNextStepId || !completeNextEndTime}>确认</Button>
+                <TestMarkedButton testId="task-step-submit" theme="primary" loading={submittingComplete} onClick={handleStepComplete} disabled={!completeNextStepId || !completeNextEndTime}>确认</TestMarkedButton>
               </div>
             </div>
           </Popup>

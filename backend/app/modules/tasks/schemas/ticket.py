@@ -3,6 +3,7 @@ from typing import List, Dict, Optional, Any, Union
 from datetime import datetime
 
 from app.modules.tasks.models.ticket import TicketStatus, TicketPriority, TicketType
+from app.models.task import RelationType
 
 # 附件可以是字符串（本平台手动上传流程存的是 object_path 字符串），
 # 也可以是字典（外部任务源/微信会话写入的 {path, size, filename} 结构）。
@@ -28,6 +29,12 @@ class TicketBase(BaseModel):
 
 class TicketCreate(TicketBase):
     assigned_to: Optional[str] = Field(None, description="处理者ID")
+    on_behalf_of: Optional[str] = Field(
+        None,
+        description="代他人提单：被代理人 users.id 或 username（留空=普通自提单）。"
+                    "被代理人须为注册在职用户，后端二次校验；关系建立为 pending，"
+                    "确认跟随后获协办权。",
+    )
 
 
 class TicketUpdate(BaseModel):
@@ -179,6 +186,21 @@ class TicketResponse(TicketBase):
         from_attributes = True
 
 
+class TicketParticipantItem(BaseModel):
+    """列表卡片「评论区参与人」头像堆叠元素（见 participant_service）。
+
+    - ``comment_count`` / ``last_comment_at``：供前端排序展示（评论数降序 → 评论时间降序），
+      排序已在后端完成，前端按数组顺序渲染即可。
+    - ``has_unread``：当前登录用户是否**未读**该参与者发的评论 → 头像右上角红点。
+    """
+    username: str
+    name: Optional[str] = None
+    avatar_resource_id: Optional[int] = None
+    comment_count: int = 0
+    last_comment_at: Optional[str] = None
+    has_unread: bool = False
+
+
 class TicketListItemResponse(TicketBase):
     id: int
     status: TicketStatus
@@ -204,6 +226,21 @@ class TicketListItemResponse(TicketBase):
     view_count: int
     redispatch_tip: Optional[str] = Field(None, description="派单结果提醒一句话摘要（无提醒为 None，见 §3.6）")
     is_followed: bool = Field(False, description="当前登录用户是否已关注该工单（卡片星标）")
+    participants: List[TicketParticipantItem] = Field(
+        default_factory=list,
+        description="评论区参与讨论人员（头像堆叠用，已按评论数→评论时间降序，见 participant_service）",
+    )
+
+    # --- 代他人提单关系（见 docs/PRODUCT/代他人提单（代理提单）功能设计方案.md）---
+    # 脱敏：非参与人不下发这些字段（由 TicketService 侧裁剪为空），
+    # 避免通过列表接口探测「谁代谁提单」。
+    proxy_relation_status: Optional[str] = Field(
+        None, description="代理关系状态：pending / acknowledged / declined（无关系为 None）"
+    )
+    proxy_agent_name: Optional[str] = Field(None, description="代理人姓名（仅参与人可见）")
+    proxy_principal_name: Optional[str] = Field(None, description="被代理人姓名（仅参与人可见）")
+    is_proxy_agent: bool = Field(False, description="当前登录用户是否为该单代理人")
+    is_principal: bool = Field(False, description="当前登录用户是否为该单被代理人")
 
     class Config:
         from_attributes = True
@@ -327,3 +364,88 @@ class ProjectMemberResponse(BaseModel):
     username: str
     name: Optional[str] = None
     role_name: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# 代他人提单（代理提单）—— 见 docs/PRODUCT/代他人提单（代理提单）功能设计方案.md
+# ---------------------------------------------------------------------------
+
+class OnBehalfCandidate(BaseModel):
+    """代提选人候选项。
+
+    ``group`` 必须显式返回，前端**不靠顺序猜**：
+    - ``project``：与工单项目同项目的在职人员
+    - ``all``：其他全量在职人员（兜底）
+    """
+    id: str = Field(..., description="users.id")
+    username: str = Field(..., description="username（通知/展示用）")
+    name: Optional[str] = Field(None, description="姓名")
+    group: str = Field("all", description="分组标记：project | all")
+
+
+class ProxyRelationResponse(BaseModel):
+    """代理关系（返回给前端做横幅/胶囊展示）。"""
+    id: int
+    task_id: int
+    relation_status: str = Field(..., description="pending / acknowledged / declined")
+    source: Optional[str] = Field(None, description="manual / ai / admin")
+    remark: Optional[str] = Field(None, description="拒绝原因（declined 时）")
+    # 当前登录用户视角，避免前端自行拼身份判定
+    is_agent: bool = Field(False, description="当前用户是否为代理人")
+    is_principal: bool = Field(False, description="当前用户是否为被代理人")
+    agent_name: Optional[str] = Field(None, description="代理人姓名（参与人可见）")
+    principal_name: Optional[str] = Field(None, description="被代理人姓名（参与人可见）")
+    notified_at: Optional[datetime] = None
+    acked_at: Optional[datetime] = None
+    declined_at: Optional[datetime] = None
+    created_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+# ── 工单关联（task_relations）Schema ──
+
+class TaskRelationCreate(BaseModel):
+    """创建工单关联请求"""
+    target_task_id: int = Field(..., description="目标工单ID")
+    relation_type: RelationType = Field(..., description="关系类型")
+
+
+class TaskRelationBrief(BaseModel):
+    """关联工单概要（嵌入 RelationResponse）"""
+    id: int
+    title: str
+    status: TicketStatus
+    created_by_name: Optional[str] = None
+    assigned_to_name: Optional[str] = None
+
+
+class ProxyRelationDeclineRequest(BaseModel):
+    """被代理人拒绝（与我无关）请求体。"""
+    remark: str = Field(..., min_length=1, max_length=500, description="与本单无关的原因（必填）")
+
+
+class TaskRelationResponse(BaseModel):
+    """工单关联响应"""
+    id: int
+    source_task_id: int
+    target_task_id: int
+    relation_type: RelationType
+    created_by: Optional[str] = None
+    created_at: datetime
+    # 目标工单概要（前端展示用）
+    target: Optional[TaskRelationBrief] = None
+    # 反向关联：当当前工单是 target 时（如作为子任务的父工单回链）
+    source: Optional[TaskRelationBrief] = None
+
+    class Config:
+        from_attributes = True
+
+
+class BlockedTaskInfo(BaseModel):
+    """被阻塞工单信息（状态变更校验失败时返回）"""
+    task_id: int
+    title: str
+    status: str
+    reason: str = Field(..., description="阻塞原因：predecessor 或 subtask")

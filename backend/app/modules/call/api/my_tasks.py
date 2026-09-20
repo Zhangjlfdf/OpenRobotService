@@ -12,7 +12,7 @@ from app.modules.tasks.schemas.ticket import (
 )
 from app.modules.tasks.models.ticket import TicketStatus, TicketPriority, TicketType
 from app.modules.tasks.services.ticket_service import TicketService
-from app.core.user_identity import user_matches, to_user_id
+from app.core.ticket_roles import get_ticket_roles
 
 router = APIRouter(prefix="/my-tasks", tags=["call-my-tasks"])
 
@@ -76,8 +76,10 @@ async def get_my_task(
     decoded = decode_token(token)
     username = decoded.get("sub")
     me = {"username": username, "id": to_user_id(username)}
-    
-    if not user_matches(me, ticket.created_by, ticket.assigned_to, ticket.customer):
+
+    # 统一角色解析（含被代理人）：代提后「被代理人」也应能看到本单
+    roles = await get_ticket_roles(db, ticket, me)
+    if not roles.is_related:
         raise HTTPException(status_code=403, detail="无权限查看此任务")
     
     return ticket

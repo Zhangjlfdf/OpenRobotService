@@ -211,6 +211,42 @@ async def quick_chat_stream(request: QuickChatRequest):
     )
 
 
+@router.post("/chat/agentic/stream", summary="Agentic 自由对话（流式 SSE，LLM 主导+工具调用）")
+async def agentic_chat_stream(request: QuickChatRequest):
+    """Agentic 流式对话：LLM 自主决定聊天或调用工具查询平台数据。
+
+    与 /chat/stream 同 SSE 事件协议，额外支持：
+        {"type":"reasoning","content":"..."}  思考过程（可选，meta 之前下发）
+        done 事件附带 suggest_questions：LLM 生成的追问建议（可选）
+    不传 data 时进入 agentic 流程（指标问题自动查库，闲聊自由回答）；
+    传 data 或 LLM 客户端无工具能力时自动降级到既有 /chat/stream 流程。
+    """
+    agent = get_agent()
+    payload = _merge_chat_context(request)
+    # agentic_chat_stream 不接收 period/date（时间范围由工具参数决定）
+    payload.pop("period", None)
+    payload.pop("date", None)
+
+    async def stream_generator():
+        try:
+            async for event in agent.agentic_chat_stream(**payload):
+                yield "data: " + json.dumps(event, ensure_ascii=False) + _SSE_NEWLINE
+        except ValueError as exc:
+            yield "data: " + json.dumps(
+                {"type": "error", "error": str(exc)}, ensure_ascii=False
+            ) + _SSE_NEWLINE
+        except Exception:
+            logger.exception("agentic 流式对话失败")
+            yield "data: " + json.dumps(
+                {"type": "error", "error": "对话服务内部错误"}, ensure_ascii=False
+            ) + _SSE_NEWLINE
+
+    return StreamingResponse(
+        stream_generator(),
+        media_type="text/event-stream",
+    )
+
+
 @router.get("/types", summary="分析类型列表")
 async def list_analysis_types():
     """返回支持的分析类型枚举。"""

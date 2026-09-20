@@ -25,6 +25,7 @@
 
 from __future__ import annotations
 
+import calendar
 import json
 import re
 from datetime import date
@@ -100,6 +101,25 @@ def _extract_time(
         day_iso = _to_iso(single.group(1), single.group(2))
         label = f"{single.group(1)}月{single.group(2)}号"
         return "custom", True, 7, day_iso, day_iso, label
+
+    # 月份词「9月份」「9月」→ 该月 1 号至月末（custom）；
+    # 负向前瞻排除「3个月」「近三个月」这类时长表达；
+    # 项目维度的时间口径（settlement_period 月份过滤）依赖此解析。
+    month_word = re.search(r"(?<!\d)(\d{1,2})\s*月(?:份)?(?!个)", text)
+    if month_word:
+        try:
+            m_val = int(month_word.group(1))
+            if 1 <= m_val <= 12:
+                year = today.year
+                # 未来月份回退一年（与绝对日期同口径）
+                if (year, m_val) > (today.year, today.month):
+                    year -= 1
+                last_day = calendar.monthrange(year, m_val)[1]
+                start_iso = f"{year:04d}-{m_val:02d}-01"
+                end_iso = f"{year:04d}-{m_val:02d}-{last_day:02d}"
+                return "custom", True, last_day, start_iso, end_iso, f"{m_val}月份"
+        except ValueError:
+            pass
 
     for pattern, time_type in _TIME_PATTERNS:
         m = pattern.search(text)
@@ -217,6 +237,10 @@ _DIMENSION_RULES: list[tuple[re.Pattern, str, list[tuple[re.Pattern | None, list
             # （同样支持「没有搬运数据」等夹入维度词的问法）
             (re.compile(r"((?:没有|无|没)(?:搬运效率|搬运|机器人|任务|效率){0,2}数据|未上报|没有上报|未采集|没有采集)"),
              ["project.no_data_items"]),
+            # 「哪些项目」「有什么项目」「项目列表/清单/明细」→ 项目明细清单
+            # （名称/状态等逐项展示；放在 no_data 之后，保证「哪些项目没有
+            # 数据」仍优先命中无数据清单）
+            (re.compile(r"(哪些|有什么|什么|列表|清单|明细)"), ["project.items"]),
             (None, ["project.total", "project.active_count", "project.by_status"]),
         ],
     ),

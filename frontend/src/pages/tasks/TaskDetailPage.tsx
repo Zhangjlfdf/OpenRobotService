@@ -1,5 +1,5 @@
-import { useState, useEffect, useRef } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { Fragment, useState, useEffect, useRef } from 'react';
+import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import { Navbar, Button, Textarea, Toast, Loading, Tag, Popup, Dialog, Form, FormItem } from 'tdesign-mobile-react';
 import AppButton from '@/shared/components/AppButton';
 import { User, UserCheck, Folder, AlarmClock, Clock, RefreshCw, Building2, Store, Download, FileImage, FileText, FileSpreadsheet, FileCode, FileArchive, Paperclip, Bot } from 'lucide-react';
@@ -9,7 +9,7 @@ import ClearableInput from '@/shared/components/ClearableInput';
 import TitleEllipsis from '@/shared/components/TitleEllipsis';
 import { setupWechatShare, isPcWechat } from '@/shared/utils/wechatJsSdk';
 import { WECHAT_CONFIG } from '@/config/wechat';
-import { createRequest, getToken } from '@/api/client';
+import { createRequest, getToken, ApiError } from '@/api/client';
 import API_CONFIG from '@/config/api';
 import { readStored } from '@/stores/authStorage';
 import SafeHtml from '@/shared/components/SafeHtml';
@@ -21,11 +21,14 @@ import { useStepNegotiation } from '@/shared/hooks/useStepNegotiation';
 import { useResolveTicket } from '@/shared/hooks/useResolveTicket';
 import AttachmentViewer, { type AttachmentViewItem } from '@/shared/components/AttachmentViewer';
 import DispatchFold from '@/shared/components/DispatchFold';
+import RelationBlock from '@/shared/components/RelationBlock';
+import type { BlockedErrorDetail } from '@/api/ticket';
 import UserSelect from '@/shared/components/UserSelect';
 import type { UserItem } from '@/api/users';
 import { useWorkbenchStore } from '@/stores/workbench';
 import { useAuthStore } from '@/stores/auth';
-import { uploadCommentAttachment } from '@/api/ticket';
+import { uploadCommentAttachment, getProxyRelations, type ProxyRelation } from '@/api/ticket';
+import ProxyRelationBanner from '@/shared/components/ProxyRelationBanner';
 import { TICKET_TYPE_DISPLAY_MAP, STATUS_DISPLAY_MAP, PRIORITY_DISPLAY_MAP, canEditPriority } from '@/shared/constants/ticket';
 import { isSameUser } from '@/shared/utils/userIdentity';
 import { getDeadlineRange, makeDisabledDate, makeDisabledTime, parseDeadlineString } from '@/shared/utils/deadline';
@@ -36,7 +39,7 @@ import type { ProjectMember } from '@/api/projects';
 import { dedupeFileNames } from '@/shared/utils/uniqueFileNames';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { urlTransformAllowDataImage } from '@/shared/utils/markdown';
+import { appUrlTransform } from '@/shared/utils/markdown';
 
 // 状态文字色（设计稿 statusText 蓝阶：待处理 blue-3 / 处理中·进行中 blue-2 / 已解决 blue-1 / 关闭·取消 muted）
 const STATUS_TEXT_COLOR_MAP: Record<string, string> = {
@@ -136,6 +139,12 @@ interface Ticket {
   curr_step_agreed?: boolean;
   // 升级上报次数：>0 表示已升级，协商回合重置为1且不再受限
   escalate_count?: number;
+  // ── 代他人提单（代理提单）：后端下发的关系与视角标记（非参与人为空/False）──
+  proxy_relation_status?: 'pending' | 'acknowledged' | 'declined' | null;
+  proxy_agent_name?: string | null;
+  proxy_principal_name?: string | null;
+  is_proxy_agent?: boolean;
+  is_principal?: boolean;
 }
 
 // 协商阶段模板步骤（GET /{task_id}/steps 返回）
@@ -155,6 +164,11 @@ const AI_NAME = 'U老师';
 export default function TaskDetailPage() {
   const { id: detailId } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  // 从列表卡片跳进来时的讨论区定位参数（点参与人头像 → focus=discussion[&author=xxx|&commentId=xxx]）
+  const [searchParams] = useSearchParams();
+  const focusDiscussion = searchParams.get('focus') === 'discussion';
+  const focusCommentId = searchParams.get('commentId');
+  const focusAuthor = searchParams.get('author');
   const request = createRequest(API_CONFIG.TASKS.BASE_URL, '工单服务');
   const adminRequest = createRequest(API_CONFIG.ADMIN.BASE_URL, '管理服务');
 
@@ -192,6 +206,8 @@ export default function TaskDetailPage() {
   // deadlineDraft: undefined=未改动（保存时不提交该字段）；ISO 字符串=新时间；null=清除
   const [showDeadlinePopup, setShowDeadlinePopup] = useState(false);
   const [deadlineDraft, setDeadlineDraft] = useState<string | null | undefined>(undefined);
+  // 关联工单阻塞提示（状态变更 422 时传入 RelationBlock 展示）
+  const [blockedError, setBlockedError] = useState<BlockedErrorDetail | null>(null);
   const [submittingDeadline, setSubmittingDeadline] = useState(false);
   const [submittingComment, setSubmittingComment] = useState(false);
   const [askingAI, setAskingAI] = useState(false);
@@ -250,6 +266,10 @@ export default function TaskDetailPage() {
   const [setStepTimeValue, setSetStepTimeValue] = useState<string | null>(null);
   const [submittingSetStepTime, setSubmittingSetStepTime] = useState(false);
 
+  // 代他人提单（代理提单）关系：详情页顶部横幅数据源。
+  // 后端对非参与人返回空数组（脱敏），故此处拿不到即视为无关系，无需前端再判权限。
+  const [proxyRelation, setProxyRelation] = useState<ProxyRelation | null>(null);
+
   // 项目成员（用于讨论区 @ 提及）
   const [projectMembers, setProjectMembers] = useState<ProjectMember[]>([]);
   // 全部在职用户（项目成员 + 项目外，@ 输入过滤字时可 @ 到项目外的人）
@@ -265,6 +285,10 @@ export default function TaskDetailPage() {
         setRedispatchTipDetail(t.redispatch?.result?.tip_detail || '');
         // 二次派单感知增强：派单理由（后端仅对接单人/管理员返回 reasoning，非空即展示）
         setDispatchReason(t.redispatch?.result?.reasoning || '');
+        // 代理关系（代他人提单）：独立接口，失败不阻断详情渲染（横幅缺失而已）
+        getProxyRelations(detailId)
+          .then((list) => setProxyRelation(list?.[0] || null))
+          .catch(() => setProxyRelation(null));
         // 摘要存 metadata_info.ai_summary（不混入讨论区）
         const meta = t.metadata_info || {};
         setAiSummary(typeof meta.ai_summary === 'string' ? meta.ai_summary as string : '');
@@ -389,7 +413,13 @@ export default function TaskDetailPage() {
       (detail?.created_by_name && (detail.created_by_name === username || detail.created_by_name === currentName))
     );
 
-    return { isAssignee, isReporter };
+    // 代他人提单（代理提单）视角：**优先后端下发的角色标记**，不倒推身份。
+    // 后端已按 token 判定 is_agent / is_principal（见 ProxyRelationResponse），
+    // 前端自拼判定会在「姓名重名 / username 与 id 混用」时判错（历史踩过的坑）。
+    const isProxyAgent = proxyRelation?.is_agent ?? Boolean(detail?.is_proxy_agent);
+    const isPrincipal = proxyRelation?.is_principal ?? Boolean(detail?.is_principal);
+
+    return { isAssignee, isReporter, isProxyAgent, isPrincipal };
   };
 
   // 拥有 backend:tasks:operate 权限的用户可点击「创建人」设置其姓名
@@ -403,7 +433,7 @@ export default function TaskDetailPage() {
     const isCanceled = status === 'canceled' || status === 'cancelled';
     if (isClosed || isCanceled) return [];
 
-    const { isAssignee, isReporter } = getCurrentUserRoles();
+    const { isAssignee, isReporter, isPrincipal } = getCurrentUserRoles();
 
     // 拥有 backend:tasks:operate 权限的用户，对所有活跃状态工单均可见且可操作
     const canOperate = hasPermission('backend:tasks:operate');
@@ -411,7 +441,8 @@ export default function TaskDetailPage() {
     const assigneeOnlyStatuses = ['new', 'in_progress', 'pending', 'paused'];
     if (assigneeOnlyStatuses.includes(status) && !isAssignee && !canOperate) return [];
 
-    if (status === 'resolved' && !isReporter && !canOperate) return [];
+    // 已解决：与后端口径统一（决策 6）—— 提单人(created_by，即代理人) / 已确认跟进的被代理人 / 管理员
+    if (status === 'resolved' && !isReporter && !isPrincipal && !canOperate) return [];
 
     // 顶部操作按钮配色（设计稿 05：主推进 bg-primary 白字胶囊 / 次操作 bg-secondary 深字胶囊）
     const BTN_PRIMARY = { backgroundColor: 'var(--primary)', color: 'var(--primary-foreground)', borderRadius: '999px', border: 'none' };
@@ -442,6 +473,8 @@ export default function TaskDetailPage() {
 
   const handleStatusChange = async (action: { nextStatus: string }) => {
     if (!detail) return;
+    // 清空前次阻塞提示
+    setBlockedError(null);
     
     try {
       await request<Ticket>(`/${detail.id}/status`, {
@@ -453,6 +486,15 @@ export default function TaskDetailPage() {
       await refreshDetail();
       Toast({ message: `状态已更新为${statusLabel}`, theme: 'success' });
     } catch (err) {
+      // 422 阻塞校验失败：提取 blocked 详情展示
+      if (err instanceof ApiError && err.statusCode === 422) {
+        const body = (err.errorBody as { detail?: BlockedErrorDetail })?.detail;
+        if (body?.code === 'blocked_by_related_tasks') {
+          setBlockedError(body);
+          Toast({ message: `被 ${body.blocked.length} 个工单阻塞`, theme: 'error' });
+          return;
+        }
+      }
       Toast({ message: `状态更新失败: ${err instanceof Error ? err.message : ''}`, theme: 'error' });
     }
   };
@@ -558,7 +600,7 @@ export default function TaskDetailPage() {
 
   // 工单阶段性处理（协商节点）+ 结束工单（解决方式）：抽到共享 hook，与历史工单详情页复用
   const negotiation = useStepNegotiation(detailId ?? '', detail, refreshDetail);
-  const resolve = useResolveTicket(detailId ?? '', detail, refreshDetail, refreshTasks);
+  const resolve = useResolveTicket(detailId ?? '', detail, refreshDetail, refreshTasks, (b) => setBlockedError(b));
 
   // ===== 公司/部门审核 =====
   const approvalInfo = (() => {
@@ -1083,7 +1125,9 @@ export default function TaskDetailPage() {
   );
 
   const specDocRoles = getCurrentUserRoles();
-  const canEditSpecDoc = isAdmin || specDocRoles.isAssignee || specDocRoles.isReporter;
+  // 与后端 spec_doc._can_edit 口径一致：管理员 / 处理人 / 提单人 / 被代理人(已确认跟进)
+  const canEditSpecDoc =
+    isAdmin || specDocRoles.isAssignee || specDocRoles.isReporter || specDocRoles.isPrincipal;
 
   return (
     <div className="task-detail-page" style={{ paddingBottom: 72 }}>
@@ -1099,6 +1143,8 @@ export default function TaskDetailPage() {
             <div className="detail-card__meta">
               {/* 状态胶囊（设计稿 statusText：bg-secondary + 蓝阶文字） */}
               <Tag
+                data-testid="task-status"
+                data-status={detail.status?.toLowerCase()}
                 theme="default"
                 style={{
                   background: 'var(--secondary)',
@@ -1129,34 +1175,49 @@ export default function TaskDetailPage() {
             </div>
             <div className="detail-card__action-btns">
               {getActionButtons().map((action, index) => (
-                <AppButton
-                  key={index}
-                  size="small"
-                  theme={action.theme as 'primary' | 'default' | 'danger' | 'light'}
-                  onClick={() => {
-                    if (action.actionType === 'resume') {
-                      setShowResumePopup(true);
-                    } else if (action.actionType === 'reopen') {
-                      // 未解决打回：选择重新开始的阶段 + 节点时间，阶段性处理从头开始
-                      const firstStep = [...negotiation.stepTemplate].sort((a, b) => a.sequence - b.sequence)[0];
-                      negotiation.setReopenStepId(firstStep ? firstStep.id : null);
-                      negotiation.setReopenEndTime(null);
-                      negotiation.setShowReopenPopup(true);
-                    } else if (action.nextStatus === 'resolved') {
-                      // 结束工单（→ resolved）→ 打开 "问题 + AI 解决方式" 确认弹窗
-                      resolve.handleResolveClick();
-                    } else {
-                      handleStatusChange(action);
-                    }
-                  }}
-                  className="detail-card__action-btn"
-                  style={action.customStyle}
-                >
-                  {action.label}
-                </AppButton>
+                <Fragment key={index}>
+                  {action.nextStatus === 'closed' && <span data-testid="task-close" hidden />}
+                  {action.nextStatus === 'resolved' && <span data-testid="task-resolve" hidden />}
+                  <AppButton
+                    size="small"
+                    theme={action.theme as 'primary' | 'default' | 'danger' | 'light'}
+                    onClick={() => {
+                      if (action.actionType === 'resume') {
+                        setShowResumePopup(true);
+                      } else if (action.actionType === 'reopen') {
+                        // 未解决打回：选择重新开始的阶段 + 节点时间，阶段性处理从头开始
+                        const firstStep = [...negotiation.stepTemplate].sort((a, b) => a.sequence - b.sequence)[0];
+                        negotiation.setReopenStepId(firstStep ? firstStep.id : null);
+                        negotiation.setReopenEndTime(null);
+                        negotiation.setShowReopenPopup(true);
+                      } else if (action.nextStatus === 'resolved') {
+                        // 结束工单（→ resolved）→ 打开 "问题 + AI 解决方式" 确认弹窗
+                        resolve.handleResolveClick();
+                      } else {
+                        handleStatusChange(action);
+                      }
+                    }}
+                    className="detail-card__action-btn"
+                    style={action.customStyle}
+                  >
+                    {action.label}
+                  </AppButton>
+                </Fragment>
               ))}
             </div>
           </div>
+          {/* 代他人提单：关系横幅（代理人「你代 X 提交」/ 被代理人「X 代你提交」+ 确认跟进） */}
+          {proxyRelation && (
+            <ProxyRelationBanner
+              ticketId={detail.id}
+              relation={proxyRelation}
+              onChanged={(updated) => {
+                setProxyRelation(updated);
+                // 关系变更影响可操作项（pending 只读 → acknowledged 获协办权），拉一次详情统一刷新
+                loadDetail();
+              }}
+            />
+          )}
           <h2 className="detail-card__title">
             <TitleEllipsis text={detail.title} lines={3} titleClassName="detail-card__title-inner" as="span" fontSize={19} lineHeight={1.3} />
           </h2>
@@ -1188,13 +1249,13 @@ export default function TaskDetailPage() {
                   const isAiTicket = !!detail.metadata_info?.session_id;
                   if (noAssignee && isAiTicket && detail.status === 'new') {
                     return (
-                      <span className="detail-info-item__value task-card2__person-name--dispatching">
+                      <span data-testid="task-assignee" className="detail-info-item__value task-card2__person-name--dispatching">
                         <i className="dispatch-pulse dispatch-pulse--inline" />派单中
                       </span>
                     );
                   }
                   return (
-                    <span className="detail-info-item__value">
+                    <span data-testid="task-assignee" className="detail-info-item__value">
                       {detail.assignee_name || detail.assigned_to_name || detail.assigned_to || (noAssignee ? '未指派' : '-')}
                     </span>
                   );
@@ -1278,7 +1339,11 @@ export default function TaskDetailPage() {
         <StepNegotiationCard
           negotiation={negotiation}
           detail={detail}
-          roles={getCurrentUserRoles()}
+          // 被代理人仅在已确认跟随后才参与协商（pending 只读，决策 10）
+          roles={{
+            ...getCurrentUserRoles(),
+            isPrincipal: getCurrentUserRoles().isPrincipal && proxyRelation?.relation_status === 'acknowledged',
+          }}
           onResolve={resolve.handleResolveClick}
           onEscalate={(round, maxRound) => {
             setEscalateUser(null);
@@ -1361,6 +1426,19 @@ export default function TaskDetailPage() {
             </div>
           );
         })()}
+
+        {/* 关联工单（无关联时不显示） */}
+        {detail && (
+          <RelationBlock
+            taskId={Number(detail.id)}
+            projectName={detail.project_name}
+            projectId={detail.project_id}
+            customer={detail.customer}
+            canOperate={hasPermission('backend:tasks:operate')}
+            blockedError={blockedError}
+            hideWhenEmpty
+          />
+        )}
 
         <div className="detail-card">
           <h4 className="detail-card__h">讨论摘要</h4>
@@ -1477,6 +1555,8 @@ export default function TaskDetailPage() {
               帮我分析
             </Button>
           }
+          focusCommentId={focusDiscussion ? focusCommentId : null}
+          focusAuthor={focusDiscussion ? focusAuthor : null}
         />
 
         {(() => {
@@ -1484,10 +1564,11 @@ export default function TaskDetailPage() {
           const isClosedOrCanceled = status === 'closed' || status === 'canceled' || status === 'cancelled';
           if (isClosedOrCanceled) return null;
 
-          const { isAssignee, isReporter } = getCurrentUserRoles();
+          const { isAssignee, isReporter, isPrincipal } = getCurrentUserRoles();
           const canOperate = hasPermission('backend:tasks:operate');
           const assigneeOnlyStatuses = ['new', 'in_progress', 'pending', 'paused'];
-          const showRoleActions = canOperate || (assigneeOnlyStatuses.includes(status) ? isAssignee : (status === 'resolved' ? isReporter : false));
+          // 已解决：被代理人（已确认跟进）与提单人同权，可确认关闭（与后端 roles.can_close 对齐）
+          const showRoleActions = canOperate || (assigneeOnlyStatuses.includes(status) ? isAssignee : (status === 'resolved' ? (isReporter || isPrincipal) : false));
           // 已解决状态：提单人仅可修改工单/升级上报，不应退回工单或重新指派
           // 退回工单/重新指派应由处理人在非已解决状态下操作
           const isResolved = status === 'resolved';
@@ -1701,6 +1782,7 @@ export default function TaskDetailPage() {
                 </div>
               ) : (
                 <Textarea
+                  data-testid="task-resolution-summary"
                   value={resolve.resolutionText}
                   onChange={(v) => resolve.setResolutionText(String(v))}
                   placeholder={
@@ -1726,13 +1808,16 @@ export default function TaskDetailPage() {
             >
               {resolve.resolutionFailed ? '重试' : '帮我生成'}
             </Button>
-            <Button
-              theme="primary"
-              onClick={resolve.handleConfirmResolve}
-              disabled={resolve.resolutionSubmitting || resolve.resolutionLoading || resolve.resolutionPolling || !resolve.resolutionText.trim()}
-            >
-              确认完成
-            </Button>
+            <>
+              <span data-testid="task-resolve-confirm" hidden />
+              <Button
+                theme="primary"
+                onClick={resolve.handleConfirmResolve}
+                disabled={resolve.resolutionSubmitting || resolve.resolutionLoading || resolve.resolutionPolling || !resolve.resolutionText.trim()}
+              >
+                确认完成
+              </Button>
+            </>
           </div>
         </div>
       </Popup>
@@ -2016,7 +2101,7 @@ export default function TaskDetailPage() {
           {diagnosisReport ? (
             <ReactMarkdown
               remarkPlugins={[remarkGfm]}
-              urlTransform={urlTransformAllowDataImage}
+              urlTransform={appUrlTransform}
             >
               {diagnosisReport}
             </ReactMarkdown>

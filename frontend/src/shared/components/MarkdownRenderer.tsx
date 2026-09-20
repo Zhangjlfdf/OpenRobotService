@@ -15,7 +15,7 @@ import { Component, useMemo, useState, useCallback, useEffect, useRef } from 're
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Link } from 'react-router-dom';
-import { urlTransformAllowDataImage } from '@/shared/utils/markdown';
+import { appUrlTransform } from '@/shared/utils/markdown';
 import { WECHAT_EMOJI_URL_SET } from '@/shared/emoji/wechat';
 import { useAuthStore } from '@/stores/auth';
 import { ENV_PREFIX, RAW_BASE } from '@/config/api';
@@ -695,7 +695,7 @@ export default function MarkdownRenderer({ content, compact = false, streaming =
       <div className={`markdown-body${compact ? ' md-compact' : ''}`}>
         <ReactMarkdown
           remarkPlugins={[remarkGfm]}
-          urlTransform={urlTransformAllowDataImage}
+          urlTransform={appUrlTransform}
           components={{
             // ---- 图片 / 视频渲染 ----
             // eslint-disable-next-line @typescript-eslint/no-explicit-any

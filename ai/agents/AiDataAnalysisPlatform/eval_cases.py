@@ -125,6 +125,25 @@ FAST_PATH_CASES: list[dict] = [
         "action": "summary",
         "scope_type": "global",
     },
+    {
+        # 回归：「哪些项目」类问法 → 项目明细清单（名称/状态等逐项展示），
+        # 不再落兜底只给项目个数与状态分布
+        "question": "现在有哪些项目",
+        "metric_keys": ["project.items"],
+        "time_type": "recent_days",
+        "time_explicit": False,
+        "action": "summary",
+        "scope_type": "global",
+    },
+    {
+        # 回归：「项目列表/清单」类问法 → 项目明细清单
+        "question": "项目列表",
+        "metric_keys": ["project.items"],
+        "time_type": "recent_days",
+        "time_explicit": False,
+        "action": "summary",
+        "scope_type": "global",
+    },
     # 风险维度
     {
         "question": "今天新增了多少风险",
@@ -232,6 +251,25 @@ FAST_PATH_CASES: list[dict] = [
         "metric_keys": ["project.no_data_items"],
         "time_type": "custom",
         "time_explicit": True,
+        "action": "summary",
+        "scope_type": "global",
+    },
+    {
+        # 月份词「9月份」→ custom（当月 1 号至月末）显式时间；
+        # 「多少项目」→ 项目维度兜底指标（settlement_period 月份过滤的入口）
+        "question": "9月份有多少项目",
+        "metric_keys": ["project.total", "project.active_count", "project.by_status"],
+        "time_type": "custom",
+        "time_explicit": True,
+        "action": "summary",
+        "scope_type": "global",
+    },
+    {
+        # 时长表达「近3个月」不误入月份词（负向前瞻排除）→ 默认 recent_days 非显式
+        "question": "近3个月有多少项目",
+        "metric_keys": ["project.total", "project.active_count", "project.by_status"],
+        "time_type": "recent_days",
+        "time_explicit": False,
         "action": "summary",
         "scope_type": "global",
     },

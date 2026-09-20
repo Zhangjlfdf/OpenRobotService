@@ -100,30 +100,75 @@ class ProjectDelivery(Base):
     id = Column(String(64), primary_key=True, comment="项目ID/代码，与code一致")
     code = Column(String(64), unique=True, nullable=False, comment="项目代码")
     name = Column(String(128), nullable=False, comment="项目名称")
+
     system_id = Column(String(50), nullable=True, comment="系统ID")
-    description = Column(String(1000), nullable=True, comment="项目描述")
+    description = Column(Text, nullable=True, comment="项目描述")
     contact_person = Column(String(50), nullable=True, comment="对接人")
-    contact_person_id = Column(String(20), nullable=True, comment="对接人ID")
+    contact_person_id = Column(String(64), nullable=True, comment="对接人ID（与 users.id 同长度）")
+    project_contact = Column(String(50), nullable=True, comment="对接人")
     status = Column(String(20), nullable=False, default="active", comment="状态")
     expected_trend = Column(String(20), nullable=True, comment="预计走向")
     issues = Column(Integer, nullable=False, default=0, comment="问题数")
     risks = Column(Integer, nullable=False, default=0, comment="风险数")
     personnel_plan = Column(String(50), nullable=True, comment="人员计划")
-    risk_list = Column(String(500), nullable=True, comment="风险清单")
+    risk_list = Column(Text, nullable=True, comment="风险清单")
     deployment_date = Column(String(20), nullable=True, comment="部署时间")
     deployment_version = Column(String(50), nullable=True, comment="部署版本")
     recent_delivery_date = Column(String(20), nullable=True, comment="近期交付时间")
-    recent_delivery_content = Column(String(500), nullable=True, comment="近期交付内容")
+    recent_delivery_content = Column(Text, nullable=True, comment="近期交付内容")
     final_delivery_date = Column(String(20), nullable=True, comment="最终交付时间")
-    project_summary = Column(String(1000), nullable=True, comment="项目总结")
+    project_summary = Column(Text, nullable=True, comment="项目总结")
     task_execution_status = Column(String(50), nullable=True, comment="任务执行情况")
-    field_links = Column(String(1000), nullable=True, comment="字段链接(JSON格式)")
+    field_links = Column(Text, nullable=True, comment="字段链接(JSON格式)")
     category_basis = Column(String(20), nullable=False, default="重要紧急", comment="分类依据")
+    # 项目扩展信息（递归嵌套 JSON），结构由服务层约定
+    ext_info = Column(JSON, nullable=True, comment="项目扩展信息(递归嵌套 JSON)")
+    # 乐观锁版本号（backend update_project 维护，AI 侧仅读取）
+    version = Column(Integer, nullable=False, default=1, comment="乐观锁版本号")
+
+    project_type = Column(String(20), nullable=True, comment="项目类型（企业微信项目类型字段原值）")
+    stage_notes = Column(Text, nullable=True, comment="生命周期各阶段补充说明(JSON格式，键为阶段名)")
+    risk_carrying_type = Column(String(20), nullable=True, comment="风险承接类型")
+    special_attention = Column(Text, nullable=True, comment="特别关注说明")
+    risk_task_description = Column(Text, nullable=True, comment="风险和任务描述")
+    management_strategy = Column(Text, nullable=True, comment="项目管理策略")
+    project_documents = Column(Text, nullable=True, comment="项目文档(JSON格式，[{name,resource_id,url}])")
+    sales = Column(String(50), nullable=True, comment="销售")
+    pre_sales = Column(String(50), nullable=True, comment="售前")
+    project_manager = Column(String(50), nullable=True, comment="项目经理")
+    project_manager_id = Column(String(64), nullable=True, comment="项目经理ID（与 users.id 同长度，用于关联角色）")
+    field_engineer = Column(String(50), nullable=True, comment="实施工程师")
+
+    internal_code = Column(String(50), nullable=True, comment="内部编号")
+    project_region = Column(String(30), nullable=True, comment="项目区域/地点")
+    total_vehicle_count = Column(Integer, nullable=True, comment="总车数")
+    controller_vendor = Column(String(30), nullable=True, comment="控制器选择")
+    system_integration = Column(Text, nullable=True, comment="系统/外设对接(JSON数组)")
+    server_deployment_status = Column(String(30), nullable=True, comment="服务器部署")
+    settlement_period = Column(String(20), nullable=True, comment="业绩核算期（手工填写，常见YYYYMM如202608，兼容YYYY-MM）")
+    undertake_status = Column(String(10), nullable=False, default="是", comment="是否承接（是/待定；「否」不入库）")
 
     __table_args__ = (
         Index("idx_project_code", "code", unique=True),
         Index("idx_project_status", "status"),
+        Index("idx_project_settlement_period", "settlement_period"),
+        Index("idx_project_undertake_status", "undertake_status"),
     )
+
+
+class ProjectInfoNode(Base):
+    """项目信息树节点（仅查询，字段对齐 backend/app/models/delivery.py ProjectInfoNode）"""
+    __tablename__ = "project_info_node"
+
+    id = Column(String(64), primary_key=True, comment="节点UUID(客户端生成)")
+    project_id = Column(String(64), nullable=False, comment="所属项目ID")
+    parent_id = Column(String(64), nullable=True, comment="父节点ID, NULL=根节点")
+    title = Column(String(255), nullable=False, comment="节点标题")
+    content_type = Column(String(32), nullable=False, default="text", comment="内容类型")
+    value = Column(Text, nullable=True, comment="节点值")
+    sort_order = Column(Integer, nullable=False, default=0, comment="同级排序")
+    created_at = Column(String(30), nullable=False, comment="创建时间")
+    updated_at = Column(String(30), nullable=False, comment="更新时间")
 
 
 class Risk(Base):
@@ -222,3 +267,31 @@ class Message(Base):
     sequence = Column(Integer, nullable=False, default=0, comment="消息序号")
     created_at = Column(DateTime, server_default=func.now(), comment="创建时间")
     metadata_ = Column(Text, nullable=True, comment="元数据")
+
+
+class TaskParticipant(Base):
+    """任务参与人表（只读，字段对齐 backend/app/models/task.py TaskParticipant）。
+
+    历史工单列表卡片「评论区参与人头像堆叠」的数据源；评论成功后由后端同事务幂等
+    upsert 写入（见 backend 评论端点）。AI 侧仅查询，不写入。
+    """
+    __tablename__ = "task_participants"
+
+    id = Column(BigInteger, primary_key=True, index=True, comment="参与记录ID")
+    task_id = Column(BigInteger, nullable=False, index=True, comment="任务ID")
+    username = Column(String(50), nullable=False, index=True, comment="参与人username")
+    created_at = Column(DateTime, comment="首次参与时间")
+    last_active_at = Column(DateTime, comment="最近一次参与时间")
+
+
+class TaskCommentRead(Base):
+    """评论已读游标表（只读，字段对齐 backend/app/models/task.py TaskCommentRead）。
+
+    红点判定口径：存在「作者不是我、且 comment_id > 我的游标」的评论 ⇒ 该作者头像亮红点。
+    """
+    __tablename__ = "task_comment_read"
+
+    id = Column(BigInteger, primary_key=True, index=True)
+    task_id = Column(BigInteger, nullable=False, index=True, comment="任务ID")
+    username = Column(String(50), nullable=False, index=True, comment="用户username")
+    last_read_comment_id = Column(BigInteger, nullable=True, comment="已读到的最后一条评论ID")

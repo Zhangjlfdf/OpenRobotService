@@ -90,6 +90,10 @@ _PROJECT_STATUS_CN = {
     "suspended": "已暂停",
 }
 
+# 项目明细（project.items）按状态分组后，每组最多列出的项目数；
+# 超出部分只计数量（已截断标记），避免全量明细喂 LLM 撑爆上下文。
+_PROJECT_ITEMS_PER_GROUP_LIMIT = 30
+
 _RISK_STATUS_CN = {
     "open": "未关闭",
     "opened": "未关闭",
@@ -116,6 +120,39 @@ def _cn_label(mapping: dict[str, str], value: str | None, default: str) -> str:
     if not key:
         return default
     return mapping.get(key, str(value).strip())
+
+
+def _norm_settlement_period(value: str | None) -> str:
+    """归一化业绩核算期 settlement_period：'2026-08' / '2026-8' → '202608'；异常原样返回。
+
+    project.settlement_period 为手工填写（常见 YYYYMM 如 202608，兼容 YYYY-MM），
+    是项目维度的时间口径：用户提及时间时按该字段的月份过滤项目。
+    """
+    if not value:
+        return ""
+    v = str(value).strip()
+    m = re.match(r"^(\d{4})\s*[-/.]?\s*(\d{1,2})$", v)
+    if not m:
+        return v
+    try:
+        month = int(m.group(2))
+        if not 1 <= month <= 12:
+            return v
+        return f"{m.group(1)}{month:02d}"
+    except ValueError:
+        return v
+
+
+def _settlement_month_keys(start: datetime, end: datetime) -> set[str]:
+    """时间窗口 [start, end] 覆盖到的月份集合（YYYYMM），用于 settlement_period 过滤。"""
+    months: set[str] = set()
+    y, m = start.year, start.month
+    while (y, m) <= (end.year, end.month):
+        months.add(f"{y}{m:02d}")
+        m += 1
+        if m > 12:
+            y, m = y + 1, 1
+    return months
 
 
 # ── 采集数据（collection_data）解析 ──────────────────────────────
@@ -600,6 +637,7 @@ class ReportDataCollector:
         start: datetime,
         end: datetime,
         date_range_str: str,
+        explicit_time: bool = False,
     ) -> dict:
         """按指标白名单采集数据，只查询所需维度。
 
@@ -608,6 +646,9 @@ class ReportDataCollector:
             start: 统计起始时间。
             end: 统计结束时间。
             date_range_str: 时间范围描述。
+            explicit_time: 时间是否为用户显式提及。True 时 project 维度指标按
+                settlement_period（业绩核算期）月份过滤；False（默认）查全部，
+                保持历史口径不变。
 
         Returns:
             dict，key 为维度名（ticket/project/risk），value 为对应指标数据。
@@ -645,7 +686,9 @@ class ReportDataCollector:
         if ticket_keys:
             result["ticket"] = self._collect_ticket_metrics(ticket_keys, start, end)
         if project_keys:
-            result["project"] = self._collect_project_metrics(project_keys, start, end)
+            result["project"] = self._collect_project_metrics(
+                project_keys, start, end, explicit_time
+            )
         if risk_keys:
             result["risk"] = self._collect_risk_metrics(risk_keys, start, end)
         if collection_keys:
@@ -678,16 +721,37 @@ class ReportDataCollector:
                 result["new_count"] = sum(
                     1 for t in all_tickets if t.created_at and start <= t.created_at <= end
                 )
+                # 顺带按天序列：标量指标配趋势图（图+文字展示）
+                trend: dict[str, int] = {}
+                for t in all_tickets:
+                    if t.created_at and start <= t.created_at <= end:
+                        day = t.created_at.strftime("%Y-%m-%d")
+                        trend[day] = trend.get(day, 0) + 1
+                result["new_count_by_day"] = dict(sorted(trend.items()))
 
             if "ticket.resolved_count" in keys:
                 result["resolved_count"] = sum(
                     1 for t in all_tickets if t.resolved_at and start <= t.resolved_at <= end
                 )
+                # 顺带按天序列：标量指标配趋势图（图+文字展示）
+                trend: dict[str, int] = {}
+                for t in all_tickets:
+                    if t.resolved_at and start <= t.resolved_at <= end:
+                        day = t.resolved_at.strftime("%Y-%m-%d")
+                        trend[day] = trend.get(day, 0) + 1
+                result["resolved_count_by_day"] = dict(sorted(trend.items()))
 
             if "ticket.closed_count" in keys:
                 result["closed_count"] = sum(
                     1 for t in all_tickets if t.closed_at and start <= t.closed_at <= end
                 )
+                # 顺带按天序列：标量指标配趋势图（图+文字展示）
+                trend: dict[str, int] = {}
+                for t in all_tickets:
+                    if t.closed_at and start <= t.closed_at <= end:
+                        day = t.closed_at.strftime("%Y-%m-%d")
+                        trend[day] = trend.get(day, 0) + 1
+                result["closed_count_by_day"] = dict(sorted(trend.items()))
 
             if "ticket.resolve_rate" in keys:
                 total = len(all_tickets)
@@ -752,6 +816,12 @@ class ReportDataCollector:
                                 "项目名称": t.project_name,
                             })
                 result["overdue_list"] = overdue_items[:50]
+                # 顺带按状态分布：明细列表配分布图（图+文字展示）
+                status_dist: dict[str, int] = {}
+                for it in overdue_items:
+                    label = it["状态"]
+                    status_dist[label] = status_dist.get(label, 0) + 1
+                result["items_dist"] = status_dist
 
             if "ticket.items" in keys:
                 items = []
@@ -773,6 +843,12 @@ class ReportDataCollector:
                             "更新时间": updated.isoformat() if updated else None,
                         })
                 result["items"] = items
+                # 顺带按状态分布：明细列表配分布图（图+文字展示）
+                status_dist: dict[str, int] = {}
+                for it in items:
+                    label = it["状态"]
+                    status_dist[label] = status_dist.get(label, 0) + 1
+                result["items_dist"] = status_dist
 
             return result
         finally:
@@ -781,9 +857,18 @@ class ReportDataCollector:
     # ── 项目维度指标采集 ────────────────────────────────────
 
     def _collect_project_metrics(
-        self, keys: set[str], start: datetime, end: datetime
+        self, keys: set[str], start: datetime, end: datetime, explicit_time: bool = False
     ) -> dict:
-        """一次性采集所有请求的项目指标。"""
+        """一次性采集所有请求的项目指标。
+
+        explicit_time=True（用户显式提及时间）时，项目自身维度指标
+        （数量/状态/明细）按 settlement_period（业绩核算期）落在窗口
+        覆盖月份内过滤；未显式提及查全部。
+
+        project.no_data_items 例外：「搬运效率为空」问的是 collection_data
+        的采集数据而非项目本身，时间口径来自采集窗口，判定对象为全部
+        用户关联项目，不受 settlement_period 过滤影响。
+        """
         db = self._get_db()
         try:
             q = db.query(ProjectDelivery)
@@ -793,29 +878,38 @@ class ReportDataCollector:
             projects = q.all()
             result: dict = {}
 
+            # 项目自身指标使用的集合（可被 settlement_period 过滤）
+            scope_projects = projects
+            if explicit_time:
+                months = _settlement_month_keys(start, end)
+                scope_projects = [
+                    p for p in projects
+                    if _norm_settlement_period(p.settlement_period) in months
+                ]
+
             if "project.total" in keys:
-                result["total"] = len(projects)
+                result["total"] = len(scope_projects)
 
             if "project.active_count" in keys:
                 result["active_count"] = sum(
-                    1 for p in projects if _norm_enum(p.status) == "active"
+                    1 for p in scope_projects if _norm_enum(p.status) == "active"
                 )
 
             if "project.completed_count" in keys:
                 result["completed_count"] = sum(
-                    1 for p in projects
+                    1 for p in scope_projects
                     if _norm_enum(p.status) in ("completed", "done", "closed")
                 )
 
             if "project.on_hold_count" in keys:
                 result["on_hold_count"] = sum(
-                    1 for p in projects
+                    1 for p in scope_projects
                     if _norm_enum(p.status) in ("on_hold", "paused", "suspended")
                 )
 
             if "project.by_status" in keys:
                 dist: dict[str, int] = {}
-                for p in projects:
+                for p in scope_projects:
                     label = _cn_label(_PROJECT_STATUS_CN, p.status, "未知")
                     dist[label] = dist.get(label, 0) + 1
                 result["by_status"] = dist
@@ -824,6 +918,8 @@ class ReportDataCollector:
                 # 窗口内无 collection_data 上报记录的项目清单：
                 # 采集记录窗口与查询窗口有重叠（start_time_int <= end 且 end_time_int >= start）
                 # 即视为「有数据」，其余项目为无数据。
+                # 判定对象为全部用户关联项目（projects 全集），不受 settlement_period
+                # 显式时间过滤影响：本项目指标问的是采集数据口径，不是项目口径。
                 start_ts = int(start.timestamp())
                 end_ts = int(end.timestamp())
                 reported_rows = (
@@ -853,21 +949,40 @@ class ReportDataCollector:
             need_items = "project.items" in keys
             if need_items:
                 members_by_project = self._get_project_members_map(
-                    db, [p.id for p in projects if p.id]
+                    db, [p.id for p in scope_projects if p.id]
                 )
-                items = []
-                for p in projects:
-                    items.append({
+                # 按状态分组输出，组内截断：
+                # - 「状态」提为组标签，组内条目不再重复状态字段；
+                # - 每组最多 _PROJECT_ITEMS_PER_GROUP_LIMIT 条，超出只计数量；
+                # - 组按项目数降序，先呈现大头状态。
+                groups: dict[str, list[dict]] = {}
+                for p in scope_projects:
+                    label = _cn_label(_PROJECT_STATUS_CN, p.status, "未知")
+                    groups.setdefault(label, []).append({
                         "项目ID": p.id,
                         "项目代码": p.code,
                         "项目名称": p.name,
-                        "状态": _cn_label(_PROJECT_STATUS_CN, p.status, "未知"),
                         "问题数": p.issues,
                         "风险数": p.risks,
                         "对接人": p.contact_person,
                         "成员": members_by_project.get(p.id, []),
                     })
-                result["items"] = items
+                result["items_by_status"] = [
+                    {
+                        "状态": label,
+                        "项目数": len(group),
+                        "项目": group[: _PROJECT_ITEMS_PER_GROUP_LIMIT],
+                        "已截断": len(group) > _PROJECT_ITEMS_PER_GROUP_LIMIT,
+                    }
+                    for label, group in sorted(
+                        groups.items(), key=lambda kv: len(kv[1]), reverse=True
+                    )
+                ]
+                result["items_count"] = len(scope_projects)
+                # 顺带按状态分布：明细列表配分布图（图+文字展示）
+                result["items_dist"] = {
+                    g["状态"]: g["项目数"] for g in result["items_by_status"]
+                }
 
             return result
         finally:
@@ -898,6 +1013,13 @@ class ReportDataCollector:
                     1 for r in all_risks
                     if r.created_at and start_s <= r.created_at[:10] <= end_s
                 )
+                # 顺带按天序列：标量指标配趋势图（图+文字展示）
+                trend: dict[str, int] = {}
+                for r in all_risks:
+                    if r.created_at and start_s <= r.created_at[:10] <= end_s:
+                        day = r.created_at[:10]
+                        trend[day] = trend.get(day, 0) + 1
+                result["new_count_by_day"] = dict(sorted(trend.items()))
 
             if "risk.closed_count" in keys:
                 start_s = start.strftime("%Y-%m-%d")
@@ -906,6 +1028,13 @@ class ReportDataCollector:
                     1 for r in all_risks
                     if r.close_time and start_s <= r.close_time[:10] <= end_s
                 )
+                # 顺带按天序列：标量指标配趋势图（图+文字展示）
+                trend: dict[str, int] = {}
+                for r in all_risks:
+                    if r.close_time and start_s <= r.close_time[:10] <= end_s:
+                        day = r.close_time[:10]
+                        trend[day] = trend.get(day, 0) + 1
+                result["closed_count_by_day"] = dict(sorted(trend.items()))
 
             if "risk.by_level" in keys:
                 dist: dict[str, int] = {}
@@ -944,6 +1073,12 @@ class ReportDataCollector:
                         "关闭时间": r.close_time,
                     })
                 result["items"] = items
+                # 顺带按风险等级分布：明细列表配分布图（图+文字展示）
+                level_dist: dict[str, int] = {}
+                for it in items:
+                    lv = it["风险等级"] or "未知"
+                    level_dist[lv] = level_dist.get(lv, 0) + 1
+                result["items_dist"] = level_dist
 
             return result
         finally:

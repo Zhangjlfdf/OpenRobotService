@@ -16,6 +16,13 @@ from app.models.task import (
     TaskStatus,
     TaskPriority,
     TaskType,
+    TaskRelation,
+    RelationType,
+)
+from app.models.task_proxy_relation import (
+    TaskProxyRelation,
+    ProxyRelationStatus,
+    ProxyRelationSource,
 )
 
 Ticket = Task
@@ -23,6 +30,9 @@ TicketComment = TaskComment
 TicketStatus = TaskStatus
 TicketPriority = TaskPriority
 TicketType = TaskType
+# 兼容别名：旧代码若引用 TicketRelation / TicketRelationType
+TicketRelation = TaskRelation
+TicketRelationType = RelationType
 
 __all__ = [
     "Task",
@@ -31,9 +41,16 @@ __all__ = [
     "TaskStatus",
     "TaskPriority",
     "TaskType",
+    "TaskProxyRelation",
+    "ProxyRelationStatus",
+    "ProxyRelationSource",
+    "TaskRelation",
+    "RelationType",
     "Ticket",
     "TicketComment",
     "TicketStatus",
     "TicketPriority",
     "TicketType",
+    "TicketRelation",
+    "TicketRelationType",
 ]

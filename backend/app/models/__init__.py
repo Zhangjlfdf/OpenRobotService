@@ -29,6 +29,11 @@ from app.models.delivery import (
     ProjectLicense,
     ProjectTransportEfficiency,
     ProjectTransportEfficiencyRobot,
+    ProjectInfoNode,
+    ProjectInfoNodeMark,
+    ProjectInfoValue,
+    ProjectInfoValueHistory,
+    ProjectBlockingConfig,
 )
 
 # 任务（承工单语义升格）
@@ -40,10 +45,19 @@ from app.models.task import (
     TaskType,
     TaskUserMapping,
     TaskStep,
+    TaskRelation,
+    RelationType,
 )
 
 # 任务派单日志（二次派单感知增强）
 from app.models.task_dispatch_log import TaskDispatchLog
+
+# 代他人提单（代理提单）关系
+from app.models.task_proxy_relation import (
+    TaskProxyRelation,
+    ProxyRelationStatus,
+    ProxyRelationSource,
+)
 
 # 会话 / 消息
 from app.models.conversation import (
@@ -99,10 +113,18 @@ __all__ = [
     "RealtimeData", "HistoryData", "CollectionData",
     "Risk", "ProjectDailyReport", "ProjectLicense",
     "ProjectTransportEfficiency", "ProjectTransportEfficiencyRobot",
+    "ProjectInfoNode",
+    "ProjectInfoNodeMark",
+    "ProjectInfoValue",
+    "ProjectInfoValueHistory",
+    "ProjectBlockingConfig",
     # task
     "Task", "TaskComment", "TaskStatus", "TaskPriority", "TaskType", "TaskUserMapping", "TaskStep",
+    "TaskRelation", "RelationType",
     # task dispatch log
     "TaskDispatchLog",
+    # task proxy relation
+    "TaskProxyRelation", "ProxyRelationStatus", "ProxyRelationSource",
     # conversation
     "Conversation", "Message", "SceneType", "MessageRole", "MessageType",
     # dataqa

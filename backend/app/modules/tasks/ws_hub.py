@@ -112,8 +112,16 @@ class RoomHub:
         await self._publish(task_id, payload)
 
     async def _local_broadcast(self, task_id: int, payload: Dict[str, Any]) -> None:
+        # copy 一份快照，避免迭代期间连接变动
+        dead: list[Any] = []
         for conn in list(self._rooms.get(task_id, ())):
-            await conn.send(payload)
+            try:
+                await conn.send(payload)
+            except Exception:  # noqa: BLE001
+                # 连接可能已死或未 accept，标记清理
+                dead.append(conn)
+        for conn in dead:
+            self.discard(task_id, conn)
 
     async def _publish(self, task_id: int, payload: Dict[str, Any]) -> None:
         await self.start()

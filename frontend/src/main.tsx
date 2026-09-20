@@ -17,6 +17,7 @@ import { RouterProvider, createBrowserRouter, Navigate, Outlet, useRouteError, u
 import { AuthGuard } from '@/shared/utils/authGuard';
 import { RAW_BASE } from '@/config/api';
 import 'tdesign-mobile-react/es/style/index.css';
+import '@xyflow/react/dist/style.css';
 import '@/shared/styles/global.css';
 
 // 初始化认证状态
@@ -127,6 +128,10 @@ const TicketStatusDetail = lazyImport(() => import('@/pages/admin/TicketStatusDe
 const ProjectCategoryDetail = lazyImport(() => import('@/pages/admin/ProjectCategoryDetail'));
 const ProjectDetail = lazyImport(() => import('@/pages/admin/ProjectDetail'));
 const TransportEfficiency = lazyImport(() => import('@/pages/admin/TransportEfficiency'));
+// 项目信息管理（项目详细信息）编辑页：项目详情卡右上角「编辑」进入
+const ProjectInfoEdit = lazyImport(() => import('@/pages/admin/ProjectInfoEdit'));
+// 项目详情模板（仅管理员）：编辑模板 → 保存并同步到所有项目的节点；入口在编辑页头部
+const ProjectInfoTemplate = lazyImport(() => import('@/pages/admin/ProjectInfoTemplate'));
 
 // 三大核心功能（明细列表页）
 const TicketMonitor = lazyImport(() => import('@/pages/admin/TicketMonitor'));
@@ -202,7 +207,15 @@ const router = createBrowserRouter([
               { path: 'dashboard/projects/:dimension/:key', element: <ProjectCategoryDetail /> },
               // 项目详情：点击项目管理列表条目后展示（原样复用项目详情设计稿，见 pages/admin/ProjectDetail.tsx）
               { path: 'project-detail/:id', element: <ProjectDetail /> },
+              // 项目工单卡三格（总工单数 / 正在处理 / 超期工单数）的下钻：只列这一个项目的该类工单。
+              // 复用仪表盘的明细页，页面见到路径上的 :id 就把 project_ids 收窄成这一个项目
+              // （/admin/project-detail/:id/tickets/all|pending|overdue）
+              { path: 'project-detail/:id/tickets/:status', element: <TicketStatusDetail /> },
               { path: 'project-detail/:id/transport-efficiency', element: <TransportEfficiency /> },
+              // 编辑项目信息（信息树编辑页）：与详情页同为直挂路由（无 AdminLayout 导航壳）
+              { path: 'project-detail/:id/edit', element: <ProjectInfoEdit /> },
+              // 详情模板（仅管理员可编辑）：保存后同步到所有项目的节点
+              { path: 'project-info-template', element: <ProjectInfoTemplate /> },
               // 次级入口：三大功能传统列表页 + 管理员工具
               { path: 'entries', element: <AdminEntries /> },
               {

@@ -128,24 +128,29 @@ manager = ConnectionManager(hub)
 
 @router.websocket("/{task_id}/ws")
 async def ws_task_room(websocket: WebSocket, task_id: int, token: str = Query(None)):
-    # 1. 鉴权（query token）
+    # 1. 鉴权（query token）—— 必须在 accept 之前完成，避免 close() 失败
+    #    Starlette: accept() 前调 close() 会抛 "Need to call accept first"
+    auth_code = None
     if not token:
-        await websocket.close(code=4401)
-        return
-    payload = decode_token(token)
-    if not payload or not payload.get("sub"):
-        await websocket.close(code=4401)
-        return
-    username = payload["sub"]
-    user = get_user_with_roles(username)
-    if user is None:
-        await websocket.close(code=4404)
-        return
-    name = user.get("name") or username
-    avatar_resource_id = user.get("avatar_resource_id")
+        auth_code = 4401
+    else:
+        payload = decode_token(token)
+        if not payload or not payload.get("sub"):
+            auth_code = 4401
+        else:
+            username = payload["sub"]
+            user = get_user_with_roles(username)
+            if user is None:
+                auth_code = 4404
+            else:
+                name = user.get("name") or username
+                avatar_resource_id = user.get("avatar_resource_id")
 
-    # 2. 接受连接 + 加入房间
+    # 先 accept 再 close，避免 Starlette 在未 accept 的 WS 上拒绝 close
     await websocket.accept()
+    if auth_code is not None:
+        await websocket.close(code=auth_code)
+        return
     conn = WsConnection(websocket, username, name, task_id, avatar_resource_id)
     await manager.connect(task_id, conn)
 
@@ -277,3 +282,27 @@ def _task_updated_payload(obj) -> dict:
 
 async def ws_broadcast_task_updated(task_id: int, obj) -> None:
     await manager.broadcast(task_id, _task_updated_payload(obj))
+
+
+async def ws_broadcast_proxy_relation(
+    task_id: int,
+    relation_id: int,
+    relation_status: str,
+    principal_id: Optional[str] = None,
+    agent_id: Optional[str] = None,
+) -> None:
+    """代理关系变更事件（新增事件名，不改既有事件）。
+
+    前端据此刷新：详情页关系横幅、列表卡片关系胶囊、「待我跟进」角标。
+
+    注意：不对未参与人暴露身份——principal_id / agent_id 仅用于前端**本地**比对
+    当前登录用户，不用于展示他人信息（姓名由 REST 接口按权限返回）。
+    """
+    await manager.broadcast(task_id, {
+        "type": "proxy_relation.changed",
+        "task_id": task_id,
+        "relation_id": relation_id,
+        "relation_status": relation_status,
+        "principal_id": principal_id,
+        "agent_id": agent_id,
+    })

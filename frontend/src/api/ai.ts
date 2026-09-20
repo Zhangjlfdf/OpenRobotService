@@ -137,6 +137,11 @@ export interface TicketDraft {
   curr_step_id?: number;
   /** 阶段完成时间（SLA，ISO 字符串）：提单弹窗必选，落 Task.curr_step_endtime */
   curr_step_endtime?: string;
+  /** 代他人提单：被代理人 users.id。AI 只识别姓名（on_behalf_of_name），
+   *  精确到人由弹窗内选择确认后回填；见 OnBehalfSelect。 */
+  on_behalf_of?: string;
+  /** AI 识别的被代理人姓名（仅用于弹窗预填提示，不直接入库） */
+  on_behalf_of_name?: string;
   [k: string]: unknown;
 }
 
@@ -240,6 +245,15 @@ export interface AiTicketBrief {
   source?: string;
   // 二次派单感知增强（M3）：派单结果提醒一句话摘要（无提醒为 null/undefined）
   redispatch_tip?: string | null;
+  // 评论区参与讨论人员（头像堆叠；已按评论数→评论时间降序，含未读红点标记）
+  participants?: Array<{
+    username: string;
+    name?: string | null;
+    avatar_resource_id?: number | null;
+    comment_count?: number;
+    last_comment_at?: string | null;
+    has_unread?: boolean;
+  }>;
 }
 
 /** 历史工单列表筛选参数 */

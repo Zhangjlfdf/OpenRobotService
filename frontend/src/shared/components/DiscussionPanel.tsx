@@ -149,6 +149,10 @@ interface DiscussionPanelProps {
    *  收到真实 ai.progress 后用真实数据覆盖。用于 [帮我分析] 这类点击即触发、
    *  但 WS 首条 running 可能稍晚到达的场景，避免过程区“晚出现 / 闪一下”。 */
   optimisticAi?: boolean;
+  /** 进场自动定位：目标评论 id（列表卡片点引用/参与人头像跳进来时传，滚动 + is-flash 高亮） */
+  focusCommentId?: string | number | null;
+  /** 进场无 commentId 时，按作者 username 定位到该作者在该工单的**最近一条**评论（参与人头像跳转用） */
+  focusAuthor?: string | null;
 }
 
 export default function DiscussionPanel({
@@ -169,6 +173,8 @@ export default function DiscussionPanel({
   taskId,
   onTaskUpdated,
   optimisticAi = false,
+  focusCommentId = null,
+  focusAuthor = null,
 }: DiscussionPanelProps) {
   const { username, name, avatarResourceId } = useAuthStore();
   // 长按操作菜单的浮层由 TDesign Mobile <Popover> 承载（自带箭头/动画/外点关闭）；
@@ -873,6 +879,28 @@ export default function DiscussionPanel({
     el.classList.add('is-flash');
     setTimeout(() => el.classList.remove('is-flash'), 1200);
   }, []);
+
+  // 进场自动定位（列表卡片点参与人头像跳进来）：
+  // 优先按 focusCommentId 精确定位；否则按 focusAuthor 定位到该作者在本工单的最近一条评论。
+  // 依赖 comments 长度：首帧评论可能尚未渲染，等数据到位再执行（只跑一次）。
+  const autoLocatedRef = useRef(false);
+  useEffect(() => {
+    if (autoLocatedRef.current) return;
+    const byId = focusCommentId != null && focusCommentId !== '';
+    if (!byId && !focusAuthor) return;
+    if (comments.length === 0) return;
+    let targetId: string | number | null = byId ? focusCommentId : null;
+    if (targetId == null && focusAuthor) {
+      // 评论按时间升序，取最后一个匹配作者的即为「最近一条」
+      const mine = comments.filter((c) => c.created_by === focusAuthor);
+      if (mine.length > 0) targetId = mine[mine.length - 1].id;
+    }
+    if (targetId == null) return;
+    autoLocatedRef.current = true;
+    // 下一帧再滚，确保气泡 DOM 已提交
+    const timer = window.setTimeout(() => locateComment(targetId as string | number), 60);
+    return () => window.clearTimeout(timer);
+  }, [comments, focusCommentId, focusAuthor, locateComment]);
 
   // 菜单动作
   const handleQuote = () => {

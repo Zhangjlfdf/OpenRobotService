@@ -5,6 +5,7 @@ MIGRATION.md 阶段 3：从 `app/modules/fqa/ticket/api/ticket.py` 搬迁而来�
 
 Wave 2.2 完成：工单(tickets)已升格为任务(tasks)，本模块使用统一的 Task/TaskComment 模型。
 """
+import contextvars
 import logging
 
 from fastapi import APIRouter, HTTPException, Depends, Query, Request, UploadFile, File, Form, Body
@@ -25,12 +26,27 @@ from app.modules.tasks.schemas.ticket import (
     TicketCommentCreate, TicketCommentUpdate, TicketCommentResponse,
     TicketQueryParams, TicketCuibanNotification, TicketFilterRequest,
     TicketBatchCountRequest,
-    TicketCreateNotificationRequest, RobotAlarmNotificationRequest, ProjectMemberResponse
+    TicketCreateNotificationRequest, RobotAlarmNotificationRequest, ProjectMemberResponse,
+    # 代他人提单
+    OnBehalfCandidate, ProxyRelationResponse, ProxyRelationDeclineRequest,
+    TaskRelationCreate, TaskRelationResponse, TaskRelationBrief, BlockedTaskInfo
 )
-from app.modules.tasks.models.ticket import TicketStatus, TicketPriority, TicketType
+from app.modules.tasks.models.ticket import TicketStatus, TicketPriority, TicketType, RelationType
 from app.modules.tasks.services.ticket_service import TicketService, convert_to_shanghai_time
+from app.modules.tasks.services.proxy_relation_service import (
+    ProxyRelationService,
+    ProxyRelationError,
+    ProxyRelationStatus,
+)
+from app.core.ticket_roles import (
+    resolve_ticket_roles,
+    get_ticket_roles as core_get_ticket_roles,
+    load_relation as core_load_relation,
+    SIDE_ASSIGNED,
+    SIDE_CREATOR,
+)
 from app.modules.tasks.services.operation_log_service import OperationLogService, get_role_prefix
-from app.models.task import OperationType, TaskStep, TaskFollower, TaskParticipant, Task
+from app.models.task import OperationType, TaskStep, TaskFollower, TaskParticipant, Task, TaskRelation
 from app.modules.tasks.api.ws import (
     ws_broadcast_comment,
     ws_broadcast_comment_deleted,
@@ -245,7 +261,18 @@ _ACTOR_SIDE_CREATOR = "creator"
 
 
 def _actor_side(ticket, current_user, username: str) -> Optional[str]:
-    """返回当前操作人属于接单人侧(assigned) 还是 提单人侧(creator)，都不是则 None。"""
+    """返回当前操作人属于接单人侧(assigned) 还是 提单人侧(creator)，都不是则 None。
+
+    代提改造后优先读请求级角色缓存（由 `get_ticket_roles` 写入）：
+    被代理人（已确认跟进）归 creator 侧（与代理人同侧，代表问题方），
+    pending 期间不参与协商故为 None。缓存未命中时退化为原双键比较。
+
+    安全：缓存以「操作人 + task_id」为键（见 `_roles_cache_key`），
+    避免同一请求上下文内解析过他人角色后被复用（越权风险）。
+    """
+    roles = (_roles_cache.get() or {}).get(_roles_cache_key(current_user, getattr(ticket, "id", None)))
+    if roles is not None:
+        return roles.side
     if user_matches(current_user, getattr(ticket, 'assigned_to', None)):
         return _ACTOR_SIDE_ASSIGNED
     if user_matches(current_user, getattr(ticket, 'created_by', None)):
@@ -255,6 +282,83 @@ def _actor_side(ticket, current_user, username: str) -> Optional[str]:
     if username and username == getattr(ticket, 'created_by', None):
         return _ACTOR_SIDE_CREATOR
     return None
+
+
+# 请求级角色缓存：键为 (操作人标识, task_id)，值 TicketRoles。
+# 用 ContextVar 而非全局 dict，避免并发请求间串数据（安全：仅缓存本请求内已鉴权结果）。
+_roles_cache: "contextvars.ContextVar[Optional[Dict[Any, Any]]]" = contextvars.ContextVar(
+    "ticket_roles_cache", default=None
+)
+
+
+def _roles_cache_key(current_user: Any, task_id: Optional[int]) -> Any:
+    """角色缓存键：必须含操作人标识。
+
+    只按 task_id 缓存会在「同一请求内先以 A 身份解析、再问 B 的角色」时返回 A 的结果，
+    造成越权误判；加上操作人双键（id + username）后天然隔离。
+    """
+    if not task_id:
+        return None
+    if isinstance(current_user, dict):
+        uid = current_user.get("id") or current_user.get("user_id")
+        uname = current_user.get("username")
+    else:
+        uid = getattr(current_user, "id", None)
+        uname = getattr(current_user, "username", None)
+    return (str(uid or ""), str(uname or ""), task_id)
+
+
+async def get_ticket_roles(
+    db: AsyncSession,
+    ticket,
+    current_user: Dict[str, Any],
+    *,
+    with_follower: bool = False,
+):
+    """本模块角色解析入口（委托 `app/core/ticket_roles.get_ticket_roles`）。
+
+    额外做两件事：
+    1. 结果按 (操作人, task_id) 缓存在请求级 ContextVar，同一请求多处判定不重复查库；
+    2. `_actor_side` 读该缓存，从而让被代理人归 creator 侧（决策 7）。
+    """
+    if ticket is None:
+        return None
+    task_id = getattr(ticket, "id", None)
+    cache_key = _roles_cache_key(current_user, task_id)
+
+    # 命中缓存直接返回（with_follower 场景需真实关注态，不缓存）
+    cache = _roles_cache.get()
+    if not with_follower and cache and cache_key and cache_key in cache:
+        return cache[cache_key]
+
+    is_follower = False
+    if with_follower and task_id:
+        try:
+            from app.modules.tasks.models.ticket import TaskFollower
+            from sqlalchemy import select as _select
+            me_keys = list(identity_keys(actor_username(current_user)))
+            follower = await db.execute(
+                _select(TaskFollower.id)
+                .where(TaskFollower.task_id == task_id, TaskFollower.username.in_(me_keys))
+                .limit(1)
+            )
+            is_follower = follower.first() is not None
+        except Exception as e:
+            logger_task.warning(f"读取关注关系失败 task_id={task_id}: {e}")
+
+    roles = await core_get_ticket_roles(db, ticket, current_user, is_follower=is_follower)
+
+    if cache is None:
+        cache = {}
+        _roles_cache.set(cache)
+    if cache_key:
+        cache[cache_key] = roles
+    return roles
+
+
+async def _load_relation(db: AsyncSession, task_id: int):
+    """读取工单的代理关系（无关系返回 None）。失败不阻断主流程。"""
+    return await core_load_relation(db, task_id)
 
 
 def _apply_step_update_meta(ticket, current_user, username: str) -> Dict[str, Any]:
@@ -775,6 +879,310 @@ async def get_similar_tasks(
         raise HTTPException(status_code=500, detail=f"相似工单检索失败: {str(e)}")
 
 
+@router.get("/on-behalf-candidates", response_model=List[OnBehalfCandidate])
+async def get_on_behalf_candidates(
+    project_id: Optional[str] = Query(None, description="项目ID，用于把同项目人员排在前面"),
+    keyword: Optional[str] = Query(None, description="按姓名 / username 模糊过滤"),
+    db: AsyncSession = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_active_user_from_token),
+):
+    """代他人提单选人候选（见设计文档 §3.5）。
+
+    为什么不复用现有接口：
+      - `GET /api/tasks/{id}/project-members` 需要 task_id —— 提单时工单尚不存在；
+      - `GET /api/tasks/assignable-users` 无项目参数。
+
+    返回：在职（users.status='active'）用户，`group='project'` 段在前、`'all'` 段在后。
+    **分组标记必须显式返回**：现有 project-members 的 role_name 在项目成员段可能为空，
+    前端无法靠它区分分组，只能靠位置猜，很脆。
+    """
+    try:
+        from app.core.db import SessionLocal
+        from app.models.identity import UserDB
+
+        me_id = to_user_id(current_user.get("id") if isinstance(current_user, dict) else None)
+        me_keys = set(identity_keys(actor_username(current_user))) | ({me_id} if me_id else set())
+
+        kw = (keyword or "").strip().lower()
+
+        def _query(pid: Optional[str]):
+            sync_db = SessionLocal()
+            try:
+                project_user_ids: set = set()
+                if pid:
+                    try:
+                        members = db_manager.get_project_members(pid, include_usp=False) or []
+                        for m in members:
+                            for key in ("id", "username"):
+                                val = (m.get(key) or "").strip()
+                                if val:
+                                    project_user_ids.add(val)
+                    except Exception as exc:
+                        logger_task.warning(f"代提选人：取项目成员失败 project_id={pid}: {exc}")
+
+                users = (
+                    sync_db.query(UserDB)
+                    .filter(UserDB.status == "active")
+                    .all()
+                )
+                return project_user_ids, [
+                    {
+                        "id": (u.id or "").strip(),
+                        "username": (u.username or "").strip(),
+                        "name": u.name,
+                    }
+                    for u in users
+                ]
+            finally:
+                sync_db.close()
+
+        project_user_ids, users = await run_in_threadpool(_query, project_id)
+
+        def _sort_key(u: Dict[str, Any]):
+            return (u.get("name") or u.get("username") or "").lower()
+
+        project_items: List[OnBehalfCandidate] = []
+        other_items: List[OnBehalfCandidate] = []
+
+        for u in sorted(users, key=_sort_key):
+            uid = u["id"]
+            uname = u["username"]
+            if not uid or not uname:
+                continue
+            # 排除自己（不给自己代提）
+            if uid in me_keys or uname in me_keys:
+                continue
+            if kw and kw not in (u.get("name") or "").lower() and kw not in uname.lower():
+                continue
+            in_project = bool(
+                project_user_ids and (uid in project_user_ids or uname in project_user_ids)
+            )
+            item = OnBehalfCandidate(
+                id=uid, username=uname, name=u.get("name") or uname,
+                group="project" if in_project else "all",
+            )
+            (project_items if in_project else other_items).append(item)
+
+        return project_items + other_items
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger_task.error(f"代提选人查询失败: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail="代提选人查询失败")
+
+
+@router.get("/my-followups/count")
+async def get_my_followups_count(
+    db: AsyncSession = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_active_user_from_token),
+):
+    """「待我跟进」角标数：我是被代理人、关系 pending、工单未终结。"""
+    try:
+        me_id = to_user_id(current_user.get("id") if isinstance(current_user, dict) else None) \
+            or to_user_id(actor_username(current_user))
+        if not me_id:
+            return {"count": 0}
+        count = await ProxyRelationService.count_pending_for_principal(db, me_id)
+        return {"count": count}
+    except Exception as e:
+        logger_task.error(f"待我跟进计数失败: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail="待我跟进计数失败")
+
+
+@router.get("/{task_id}/proxy-relations", response_model=List[ProxyRelationResponse])
+async def get_proxy_relations(
+    task_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_active_user_from_token),
+):
+    """查询工单的代理关系（仅参与人可见，非参与人返回 403）。
+
+    安全：先解析角色集合，非参与人一律 403，避免泄露「谁代谁提单」。
+    """
+    try:
+        relation = await ProxyRelationService.get_task_relation(db, task_id)
+        if not relation:
+            return []
+
+        ticket = await TicketService.get_ticket_by_id(db, task_id)
+        if not ticket:
+            raise HTTPException(status_code=404, detail="任务未找到")
+
+        roles = resolve_ticket_roles(ticket, current_user, relation)
+        if not roles.is_related:
+            raise HTTPException(status_code=403, detail="无权查看该工单的代理关系")
+
+        return [_proxy_relation_response(relation, roles)]
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger_task.error(f"查询代理关系失败 task_id={task_id}: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail="查询代理关系失败")
+
+
+@router.post("/{task_id}/proxy-relations/{relation_id}/ack", response_model=ProxyRelationResponse)
+async def ack_proxy_relation(
+    task_id: int,
+    relation_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_active_user_from_token),
+):
+    """被代理人确认跟进（pending → acknowledged，获协办权）。
+
+    安全：**仅被代理人本人**可调用，以 token 身份为准，不信任前端传入的 principal_id。
+    """
+    return await _handle_relation_action(db, task_id, relation_id, current_user, action="ack")
+
+
+@router.post("/{task_id}/proxy-relations/{relation_id}/decline", response_model=ProxyRelationResponse)
+async def decline_proxy_relation(
+    task_id: int,
+    relation_id: int,
+    payload: ProxyRelationDeclineRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_active_user_from_token),
+):
+    """被代理人拒绝（与我无关，pending → declined，需填原因）。
+
+    工单不中断：代理人继续兜底推进，其 created_by 身份不受影响。
+    """
+    return await _handle_relation_action(
+        db, task_id, relation_id, current_user, action="decline", remark=payload.remark
+    )
+
+
+def _proxy_relation_response(relation, roles) -> ProxyRelationResponse:
+    """组装关系响应（含当前用户视角标记与参与人姓名，便于前端直接渲染）。"""
+    user_map = {}
+    try:
+        from app.services.user_service import user_service
+        user_map = user_service.get_user_map() or {}
+    except Exception:
+        pass
+
+    agent_id = getattr(relation, "agent_id", None) or ""
+    principal_id = getattr(relation, "principal_id", None) or ""
+
+    return ProxyRelationResponse(
+        id=relation.id,
+        task_id=relation.task_id,
+        relation_status=relation.relation_status,
+        source=getattr(relation, "source", None),
+        remark=getattr(relation, "remark", None),
+        is_agent=roles.is_agent,
+        is_principal=roles.is_principal or roles.is_pending_principal,
+        agent_name=user_map.get(agent_id) or getattr(relation, "agent_username", None) or agent_id,
+        principal_name=user_map.get(principal_id) or getattr(relation, "principal_username", None) or principal_id,
+        notified_at=relation.notified_at,
+        acked_at=relation.acked_at,
+        declined_at=relation.declined_at,
+        created_at=relation.created_at,
+    )
+
+
+async def _handle_relation_action(
+    db: AsyncSession,
+    task_id: int,
+    relation_id: int,
+    current_user: Dict[str, Any],
+    *,
+    action: str,
+    remark: str = "",
+) -> ProxyRelationResponse:
+    """关系动作公共实现（ack / decline）：身份 + 归属双校验 + 审计。"""
+    try:
+        ticket = await TicketService.get_ticket_by_id(db, task_id)
+        if not ticket:
+            raise HTTPException(status_code=404, detail="任务未找到")
+
+        relation = await ProxyRelationService.get_by_id(db, relation_id)
+        if not relation or relation.task_id != task_id:
+            raise HTTPException(status_code=404, detail="代理关系未找到")
+
+        # 归属校验：仅被代理人本人
+        from app.core.user_identity import user_matches as _user_matches
+        if not _user_matches(
+            current_user, relation.principal_id, relation.principal_username
+        ):
+            logger_task.warning(
+                f"越权访问代理关系 task_id={task_id} relation_id={relation_id} "
+                f"operator={actor_username(current_user)}"
+            )
+            raise HTTPException(status_code=403, detail="无权操作该代理关系")
+
+        operator_username = actor_username(current_user)
+
+        if action == "ack":
+            await ProxyRelationService.acknowledge(db, relation, operator_username)
+            log_desc = f"【被代理人】{operator_username} 确认跟进本工单"
+            notify_action, notify_reason = "acked", ""
+        else:
+            await ProxyRelationService.decline(db, relation, operator_username, remark)
+            log_desc = f"【被代理人】{operator_username} 表示与本单无关：{relation.remark}"
+            notify_action, notify_reason = "declined", relation.remark or ""
+
+        # 审计日志（与工单操作日志同表，参与人可见）
+        try:
+            await OperationLogService.log(
+                db=db,
+                task_id=task_id,
+                op_type=OperationType.UPDATE,
+                operator=operator_username,
+                operator_name=current_user.get("name") if isinstance(current_user, dict) else None,
+                description=log_desc,
+            )
+        except Exception as exc:
+            logger_task.warning(f"写代理关系操作日志失败 relation_id={relation_id}: {exc}")
+
+        await db.commit()
+        await db.refresh(relation)
+
+        # 通知代理人（失败不影响状态流转）
+        try:
+            user_map = await TicketService._get_user_map(None)
+            agent_name = user_map.get(relation.agent_id) or relation.agent_username or relation.agent_id
+            principal_name = user_map.get(relation.principal_id) or relation.principal_username or relation.principal_id
+            await NotificationUtils.send_proxy_relation_notification(
+                ticket_id=task_id,
+                title=ticket.title or "",
+                project_name=ticket.project_name or "",
+                agent_name=agent_name,
+                principal_name=principal_name,
+                action=notify_action,
+                reason=notify_reason,
+                user_names=[relation.agent_id],
+                token=current_user.get("token") if isinstance(current_user, dict) else None,
+            )
+        except Exception as exc:
+            logger_task.warning(f"代提关系变更通知失败 relation_id={relation_id}: {exc}")
+
+        # WS 事件驱动前端角标 / 横幅刷新（新增事件名，不改既有事件）
+        try:
+            from app.modules.tasks.api.ws import ws_broadcast_proxy_relation
+            await ws_broadcast_proxy_relation(
+                task_id=task_id,
+                relation_id=relation.id,
+                relation_status=relation.relation_status,
+                principal_id=relation.principal_id,
+                agent_id=relation.agent_id,
+            )
+        except Exception as exc:
+            logger_task.warning(f"代理关系 WS 广播失败 relation_id={relation_id}: {exc}")
+
+        roles = resolve_ticket_roles(ticket, current_user, relation)
+        return _proxy_relation_response(relation, roles)
+    except ProxyRelationError as e:
+        await db.rollback()
+        raise HTTPException(status_code=e.status_code, detail=e.message)
+    except HTTPException:
+        await db.rollback()
+        raise
+    except Exception as e:
+        await db.rollback()
+        logger_task.error(f"代理关系操作失败 task_id={task_id}: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail="代理关系操作失败")
+
+
 @router.get("/{task_id}/project-members", response_model=List[ProjectMemberResponse])
 async def get_task_project_members(
     task_id: int,
@@ -900,18 +1308,22 @@ async def update_task(
 
     # 拥有 backend:tasks:operate 权限的用户视同 admin，跳过身份与状态流转校验
     can_operate = has_permission_code(current_user, "backend:tasks:operate")
+    # 统一角色解析（含被代理人）：见 app/core/ticket_roles.py
+    roles = await get_ticket_roles(db, ticket, current_user)
     if not is_admin and not can_operate:
-        if not user_matches(current_user, ticket.assigned_to, ticket.customer, ticket.created_by):
+        if not roles.is_related:
             raise HTTPException(status_code=403, detail="无权限更新此任务")
         if ticket.status == TicketStatus.CLOSED:
             raise HTTPException(status_code=400, detail="已关闭的任务不能更新")
         if ticket_update.status:
-            if ticket.status == TicketStatus.NEW and not user_matches(current_user, ticket.created_by):
+            if ticket.status == TicketStatus.NEW and not roles.is_creator:
                 raise HTTPException(status_code=400, detail="只允许创建者开始任务！")
-            if ticket.status in [TicketStatus.PENDING, TicketStatus.IN_PROGRESS] and not user_matches(current_user, ticket.assigned_to):
+            if ticket.status in [TicketStatus.PENDING, TicketStatus.IN_PROGRESS] and not roles.is_assignee:
                 raise HTTPException(status_code=400, detail="只允许处理人更新任务！")
-            if ticket.status == TicketStatus.RESOLVED and not user_matches(current_user, ticket.customer):
-                raise HTTPException(status_code=400, detail="只允许发起人的更新已解决任务！")
+            # 关单（resolved →）：决策 6 —— 由 created_by（代理人）+ 已确认被代理人 + 管理员判定，
+            # customer 收敛为纯展示「联系人」，不再参与权限（修掉「新单 customer 为空导致非 admin 关不掉单」）
+            if ticket.status == TicketStatus.RESOLVED and not roles.can_close:
+                raise HTTPException(status_code=400, detail="只允许发起人或被代理人确认已解决任务！")
 
     try:
         token = current_user.get('token')
@@ -1078,7 +1490,8 @@ async def delete_task(
     username = actor_username(current_user)
 
     if not is_admin:
-        if not user_matches(current_user, ticket.assigned_to, ticket.created_by):
+        roles = await get_ticket_roles(db, ticket, current_user)
+        if not (roles.is_assignee or roles.is_creator):
             raise HTTPException(status_code=403, detail="无权限更新此任务")
 
     try:
@@ -1479,6 +1892,18 @@ async def update_task_status(
                 raise HTTPException(status_code=400, detail="结束工单必须填写解决方式")
             resolution_summary = rs
 
+        # ── 前置/子任务阻塞校验 ──
+        blocked = await _check_relation_block(db, task_id, ticket.status, status_enum)
+        if blocked:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "blocked_by_related_tasks",
+                    "message": "当前工单存在未完成的前置工单或子任务，无法完成/关闭",
+                    "blocked": [b.model_dump() for b in blocked],
+                }
+            )
+
         old_status = ticket.status.value if hasattr(ticket.status, 'value') else str(ticket.status)
         updated_ticket = await TicketService.update_ticket_status(db, task_id, status_enum, token=token, operator_id=username, resolution_summary=resolution_summary)
         # ── WS 实时广播：工单状态变更 ──
@@ -1688,10 +2113,13 @@ async def complete_task_step(
     username = actor_username(current_user)
     token = request.headers.get("Authorization", "").replace("Bearer ", "") if request else ""
     can_operate = has_permission_code(current_user, "backend:tasks:operate")
+    roles = await get_ticket_roles(db, ticket, current_user)
+    if not can_operate:
+        can_operate = roles.can_operate
 
     if ticket.source == 'ai':
         pass
-    elif not (user_matches(current_user, ticket.assigned_to) or is_admin or can_operate):
+    elif not (roles.is_assignee or is_admin or can_operate):
         raise HTTPException(status_code=403, detail="无权限操作此工单")
 
     if ticket.status != TicketStatus.IN_PROGRESS:
@@ -1801,10 +2229,12 @@ async def negotiate_step(
     token = request.headers.get("Authorization", "").replace("Bearer ", "") if request else ""
     can_operate = has_permission_code(current_user, "backend:tasks:operate")
 
-    # 权限：接单人 / 提单人 / 管理员 / 操作权限均可协商（回合双方对话）
-    _is_assignee = user_matches(current_user, ticket.assigned_to)
-    _is_creator = user_matches(current_user, ticket.created_by)
-    if ticket.source != 'ai' and not (_is_assignee or _is_creator or is_admin or can_operate):
+    # 权限：接单人 / 提单人 / 被代理人(已确认跟进) / 管理员 / 操作权限 均可协商（回合双方对话）
+    # 决策 10：被代理人在 pending 期间**不参与协商**（is_principal 仅在 acknowledged 为 True）
+    _roles = await get_ticket_roles(db, ticket, current_user)
+    if ticket.source != 'ai' and not (
+        _roles.is_assignee or _roles.is_creator or _roles.is_principal or is_admin or can_operate
+    ):
         raise HTTPException(status_code=403, detail="无权限协商此工单")
 
     # 协商理由必填
@@ -2009,9 +2439,11 @@ async def reopen_step(
     token = request.headers.get("Authorization", "").replace("Bearer ", "") if request else ""
     can_operate = has_permission_code(current_user, "backend:tasks:operate")
 
-    # 权限：提单人 / 管理员 / 操作权限（AI 工单放行）
-    _is_creator = user_matches(current_user, ticket.created_by)
-    if ticket.source != 'ai' and not (_is_creator or is_admin or can_operate):
+    # 权限：提单人 / 被代理人(已确认跟进) / 管理员 / 操作权限（AI 工单放行）
+    _roles = await get_ticket_roles(db, ticket, current_user)
+    if ticket.source != 'ai' and not (
+        _roles.is_creator or _roles.is_principal or is_admin or can_operate
+    ):
         raise HTTPException(status_code=403, detail="仅提单人可打回工单")
 
     # 仅已解决状态可打回
@@ -2304,8 +2736,10 @@ async def update_creator_name(
     user_name = (current_user.get('name', username) if isinstance(current_user, dict) else username)
 
     # 仅工单处理人（assigned_to）或管理员可修改创建人姓名
-    if not is_admin and not user_matches(current_user, ticket.assigned_to):
-        raise HTTPException(status_code=403, detail="仅工单处理人可修改创建人姓名")
+    if not is_admin:
+        _roles = await get_ticket_roles(db, ticket, current_user)
+        if not _roles.is_assignee:
+            raise HTTPException(status_code=403, detail="仅工单处理人可修改创建人姓名")
 
     new_name = (payload.name or "").strip()
     if not new_name:
@@ -2417,8 +2851,10 @@ async def re_dispatch_task(
     user_name = (current_user.get('name', username) if isinstance(current_user, dict) else getattr(current_user, "name", username)) or username
     token = current_user.get('token') if isinstance(current_user, dict) else getattr(current_user, "token", None)
 
-    # 权限口径对齐 update_task：管理员 / 提单人 / 处理人 / 客户
-    if not is_admin and not user_matches(current_user, ticket.assigned_to, ticket.customer, ticket.created_by):
+    # 权限口径对齐 update_task：管理员 / 提单人 / 处理人 / 被代理人(已确认跟进)
+    # customer 收敛为展示用联系人，不再参与权限（决策 6）
+    _roles = await get_ticket_roles(db, ticket, current_user)
+    if not is_admin and not (_roles.is_assignee or _roles.is_creator or _roles.is_principal):
         raise HTTPException(status_code=403, detail="无权限重新派单此任务")
     if ticket.status == TicketStatus.CLOSED:
         raise HTTPException(status_code=400, detail="已关闭的任务不能重新派单")
@@ -3007,4 +3443,460 @@ async def download_attachment(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"下载文件失败: {str(e)}")
+
+
+# ==================== 工单关联（task_relations） ====================
+
+
+async def _check_relation_block(
+    db: AsyncSession,
+    task_id: int,
+    current_status: TicketStatus,
+    target_status: TicketStatus,
+) -> List[BlockedTaskInfo]:
+    """检查工单状态变更是否被前置工单或子任务阻塞。
+
+    阻塞规则：
+      - in_progress → resolved：所有 predecessor 前置工单需已完成（resolved/closed）
+      - resolved → closed：上述前置校验 + 所有 subtask 子工单需已完成（resolved/closed/canceled）
+
+    返回空列表表示无阻塞；返回 BlockedTaskInfo 列表表示被阻塞的工单清单。
+    """
+    blocked: List[BlockedTaskInfo] = []
+    transition = f"{current_status.value if hasattr(current_status, 'value') else str(current_status)}" \
+                 f"→{target_status.value if hasattr(target_status, 'value') else str(target_status)}"
+
+    # 前置校验：resolved 和 closed 目标状态都需检查
+    if target_status in (TicketStatus.RESOLVED, TicketStatus.CLOSED):
+        # 查询所有 predecessor 关系（source=当前工单, target=前置工单）
+        result = await db.execute(
+            select(TaskRelation, Task).join(Task, Task.id == TaskRelation.target_task_id)
+            .where(
+                TaskRelation.source_task_id == task_id,
+                TaskRelation.relation_type == RelationType.PREDECESSOR,
+            )
+        )
+        for rel, pred_task in result.unique().all():
+            pred_status = pred_task.status.value if hasattr(pred_task.status, 'value') else str(pred_task.status)
+            if pred_status not in ('resolved', 'closed'):
+                blocked.append(BlockedTaskInfo(
+                    task_id=pred_task.id,
+                    title=pred_task.title,
+                    status=pred_status,
+                    reason='predecessor',
+                ))
+
+    # 子任务校验：仅 closed 目标状态
+    if target_status == TicketStatus.CLOSED:
+        result = await db.execute(
+            select(TaskRelation, Task).join(Task, Task.id == TaskRelation.target_task_id)
+            .where(
+                TaskRelation.source_task_id == task_id,
+                TaskRelation.relation_type == RelationType.SUBTASK,
+            )
+        )
+        for rel, sub_task in result.unique().all():
+            sub_status = sub_task.status.value if hasattr(sub_task.status, 'value') else str(sub_task.status)
+            if sub_status not in ('resolved', 'closed', 'canceled'):
+                blocked.append(BlockedTaskInfo(
+                    task_id=sub_task.id,
+                    title=sub_task.title,
+                    status=sub_status,
+                    reason='subtask',
+                ))
+
+    return blocked
+
+
+async def _has_cycle(db: AsyncSession, source_id: int, target_id: int) -> bool:
+    """DFS 检测 predecessor 关系是否成环：若从 target_id 出发沿 predecessor 边能回到 source_id，则成环。"""
+    adj: Dict[int, List[int]] = {}
+    all_result = await db.execute(
+        select(TaskRelation.source_task_id, TaskRelation.target_task_id).where(
+            TaskRelation.relation_type == RelationType.PREDECESSOR
+        )
+    )
+    for s, t in all_result.all():
+        adj.setdefault(s, []).append(t)
+
+    # DFS 从 target_id 出发，看能否到达 source_id
+    visited = set()
+    stack = [target_id]
+    while stack:
+        node = stack.pop()
+        if node == source_id:
+            return True
+        if node in visited:
+            continue
+        visited.add(node)
+        stack.extend(adj.get(node, []))
+    return False
+
+
+# ── 关系树查询 ──
+
+class RelationTreeNode(BaseModel):
+    """关系树节点（一个工单的概要）"""
+    id: int
+    title: str
+    status: str
+    created_by_name: Optional[str] = None
+    assigned_to_name: Optional[str] = None
+
+
+class RelationTreeEdge(BaseModel):
+    """关系树边（两个节点间的关系）"""
+    source: int
+    target: int
+    relation_type: RelationType
+
+
+class RelationTreeResponse(BaseModel):
+    """关系树响应
+
+    root_id:    渲染根节点（subtask 树最顶层的父工单）
+    current_id: 用户实际打开的工单（用于前端高亮「当前」标签）
+    nodes:      所有可达节点
+    edges:      所有可达边
+    """
+    root_id: int
+    current_id: int
+    nodes: List[RelationTreeNode]
+    edges: List[RelationTreeEdge]
+
+
+async def _collect_relation_tree(
+    db: AsyncSession,
+    root_id: int,
+    max_depth: int = 8,
+) -> RelationTreeResponse:
+    """从 root_id 出发，沿 subtask（向下）、predecessor（向上）、duplicate（平级）
+    三个方向 BFS 遍历，收集所有可达节点和边。
+
+    防环：visited 集合避免重复；subtask 不会成环（一个子任务只挂一个父）；
+    predecessor 已有建关系时的成环校验，这里 BFS 也会兜底。
+    """
+    # 一次查出全表关系（数据量小，O(N) 可接受）
+    result = await db.execute(select(TaskRelation))
+    all_rels = result.scalars().all()
+
+    # 构建邻接表：按关系类型分组
+    # subtask: source(父) → [target(子)]，同时反向建 parent 映射
+    # predecessor: source → [target(前置)]
+    # duplicate: source ↔ target
+    subtask_children: Dict[int, List[int]] = {}
+    subtask_parent: Dict[int, int] = {}          # key=子, value=父
+    predecessor_of: Dict[int, List[int]] = {}   # key=工单, value=它的前置工单IDs
+    predecessor_dependents: Dict[int, List[int]] = {}  # key=前置工单, value=依赖它的工单IDs（反向）
+    duplicate_with: Dict[int, set] = {}           # key=工单, value=重复工单IDs
+    all_task_ids: set = {root_id}
+    for rel in all_rels:
+        if rel.relation_type == RelationType.SUBTASK:
+            subtask_children.setdefault(rel.source_task_id, []).append(rel.target_task_id)
+            subtask_parent[rel.target_task_id] = rel.source_task_id
+            all_task_ids.add(rel.source_task_id)
+            all_task_ids.add(rel.target_task_id)
+        elif rel.relation_type == RelationType.PREDECESSOR:
+            predecessor_of.setdefault(rel.source_task_id, []).append(rel.target_task_id)
+            predecessor_dependents.setdefault(rel.target_task_id, []).append(rel.source_task_id)
+            all_task_ids.add(rel.source_task_id)
+            all_task_ids.add(rel.target_task_id)
+        elif rel.relation_type == RelationType.DUPLICATE:
+            duplicate_with.setdefault(rel.source_task_id, set()).add(rel.target_task_id)
+            duplicate_with.setdefault(rel.target_task_id, set()).add(rel.source_task_id)
+            all_task_ids.add(rel.source_task_id)
+            all_task_ids.add(rel.target_task_id)
+
+    # 向上追溯真正的 subtask 根节点（确保渲染从最顶层父工单开始）
+    render_root_id = root_id
+    _seen: set = set()
+    while render_root_id in subtask_parent and render_root_id not in _seen:
+        _seen.add(render_root_id)
+        render_root_id = subtask_parent[render_root_id]
+
+    # BFS：从 render_root_id（真正的 subtask 根）出发，沿三个方向遍历
+    visited: set = set()
+    queue: List[tuple] = [(render_root_id, 0)]
+    visited.add(render_root_id)
+    reachable: set = {render_root_id, root_id}  # root_id（当前工单）也必须在内
+
+    while queue:
+        current, depth = queue.pop(0)
+        if depth >= max_depth:
+            continue
+        # subtask：向下遍历子节点
+        for child_id in subtask_children.get(current, []):
+            reachable.add(child_id)
+            if child_id not in visited:
+                visited.add(child_id)
+                queue.append((child_id, depth + 1))
+        # subtask 反向：向上遍历父节点（当 BFS 从非根节点进入子树时补全祖先）
+        if current in subtask_parent:
+            parent_id = subtask_parent[current]
+            reachable.add(parent_id)
+            if parent_id not in visited:
+                visited.add(parent_id)
+                queue.append((parent_id, depth + 1))
+        for pred_id in predecessor_of.get(current, []):
+            reachable.add(pred_id)
+            if pred_id not in visited:
+                visited.add(pred_id)
+                queue.append((pred_id, depth + 1))
+        # 反向：谁依赖 current 作为前置（dependents）
+        for dep_id in predecessor_dependents.get(current, []):
+            reachable.add(dep_id)
+            if dep_id not in visited:
+                visited.add(dep_id)
+                queue.append((dep_id, depth + 1))
+        for dup_id in duplicate_with.get(current, set()):
+            reachable.add(dup_id)
+            if dup_id not in visited:
+                visited.add(dup_id)
+                queue.append((dup_id, depth + 1))
+
+    # BFS 结束后，在 reachable 内部重新确定真正的 subtask 根节点
+    # （之前的 render_root_id 只从当前工单向上追溯，可能没追溯到真正的根）
+    has_subtask = any(
+        t in subtask_children or t in subtask_parent
+        for t in reachable
+    )
+    if has_subtask:
+        # reachable 中有 subtask 关系：找"不在 subtask_parent 里，但有 subtask 子节点"的节点
+        subtask_roots = [
+            t for t in reachable
+            if t not in subtask_parent and subtask_children.get(t)
+        ]
+        if subtask_roots:
+            render_root_id = min(subtask_roots)  # 多个根时选 ID 最小的（稳定）
+
+    if not reachable:
+        reachable = {root_id}
+    task_result = await db.execute(
+        select(Task).where(Task.id.in_(reachable))
+    )
+    task_map: Dict[int, Task] = {t.id: t for t in task_result.scalars().all()}
+
+    # 构建 nodes
+    nodes: List[RelationTreeNode] = []
+    for tid in sorted(reachable):
+        t = task_map.get(tid)
+        if not t:
+            continue
+        status_val = t.status.value if hasattr(t.status, 'value') else str(t.status)
+        nodes.append(RelationTreeNode(
+            id=t.id,
+            title=t.title,
+            status=status_val,
+            created_by_name=t.created_by_name if hasattr(t, 'created_by_name') else None,
+            assigned_to_name=t.assigned_to_name if hasattr(t, 'assigned_to_name') else None,
+        ))
+
+    # 构建 edges（只保留两端都在 reachable 内的边）
+    edges: List[RelationTreeEdge] = []
+    for rel in all_rels:
+        if rel.source_task_id in reachable and rel.target_task_id in reachable:
+            edges.append(RelationTreeEdge(
+                source=rel.source_task_id,
+                target=rel.target_task_id,
+                relation_type=rel.relation_type,
+            ))
+
+    return RelationTreeResponse(root_id=render_root_id, current_id=root_id, nodes=nodes, edges=edges)
+
+
+@router.get("/{task_id}/relations/tree", response_model=RelationTreeResponse)
+async def get_task_relation_tree(
+    task_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_active_user_from_token),
+    max_depth: int = Query(8, ge=1, le=20, description="BFS 遍历深度上限"),
+):
+    """获取工单的完整关系树（从当前工单出发，BFS 遍历 subtask/predecessor/duplicate 三个方向）"""
+    ticket = await TicketService.get_ticket_by_id(db, task_id)
+    if not ticket:
+        raise HTTPException(status_code=404, detail="工单不存在")
+    return await _collect_relation_tree(db, task_id, max_depth=max_depth)
+
+
+@router.get("/{task_id}/relations", response_model=List[TaskRelationResponse])
+async def get_task_relations(
+    task_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_active_user_from_token),
+):
+    """获取工单的所有关联（双向：当前工单作为 source 或 target 的关系）"""
+    ticket = await TicketService.get_ticket_by_id(db, task_id)
+    if not ticket:
+        raise HTTPException(status_code=404, detail="工单不存在")
+
+    # 查询双向关系
+    result = await db.execute(
+        select(TaskRelation, Task).outerjoin(
+            Task, Task.id == TaskRelation.target_task_id
+        ).where(
+            (TaskRelation.source_task_id == task_id) | (TaskRelation.target_task_id == task_id)
+        )
+    )
+
+    relations: List[TaskRelationResponse] = []
+    for rel, target in result.unique().all():
+        # 加载 source 侧工单（若当前工单是 target）
+        source = None
+        if rel.source_task_id != task_id:
+            from sqlalchemy import select as _sel
+            src_result = await db.execute(_sel(Task).where(Task.id == rel.source_task_id))
+            source = src_result.scalar_one_or_none()
+
+        # 加载 target 侧工单（若当前工单是 source）
+        target_info = None
+        if rel.target_task_id != task_id and target:
+            target_info = target
+
+        relations.append(TaskRelationResponse(
+            id=rel.id,
+            source_task_id=rel.source_task_id,
+            target_task_id=rel.target_task_id,
+            relation_type=rel.relation_type,
+            created_by=rel.created_by,
+            created_at=rel.created_at,
+            target=TaskRelationBrief.model_validate(target_info) if target_info else None,
+            source=TaskRelationBrief.model_validate(source) if source else None,
+        ))
+
+    return relations
+
+
+@router.post("/{task_id}/relations", response_model=TaskRelationResponse)
+async def create_task_relation(
+    task_id: int,
+    body: TaskRelationCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_active_user_from_token),
+):
+    """创建工单关联"""
+    ticket = await TicketService.get_ticket_by_id(db, task_id)
+    if not ticket:
+        raise HTTPException(status_code=404, detail="工单不存在")
+
+    # 权限：复用 backend:tasks:operate
+    if not has_permission_code(current_user, 'backend:tasks:operate'):
+        raise HTTPException(status_code=403, detail="无权限创建工单关联")
+
+    # 校验目标工单存在
+    target_ticket = await TicketService.get_ticket_by_id(db, body.target_task_id)
+    if not target_ticket:
+        raise HTTPException(status_code=404, detail="目标工单不存在")
+
+    # 禁止自引用
+    if task_id == body.target_task_id:
+        raise HTTPException(status_code=400, detail="不能关联自己")
+
+    # 重复检查
+    existing = await db.execute(
+        select(TaskRelation).where(
+            TaskRelation.source_task_id == task_id,
+            TaskRelation.target_task_id == body.target_task_id,
+            TaskRelation.relation_type == body.relation_type,
+        )
+    )
+    if existing.scalar_one_or_none():
+        raise HTTPException(status_code=400, detail="该关联已存在")
+
+    # subtask 唯一性：一个子任务只能挂一个父工单
+    if body.relation_type == RelationType.SUBTASK:
+        dup_sub = await db.execute(
+            select(TaskRelation).where(
+                TaskRelation.target_task_id == body.target_task_id,
+                TaskRelation.relation_type == RelationType.SUBTASK,
+            )
+        )
+        if dup_sub.scalar_one_or_none():
+            raise HTTPException(status_code=400, detail="目标工单已是子任务，只能挂一个父工单")
+
+    # predecessor 成环检测
+    if body.relation_type == RelationType.PREDECESSOR:
+        if await _has_cycle(db, task_id, body.target_task_id):
+            raise HTTPException(status_code=400, detail="该关联会形成前置工单循环，不允许")
+
+    # 冲突校验：同一对工单不能同时有 predecessor 和 subtask
+    # 检查 target 是否已经是 source 的子任务
+    conflict = await db.execute(
+        select(TaskRelation).where(
+            TaskRelation.source_task_id == task_id,
+            TaskRelation.target_task_id == body.target_task_id,
+            TaskRelation.relation_type.in_([RelationType.PREDECESSOR, RelationType.SUBTASK]),
+        )
+    )
+    if conflict.scalar_one_or_none():
+        existing_type = conflict.scalar_one().relation_type
+        raise HTTPException(
+            status_code=400,
+            detail=f"两个工单已存在 {existing_type.value} 关系，不能同时建立前置/子任务关系",
+        )
+
+    username = actor_username(current_user)
+    new_rel = TaskRelation(
+        source_task_id=task_id,
+        target_task_id=body.target_task_id,
+        relation_type=body.relation_type,
+        created_by=username,
+    )
+    db.add(new_rel)
+    await db.commit()
+    await db.refresh(new_rel)
+
+    # 组装返回（带 target/source 概要）
+    rel = new_rel
+    result = await db.execute(
+        select(TaskRelation).where(TaskRelation.id == rel.id)
+    )
+    refetched = result.scalar_one()
+    target = await db.execute(select(Task).where(Task.id == refetched.target_task_id))
+    target_t = target.scalar_one_or_none()
+    source_t = None
+    if refetched.source_task_id != task_id:
+        src = await db.execute(select(Task).where(Task.id == refetched.source_task_id))
+        source_t = src.scalar_one_or_none()
+
+    return TaskRelationResponse(
+        id=refetched.id,
+        source_task_id=refetched.source_task_id,
+        target_task_id=refetched.target_task_id,
+        relation_type=refetched.relation_type,
+        created_by=refetched.created_by,
+        created_at=refetched.created_at,
+        target=TaskRelationBrief.model_validate(target_t) if target_t else None,
+        source=TaskRelationBrief.model_validate(source_t) if source_t else None,
+    )
+
+
+@router.delete("/{task_id}/relations/{relation_id}", response_model=dict)
+async def delete_task_relation(
+    task_id: int,
+    relation_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_active_user_from_token),
+):
+    """删除工单关联"""
+    ticket = await TicketService.get_ticket_by_id(db, task_id)
+    if not ticket:
+        raise HTTPException(status_code=404, detail="工单不存在")
+
+    # 权限：复用 backend:tasks:operate
+    if not has_permission_code(current_user, 'backend:tasks:operate'):
+        raise HTTPException(status_code=403, detail="无权限删除工单关联")
+
+    result = await db.execute(
+        select(TaskRelation).where(
+            TaskRelation.id == relation_id,
+            (TaskRelation.source_task_id == task_id) | (TaskRelation.target_task_id == task_id),
+        )
+    )
+    rel = result.scalar_one_or_none()
+    if not rel:
+        raise HTTPException(status_code=404, detail="关联不存在")
+
+    await db.delete(rel)
+    await db.commit()
+    return {"message": "删除成功"}
 
