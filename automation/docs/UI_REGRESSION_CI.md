@@ -48,14 +48,29 @@ permitopen="127.0.0.1:3306"
 
 不允许执行远程 shell 命令，只允许端口转发。
 
-## 5. Workflow 步骤
+## 5. SSH 会话模型
+
+backend、automation AI 和 MySQL 不分别建立三条 SSH 会话，而是在一次 SSH 连接中注册全部
+`-L` 转发：
+
+```text
+19400 -> 127.0.0.1:9400
+19411 -> 127.0.0.1:9411
+19402 -> 127.0.0.1:3306
+```
+
+这样避免同一 runner 在短时间内重复认证和建立第二条、第三条会话。
+
+## 6. Workflow 步骤
 
 ```text
 校验 Secrets/Variables
 -> 安装 Python、Node、Playwright
 -> 写入 SSH private key
+-> 输出公钥指纹并预检全部 SSH 转发
+-> 检查 backend、AI health 和数据库端口
 -> 构建前端
--> pytest 启动三条 SSH 隧道
+-> pytest 启动一次 SSH 多端口转发
 -> 执行 UI 场景 + Smoke
 -> API 500 时数据库补偿
 -> 生成 Allure HTML
@@ -63,7 +78,7 @@ permitopen="127.0.0.1:3306"
 -> test commit 评论摘要
 ```
 
-## 6. 报告
+## 7. 报告
 
 artifact 名称：
 
@@ -79,7 +94,7 @@ allure-report-ui-regression-<run_number>
 - 报告包含内部项目、接口和测试数据。
 - Actions artifact 需要具备仓库访问权限的账号查看。
 
-## 7. 失败分类
+## 8. 失败分类
 
 - SSH、后端、AI、数据库连接失败：环境失败。
 - 页面步骤或接口断言失败：业务失败。
@@ -87,10 +102,14 @@ allure-report-ui-regression-<run_number>
 
 环境失败和业务失败会让 job 失败；清理告警不会覆盖业务结论。
 
-## 8. 排障
+## 9. 排障
 
-1. 检查 `TEST_SSH_PRIVATE_KEY` 是否配置。
+1. 先查看 `Preflight real environment SSH forwards` 步骤：
+   - 公钥指纹失败：检查 `TEST_SSH_PRIVATE_KEY`。
+   - SSH 进程提前退出：查看该步骤输出的 SSH stderr。
+   - backend health 失败：检查测试后端 `9400`。
+   - AI health 失败：检查自动化 AI `9411`。
+   - 数据库端口失败：检查 MySQL `3306` 和 `permitopen`。
 2. 检查 SSH 公钥是否包含三个 `permitopen`。
-3. 检查测试后端 `9400`、自动化 AI `9411` 是否健康。
-4. 检查 `automation_cleanup` 是否能连接 `helpdesk_test`。
-5. 下载 Allure artifact 查看步骤截图、接口状态和清理结果。
+3. 检查 `automation_cleanup` 是否能连接 `helpdesk_test`。
+4. 下载 Allure artifact 查看步骤截图、接口状态和清理结果。
