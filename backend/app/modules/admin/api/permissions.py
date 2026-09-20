@@ -1,8 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 import uuid
 
-from typing import Dict, Any
 from app.core.database import db_manager
 from app.modules.admin.schemas.response import SuccessResponse, DataResponse
 from app.modules.admin.api.auth import get_current_active_user_from_token, require_permission
@@ -16,6 +15,38 @@ def get_current_admin_user(current_user: Dict[str, Any] = Depends(get_current_ac
             detail="需要管理员权限"
         )
     return current_user
+
+
+def is_project_member_or_admin(current_user: Dict[str, Any], project_id: Optional[str]) -> bool:
+    """是不是「这个项目下的人」（或 admin 直通）。
+
+    判据 = user_project_roles 里该项目下有任一角色，与「项目已关联人员」同一份数据
+    （PermissionService.is_project_member）。全局角色不算——它们在库里 project_id 为空，
+    代表平台级身份，不等于每个项目的成员。
+    """
+    if "admin" in current_user.get('permissions', []):
+        return True
+    if not project_id:
+        return False
+    from app.services.permission_service import PermissionService
+    return PermissionService.is_project_member(current_user.get('id'), project_id)
+
+
+def require_project_member(
+    project_id: str,
+    current_user: Dict[str, Any] = Depends(get_current_active_user_from_token),
+) -> Dict[str, Any]:
+    """项目信息树的结构类接口闸门：项目成员可写本项目的树与增补节点。
+
+    project_id 由路径参数同名注入（路由里必须有 {project_id}）。节点级路由
+    （/nodes/{node_id}）没有项目在路径上，走 info_nodes 里按节点反查项目的那个依赖。
+    """
+    if is_project_member_or_admin(current_user, project_id):
+        return current_user
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="只有该项目下的人员可以编辑项目信息树",
+    )
 
 @router.get("/", response_model=DataResponse, summary="获取所有权限")
 async def get_all_permissions(

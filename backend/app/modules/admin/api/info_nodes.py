@@ -3,20 +3,30 @@
 路由前缀 /info-nodes，挂载到 admin_router 后实际路径为
 /api/admin/info-nodes/projects/{project_id}/...。
 
-**鉴权口径（本次改造的核心变化之一）**
-  结构类写接口 = 改「字段定义」：`PUT /nodes/{id}`、`PATCH /nodes/{id}/move`、
-  `DELETE /nodes/{id}`、`POST /projects/{id}`（增补自定义字段）、`/template`
-  → 一律 `Depends(get_current_admin_user)`。旧实现的注释是「写接口不强制鉴权
-  （沿用网关管控）」，但网关只管「登没登录」，不区分管理员与普通用户；
-  新需求要求「普通用户不能再直接修改项目信息树」，只靠前端藏按钮是拦不住的
-  （接口是公开可直连的），所以闸门必须落在这里。
+**鉴权口径**
+  结构类写接口 = 改「这个项目的树」：`POST /projects/{id}`（增补节点）、
+  `POST /projects/{id}/import`（文件导入落库的整树导入）、`PUT /nodes/{id}`、
+  `PATCH /nodes/{id}/move`、`DELETE /nodes/{id}`、`POST /projects/{id}/parse-file`
+  → **该项目下的人**（user_project_roles 里该项目有任一角色）都能改，admin 直通
+  （`require_project_member`）。节点级路由的项目不在路径上，按节点反查归属项目
+  （`_require_node_project_member`）。只靠前端藏按钮是拦不住的（接口可直连），
+  闸门必须落在这里。
+
+  但**全局字段的定义**（project_id 为空的那批行）不属于任何项目，改它等于改全体项目：
+  这一层由 Service 层拦（`info_node_service` 对全局节点抛 403「全局字段定义请在
+  「详情模板」里修改」），项目成员只能动本项目自己增补的节点。
+
+  详情模板（`/template`：全局字段定义，改一次全体项目生效）→ 只有全局角色
+  **开发者 / 超级管理员** 或 admin 能读能改，判据见 permission_service 的
+  `_GLOBAL_ROLE_DERIVED_PERMISSIONS`（派生出权限码 `PERM_PROJECT_INFO_TEMPLATE`，
+  后端 require_permission 与前端 hasPermission 读同一个码）。
 
   值类写接口 = 填「项目数据」：`PUT /nodes/{id}/value`
   → 任何登录用户都能写，且只能写**已存在节点**的值，不能改结构、不能加节点。
-  普通用户要记表外信息，走 `POST /projects/{id}/custom-nodes`——即「增补信息」，
-  任何节点下都能加（层数 ≤ 4），全局定义不受影响。
+  要记表外信息，走 `POST /projects/{id}/custom-nodes`——即「增补信息」，
+  任何节点下都能加（层数 ≤ 4），不动全局定义，任何登录用户可用。
 
-  读接口（树 / 历史 / 关注 / 动态 / 模板读取）沿用网关管控，不额外鉴权：
+  读接口（树 / 历史 / 关注 / 动态）沿用网关管控，不额外鉴权：
   普通用户本来就要看项目信息。
 
 性能约定：除 parse-file（需 await 大模型调用）外，本组路由均为同步 def——
@@ -26,8 +36,16 @@ Service 层是同步 SQLAlchemy，async def 里跑同步 DB 会阻塞事件循�
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from typing import Dict, List, Optional, Any
 from pydantic import BaseModel, Field
-from app.modules.admin.api.auth import get_request_actor_optional
-from app.modules.admin.api.permissions import get_current_admin_user
+from app.modules.admin.api.auth import (
+    get_current_active_user_from_token,
+    get_request_actor_optional,
+    require_permission,
+)
+from app.services.permission_service import PERM_PROJECT_INFO_TEMPLATE
+from app.modules.admin.api.permissions import (
+    is_project_member_or_admin,
+    require_project_member,
+)
 from app.modules.admin.services.info_node_service import info_node_service
 from app.modules.admin.services.info_node_change_service import info_node_change_service
 from app.modules.admin.services.info_node_mark_service import info_node_mark_service
@@ -39,7 +57,7 @@ from app.models.delivery import PROJECT_INFO_VALUE_TYPES
 # ── 请求模型 ───────────────────────────────────────────
 
 class InfoNodeCreate(BaseModel):
-    """增补自定义字段（管理员在本项目范围内新增，不动全局模板）。"""
+    """增补自定义字段（在本项目范围内新增，不动全局模板）。"""
     parent_id: Optional[str] = Field(None, description="父节点ID, NULL=最外层")
     title: Optional[str] = Field(None, description="节点名称")
     node_name: Optional[str] = Field(None, description="节点名称（与 title 等价）")
@@ -57,8 +75,8 @@ class InfoNodeUpdate(BaseModel):
     sort_order: Optional[int] = None
     required: Optional[bool] = None
     allow_custom: Optional[bool] = None
-    options: Optional[List[str]] = Field(None, description="下拉选项（字段定义，仅管理员）")
-    titleOptions: Optional[List[str]] = Field(None, description="标题备选项（字段定义，仅管理员）")
+    options: Optional[List[str]] = Field(None, description="下拉选项（字段定义，只对本项目增补的节点生效）")
+    titleOptions: Optional[List[str]] = Field(None, description="标题备选项（字段定义，只对本项目增补的节点生效）")
 
 
 class InfoNodeMove(BaseModel):
@@ -94,6 +112,29 @@ def _resolve_value_type(content_type: Optional[str], value_type: Optional[str]) 
     return "text"
 
 
+def _require_node_project_member(
+    node_id: str,
+    current_user: Dict[str, Any] = Depends(get_current_active_user_from_token),
+) -> Dict[str, Any]:
+    """节点级路由（/nodes/{id}）的闸门：按节点反查它属于哪个项目，再判是不是这个项目下的人。
+
+    全局字段（project_id 为空）不归任何项目管：这里放行，交给 Service 层按原口径
+    回 403「全局字段定义请在「详情模板」里修改」——在闸门里拦会抛一个语焉不详的越权错，
+    而真正的原因是这个字段属于模板。
+    """
+    node = info_node_service.get_node(node_id)
+    if not node:
+        raise HTTPException(status_code=404, detail="节点不存在")
+    project_id = node.get("project_id")
+    if project_id and not is_project_member_or_admin(current_user, project_id):
+        raise HTTPException(status_code=403, detail="只有该项目下的人员可以编辑项目信息树")
+    return current_user
+
+
+# 详情模板（全局字段定义，改一次全体项目生效）：全局角色 开发者 / 超级管理员 或 admin
+require_template_editor = require_permission(PERM_PROJECT_INFO_TEMPLATE)
+
+
 # ── 路由 ───────────────────────────────────────────────
 
 info_node_router = APIRouter(prefix="/info-nodes", tags=["admin-info-nodes"])
@@ -110,14 +151,15 @@ def get_info_tree(project_id: str):
     return info_node_service.get_tree(project_id)
 
 
-@info_node_router.post("/projects/{project_id}", summary="增补信息节点（仅管理员）", status_code=201)
+@info_node_router.post("/projects/{project_id}", summary="增补信息节点（项目成员）", status_code=201)
 def create_info_node(project_id: str, node: InfoNodeCreate,
-                     current_user: Dict[str, Any] = Depends(get_current_admin_user),
+                     current_user: Dict[str, Any] = Depends(require_project_member),
                      actor: Dict[str, Optional[str]] = Depends(get_request_actor_optional)):
     """在某项目范围内增补一个自定义字段（不动全局模板，别的项目看不到）。
 
-    普通用户请走 /custom-nodes——那条路径只改本项目、且限 4 层，
-    本接口假定调用者有意在项目里直接加字段。
+    与 /custom-nodes 的区别：这条路径可以在**任意层级**加（含最外层根节点，
+    编辑页的「新标签」走这里），也不限 4 层以外的额外规则；/custom-nodes 必须指定
+    父节点且层数 ≤ 4。两条路都只动本项目。
     """
     name = node.node_name or node.title
     if not name or not name.strip():
@@ -197,9 +239,9 @@ def set_info_node_value(node_id: str, payload: InfoNodeValueWrite,
         raise HTTPException(status_code=400, detail=str(exc))
 
 
-@info_node_router.put("/nodes/{node_id}", summary="更新节点定义（仅管理员）")
+@info_node_router.put("/nodes/{node_id}", summary="更新节点定义（项目成员）")
 def update_info_node(node_id: str, update: InfoNodeUpdate,
-                     current_user: Dict[str, Any] = Depends(get_current_admin_user),
+                     current_user: Dict[str, Any] = Depends(_require_node_project_member),
                      actor: Dict[str, Optional[str]] = Depends(get_request_actor_optional)):
     """改节点定义（名称 / 类型 / 排序 / 是否允许增补）。
 
@@ -228,9 +270,9 @@ def update_info_node(node_id: str, update: InfoNodeUpdate,
         raise HTTPException(status_code=400, detail=str(exc))
 
 
-@info_node_router.patch("/nodes/{node_id}/move", summary="移动节点（仅管理员）")
+@info_node_router.patch("/nodes/{node_id}/move", summary="移动节点（项目成员）")
 def move_info_node(node_id: str, move: InfoNodeMove,
-                   current_user: Dict[str, Any] = Depends(get_current_admin_user),
+                   current_user: Dict[str, Any] = Depends(_require_node_project_member),
                    actor: Dict[str, Optional[str]] = Depends(get_request_actor_optional)):
     """把本项目增补的节点移到新父节点下（拖拽排序）。全局字段的位置由模板决定。"""
     try:
@@ -247,9 +289,9 @@ def move_info_node(node_id: str, move: InfoNodeMove,
         raise HTTPException(status_code=400, detail=str(exc))
 
 
-@info_node_router.delete("/nodes/{node_id}", summary="删除节点(含子树，仅管理员)")
+@info_node_router.delete("/nodes/{node_id}", summary="删除节点(含子树，项目成员)")
 def delete_info_node(node_id: str,
-                     current_user: Dict[str, Any] = Depends(get_current_admin_user),
+                     current_user: Dict[str, Any] = Depends(_require_node_project_member),
                      actor: Dict[str, Optional[str]] = Depends(get_request_actor_optional)):
     """删除本项目增补的节点及其子树（连带其值与关注）。
 
@@ -271,9 +313,9 @@ def delete_info_node(node_id: str,
     return {"detail": "已删除节点及其子树"}
 
 
-@info_node_router.post("/projects/{project_id}/import", summary="批量导入信息树（仅管理员）")
+@info_node_router.post("/projects/{project_id}/import", summary="批量导入信息树（项目成员）")
 def import_info_tree(project_id: str, data: InfoNodeImport,
-                     current_user: Dict[str, Any] = Depends(get_current_admin_user),
+                     current_user: Dict[str, Any] = Depends(require_project_member),
                      actor: Dict[str, Optional[str]] = Depends(get_request_actor_optional)):
     """把一棵信息树导入为**本项目的增补节点**（只增不改不删），返回新增数量。
 
@@ -390,13 +432,18 @@ def get_project_activity(project_id: str,
 
 
 @info_node_router.post("/projects/{project_id}/parse-file",
-                       summary="AI 识别导入文件（预览，不落库）")
-async def parse_import_file(project_id: str, file: UploadFile = File(...)):
+                       summary="AI 识别导入文件（预览，不落库；项目成员）")
+async def parse_import_file(project_id: str, file: UploadFile = File(...),
+                            current_user: Dict[str, Any] = Depends(require_project_member)):
     """上传 Word/Markdown/Excel/文本，由大模型（摇人同款，默认 DeepSeek flash）识别其中
     的项目信息，与现有节点匹配后按「将填写 / 将覆盖 / 未匹配到节点」三类返回预览。
 
     本接口只读不写：用户在前端勾选确认后，由前端逐节点调用值写入接口落库。
     未识别到信息时三个数组均为空。错误约定：400=文件/状态问题，503=AI 未配置或调用失败。
+
+    鉴权：识别要读整棵信息树、又要花大模型调用，所以归到「文件导入」这一整套里，
+    与落库同门槛——只有该项目下的人能调（只读身份不构成放开的理由：消耗的是全平台的
+    AI 配额，且会把项目信息回显给调用方）。
     """
     data = await file.read()
     try:
@@ -407,10 +454,10 @@ async def parse_import_file(project_id: str, file: UploadFile = File(...)):
         raise HTTPException(status_code=503, detail=str(exc))
 
 
-# ── 详情模板（管理员维护全局字段定义） ────────────────────
+# ── 详情模板（全局字段定义）：全局角色 开发者 / 超级管理员 维护 ──
 
-@info_node_router.get("/template", summary="获取项目详情模板（仅管理员）")
-def get_info_template(current_user: Dict[str, Any] = Depends(get_current_admin_user)):
+@info_node_router.get("/template", summary="获取项目详情模板（开发者/超级管理员）")
+def get_info_template(current_user: Dict[str, Any] = require_template_editor):
     """返回全局字段定义（project_info_node 中 project_id 为 NULL 的那部分）与项目数量。
 
     返回字段：nodes（节点树，含稳定 id）/ name / updated_at / updated_by /
@@ -419,10 +466,10 @@ def get_info_template(current_user: Dict[str, Any] = Depends(get_current_admin_u
     return info_template_service.get_template()
 
 
-@info_node_router.post("/template", summary="保存项目详情模板（仅管理员）")
+@info_node_router.post("/template", summary="保存项目详情模板（开发者/超级管理员）")
 def save_info_template(
     payload: InfoTemplateSave,
-    current_user: Dict[str, Any] = Depends(get_current_admin_user),
+    current_user: Dict[str, Any] = require_template_editor,
 ):
     """保存全局字段定义。**保存即对全体项目生效**（项目不再持有节点副本，无需同步）。
 

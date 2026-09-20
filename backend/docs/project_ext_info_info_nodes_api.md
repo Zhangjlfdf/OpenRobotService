@@ -235,14 +235,25 @@ Service 逻辑（`update_project`）：
 - `ProjectUpdate`：新增 `ext_info`、`version: Optional[int]`
 - `ProjectResponse`：新增 `ext_info`、`version: int = 1`
 
-## 五、项目信息树接口（新增，13 个）
+## 五、项目信息树接口（新增，15 个）
 
 路由文件：[info_nodes.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/api/info_nodes.py)
 Service：[info_node_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/services/info_node_service.py)、[info_node_import_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/services/info_node_import_service.py)（仅 5.8）
 路由前缀：`/api/admin/info-nodes`，tag：`admin-info-nodes`
 
-> 鉴权现状：本组路由暂未挂载 `security` 依赖（与项目接口的 DEBUG 开关鉴权不同），当前依赖部署侧网关管控，后续如需端级鉴权再补充。
-> 5.2～5.7 六个写接口额外挂了 `get_request_actor_optional`（**尽力识别、不拦截**）：带 `Authorization: Bearer` 时把操作人记进操作记录（2.4），不带/解析失败按匿名记录，行为与从前一致。
+> 鉴权口径（2026-09-20 起，见 `api/info_nodes.py` 顶部注释与 `tests/test_info_nodes_authz.py`）：
+>
+> | 接口 | 谁能调 |
+> |------|--------|
+> | 结构类：5.2 创建节点、5.6 批量导入、5.8 AI 识别、5.3 更新节点、5.4 移动、5.5 删除 | **该项目下的人**（`user_project_roles` 里该项目有任一角色）或 admin — `require_project_member` |
+> | 5.x 节点级路由（`/nodes/{node_id}`）| 同上，项目不在路径上，按节点反查归属项目（`_require_node_project_member`）|
+> | 5.1 树查询、5.9/5.10 历史、5.11～5.13 关注与动态 | 沿用网关管控，不额外鉴权（普通用户本来就要看项目信息）|
+> | `PUT /nodes/{id}/value` 值写入 | 任何登录用户（只能写已存在节点的值，不改结构）|
+> | `POST /projects/{id}/custom-nodes` 增补信息 | 任何登录用户（限父节点必填、层数 ≤ 4）|
+> | `GET/POST /template` 详情模板 | 模板权限码 `frontend:admin:project-info-template:show` 或 admin — 由**全局角色**「开发者 / 超级管理员」派生（`permission_service._GLOBAL_ROLE_DERIVED_PERMISSIONS`）|
+>
+> **全局字段定义**（`project_id` 为空的行）不属于任何项目，改它等于改全体项目：节点级闸门对它放行，由 Service 层回 `403 全局字段定义请在「详情模板」里修改`——真正的原因归 Service 说，闸门不拿「越权」搪塞。
+> 写接口额外挂了 `get_request_actor_optional`（**尽力识别、不拦截**）：带 `Authorization: Bearer` 时把操作人记进操作记录（2.4），不带/解析失败按匿名记录。
 
 节点对象标准字段：`id, project_id, parent_id, title, content_type, value, sort_order, created_at, updated_at`；树查询时每节点额外含 `children` 数组。
 
@@ -252,30 +263,33 @@ Service：[info_node_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/ap
 - Service 逻辑：一次查出该项目全部节点并按 `sort_order` 排序；在 Python 内构建 `parent_id → 子节点` 映射，从 `parent_id IS NULL` 递归组装 children；空树返回 `[]`。项目节点量级为百级，不使用递归 CTE 以兼容 MySQL 版本。
 - 响应：`200`，节点数组（根节点列表），每节点含 `children`。
 
-### 5.2 POST /info-nodes/projects/{project_id} —— 创建节点
+### 5.2 POST /info-nodes/projects/{project_id} —— 创建节点（增补，仅本项目可见）
 
+- 鉴权：**该项目下的人**或 admin（`require_project_member`）；不是这个项目的人 → `403 只有该项目下的人员可以编辑项目信息树`。
 - 状态码：`201`
 - 请求体 `InfoNodeCreate`：
 
 | 字段 | 类型 | 必填 | 默认 | 说明 |
 |------|------|------|------|------|
-| `id` | string | 是 | —— | 客户端生成的 UUID，供后续稳定引用 |
-| `parent_id` | string \| null | 否 | null | 父节点 ID，null 为根节点 |
-| `title` | string | 否 | "未命名节点" | 标题 |
-| `content_type` | string | 否 | "text" | 内容类型 |
-| `value` | string \| null | 否 | null | 节点值 |
-| `sort_order` | int | 否 | 0 | 同级排序 |
+| `parent_id` | string \| null | 否 | null | 父节点 ID，null 为最外层（编辑页的「新标签」走这里）|
+| `title` / `node_name` | string | 是（二者取一）| —— | 节点名称 |
+| `content_type` | string | 否 | "text" | 内容类型：text/select/file/image |
+| `value_type` | string | 否 | —— | 值类型，优先于 `content_type` |
+| `node_key` | string | 否 | 自动生成 | 节点外部标识 |
+| `sort_order` | int | 否 | 末尾 | 同级排序 |
 
-- Service 逻辑：补齐两个时间戳字符串，直接插入单行后 refresh 返回。当前不校验 parent_id 是否存在/同项目，由调用方保证。
+- Service 逻辑：在**本项目范围内**增补一个自定义节点（`project_id` 落成该项目，不动全局模板、别的项目看不到），逐级插入后返回节点。可加在任意层级（这条路径不限 4 层；限层的是下方的 `/custom-nodes`）。
 
 ### 5.3 PUT /info-nodes/nodes/{node_id} —— 更新节点
 
-- 请求体 `InfoNodeUpdate`：`title` / `content_type` / `value` / `sort_order` 均可选；**不能改 parent_id**（换父请用 move 接口）。
+- 鉴权：按节点反查归属项目，**该项目下的人**或 admin（`_require_node_project_member`）；全局字段（`project_id` 为空）由闸门放行、Service 回 `403 全局字段定义请在「详情模板」里修改`；别的项目的增补节点 → `403 只有该项目下的人员可以编辑项目信息树`。
+- 请求体 `InfoNodeUpdate`：`title` / `content_type` / `sort_order` / `required` / `allow_custom` / `options` / `titleOptions` 均可选；**不能改 parent_id**（换父请用 move 接口），`options`/`titleOptions` 只对本项目增补的节点生效。
 - 业务规则：请求体剔除值为 None 的字段后若为空 → `400 {detail: "无更新字段"}`。
 - Service 逻辑：按 id 查节点，不存在返回 None → `404 {detail: "节点不存在"}`；仅对白名单四字段逐个赋值，刷新 `updated_at`，提交返回更新后节点。
 
 ### 5.4 PATCH /info-nodes/nodes/{node_id}/move —— 移动/排序节点
 
+- 鉴权：同 5.3（按节点归属项目判是否本项目的人）。
 - 请求体 `InfoNodeMove`：
 
 | 字段 | 类型 | 必填 | 说明 |
@@ -288,18 +302,17 @@ Service：[info_node_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/ap
 
 ### 5.5 DELETE /info-nodes/nodes/{node_id} —— 删除节点（含整棵子树）
 
+- 鉴权：同 5.3；全局字段不在此删除（它属于模板，停用请在 `/template` 保存时移除）。
 - Service 逻辑：先用**递归 CTE**（`WITH RECURSIVE`，MySQL 8）查出该节点及全部后代 ID；结果为空（节点不存在）→ 404；否则按 ID 集合批量删除并提交。
 - 响应：`200 {"detail": "已删除节点及其子树"}`。
 
 ### 5.6 POST /info-nodes/projects/{project_id}/import —— 批量导入信息树
 
 - 请求体 `InfoNodeImport`：`{"nodes": [ {id, title, content_type?, value?, sort_order?, children?: [...]} ]}`，递归嵌套。
-- Service 逻辑（同一事务内）：
-  1. 先物理删除该项目下的全部旧节点（替换式导入）；
-  2. 递归展平入参为行列表（parent_id 在展平过程中按层级挂上，缺省值同创建）；
-  3. `bulk_save_objects` 批量插入并提交。
-- 响应：`200 {"imported": <节点总数>}`。
+- Service 逻辑：**纯增补**——递归展平入参为行列表（parent_id 在展平过程中按层级挂上，缺省值同创建）后批量插入；同 `node_key` 的节点已存在就跳过，不动全局定义、不动已有值。
+- 响应：`200 {"imported": <新增节点数>}`。
 - 适用场景：从 a.json 等外部信息树整体迁入。
+- 历史：旧实现是「先清空该项目全部旧节点再导入」；新结构下项目不再持有节点副本，那等于抹掉项目已填的全部信息，故改为只增不改不删。
 
 ### 5.7 POST /info-nodes/projects/{project_id}/import-template —— 按项目模板重建信息树
 
@@ -311,6 +324,7 @@ Service：[info_node_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/ap
 
 ### 5.8 POST /info-nodes/projects/{project_id}/parse-file —— AI 识别导入文件（预览，**不落库**）
 
+- 鉴权：与落库同门槛——**该项目下的人**或 admin。识别要读整棵树、又要花全平台的模型配额，且会把项目信息回显给调用方，只读身份不构成放开的理由。
 - 请求：`multipart/form-data`，字段 `file`（单个文件，≤10MB）。
 - 支持格式与抽取方式（全部在后端完成，前端不引解析库）：
 
@@ -399,7 +413,20 @@ Service：[info_node_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/ap
   "action": "update", "detail": "把内容从「空」改为「中力」", "created_at": "2026-09-16 14:42:13" } ] }
 ```
 
-- 说明：**前端只展示 `root_title · node_title` + `detail`**，不展示 `created_at` 与人员（用户明确要求「只展示该节点的变动内容」）；`created_at` / `action` 仍返回，供将来扩展。`root_title` 沿当前树 `parent_id` 走到根（纯函数 `root_title_of`，链断/成环/超 32 层回退为节点自身标题）。取消关注后该节点的条目立即从动态里消失。
+- 说明：**前端只展示 `root_title · node_title` + `detail`**，不展示 `created_at` 与人员（用户明确要求「只展示该节点的变动内容」）；`created_at` / `action` 仍返回，供将来扩展。`root_title` 沿当前树 `parent_id` 走到根（纯函数 `root_title_of`，链断/成环/超 32 层回退为节点自身标题）。取消关注后该节点的动态立即从动态里消失。
+
+### 5.14 POST /info-nodes/projects/{project_id}/custom-nodes —— 增补信息（登录用户）
+
+- 鉴权：**任何登录用户**（没有项目成员闸门）。它与 5.2 同性质（都给这棵树加本项目自己的节点），但 5.2 已在 2026-09-20 收紧为「本项目成员或 admin」，这一条没跟着动——是**既有口径**，不是本次的疏漏；要收紧只需给该路由挂 `require_project_member`（`tests/test_info_nodes_authz.py::test_custom_nodes_endpoint_is_still_login_only` 钉住了当前行为，改的时候改它而不是改坏它）。
+- 请求体同 `InfoNodeCreate`，但 `parent_id` **必填**（`400 增补信息必须指定要挂在哪个节点下`），层级 ≤ 4（`PROJECT_INFO_MAX_DEPTH`），`node_key` 一律由服务端生成。
+- 响应：`201`，新建节点。适用场景：普通用户在某节点下记一条表外信息。
+
+### 5.15 GET / POST /info-nodes/template —— 详情模板（全局字段定义）
+
+- 鉴权：模板权限码 `frontend:admin:project-info-template:show` 或 admin。该码不是人工勾的，而是 `permission_service._GLOBAL_ROLE_DERIVED_PERMISSIONS` 按**全局角色**（`user_project_roles.project_id IS NULL`）的名字「开发者 / 超级管理员」派生、随登录态下发的——后端 `require_permission` 与前端 `hasPermission` 读同一个码，两端判据不会漂。
+- `GET`：返回全局字段定义（`project_info_node` 中 `project_id IS NULL` 的那部分）+ `name` / `updated_at` / `updated_by` / `project_count` / `source`（恒为 `db`）。前端**未持有该码时直接不发请求**。
+- `POST`：保存全局字段定义，**保存即对全体项目生效**（项目不再持有节点副本，无需同步）。`dry_run=true` 只预览影响面；否则校验后更新/新增/停用全局节点行。模板里移除的字段是**停用**（`status='disabled'`）而非删除，项目已填的值留在 `project_info_value`，字段加回来即恢复。校验失败 → `400`。
+- 与 5.2/5.14 的分界：改「全体项目共用的字段定义」走这里；改「我这个项目自己的树」走 5.2/5.14。节点级接口（5.3～5.5）碰到全局字段行一律 `403 全局字段定义请在「详情模板」里修改`。
 
 ## 六、并发与一致性小结
 
@@ -416,6 +443,7 @@ Service：[info_node_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/ap
 |--------|------|------|
 | 400 | 更新节点时无任何有效字段；授权接口 type 参数非法；AI 摘要时信息树无节点 | info-nodes / licenses / projects（ai-summary） |
 | 401 | 未提供/无效 token、token 缺用户信息（/me 类接口）；关注/项目动态接口识别不到登录人（5.11～5.13，关注列表按人隔离） | projects、info-nodes |
+| 403 | 不是这个项目的人动结构（5.2～5.6、5.8）：`只有该项目下的人员可以编辑项目信息树`；改全局字段定义（5.3～5.5）：`全局字段定义请在「详情模板」里修改`；没有模板权限码碰 `/template`：`权限不足` | info-nodes |
 | 404 | 项目/节点不存在（含软删除项目）；对不存在的节点点关注（5.12） | projects、info-nodes |
 | 409 | 项目编号/名称重复；**乐观锁版本冲突** | projects（PUT） |
 | 422 | 请求体字段非法：`changes` 的 `limit` 越界（1～500）、`limit` 非整数 | info-nodes（changes） |
@@ -432,7 +460,7 @@ Service：[info_node_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/ap
 | API | [api/projects.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/api/projects.py)、[api/info_nodes.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/api/info_nodes.py) |
 | Service | [services/project_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/services/project_service.py)、[services/info_node_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/services/info_node_service.py)、[services/info_node_import_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/services/info_node_import_service.py)、[services/project_ai_summary_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/services/project_ai_summary_service.py)（4.4）、[services/info_node_change_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/services/info_node_change_service.py)（2.4 / 5.9 / 5.10，另被 info_node_service、info_template_service 调用写记录）、[services/info_node_mark_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/services/info_node_mark_service.py)（2.5 / 5.11～5.13，另被 info_node_service、info_template_service 调用清理标注） |
 | 公共组件 | [app/core/llm_client.py](file:///d:/CODE/9_14/OpenRobotService/backend/app/core/llm_client.py)（backend 自维护的 LLM 客户端：DeepSeek/OpenAI 兼容非流式补全 + 网络重试，供 4.4 AI 摘要等 backend 大模型功能共用；密钥/模型与「文件识别」同源于 `settings`） |
-| 测试 | [tests/test_info_node_import.py](file:///d:/CODE/9_9/OpenRobotService/backend/tests/test_info_node_import.py)（文本抽取/目录与 prompt 构造/LLM 返回解析/0.9 阈值匹配/select 校验/归属解析，13 用例）、[tests/test_project_ai_summary.py](file:///d:/CODE/9_9/OpenRobotService/backend/tests/test_project_ai_summary.py)（节点内容解码/信息树渲染/prompt 组装/输出清洗，10 用例）、[tests/test_info_node_change.py](file:///d:/CODE/9_9/OpenRobotService/backend/tests/test_info_node_change.py)（节点值→人话/逐字段变动文案/各操作类型文案/记录 id 时间有序，26 用例）、[tests/test_info_node_mark.py](file:///d:/CODE/9_9/OpenRobotService/backend/tests/test_info_node_mark.py)（根标题回溯/关注切换按人过滤（假 session）/标注清理，15 用例） |
+| 测试 | [tests/test_info_nodes_authz.py](file:///d:/CODE/9_9/OpenRobotService/backend/tests/test_info_nodes_authz.py)（信息树写接口的鉴权闸门：项目成员放行/非成员全拦/节点级按归属项目判/全局字段放行给 Service/值写入与增补信息仍是登录即可/详情模板要权限码，11 用例）、[tests/test_info_node_import.py](file:///d:/CODE/9_9/OpenRobotService/backend/tests/test_info_node_import.py)（文本抽取/目录与 prompt 构造/LLM 返回解析/0.9 阈值匹配/select 校验/归属解析，13 用例）、[tests/test_project_ai_summary.py](file:///d:/CODE/9_9/OpenRobotService/backend/tests/test_project_ai_summary.py)（节点内容解码/信息树渲染/prompt 组装/输出清洗，10 用例）、[tests/test_info_node_change.py](file:///d:/CODE/9_9/OpenRobotService/backend/tests/test_info_node_change.py)（节点值→人话/逐字段变动文案/各操作类型文案/记录 id 时间有序，26 用例）、[tests/test_info_node_mark.py](file:///d:/CODE/9_9/OpenRobotService/backend/tests/test_info_node_mark.py)（根标题回溯/关注切换按人过滤（假 session）/标注清理，15 用例） |
 | 模板 | [config/project_templates/default.yaml](file:///d:/CODE/9_9/OpenRobotService/backend/app/config/project_templates/default.yaml) |
 | 路由挂载 | [modules/admin/__init__.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/__init__.py) |
 

@@ -52,6 +52,15 @@ export const PERMISSION_RESOURCE_READ = 'backend:resource:base:read';
 /** 资源管理：下载资源/获取分享链接（含缩略图、预览 URL） */
 export const PERMISSION_RESOURCE_DOWNLOAD = 'backend:resource:base:download';
 
+/**
+ * 项目详情模板（全局字段定义：改一次全体项目生效）的编辑 + 可见权限码。
+ *
+ * 它不是「权限管理」里手工勾的，而是后端按**全局角色**（开发者 / 超级管理员）派生后
+ * 随登录态下发的（backend permission_service._GLOBAL_ROLE_DERIVED_PERMISSIONS）；
+ * 后端 require_permission 与这里读的是同一个码，所以两端判据不会漂。
+ */
+export const PERM_PROJECT_INFO_TEMPLATE = 'frontend:admin:project-info-template:show';
+
 export interface AuthState {
   isLoggedIn: boolean;
   username: string;

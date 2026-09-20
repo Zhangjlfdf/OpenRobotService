@@ -1,11 +1,15 @@
 // 编辑项目信息 —— 项目信息树编辑页（对照原型 routes/projects.$id_.edit.tsx + components/tree/ProjectInformationTree.tsx）。
 //
-// **权限（本次改造的核心）**：字段定义与项目值分开，页面上的操作也分两类——
-//   管理员（permissions 含 'admin'）：改名 / 增删节点 / 改内容形式 / 长按拖动 / 文件导入 /
-//     详情模板；节点定义改的是「全局一份」的模板，改一次全体项目生效。
-//   普通用户：**只能填值**（文字、下拉、附件），节点编辑与节点历史照旧保留可看可点，
-//     但改不了结构——要多记表外信息就点「增补信息」，在允许增补的节点下加本项目自己的字段。
-//   后端按接口口径强制：结构类接口 Depends(get_current_admin_user)，值写入接口只认已存在节点。
+// **权限**：字段定义与项目值分开，页面上的操作也分三类——
+//   这个项目下的人（roles 里有本项目，或 admin）：改名 / 增删节点 / 改内容形式 / 长按拖动 /
+//     文件导入落库。改的都是**本项目自己的增补节点**；全局字段的定义改不动（后端 403），
+//     那属于详情模板。
+//   其他人：**只能填值**（文字、下拉、附件），节点编辑与节点历史照旧保留可看可点，
+//     但改不了结构——要多记表外信息就点「增补信息」，在任何节点下加本项目自己的字段。
+//   详情模板（全局字段定义，改一次全体项目生效）：只有全局角色 开发者 / 超级管理员（或 admin）
+//     看得见入口，判据是 permissions 里的 PERM_PROJECT_INFO_TEMPLATE。
+//   后端按接口口径强制：结构类接口 require_project_member / _require_node_project_member，
+//   模板走 require_template_editor，值写入接口只认已存在节点。
 //   所以这里除了藏按钮，saveValue 也必须走值写入接口（否则普通用户一保存就 403）。
 //
 // 每行的「历史」看该节点的操作记录（时间 / 人员 / 变动；子节点被删除时记录在父节点下）。
@@ -21,7 +25,7 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { BackTop, Input, Navbar, Popup, Toast } from 'tdesign-mobile-react';
 import { createRequest } from '@/api/client';
 import API_CONFIG from '@/config/api';
-import { useAuthStore } from '@/stores/auth';
+import { useAuthStore, PERM_PROJECT_INFO_TEMPLATE } from '@/stores/auth';
 import ProjectInfoFileImport from './ProjectInfoFileImport';
 import {
   MacChevronDown, MacChevronRight, MacChevronsDownUp, MacChevronsUpDown, MacDownload, MacFileText,
@@ -83,9 +87,19 @@ export default function ProjectInfoEdit() {
   const { id = '' } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const username = useAuthStore((s) => s.username);
-  // 管理员判据与后端 get_current_admin_user 一致：结构类接口只认管理员，
-  // 普通用户这边只保留「填值 + 看历史 + 增补信息」。
+  // 结构类写接口的判据与后端 require_project_member 对齐：**在这个项目下的人**（或 admin）都能改本项目的树。
+  // 登录态里的 roles 就是 user_project_roles 那张表（键=项目ID，'global' 是全局角色不算项目成员），
+  // 与后端 PermissionService.is_project_member 同一份数据。
+  const projectRoles = useAuthStore((s) => s.roles);
   const isAdmin = useAuthStore((s) => Array.isArray(s.permissions) && s.permissions.includes('admin'));
+  const isProjectMember = useMemo(
+    () => Boolean(id) && Object.keys(projectRoles ?? {}).some((key) => key === id && key !== 'global'),
+    [projectRoles, id],
+  );
+  /** 能改本项目的信息树：增删节点 / 改名 / 改类型 / 拖动 / 文件导入落库 */
+  const canEditTree = isAdmin || isProjectMember;
+  // 详情模板是全局字段定义（改一次全体项目生效），只给全局角色 开发者 / 超级管理员（判据见 stores/auth）
+  const canEditTemplate = useAuthStore((s) => s.hasPermission(PERM_PROJECT_INFO_TEMPLATE));
   const request = useMemo(() => createRequest(API_CONFIG.ADMIN.BASE_URL, 'Admin'), []);
 
   const [nodes, setNodes] = useState<ProjectInfoNode[]>([]);
@@ -246,7 +260,11 @@ export default function ProjectInfoEdit() {
     return result;
   };
 
-  /** 新增节点：管理员加的是（全局）字段定义，普通用户走「增补信息」加本项目自己的字段 */
+  /** 新增节点（「新标签」/ 某节点下的 +）：能改树的人走 /projects/{id}，加的都是**本项目自己**的
+   *  节点（后端记成 project_id 非空的增补节点），不动全局字段定义——改全局定义去「详情模板」。
+   *  custom=true 是低门槛的「增补信息」道路（必带父节点、≤4 层），界面上由 confirmCustomInfo 走，
+   *  这里默认 false。 */
+
   const addNode = async (parent: ProjectInfoNode | null, custom = false) => {
     if (parent && depthOf(parent) >= PROJECT_INFO_MAX_DEPTH) {
       Toast({ message: '信息维度过深，建议拆分或合并', theme: 'warning' });
@@ -474,7 +492,7 @@ export default function ProjectInfoEdit() {
 
   const rowProps = {
     byParent, collapsedIds, editingId, draggingId, dropTarget, uploadingNodeId,
-    historyDotIds, isAdmin,
+    historyDotIds, canEdit: canEditTree,
     onToggle: (nodeId: string) => setCollapsedIds((current) => {
       const next = new Set(current);
       if (next.has(nodeId)) next.delete(nodeId); else next.add(nodeId);
@@ -511,7 +529,7 @@ export default function ProjectInfoEdit() {
             <div className="mac-info__actions">
               <button type="button" className="mac-btn mac-btn--ghost mac-info__iconbtn" onClick={expandAll} title="全部展开" aria-label="全部展开"><MacChevronsUpDown size={15} /></button>
               <button type="button" className="mac-btn mac-btn--ghost mac-info__iconbtn" onClick={collapseAll} title="全部折叠" aria-label="全部折叠"><MacChevronsDownUp size={15} /></button>
-              {isAdmin && (
+              {canEditTemplate && (
                 <button
                   type="button"
                   className="mac-btn mac-btn--outline mac-info__act"
@@ -528,7 +546,7 @@ export default function ProjectInfoEdit() {
               >
                 <MacUpload size={13} />文件导入
               </button>
-              {isAdmin && (
+              {canEditTree && (
                 <button type="button" className="mac-btn mac-btn--primary mac-info__act" onClick={() => void addNode(null)}>
                   <MacPlus size={13} />新标签
                 </button>
@@ -548,9 +566,9 @@ export default function ProjectInfoEdit() {
             </div>
           ) : roots.length === 0 ? (
             <div className="mac-info__state">
-              {isAdmin ? '还没有信息节点，点击右上角「新标签」创建' : '信息模板还没有配置节点，请联系管理员'}
+              {canEditTree ? '还没有信息节点，点击右上角「新标签」创建' : '信息模板还没有配置节点，请联系管理员'}
               <div className="mac-info__state-sub">
-                {isAdmin ? '保存后对所有项目生效' : '管理员配置好模板后，这里就能填写项目信息'}
+                {canEditTree ? '只对这个项目生效，不影响别的项目' : '管理员配置好模板后，这里就能填写项目信息'}
               </div>
             </div>
           ) : (
@@ -642,6 +660,7 @@ export default function ProjectInfoEdit() {
         onClose={() => setFileImportOpen(false)}
         projectId={id}
         nodes={nodes}
+        canEditTree={canEditTree}
         onApplied={() => { void reload(); void syncHistoryMeta(); }}
       />
 
@@ -764,8 +783,8 @@ interface InfoRowProps {
   uploadingNodeId: string | null;
   /** 历史按钮右上角要出小红点的节点 id 集合（自身有未读记录，或下辖子树里有） */
   historyDotIds: Set<string>;
-  /** 结构类操作（改名/增删/改类型/拖动）只对管理员开放；普通用户只有填值、历史、增补信息 */
-  isAdmin: boolean;
+  /** 结构类操作（改名/增删/改类型/拖动）：本项目成员（或 admin）可改；别人只有填值、历史、增补信息 */
+  canEdit: boolean;
   onToggle: (id: string) => void;
   onEdit: (id: string | null) => void;
   onAdd: (parent: ProjectInfoNode, custom?: boolean) => void;
@@ -809,7 +828,7 @@ function InfoRow(props: InfoRowProps) {
     <div className={depth > 1 ? 'mac-info-subtree' : undefined}>
       <div data-info-node={node.id} className={classNames}>
         <div className="mac-info-row__main">
-          {props.isAdmin && node.is_custom && (
+          {props.canEdit && node.is_custom && (
             <span
               className="mac-info-row__grip"
               aria-label="长按拖动调整从属"
@@ -830,7 +849,7 @@ function InfoRow(props: InfoRowProps) {
           >
             {children.length ? (isCollapsed ? <MacChevronRight size={15} /> : <MacChevronDown size={15} />) : <span className="mac-info-row__toggle-ghost" />}
           </button>
-          {(props.isAdmin && props.editingId === node.id) ? (
+          {(props.canEdit && props.editingId === node.id) ? (
             <input
               className="mac-info-row__input"
               autoFocus
@@ -842,7 +861,7 @@ function InfoRow(props: InfoRowProps) {
               }}
               onKeyDown={(event) => { if (event.key === 'Enter') event.currentTarget.blur(); }}
             />
-          ) : (props.isAdmin && !isLeaf && titleOptions.length) ? (
+          ) : (props.canEdit && !isLeaf && titleOptions.length) ? (
             <select
               className="mac-info-row__select"
               value={titleOptions.includes(node.title) ? node.title : ''}
@@ -859,7 +878,7 @@ function InfoRow(props: InfoRowProps) {
             <span className="mac-info-row__missing" title={`${props.missingCount} 项信息未填写`}>缺 {props.missingCount}</span>
           )}
           <div className="mac-info-row__ops">
-            {props.isAdmin ? (
+            {props.canEdit ? (
               <>
                 {/* 全局字段定义改不动（后端 403，只能走「详情模板」），所以结构按钮只对本项目增补的节点出 */}
                 {node.is_custom && (
@@ -935,7 +954,7 @@ function NodeContent(props: InfoRowProps) {
           {(data.options ?? []).map((option) => <option key={option} value={option}>{option}</option>)}
         </select>
         {/* 选项属于字段定义：全局字段的选项在「详情模板」里改，这里只放本项目增补字段的 */}
-        {props.isAdmin && node.is_custom && (
+        {props.canEdit && node.is_custom && (
           <button type="button" className="mac-btn mac-btn--outline mac-info-node__manage" onClick={() => props.onOpenSelectEditor(node)}>
             管理
           </button>
