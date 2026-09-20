@@ -1427,7 +1427,7 @@ export default function TaskDetailPage() {
           );
         })()}
 
-        {/* 关联工单（无关联时不显示） */}
+        {/* 关联工单 */}
         {detail && (
           <RelationBlock
             taskId={Number(detail.id)}
@@ -1436,7 +1436,6 @@ export default function TaskDetailPage() {
             customer={detail.customer}
             canOperate={hasPermission('backend:tasks:operate')}
             blockedError={blockedError}
-            hideWhenEmpty
           />
         )}
 
