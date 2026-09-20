@@ -33,6 +33,9 @@ if HERE not in sys.path:
 import dar_segs  # noqa: E402  段首统一口径：bounds 优先 + 老窗口续聊追加（0920）
 
 ENV = os.environ.get("DAR_ENV", "test")
+# 附件图片直链前缀（与 dar_studio seg_page 同源：prod=生产站点、test=测试站点）
+IMG_BASE = (("https://usp.ep-zl.com/p" if ENV == "prod"
+             else "http://125.122.97.107/t") + "/api/call/files/")
 OUT = rf"C:/Users/PAJ26020/Desktop/export_dar/{ENV}/processed"
 SPLIT = os.path.join(OUT, "conversations_split.jsonl")
 CLS = os.path.join(OUT, "conversations_classified.jsonl")
@@ -138,6 +141,12 @@ def main():
                 "t": cls[i].get("topic", 0),
                 "tk": any(rt <= tt <= rt + WINDOW.total_seconds() * 1000
                           for tt in task_ts),
+                # 附件原图（0920：走查页有图、标注工具没有——看图标注是硬需求）。
+                # 直链=站点前缀+object_path（与 dar_studio._img_html 同源），大图/gif
+                # 不自动加载，模板里占位点击
+                "fs": [{"p": IMG_BASE + (f.get("object_path") or ""),
+                        "n": f.get("filename") or "", "s": int(f.get("size") or 0)}
+                       for f in (r.get("files") or [])],
             })
         # 人工边界覆盖初始切分：没导出过边界的会话仍按 LLM topic 展示。
         # 段首统一展开（0920）：末段已判定时老窗口续聊追加新段——走查工具里
