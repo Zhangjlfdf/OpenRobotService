@@ -78,10 +78,12 @@ MANUAL = os.path.join(DATA, "manual_segmentation.json")
 SPLIT = os.path.join(OUT, "conversations_split.jsonl")
 
 # 四表导出列（与 dar_prepare.load 的读取字段对齐；列名=服务器库实际列名）
+# messages.metadata_：项目选择题候选（前端持久化 project_choices）——
+# 0907 按钮版题面无列表，不带此列则标注记录里「用户回 3」无从对照（0920 走查反馈）
 EXPORT_TABLES = {
     "users": "id,username,name",
     "conversations": "id,user_id,title,created_at,service_ticket_id,metadata_",
-    "messages": "id,conversation_id,role,message_type,sequence,created_at,content,file_urls",
+    "messages": "id,conversation_id,role,message_type,sequence,created_at,content,file_urls,metadata_",
     "tasks": ("id,title,task_type,status,created_by,project_name,source,"
               "external_id,created_at,metadata_info"),
 }
