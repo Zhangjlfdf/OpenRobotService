@@ -88,6 +88,12 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
+      - name: Install Java and Allure CLI
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y default-jre-headless
+          npm install -g allure-commandline
+
       - name: Install automation dependencies
         run: |
           pip install -e automation/
@@ -132,18 +138,18 @@ jobs:
 
       - name: Generate Allure report
         if: always()
-        uses: simple-elf/allure-report-action@v1.7
-        with:
-          allure_results: automation/output/allure-results-ui-regression-combined
-          allure_history: automation/output/allure-history
-          keep_reports: 20
+        run: |
+          allure generate \
+            automation/output/allure-results-ui-regression-combined \
+            -o automation/output/allure-report-ui-regression \
+            --clean
 
       - name: Upload Allure report
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: allure-report-ui-regression-${{ github.run_number }}
-          path: automation/output/allure-history
+          path: automation/output/allure-report-ui-regression
           if-no-files-found: error
 
       - name: Build result summary
