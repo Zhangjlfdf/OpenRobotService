@@ -920,7 +920,10 @@ STEPS = {
                           ("--bounds-only",)),
     "l1r": lambda: step_l1_replay(),
     "retrieval": lambda: step("retrieval", "dar_retrieval_check.py"),
-    "l3": lambda: step("l3 预标", "dar_l3.py", ("--all",)),
+    # l3 预标完成后链式重生成标注版工具（0920：只跑 l3 不跑 tool，磁盘上还是
+    # tool0 的切分版 html，「打开标注工具」打开的是切分页面——用户踩实）
+    "l3": lambda: (step("l3 预标", "dar_l3.py", ("--all",)),
+                   step("tool", "build_segmentation_tool.py")),
     "tool": lambda: step("tool", "build_segmentation_tool.py"),
     "report": lambda: step_report(),
 }
