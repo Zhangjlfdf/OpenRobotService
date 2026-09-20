@@ -195,17 +195,18 @@ export async function loadInfoNodes(projectId: string): Promise<ProjectInfoNode[
 }
 
 /**
- * 增补一个节点到本项目。
- * - 普通用户（isAdmin=false）走 /custom-nodes：必须指定 parentId，
- *   任何节点下都能加（层数 ≤ 4）；这是普通用户唯一能加节点的途径。
- * - 管理员走 /projects/{id}：加的是全局字段定义。
+ * 增补一个节点到本项目（两条路都只动本项目，区别只在门槛与层级）。
+ * - `canEditTree=true`（本项目成员或 admin）走 /projects/{id}：任意层级，
+ *   含最外层根节点（编辑页的「新标签」）；这是改树结构的接口。
+ * - `canEditTree=false` 走 /custom-nodes（增补信息）：必须指定 parentId、
+ *   层数 ≤ 4，任何登录用户都能加——普通用户记表外信息的唯一途径。
  */
 export async function createInfoNode(
   projectId: string,
   parentId: string | null,
   sortOrder: number,
   title = '未命名节点',
-  isAdmin = false,
+  canEditTree = false,
   contentType: ProjectInfoContentType = 'text',
 ): Promise<ProjectInfoNode> {
   const payload = {
@@ -214,7 +215,7 @@ export async function createInfoNode(
     content_type: contentType,
     sort_order: sortOrder,
   };
-  const raw = isAdmin
+  const raw = canEditTree
     ? await createInfoNodeApi(projectId, payload)
     : await createCustomInfoNodeApi(projectId, payload);
   return decodeInfoNode(raw, parentId);

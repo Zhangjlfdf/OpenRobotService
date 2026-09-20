@@ -9,6 +9,19 @@ from app.models.organization import Company, Department
 # get_user_with_roles 结果的 TTL 缓存（秒）。权限/角色变更不频繁，60s 内复用可显著
 # 减少每请求的多次 DB 查询；变更后最多 60s 生效（用户重新登录可立即生效）。
 _USER_ROLES_CACHE_TTL = 60
+
+# ── 详情模板（全局字段定义）的编辑/可见判据 ──────────────────
+# 判据只写在这里一处：由「全局角色」（user_project_roles.project_id 为空）的角色名派生出
+# 一个权限码，塞进 get_user_with_roles 的 permissions 里。这样后端 require_permission 与
+# 前端 hasPermission 读的是同一个码，两端不必各写一份角色名——角色名以后要调整/enlarge，
+# 只改下面这张表；admin 账号（permissions 含 'admin'）照旧直通。
+PERM_PROJECT_INFO_TEMPLATE = "frontend:admin:project-info-template:show"
+
+# 「拥有哪个全局角色 → 额外获得哪些权限码」。开发者 / 超级管理员可编辑详情模板。
+_GLOBAL_ROLE_DERIVED_PERMISSIONS: Dict[str, tuple] = {
+    "开发者": (PERM_PROJECT_INFO_TEMPLATE,),
+    "超级管理员": (PERM_PROJECT_INFO_TEMPLATE,),
+}
 _user_roles_cache: Dict[str, Dict[str, Any]] = {}
 _user_roles_cache_ts: Dict[str, float] = {}
 
@@ -60,10 +73,23 @@ class PermissionService:
                 (user_project_roles.c.user_id == user_id) &
                 (user_project_roles.c.project_id == project_id)
             )).fetchall()
-            
+
             return [role.role_id for role in roles]
         finally:
             db.close()
+
+    @staticmethod
+    def is_project_member(user_id: str, project_id: str) -> bool:
+        """「在这个项目下」的判据：user_project_roles 里该项目下有任一角色。
+
+        就是「项目已关联人员」列表（db_manager.get_project_members）的同一份数据、
+        与用户管理-全局角色/项目角色分配写的是同一张表，所以两边口径不会漂。
+        注意：全局角色在库里 project_id 存的是 NULL（不是字符串 'global'），
+        因此全局角色**不**等于「每个项目的人」——传 'global' 这里恒为 False。
+        """
+        if not user_id or not project_id:
+            return False
+        return bool(PermissionService.get_user_roles_by_project(user_id, project_id))
 
     @staticmethod
     def get_all_users_roles_all_projects(user_ids: List[str]) -> Dict[str, Dict[str, List[str]]]:
@@ -252,9 +278,21 @@ class PermissionService:
                     external_credentials = {}
             
             user_roles = PermissionService.get_user_roles_all_projects(db_user.id)
-            
+
             all_permissions = set(["admin"]) if db_user.username == 'admin' else set(["user"])
-            
+
+            # 全局角色（project_id 为空，get_user_roles_all_projects 归到 'global' 键）
+            # 按角色名派生权限码，见文件头 _GLOBAL_ROLE_DERIVED_PERMISSIONS。
+            # 放在这里而不是各接口里：权限码随登录态一起下发，后端 require_permission
+            # 与前端 hasPermission 天然同源。只有挂着全局角色的用户才会多这一次查询。
+            global_role_ids = user_roles.get('global') or []
+            if global_role_ids:
+                global_role_names = {
+                    name for (name,) in db.query(Role.name).filter(Role.id.in_(global_role_ids)).all()
+                }
+                for role_name in global_role_names:
+                    all_permissions.update(_GLOBAL_ROLE_DERIVED_PERMISSIONS.get(role_name, ()))
+
             project_permissions_dict = {}
             
             role_permissions_map = {}

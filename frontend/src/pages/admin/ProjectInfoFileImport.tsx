@@ -7,6 +7,10 @@
 //   将填写      节点当前为空，勾选后直接填入（默认勾选）
 //   将覆盖      节点已有内容，勾选后才会覆盖；每行显示「原内容 → 新内容」
 //   未匹配到节点 勾选后作为新节点创建；每行显示建议归属（没有归属时用「导入信息」兜底）
+//
+// 权限：前两组只是写值（任何登录用户都能写已存在节点的值），第三组要新建节点、
+// 属于改信息树结构——canEditTree（本项目成员或 admin）为假时整组置灰不可勾，
+// 避免勾了之后整批在 403 上中途断掉（前面已写入的值得不到回滚）。
 import { useMemo, useRef, useState } from 'react';
 import { Popup, Toast } from 'tdesign-mobile-react';
 import { MacSparkles, MacUpload } from '@/shared/components/macaronIcons';
@@ -71,12 +75,15 @@ function buildRows(result: ApiImportParseResult | null, nodes: ProjectInfoNode[]
   return rows;
 }
 
-export default function ProjectInfoFileImport({ visible, onClose, projectId, nodes, onApplied }: {
+export default function ProjectInfoFileImport({ visible, onClose, projectId, nodes, canEditTree, onApplied }: {
   visible: boolean;
   onClose: () => void;
   projectId: string;
   /** 当前项目的全部信息节点（扁平，含刚解析出的匹配目标与归属节点） */
   nodes: ProjectInfoNode[];
+  /** 能不能改这棵树（本项目成员或 admin）：决定「未匹配到节点」那组能不能真的建节点。
+   *  填值/覆盖对任何登录用户都放行，只有新建要走结构类接口（见 applyImport）。 */
+  canEditTree: boolean;
   /** 导入落库后回调（调用方重新拉树） */
   onApplied: () => void;
 }) {
@@ -132,7 +139,11 @@ export default function ProjectInfoFileImport({ visible, onClose, projectId, nod
   };
 
   const applyImport = async () => {
-    const picked = rows.filter((row) => checked.has(row.key));
+    // 「未匹配到节点」要新建节点（结构类接口）：不是本项目的人时即便混进了勾选也跳过，
+    // 否则整批会在中途 403 中断，前面已写入的值又回滚不了
+    const picked = rows.filter(
+      (row) => checked.has(row.key) && (canEditTree || row.group !== 'unmatched'),
+    );
     if (!picked.length) {
       Toast({ message: '请先勾选要导入的信息', theme: 'warning' });
       return;
@@ -166,12 +177,13 @@ export default function ProjectInfoFileImport({ visible, onClose, projectId, nod
         const fresh = row.fresh;
         if (!fresh) continue;
         // 未匹配条目：挂到建议归属节点；没有归属时用「导入信息」根节点兜底（按需创建一次）。
-        // 导入是管理员操作，新节点按管理员的「增补」入口建（不动全局模板）
+        // 新建走「本项目增补」那条路（canEditTree=true → POST /projects/{id}，只动本项目，
+        // 不动全局模板）；canEditTree 为假时根本到不了这里——那组在预览里已置灰不可勾。
         let parentId: string | null = fresh.suggested_parent_id ?? null;
         if (!parentId) {
           if (!fallbackRootId) {
             fallbackRootId = nodes.find((node) => node.parent_id === null && node.title === FALLBACK_ROOT_TITLE)?.id
-              ?? (await createInfoNode(projectId, null, nextSort(null), FALLBACK_ROOT_TITLE, true)).id;
+              ?? (await createInfoNode(projectId, null, nextSort(null), FALLBACK_ROOT_TITLE, canEditTree)).id;
           }
           parentId = fallbackRootId;
         }
@@ -179,7 +191,7 @@ export default function ProjectInfoFileImport({ visible, onClose, projectId, nod
         // 车型是选出来的值，做成下拉后各项目能各自选、也能在编辑页里改选。
         const isModel = isKnownVehicleModel(fresh.title);
         const createdNode = await createInfoNode(
-          projectId, parentId, nextSort(parentId), fresh.title.slice(0, 80), true,
+          projectId, parentId, nextSort(parentId), fresh.title.slice(0, 80), canEditTree,
           isModel ? 'select' : 'text',
         );
         await setInfoNodeValue(
@@ -190,7 +202,7 @@ export default function ProjectInfoFileImport({ visible, onClose, projectId, nod
         // 车型条目自带数量：给新建的车型节点补一个「数量」子节点 —— 与匹配到既有
         // 车型节点时「数量落子节点」保持同一形状（后端 match_items 同样处理）
         if (isModel && fresh.quantity) {
-          const qtyNode = await createInfoNode(projectId, createdNode.id, nextSort(createdNode.id), '数量', true);
+          const qtyNode = await createInfoNode(projectId, createdNode.id, nextSort(createdNode.id), '数量', canEditTree);
           await setInfoNodeValue(qtyNode, fresh.quantity, projectId);
         }
         created += 1;
@@ -256,12 +268,17 @@ export default function ProjectInfoFileImport({ visible, onClose, projectId, nod
                       <span className="mac-import__group-title">{group.label}</span>
                       <span className="mac-import__group-count">（{items.length}）</span>
                     </div>
-                    <p className="mac-import__group-hint">{group.hint}</p>
+                    <p className="mac-import__group-hint">
+                      {group.key === 'unmatched' && !canEditTree
+                        ? '新建节点要改信息树结构，只有该项目的人员（或管理员）能导；这一组请交给他们'
+                        : group.hint}
+                    </p>
                     {items.map((row) => (
                       <label key={row.key} className="mac-import__row">
                         <input
                           type="checkbox"
                           checked={checked.has(row.key)}
+                          disabled={row.group === 'unmatched' && !canEditTree}
                           onChange={() => toggle(row.key)}
                           aria-label={`选择 ${row.matched ? row.matched.path : row.fresh?.title ?? ''}`}
                         />

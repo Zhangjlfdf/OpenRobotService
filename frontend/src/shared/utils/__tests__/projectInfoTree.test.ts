@@ -155,7 +155,7 @@ describe('节点 CRUD（走 /api/admin/info-nodes）', () => {
     expect(nodes.map((node) => node.id)).toEqual(['r1', 'c1', 'c2']);
   });
 
-  it('创建节点：id 由后端生成，管理员与「增补」走两个入口', async () => {
+  it('创建节点：id 由后端生成，「改树」与「增补」走两个入口', async () => {
     vi.mocked(createInfoNodeApi).mockResolvedValue(
       apiNode({ id: 'server-1', project_id: null, parent_id: 'parent-1', title: '新节点', sort_order: 30 }),
     );

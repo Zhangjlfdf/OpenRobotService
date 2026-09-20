@@ -37,11 +37,31 @@ vi.mock('@/api/client', () => ({
   clearCache: vi.fn(),
 }));
 
-// 权限可切换：默认管理员（「详情模板」入口可见），非管理员用例覆盖为 []
-const authState = vi.hoisted(() => ({ permissions: ['admin'] as string[] }));
+// 登录态可切换。默认管理员（本项目成员的判据无关紧要——admin 直通）。
+//   permissions  —— 含 'admin' 即管理员（与后端一致）
+//   projectIds   —— 当前用户在哪些项目下有角色（user_project_roles 的键）=「这个项目下的人」
+//   canEditTemplate —— 详情模板权限码（后端按全局角色 开发者/超级管理员 派生，非 admin 也 != false）
+const authState = vi.hoisted(() => ({
+  permissions: ['admin'] as string[],
+  projectIds: ['P1'] as string[],
+  canEditTemplate: false,
+}));
 vi.mock('@/stores/auth', () => ({
-  useAuthStore: (selector: (s: { username: string; permissions: string[] }) => unknown) =>
-    selector({ username: 'admin', permissions: authState.permissions }),
+  PERM_PROJECT_INFO_TEMPLATE: 'frontend:admin:project-info-template:show',
+  useAuthStore: (selector: (s: {
+    username: string;
+    permissions: string[];
+    roles: Record<string, string[]>;
+    hasPermission: (code: string) => boolean;
+  }) => unknown) =>
+    selector({
+      username: 'admin',
+      permissions: authState.permissions,
+      roles: Object.fromEntries(authState.projectIds.map((pid) => [pid, ['role-x']])),
+      hasPermission: (code: string) =>
+        authState.permissions.includes('admin')
+        || (code === 'frontend:admin:project-info-template:show' && authState.canEditTemplate),
+    }),
 }));
 
 vi.mock('tdesign-mobile-react', () => {
@@ -106,6 +126,8 @@ describe('ProjectInfoEdit（信息树编辑页）', () => {
     localStorage.clear();
     vi.clearAllMocks();
     authState.permissions = ['admin'];
+    authState.projectIds = ['P1'];
+    authState.canEditTemplate = false;
     vi.mocked(fetchInfoTree).mockResolvedValue(TREE);
     // 默认没有操作记录：不出小红点，历史弹层显示空态
     vi.mocked(fetchInfoNodeChangeSummaryApi).mockResolvedValue({});
@@ -127,11 +149,27 @@ describe('ProjectInfoEdit（信息树编辑页）', () => {
     expect(await screen.findByText('模板页占位')).toBeTruthy();
   });
 
-  it('非管理员不显示「详情模板」入口', async () => {
+  it('开发者/超级管理员（有模板权限码、不是 admin）也能进「详情模板」', async () => {
     authState.permissions = [];
+    authState.projectIds = [];      // 与项目无关：模板是全局的
+    authState.canEditTemplate = true;
+    renderEdit();
+    await screen.findByText('基础信息');
+    fireEvent.click(screen.getByRole('button', { name: '详情模板' }));
+    expect(await screen.findByText('模板页占位')).toBeTruthy();
+    // 但不在这个项目下，仍然改不了这棵树
+    expect(screen.queryByRole('button', { name: '新标签' })).toBeNull();
+    expect(screen.queryByLabelText('编辑基础信息')).toBeNull();
+  });
+
+  it('没有模板权限码就不显示「详情模板」入口（哪怕是本项目成员）', async () => {
+    authState.permissions = [];
+    authState.canEditTemplate = false;
+    authState.projectIds = ['P1'];   // 本项目成员：能改树，但看不到全局模板
     renderEdit();
     await screen.findByText('基础信息');
     expect(screen.queryByRole('button', { name: '详情模板' })).toBeNull();
+    expect(screen.getByRole('button', { name: '新标签' })).toBeTruthy();
   });
 
   it('行内改名写回后端（PUT 节点）', async () => {
@@ -150,6 +188,47 @@ describe('ProjectInfoEdit（信息树编辑页）', () => {
       expect(updateInfoNodeApi).toHaveBeenCalledWith('r1', { title: '基础信息2' });
     });
     expect(await screen.findByText('基础信息2')).toBeTruthy();
+  });
+
+  it('本项目成员（不是管理员）：同样能「新标签」并改名本项目的增补节点', async () => {
+    authState.permissions = [];
+    authState.projectIds = ['P1'];      // user_project_roles 里 P1 下有角色
+    vi.mocked(updateInfoNodeApi).mockResolvedValue(node({ id: 'r1', title: '基础信息2', is_custom: true }));
+    vi.mocked(fetchInfoTree).mockResolvedValue([
+      node({ id: 'r1', title: '基础信息', sort_order: 0, is_custom: true }),
+    ]);
+    renderEdit();
+
+    // 结构类入口都在（不再只有管理员看得到）
+    expect(await screen.findByRole('button', { name: '新标签' })).toBeTruthy();
+    expect(screen.getByLabelText('长按拖动调整从属')).toBeTruthy();
+
+    fireEvent.click(screen.getByLabelText('编辑基础信息'));
+    const input = document.querySelector('.mac-info-row__input') as HTMLInputElement;
+    fireEvent.change(input, { target: { value: '基础信息2' } });
+    fireEvent.blur(input);
+
+    await waitFor(() => expect(updateInfoNodeApi).toHaveBeenCalledWith('r1', { title: '基础信息2' }));
+  });
+
+  it('全局字段（非本项目增补）：成员也没有改名/删除入口，只能填值、看历史、往下增补', async () => {
+    authState.permissions = [];
+    authState.projectIds = ['P1'];
+    vi.mocked(fetchInfoTree).mockResolvedValue([
+      node({ id: 'r1', title: '基础信息', sort_order: 0 }),   // is_custom 缺省 = 全局字段
+    ]);
+    renderEdit();
+    await screen.findByText('基础信息');
+
+    // 结构按钮只随 is_custom 出：全局字段定义改一次全体项目生效，成员也改不动（后端 403，
+    // 只能在「详情模板」里改）
+    expect(screen.queryByLabelText('编辑基础信息')).toBeNull();
+    expect(screen.queryByLabelText('更多操作')).toBeNull();
+    expect(screen.queryByLabelText('长按拖动调整从属')).toBeNull();
+    // 值、历史、往下增补照旧
+    expect(screen.getByLabelText('基础信息内容')).toBeTruthy();
+    expect(screen.getByLabelText('在基础信息下新增')).toBeTruthy();
+    expect(screen.getByLabelText('查看基础信息的编辑历史')).toBeTruthy();
   });
 
   it('车型1（下拉 + 数量子节点）：选中型号写进值，数量子节点照常可填', async () => {
@@ -206,7 +285,8 @@ describe('ProjectInfoEdit（信息树编辑页）', () => {
         parent_id: null, title: '未命名节点', content_type: 'text', sort_order: 10,
       });
     });
-    expect(document.querySelector('.mac-info-row__input')).toBeTruthy();
+    // 改名态要等建节点返回并入列后才渲染：单独 waitFor 拿 DOM，别跟上面的接口断言挤一个
+    await waitFor(() => expect(document.querySelector('.mac-info-row__input')).toBeTruthy());
   });
 
   it('删除节点走 DELETE 接口（含子树提示）', async () => {
@@ -306,8 +386,9 @@ describe('ProjectInfoEdit（信息树编辑页）', () => {
     expect(screen.queryByText('按预设模板初始化')).toBeNull();
   });
 
-  it('非管理员看不到「新标签」，空态改提示联系管理员', async () => {
+  it('不在这个项目下的人看不到「新标签」，空态改提示联系管理员', async () => {
     authState.permissions = [];
+    authState.projectIds = [];
     vi.mocked(fetchInfoTree).mockResolvedValue([]);
     renderEdit();
 
@@ -315,8 +396,9 @@ describe('ProjectInfoEdit（信息树编辑页）', () => {
     expect(screen.queryByText('新标签')).toBeNull();
   });
 
-  it('「增补信息」：普通用户在任意节点下加本项目字段，不碰全局模板', async () => {
+  it('「增补信息」：不在项目下的人也能在任意节点下加本项目字段，但不给结构操作入口', async () => {
     authState.permissions = [];
+    authState.projectIds = [];
     // 夹具里没有任何 allow_custom：所有节点都能增补（2026-09-18 取消了逐节点开关）
     vi.mocked(fetchInfoTree).mockResolvedValue([
       node({
@@ -352,6 +434,7 @@ describe('ProjectInfoEdit（信息树编辑页）', () => {
 
   it('任何节点下都能增补，到第 4 层封顶', async () => {
     authState.permissions = [];
+    authState.projectIds = [];
     // 层级：基础信息 1 → 车辆 2 → 车型3 3 → 数量 4；夹具不带 allow_custom，一律可增补
     vi.mocked(fetchInfoTree).mockResolvedValue([
       node({

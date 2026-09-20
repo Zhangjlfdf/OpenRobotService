@@ -90,13 +90,14 @@ const pickFile = () => {
   fireEvent.change(input, { target: { files: [new File(['x'], '需求.docx')] } });
 };
 
-const renderDialog = (onApplied = vi.fn()) => {
+const renderDialog = (onApplied = vi.fn(), canEditTree = true) => {
   render(
     <ProjectInfoFileImport
       visible
       onClose={vi.fn()}
       projectId="P1"
       nodes={NODES}
+      canEditTree={canEditTree}
       onApplied={onApplied}
     />,
   );
@@ -163,6 +164,31 @@ describe('ProjectInfoFileImport（文件导入 AI 识别）', () => {
     expect(setInfoNodeValueApi).not.toHaveBeenCalledWith('c1', expect.anything(), expect.anything());
     expect(vi.mocked(Toast)).toHaveBeenCalledWith(expect.objectContaining({
       message: '已填写 1 项，覆盖 0 项，新增 1 项',
+    }));
+  });
+
+  it('不是本项目的人：未匹配组置灰不可勾，值照常导入、不新建节点', async () => {
+    vi.mocked(parseImportFileApi).mockResolvedValue(RESULT);
+    vi.mocked(setInfoNodeValueApi).mockImplementation(async (id, _projectId, value) => apiNode({ id, value }));
+    const onApplied = renderDialog(vi.fn(), false);
+    pickFile();
+    await screen.findByText('将填写');
+
+    // 新建节点属于结构类操作：整组置灰（提示交给本项目的人/管理员），值那组照常可勾
+    const freshBox = screen.getByLabelText('选择 设备数量') as HTMLInputElement;
+    expect(freshBox.disabled).toBe(true);
+    expect(screen.getByText(/只有该项目的人员/)).toBeTruthy();
+    expect((screen.getByLabelText('选择 基础信息 / 订单信息 / ERP') as HTMLInputElement).disabled).toBe(false);
+
+    // 就算勾选状态被凑出来（jsdom 点得动 disabled，真机上点不动），落库前还有一道过滤兜底
+    fireEvent.click(freshBox);
+    fireEvent.click(screen.getByText(/^确认导入（\d+）$/));
+    await waitFor(() => expect(onApplied).toHaveBeenCalled());
+    expect(setInfoNodeValueApi).toHaveBeenCalledWith('c2', 'P1', 'SAP ECC');
+    // 兜底根「导入信息」与任何新节点都不该被创建
+    expect(createInfoNodeApi).not.toHaveBeenCalled();
+    expect(vi.mocked(Toast)).toHaveBeenCalledWith(expect.objectContaining({
+      message: '已填写 1 项，覆盖 0 项，新增 0 项',
     }));
   });
 

@@ -13,11 +13,17 @@ vi.mock('@/api/infoNodes', () => ({
   saveInfoTemplateApi: vi.fn(),
 }));
 
-// 权限可切换：默认管理员，非管理员用 authState.permissions = [] 覆盖
-const authState = vi.hoisted(() => ({ permissions: ['admin'] as string[] }));
+// 权限可切换：默认给到详情模板权限码（开发者/超级管理员或 admin 都长这样），
+// 无权限用户用 authState.canEditTemplate = false 覆盖。
+// hasPermission 只判这个码——与页面里的用法一致（后端按全局角色派生后随登录态下发）。
+const authState = vi.hoisted(() => ({ canEditTemplate: true }));
 vi.mock('@/stores/auth', () => ({
-  useAuthStore: (selector: (s: { username: string; permissions: string[] }) => unknown) =>
-    selector({ username: 'admin', permissions: authState.permissions }),
+  PERM_PROJECT_INFO_TEMPLATE: 'frontend:admin:project-info-template:show',
+  useAuthStore: (selector: (s: { username: string; hasPermission: (code: string) => boolean }) => unknown) =>
+    selector({
+      username: 'admin',
+      hasPermission: (code: string) => code === 'frontend:admin:project-info-template:show' && authState.canEditTemplate,
+    }),
 }));
 
 vi.mock('tdesign-mobile-react', () => {
@@ -66,7 +72,7 @@ const rowTitles = () =>
 describe('ProjectInfoTemplate（详情模板编辑页）', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    authState.permissions = ['admin'];
+    authState.canEditTemplate = true;
     vi.mocked(fetchInfoTemplateApi).mockResolvedValue(TEMPLATE);
   });
 
@@ -238,10 +244,10 @@ describe('ProjectInfoTemplate（详情模板编辑页）', () => {
     );
   });
 
-  it('非管理员：提示不可编辑，且不请求模板接口', async () => {
-    authState.permissions = [];
+  it('没有权限码（非开发者/超级管理员）：提示不可编辑，且不请求模板接口', async () => {
+    authState.canEditTemplate = false;
     renderTemplate();
-    expect(await screen.findByText('仅管理员可编辑详情模板')).toBeTruthy();
+    expect(await screen.findByText(/仅「开发者 \/ 超级管理员」可编辑详情模板/)).toBeTruthy();
     expect(screen.queryByRole('button', { name: '保存并同步' })).toBeNull();
     expect(screen.queryByText('基础信息')).toBeNull();
     expect(fetchInfoTemplateApi).not.toHaveBeenCalled();

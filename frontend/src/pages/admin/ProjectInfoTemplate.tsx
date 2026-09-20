@@ -1,6 +1,8 @@
-// 项目详情模板编辑页（仅管理员）——编辑模板节点树，「保存并同步」后所有项目的节点跟随模板更新。
+// 项目详情模板编辑页（仅全局角色 开发者 / 超级管理员，或 admin）——编辑模板节点树，
+// 「保存并同步」后所有项目的节点跟随模板更新。
 //
-// 数据走后端 /api/admin/info-nodes/template（GET 读模板 / POST 保存并同步，均仅管理员可调）。
+// 数据走后端 /api/admin/info-nodes/template（GET 读模板 / POST 保存并同步，都要
+// PERM_PROJECT_INFO_TEMPLATE 权限码——后端按全局角色名派生，与这里读的是同一个码）。
 // 保存流程：本地编辑 → 点「保存并同步」先 dry-run（后端算出影响面）→ 确认弹窗展示
 // 「新增 / 更新 / 删除多少节点、涉及多少项目」→ 确认后真正保存并同步，Toast 汇总结果。
 // 同步语义（后端 info_template_service）：只变更节点本身——标题/层级/顺序/内容类型以模板为准，
@@ -37,15 +39,17 @@ import {
   updateTemplateNode,
   type TemplateContentType,
 } from '@/shared/utils/infoTemplateTree';
-import { useAuthStore } from '@/stores/auth';
+import { useAuthStore, PERM_PROJECT_INFO_TEMPLATE } from '@/stores/auth';
 
 const errMsg = (err: unknown, fallback: string) =>
   err instanceof Error && err.message ? err.message : fallback;
 
 export default function ProjectInfoTemplate() {
   const navigate = useNavigate();
-  const permissions = useAuthStore((s) => s.permissions);
-  const isAdmin = Array.isArray(permissions) && permissions.includes('admin');
+  // 详情模板是全局字段定义（改一次全体项目生效）：只有全局角色 开发者 / 超级管理员（或 admin）能看能改。
+  // 后端由「全局角色名」派生出 PERM_PROJECT_INFO_TEMPLATE 随登录态下发，require_permission 与这里同源
+  // （见 backend permission_service._GLOBAL_ROLE_DERIVED_PERMISSIONS）
+  const canEditTemplate = useAuthStore((s) => s.hasPermission(PERM_PROJECT_INFO_TEMPLATE));
 
   const [template, setTemplate] = useState<ApiInfoTemplate | null>(null);
   const [nodes, setNodes] = useState<ApiInfoTemplateNode[]>([]);
@@ -87,8 +91,8 @@ export default function ProjectInfoTemplate() {
     }
   }, []);
 
-  // 非管理员不请求（接口本身也要求管理员，避免注定 403 的空请求）
-  useEffect(() => { if (isAdmin) void load(); }, [isAdmin, load]);
+  // 无权限不请求（接口本身也要这个权限码，避免注定 403 的空请求）
+  useEffect(() => { if (canEditTemplate) void load(); }, [canEditTemplate, load]);
 
   const mutate = (next: ApiInfoTemplateNode[]) => {
     setNodes(next);
@@ -271,10 +275,12 @@ export default function ProjectInfoTemplate() {
             </div>
           </div>
 
-          {!isAdmin ? (
+          {!canEditTemplate ? (
             <div className="mac-info__state">
-              仅管理员可编辑详情模板
-              <div className="mac-info__state-sub">如需调整，请联系管理员</div>
+              仅「开发者 / 超级管理员」可编辑详情模板
+              <div className="mac-info__state-sub">
+                模板是所有项目共用的字段定义，改动会影响全部项目；如需调整，请联系管理员
+              </div>
             </div>
           ) : loading ? (
             <div className="mac-info__state">正在加载模板…</div>
