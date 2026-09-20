@@ -14,6 +14,8 @@ import API_CONFIG from '@/config/api';
 import { qaUploadStream, generateSessionId, trackSession, fetchWithAuth, qaPrepareTicket, qaConfirmTicket, qaClearDraft, qaGetTicketSteps, type TicketDraft, type TicketStep } from '@/api/ai';
 import ProjectSelect from '@/shared/components/ProjectSelect';
 import UserSelect from '@/shared/components/UserSelect';
+import OnBehalfSelect from '@/shared/components/OnBehalfSelect';
+import type { OnBehalfCandidate } from '@/api/ticket';
 import RedispatchCandidateList from '@/shared/components/RedispatchCandidateList';
 import SpecDocField, { type SpecDocDraft } from '@/shared/components/SpecDocField';
 import { createTicket, reDispatchTicket, uploadCommentAttachment, fetchRedispatch, type RedispatchCandidate } from '@/api/ticket';
@@ -1103,6 +1105,10 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
     dualTicket: boolean;      // 兜底双工单：项目不在项目集时勾选，生成申请单派给项目负责人
     projectOwner: UserItem | null;  // 双工单场景下选中的项目负责人
   }>({ visible: false, draft: null, overrides: {}, submitting: false, force_submit: false, dualTicket: false, projectOwner: null });
+  // 代他人提单（代理提单）：本弹窗内的被代理人。
+  // 弹窗打开时按 AI 草稿的 on_behalf_of_name 预填（AI 只给姓名，精确到 users.id 由人确认），
+  // 提交时以 id 透传 overrides.on_behalf_of。见 ai/core/task_adapter.py 的降级策略。
+  const [onBehalfUser, setOnBehalfUser] = useState<OnBehalfCandidate | null>(null);
   // 处理阶段：弹窗打开时按工单类型拉取的步骤列表（task_steps 模板，后续可配置）
   const [ticketSteps, setTicketSteps] = useState<TicketStep[]>([]);
   const [stepsLoading, setStepsLoading] = useState(false);
@@ -2727,6 +2733,7 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
     setTicketSteps([]); // 关闭弹窗即清空阶段列表
     setRemoteShots([]); // 关闭弹窗即清空已上传的远程截图
     setSpecDoc(null); // 关闭弹窗即清空问题文档草稿
+    setOnBehalfUser(null); // 关闭弹窗即清空被代理人，避免下一单被误代提
     setTicketConfirm({ visible: false, draft: null, overrides: {}, submitting: false, force_submit: false, dualTicket: false, projectOwner: null });
     if (sid) {
       qaClearDraft(String(sid)).catch(() => { /* 清草稿失败不阻塞，本地已重置 */ });
@@ -2794,6 +2801,9 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
         ...(finalRemoteType ? { remote_type: finalRemoteType } : {}),
         ...(finalAttachments.length > 0 ? { attachments: finalAttachments } : {}),
         ...(specDoc ? { spec_doc: specDoc } : {}),
+        // 代他人提单：以被代理人 users.id 透传，后端建立 pending 关系并通知对方。
+        // 未选人时不传该字段（普通自提单，行为与改造前完全一致）。
+        ...(onBehalfUser ? { on_behalf_of: onBehalfUser.id } : {}),
       };
       const res = await qaConfirmTicket(sessionId, overrides);
       if (res?.code !== 0) {
@@ -3523,6 +3533,28 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
                 />
                 {!draftField('project_id').trim() && !ticketConfirm.dualTicket && (
                   <span className="ticket-confirm__hint">项目为必选项，未绑定项目无法提交</span>
+                )}
+                {/* 代他人提单：AI 从对话识别到「帮张三提个单」时预填姓名，由用户确认到具体人。
+                    选填 —— 不选即普通自提单，行为与改造前一致。 */}
+                <label className="ticket-confirm__label">
+                  被代理人 {onBehalfUser ? <span style={{ color: 'var(--primary)' }}>· 代提</span> : <span className="ticket-confirm__hint">（选填）</span>}
+                </label>
+                {/* AI 从对话里识别到「帮张三提个单」时只给姓名，这里提示用户手动选到具体人 */}
+                {!onBehalfUser && ticketConfirm.draft?.on_behalf_of_name ? (
+                  <span className="ticket-confirm__hint">
+                    AI 识别到你可能想代「{String(ticketConfirm.draft.on_behalf_of_name)}」提交，请在下方选择确认
+                  </span>
+                ) : null}
+                <OnBehalfSelect
+                  value={onBehalfUser?.id}
+                  projectId={draftField('project_id') || undefined}
+                  placeholder="为他人提单时选择被代理人"
+                  onChange={(u) => setOnBehalfUser(u)}
+                />
+                {onBehalfUser && (
+                  <span className="ticket-confirm__hint">
+                    本单将以 {onBehalfUser.name || onBehalfUser.username} 的名义建立，对方会收到提醒并可确认跟进；撤回权仍归你。
+                  </span>
                 )}
                 {/* 兜底双工单：项目不在项目集时勾选，生成申请单派给项目负责人 */}
                 <label className="ticket-confirm__checkbox">

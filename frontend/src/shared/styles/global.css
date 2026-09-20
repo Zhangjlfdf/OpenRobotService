@@ -285,6 +285,25 @@ html, body, #root {
   cursor: pointer;
   -webkit-tap-highlight-color: transparent;
 }
+/* 代他人提单「待我跟进」：纯圆点角标（无数值），与数量角标同锚点左侧错开摆放 */
+.app-bottom-nav__dot {
+  position: absolute;
+  top: -3px;
+  right: -10px;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--primary);
+  box-shadow: 0 0 0 2px var(--background);
+  animation: app-bottom-nav-dot-in 0.24s ease;
+  pointer-events: none;
+}
+
+@keyframes app-bottom-nav-dot-in {
+  from { opacity: 0; transform: scale(0.5); }
+  to { opacity: 1; transform: scale(1); }
+}
+
 /* 系统任务「待我处理」数量角标：蓝底白字胶囊，贴在图标块右上角 */
 .app-bottom-nav__badge {
   position: absolute;
@@ -1317,6 +1336,245 @@ html, body, #root {
   background: transparent;
   border: none;
   cursor: pointer;
+}
+
+/* ── 代他人提单（代理提单）──────────────────────────────────────────
+   建单弹窗开关行 + 展开区；配色全部走既有 oklch 语义 token。
+   见 docs/PRODUCT/代他人提单（代理提单）功能设计方案.md §6.1 */
+
+.tasks-create-modal__behalf {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
+}
+
+.tasks-create-modal__behalf-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.tasks-create-modal__behalf-label {
+  font-size: 14px;
+  color: var(--foreground);
+}
+
+.tasks-create-modal__behalf-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  background: var(--muted);
+  border-radius: 12px;
+  animation: behalf-expand 0.2s ease;
+}
+
+@keyframes behalf-expand {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.tasks-create-modal__behalf-tip {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--muted-foreground);
+}
+
+.tasks-create-modal__behalf-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.tasks-create-modal__behalf-field-label {
+  flex-shrink: 0;
+  width: 56px;
+  font-size: 13px;
+  color: var(--muted-foreground);
+}
+
+.tasks-create-modal__behalf-field .user-select {
+  flex: 1;
+  min-width: 0;
+}
+
+/* 代提选人分组标题：同项目 / 其他在职人员 */
+.on-behalf-select__group-title {
+  padding: 8px 16px 4px;
+  font-size: 12px;
+  color: var(--muted-foreground);
+}
+
+.on-behalf-select__group + .on-behalf-select__group .on-behalf-select__group-title {
+  border-top: 1px solid var(--border);
+  margin-top: 4px;
+}
+
+.on-behalf-select__clear {
+  flex-shrink: 0;
+  padding: 0 4px;
+  color: var(--muted-foreground);
+  font-size: 13px;
+}
+
+/* ── 详情页代理关系横幅 ─────────────────────────────────────────── */
+
+.proxy-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 12px;
+  padding: 12px 14px 12px 12px;
+  background: var(--card);
+  border-left: 3px solid var(--primary);
+  border-radius: 12px;
+  box-shadow: var(--shadow-sm, 0 2px 8px rgba(0, 0, 0, 0.04));
+}
+
+.proxy-banner--action {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 12px;
+  background: var(--blue-1, #e3f6ff);
+  border-left-color: var(--primary);
+}
+
+.proxy-banner--muted {
+  background: var(--muted);
+  border-left-color: var(--border);
+}
+
+.proxy-banner__text {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--foreground);
+}
+
+.proxy-banner__text strong {
+  font-weight: 600;
+  color: var(--primary);
+}
+
+.proxy-banner__actions {
+  display: flex;
+  gap: 10px;
+}
+
+.proxy-banner__actions > * {
+  flex: 1;
+}
+
+/* 关系状态胶囊：待确认（主色软底）/ 已跟进（浅绿）/ 已拒绝（中性灰） */
+.proxy-pill {
+  flex-shrink: 0;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+.proxy-pill--pending {
+  background: var(--blue-1, #e3f6ff);
+  color: var(--primary);
+}
+
+.proxy-pill--acknowledged {
+  background: var(--green-1, #e6f5ef);
+  color: var(--green-2, #3e9c7a);
+}
+
+.proxy-pill--declined {
+  background: var(--muted);
+  color: var(--muted-foreground);
+}
+
+/* 列表卡片关系胶囊：与 status/priority 标签同排，尺寸略小以不抢主信息 */
+.proxy-card-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+.proxy-card-pill--pending {
+  color: var(--primary);
+  background: var(--blue-1, #e3f6ff);
+}
+
+/* 「待你跟进」小圆点：与底部导航角标同配色（主色实心 + 轻微呼吸） */
+.proxy-card-pill__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--primary);
+  animation: proxy-card-dot-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes proxy-card-dot-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.55; transform: scale(0.82); }
+}
+
+.proxy-card-pill--mini {
+  /* 人员行内嵌，需更紧凑；长姓名截断避免挤压处理人 */
+  max-width: 84px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--muted-foreground);
+  background: var(--muted);
+}
+
+/* 拒绝对话（底部弹出） */
+.proxy-decline {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 20px 16px calc(20px + env(safe-area-inset-bottom));
+  background: var(--card);
+  border-radius: 16px 16px 0 0;
+}
+
+.proxy-decline__title {
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--foreground);
+}
+
+.proxy-decline__hint {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--muted-foreground);
+}
+
+.proxy-decline__input {
+  width: 100%;
+}
+
+.proxy-decline__actions {
+  display: flex;
+  gap: 10px;
+}
+
+.proxy-decline__actions > * {
+  flex: 1;
 }
 
 /* 我要摇人：Navbar 标题随会话标题变化（新建会话为空），超长省略 */

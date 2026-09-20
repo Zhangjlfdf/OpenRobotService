@@ -25,7 +25,8 @@ import UserSelect from '@/shared/components/UserSelect';
 import type { UserItem } from '@/api/users';
 import { useWorkbenchStore } from '@/stores/workbench';
 import { useAuthStore } from '@/stores/auth';
-import { uploadCommentAttachment } from '@/api/ticket';
+import { uploadCommentAttachment, getProxyRelations, type ProxyRelation } from '@/api/ticket';
+import ProxyRelationBanner from '@/shared/components/ProxyRelationBanner';
 import { TICKET_TYPE_DISPLAY_MAP, STATUS_DISPLAY_MAP, PRIORITY_DISPLAY_MAP, canEditPriority } from '@/shared/constants/ticket';
 import { isSameUser } from '@/shared/utils/userIdentity';
 import { getDeadlineRange, makeDisabledDate, makeDisabledTime, parseDeadlineString } from '@/shared/utils/deadline';
@@ -136,6 +137,12 @@ interface Ticket {
   curr_step_agreed?: boolean;
   // 升级上报次数：>0 表示已升级，协商回合重置为1且不再受限
   escalate_count?: number;
+  // ── 代他人提单（代理提单）：后端下发的关系与视角标记（非参与人为空/False）──
+  proxy_relation_status?: 'pending' | 'acknowledged' | 'declined' | null;
+  proxy_agent_name?: string | null;
+  proxy_principal_name?: string | null;
+  is_proxy_agent?: boolean;
+  is_principal?: boolean;
 }
 
 // 协商阶段模板步骤（GET /{task_id}/steps 返回）
@@ -255,6 +262,10 @@ export default function TaskDetailPage() {
   const [setStepTimeValue, setSetStepTimeValue] = useState<string | null>(null);
   const [submittingSetStepTime, setSubmittingSetStepTime] = useState(false);
 
+  // 代他人提单（代理提单）关系：详情页顶部横幅数据源。
+  // 后端对非参与人返回空数组（脱敏），故此处拿不到即视为无关系，无需前端再判权限。
+  const [proxyRelation, setProxyRelation] = useState<ProxyRelation | null>(null);
+
   // 项目成员（用于讨论区 @ 提及）
   const [projectMembers, setProjectMembers] = useState<ProjectMember[]>([]);
   // 全部在职用户（项目成员 + 项目外，@ 输入过滤字时可 @ 到项目外的人）
@@ -270,6 +281,10 @@ export default function TaskDetailPage() {
         setRedispatchTipDetail(t.redispatch?.result?.tip_detail || '');
         // 二次派单感知增强：派单理由（后端仅对接单人/管理员返回 reasoning，非空即展示）
         setDispatchReason(t.redispatch?.result?.reasoning || '');
+        // 代理关系（代他人提单）：独立接口，失败不阻断详情渲染（横幅缺失而已）
+        getProxyRelations(detailId)
+          .then((list) => setProxyRelation(list?.[0] || null))
+          .catch(() => setProxyRelation(null));
         // 摘要存 metadata_info.ai_summary（不混入讨论区）
         const meta = t.metadata_info || {};
         setAiSummary(typeof meta.ai_summary === 'string' ? meta.ai_summary as string : '');
@@ -394,7 +409,13 @@ export default function TaskDetailPage() {
       (detail?.created_by_name && (detail.created_by_name === username || detail.created_by_name === currentName))
     );
 
-    return { isAssignee, isReporter };
+    // 代他人提单（代理提单）视角：**优先后端下发的角色标记**，不倒推身份。
+    // 后端已按 token 判定 is_agent / is_principal（见 ProxyRelationResponse），
+    // 前端自拼判定会在「姓名重名 / username 与 id 混用」时判错（历史踩过的坑）。
+    const isProxyAgent = proxyRelation?.is_agent ?? Boolean(detail?.is_proxy_agent);
+    const isPrincipal = proxyRelation?.is_principal ?? Boolean(detail?.is_principal);
+
+    return { isAssignee, isReporter, isProxyAgent, isPrincipal };
   };
 
   // 拥有 backend:tasks:operate 权限的用户可点击「创建人」设置其姓名
@@ -408,7 +429,7 @@ export default function TaskDetailPage() {
     const isCanceled = status === 'canceled' || status === 'cancelled';
     if (isClosed || isCanceled) return [];
 
-    const { isAssignee, isReporter } = getCurrentUserRoles();
+    const { isAssignee, isReporter, isPrincipal } = getCurrentUserRoles();
 
     // 拥有 backend:tasks:operate 权限的用户，对所有活跃状态工单均可见且可操作
     const canOperate = hasPermission('backend:tasks:operate');
@@ -416,7 +437,8 @@ export default function TaskDetailPage() {
     const assigneeOnlyStatuses = ['new', 'in_progress', 'pending', 'paused'];
     if (assigneeOnlyStatuses.includes(status) && !isAssignee && !canOperate) return [];
 
-    if (status === 'resolved' && !isReporter && !canOperate) return [];
+    // 已解决：与后端口径统一（决策 6）—— 提单人(created_by，即代理人) / 已确认跟进的被代理人 / 管理员
+    if (status === 'resolved' && !isReporter && !isPrincipal && !canOperate) return [];
 
     // 顶部操作按钮配色（设计稿 05：主推进 bg-primary 白字胶囊 / 次操作 bg-secondary 深字胶囊）
     const BTN_PRIMARY = { backgroundColor: 'var(--primary)', color: 'var(--primary-foreground)', borderRadius: '999px', border: 'none' };
@@ -1088,7 +1110,9 @@ export default function TaskDetailPage() {
   );
 
   const specDocRoles = getCurrentUserRoles();
-  const canEditSpecDoc = isAdmin || specDocRoles.isAssignee || specDocRoles.isReporter;
+  // 与后端 spec_doc._can_edit 口径一致：管理员 / 处理人 / 提单人 / 被代理人(已确认跟进)
+  const canEditSpecDoc =
+    isAdmin || specDocRoles.isAssignee || specDocRoles.isReporter || specDocRoles.isPrincipal;
 
   return (
     <div className="task-detail-page" style={{ paddingBottom: 72 }}>
@@ -1162,6 +1186,18 @@ export default function TaskDetailPage() {
               ))}
             </div>
           </div>
+          {/* 代他人提单：关系横幅（代理人「你代 X 提交」/ 被代理人「X 代你提交」+ 确认跟进） */}
+          {proxyRelation && (
+            <ProxyRelationBanner
+              ticketId={detail.id}
+              relation={proxyRelation}
+              onChanged={(updated) => {
+                setProxyRelation(updated);
+                // 关系变更影响可操作项（pending 只读 → acknowledged 获协办权），拉一次详情统一刷新
+                loadDetail();
+              }}
+            />
+          )}
           <h2 className="detail-card__title">
             <TitleEllipsis text={detail.title} lines={3} titleClassName="detail-card__title-inner" as="span" fontSize={19} lineHeight={1.3} />
           </h2>
@@ -1283,7 +1319,11 @@ export default function TaskDetailPage() {
         <StepNegotiationCard
           negotiation={negotiation}
           detail={detail}
-          roles={getCurrentUserRoles()}
+          // 被代理人仅在已确认跟随后才参与协商（pending 只读，决策 10）
+          roles={{
+            ...getCurrentUserRoles(),
+            isPrincipal: getCurrentUserRoles().isPrincipal && proxyRelation?.relation_status === 'acknowledged',
+          }}
           onResolve={resolve.handleResolveClick}
           onEscalate={(round, maxRound) => {
             setEscalateUser(null);
@@ -1491,10 +1531,11 @@ export default function TaskDetailPage() {
           const isClosedOrCanceled = status === 'closed' || status === 'canceled' || status === 'cancelled';
           if (isClosedOrCanceled) return null;
 
-          const { isAssignee, isReporter } = getCurrentUserRoles();
+          const { isAssignee, isReporter, isPrincipal } = getCurrentUserRoles();
           const canOperate = hasPermission('backend:tasks:operate');
           const assigneeOnlyStatuses = ['new', 'in_progress', 'pending', 'paused'];
-          const showRoleActions = canOperate || (assigneeOnlyStatuses.includes(status) ? isAssignee : (status === 'resolved' ? isReporter : false));
+          // 已解决：被代理人（已确认跟进）与提单人同权，可确认关闭（与后端 roles.can_close 对齐）
+          const showRoleActions = canOperate || (assigneeOnlyStatuses.includes(status) ? isAssignee : (status === 'resolved' ? (isReporter || isPrincipal) : false));
           // 已解决状态：提单人仅可修改工单/升级上报，不应退回工单或重新指派
           // 退回工单/重新指派应由处理人在非已解决状态下操作
           const isResolved = status === 'resolved';

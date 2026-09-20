@@ -137,6 +137,11 @@ export interface TicketDraft {
   curr_step_id?: number;
   /** 阶段完成时间（SLA，ISO 字符串）：提单弹窗必选，落 Task.curr_step_endtime */
   curr_step_endtime?: string;
+  /** 代他人提单：被代理人 users.id。AI 只识别姓名（on_behalf_of_name），
+   *  精确到人由弹窗内选择确认后回填；见 OnBehalfSelect。 */
+  on_behalf_of?: string;
+  /** AI 识别的被代理人姓名（仅用于弹窗预填提示，不直接入库） */
+  on_behalf_of_name?: string;
   [k: string]: unknown;
 }
 

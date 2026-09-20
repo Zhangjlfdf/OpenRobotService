@@ -45,6 +45,9 @@ export interface CreateTicketParams {
   /** 附件列表：字符串为 object_path；dict 为 {path, object_path, filename} 结构（远程截图等）。
    *  与 tasks.attachments 列约定对齐——详情页读 path，AI 路径去重读 object_path。 */
   attachments?: Array<string | { path?: string; object_path?: string; filename?: string; [k: string]: unknown }>;
+  /** 代他人提单：被代理人 users.id（留空=普通自提单）。
+   *  后端会二次校验其为在职用户；成功后建立 pending 代提关系并通知对方。 */
+  on_behalf_of?: string;
 }
 
 export interface CreatedTicket {
@@ -88,6 +91,72 @@ export const reDispatchTicket = (
     method: 'POST',
     body: JSON.stringify({ preferred_assignee: preferredAssignee, remark: remark || null }),
   });
+
+// ── 代他人提单（代理提单）：见 docs/PRODUCT/代他人提单（代理提单）功能设计方案.md ──
+
+/** 代理关系状态（与后端 3 态状态机对齐；无接手 / 无 revoke） */
+export type ProxyRelationStatus = 'pending' | 'acknowledged' | 'declined';
+
+/** 代提选人候选项：group 由后端显式下发，前端**不靠顺序猜** */
+export interface OnBehalfCandidate {
+  id: string;
+  username: string;
+  name?: string | null;
+  group: 'project' | 'all';
+}
+
+/** 代理关系（详情页横幅 / 列表胶囊用） */
+export interface ProxyRelation {
+  id: number;
+  task_id: number;
+  relation_status: ProxyRelationStatus;
+  source?: string | null;
+  remark?: string | null;
+  /** 当前登录用户视角，后端下发，前端不自行拼身份判定 */
+  is_agent: boolean;
+  is_principal: boolean;
+  agent_name?: string | null;
+  principal_name?: string | null;
+  notified_at?: string | null;
+  acked_at?: string | null;
+  declined_at?: string | null;
+  created_at?: string | null;
+}
+
+/** 代提选人候选：同项目在前、其他在职在后（分组标记由后端返回） */
+export const getOnBehalfCandidates = (params?: { project_id?: string; keyword?: string }) => {
+  const qs = new URLSearchParams();
+  if (params?.project_id) qs.set('project_id', params.project_id);
+  if (params?.keyword) qs.set('keyword', params.keyword);
+  const suffix = qs.toString() ? `?${qs.toString()}` : '';
+  return request(`/on-behalf-candidates${suffix}`, { method: 'GET' }) as Promise<OnBehalfCandidate[]>;
+};
+
+/** 「待我跟进」角标计数（被代理人、pending 且工单未终结） */
+export const getMyFollowupsCount = () =>
+  request('/my-followups/count', { method: 'GET' }) as Promise<{ count: number }>;
+
+/** 查询工单的代理关系（非参与人后端返回 403 或空数组） */
+export const getProxyRelations = (ticketId: number | string) =>
+  request(`/${Number(ticketId)}/proxy-relations`, { method: 'GET' }) as Promise<ProxyRelation[]>;
+
+/** 被代理人确认跟进（pending → acknowledged，获协办权） */
+export const ackProxyRelation = (ticketId: number | string, relationId: number) =>
+  request(`/${Number(ticketId)}/proxy-relations/${relationId}/ack`, {
+    method: 'POST',
+    body: JSON.stringify({}),
+  }) as Promise<ProxyRelation>;
+
+/** 被代理人拒绝（与我无关，需填原因；工单不中断，代理人兜底推进） */
+export const declineProxyRelation = (
+  ticketId: number | string,
+  relationId: number,
+  remark: string,
+) =>
+  request(`/${Number(ticketId)}/proxy-relations/${relationId}/decline`, {
+    method: 'POST',
+    body: JSON.stringify({ remark }),
+  }) as Promise<ProxyRelation>;
 
 // ── 二次派单感知增强（M2）：详情 redispatch 子对象类型 + 读取 ──
 export interface RedispatchCandidate {
