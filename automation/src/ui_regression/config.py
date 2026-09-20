@@ -28,6 +28,9 @@ class UiRegressionConfig:
     backend_local_port: int = 19400
     ai_remote_port: int = 9411
     ai_local_port: int = 19411
+    db_cleanup_enabled: bool = False
+    db_remote_port: int = 3306
+    db_local_port: int = 19402
     tunnel_timeout: float = 20.0
 
     @classmethod
@@ -67,6 +70,15 @@ class UiRegressionConfig:
             ),
             ai_local_port=int(
                 os.getenv("UI_REGRESSION_AI_LOCAL_PORT", "19411")
+            ),
+            db_cleanup_enabled=(
+                os.getenv("UI_REGRESSION_DB_CLEANUP_ENABLED", "0") == "1"
+            ),
+            db_remote_port=int(
+                os.getenv("UI_REGRESSION_DB_REMOTE_PORT", "3306")
+            ),
+            db_local_port=int(
+                os.getenv("UI_REGRESSION_DB_LOCAL_PORT", "19402")
             ),
             tunnel_timeout=float(
                 os.getenv("UI_REGRESSION_TUNNEL_TIMEOUT", "20")
