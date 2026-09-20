@@ -15,6 +15,7 @@ import '@uiw/react-md-editor/markdown-editor.css';
 import '@uiw/react-markdown-preview/markdown.css';
 import { parseSpecDocFile, uploadSpecDocImage } from '@/api/specDoc';
 import { htmlToMarkdown } from '@/shared/utils/htmlToMarkdown';
+import { appUrlTransform } from '@/shared/utils/markdown';
 import { isImageFile, SPEC_DOC_ACCEPT, SPEC_DOC_FILE_MAX_MB } from '@/shared/utils/fileKind';
 import '@/shared/styles/specDoc.css';
 
@@ -241,6 +242,10 @@ export default function SpecDocEditor({
             preview={mode}
             height="100%"
             visibleDragbar={false}
+            // 预览渲染统一走 appUrlTransform：md 正文里的图片只存裸 /api/... 代理路径
+            // （后端返回即入库），test/prod 网关只路由带环境前缀的 /t|/p/api/，
+            // 不补前缀则预览 Tab 裂图（附件代理接口免登录，img 直连即可）。
+            previewOptions={{ urlTransform: appUrlTransform }}
             textareaProps={{
               onPaste: handlePaste,
               onDrop: handleDrop,
