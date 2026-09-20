@@ -121,28 +121,42 @@ export interface AnalysisChatStreamMeta {
   cards?: AnalysisCard[] | null;
   suggestions?: string[] | null;
   conversation_id?: string | null;
+  /** 统计范围标题（单项目时为项目名，作数据卡大标题） */
+  scope_title?: string | null;
+  /** 数据日期（具体年月日范围，如 2026-09-14 ~ 2026-09-20） */
+  date_range?: string | null;
+}
+
+/** 流式 done 事件负载：会话 ID / 模式 / 追问建议（agentic 端点可选下发） */
+export interface AnalysisDonePayload {
+  conversation_id?: string | null;
+  mode?: string;
+  suggest_questions?: string[] | null;
 }
 
 /** 流式回调集合：meta 先行（图表/卡片/口径），delta 逐块追加回答文本 */
 export interface AnalysisChatStreamHandlers {
   onMeta: (meta: AnalysisChatStreamMeta) => void;
   onDelta: (content: string) => void;
-  onDone: (payload: { conversation_id?: string | null; mode?: string }) => void;
+  onDone: (payload: AnalysisDonePayload) => void;
+  /** reasoning 事件（思考过程，agentic 端点可选下发，meta 之前）；可选 */
+  onReasoning?: (content: string) => void;
 }
 
 /**
- * POST /api/ai/analysis/chat/stream —— 流式问答（SSE）。
+ * 流式问答（SSE）底层执行：POST 指定端点并解析事件流。
  *
- * 事件协议（与后端 router.quick_chat_stream 对齐）：
- *   meta（mode/plan/charts/cards/suggestions）→ delta*（回答文本块）→ done
+ * 事件协议（与后端 router 对齐）：
+ *   reasoning（思考过程，可选）→ meta（mode/plan/charts/cards/suggestions）→ delta* → done
  *   error 事件抛异常；HTTP 非 2xx 同样抛异常（401 由 fetchWithAuth 统一处理）。
  */
-export async function analysisChatStream(
+async function runChatStream(
+  url: string,
   params: AnalysisChatParams,
   handlers: AnalysisChatStreamHandlers,
   signal?: AbortSignal,
 ): Promise<void> {
-  const res = await fetchWithAuth(`${API_CONFIG.AI.BASE_URL}/analysis/chat/stream`, {
+  const res = await fetchWithAuth(url, {
     method: 'POST',
     body: JSON.stringify({
       question: params.question,
@@ -183,12 +197,14 @@ export async function analysisChatStream(
         if (!dataStr || dataStr === '[DONE]') continue;
         let obj: Record<string, unknown>;
         try { obj = JSON.parse(dataStr) as Record<string, unknown>; } catch { continue; }
-        if (obj.type === 'meta') {
+        if (obj.type === 'reasoning') {
+          handlers.onReasoning?.(String(obj.content ?? ''));
+        } else if (obj.type === 'meta') {
           handlers.onMeta(obj as unknown as AnalysisChatStreamMeta);
         } else if (obj.type === 'delta') {
           handlers.onDelta(String(obj.content ?? ''));
         } else if (obj.type === 'done') {
-          handlers.onDone(obj as { conversation_id?: string | null; mode?: string });
+          handlers.onDone(obj as AnalysisDonePayload);
         } else if (obj.type === 'error') {
           throw new Error(String(obj.error || '服务异常'));
         }
@@ -197,4 +213,34 @@ export async function analysisChatStream(
   } finally {
     reader.releaseLock();
   }
+}
+
+/**
+ * POST /api/ai/analysis/chat/stream —— 流式问答（SSE）。
+ *
+ * 事件协议（与后端 router.quick_chat_stream 对齐）：
+ *   meta（mode/plan/charts/cards/suggestions）→ delta*（回答文本块）→ done
+ *   error 事件抛异常；HTTP 非 2xx 同样抛异常（401 由 fetchWithAuth 统一处理）。
+ */
+export async function analysisChatStream(
+  params: AnalysisChatParams,
+  handlers: AnalysisChatStreamHandlers,
+  signal?: AbortSignal,
+): Promise<void> {
+  return runChatStream(`${API_CONFIG.AI.BASE_URL}/analysis/chat/stream`, params, handlers, signal);
+}
+
+/**
+ * POST /api/ai/analysis/chat/agentic/stream —— Agentic 流式问答（SSE，LLM 主导+工具调用）。
+ *
+ * 事件协议与 /chat/stream 一致，额外支持：
+ *   reasoning（思考过程，meta 之前，可选）→ meta → delta* → done
+ *   done 附带 suggest_questions（追问建议，可选）。
+ */
+export async function analysisAgenticChatStream(
+  params: AnalysisChatParams,
+  handlers: AnalysisChatStreamHandlers,
+  signal?: AbortSignal,
+): Promise<void> {
+  return runChatStream(`${API_CONFIG.AI.BASE_URL}/analysis/chat/agentic/stream`, params, handlers, signal);
 }

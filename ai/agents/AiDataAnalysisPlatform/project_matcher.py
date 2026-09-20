@@ -234,3 +234,18 @@ def resolve_project(
         "项目线索 %r → 多候选/低置信，进入消歧（%d 个候选）", hint, len(cands)
     )
     return None, cands
+
+
+def get_project_name(code: str) -> str | None:
+    """按项目代码返回数据库中的项目全名；未命中返回 None。
+
+    复用 ``_load_projects`` 的进程内 TTL 缓存，供展示标题等场景把
+    项目编号还原为项目名（不依赖 LLM 传参）。
+    """
+    target = str(code or "")
+    if not target:
+        return None
+    for c, name in _load_projects():
+        if c == target:
+            return name or None
+    return None

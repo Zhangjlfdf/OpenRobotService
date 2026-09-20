@@ -540,6 +540,46 @@
   text-overflow: ellipsis;
 }
 
+/* ── 数据卡头部（项目名大标题 + 数据日期） ── */
+.ada-data-head {
+  margin-bottom: 8px;
+  padding: 8px 10px 6px;
+  border-left: 3px solid var(--ada-iris);
+  border-radius: 8px;
+  background: color-mix(in oklab, var(--ada-iris) 6%, var(--card));
+}
+
+.ada-data-head__title {
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1.35;
+  color: var(--ada-iris, var(--text));
+  word-break: break-all;
+}
+
+/* 标题内的具体数据日期（如「（2026-08-27 ~ 2026-09-07）」），
+   与项目名同标题展示但字号稍小、颜色弱化 */
+.ada-data-head__range {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted, var(--gray-40));
+}
+
+.ada-data-head__date {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 3px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--muted, var(--gray-40));
+}
+
+.ada-data-head__date svg {
+  flex-shrink: 0;
+  opacity: 0.7;
+}
+
 /* ── 指标卡片（单值指标：解决率/总数等）── */
 .ada-cards {
   display: flex;
@@ -601,6 +641,11 @@
 
 .ada-charts--grid .ada-chart {
   min-width: 0;
+}
+
+/* 奇数张图时最后一张独占一行铺满（一行只有一张图不留右侧空白） */
+.ada-charts--grid .ada-chart:last-child:nth-child(odd) {
+  grid-column: 1 / -1;
 }
 
 .ada-chart {
@@ -668,5 +713,96 @@
 }
 
 .ada-clarify__chip:active {
+  transform: scale(0.95);
+}
+
+/* 思考过程（agentic reasoning 事件）：默认收起的折叠区，风格与气泡正文区分 */
+.ada-reasoning {
+  margin-bottom: 8px;
+  padding: 6px 10px;
+  border-radius: 10px;
+  background: color-mix(in oklab, var(--muted) 35%, transparent);
+  border: 1px dashed color-mix(in oklab, var(--muted-foreground) 35%, transparent);
+}
+
+.ada-reasoning > summary {
+  cursor: pointer;
+  user-select: none;
+  font-size: 11px;
+  color: var(--muted-foreground);
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.ada-reasoning > summary::-webkit-details-marker {
+  display: none;
+}
+
+.ada-reasoning > summary::before {
+  content: '▸';
+  font-size: 10px;
+  transition: transform 0.15s ease;
+}
+
+.ada-reasoning[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+.ada-reasoning__body {
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--muted-foreground);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* 追问建议（agentic done 事件）：与 clarify 候选同风格，仅最新一条定稿消息渲染 */
+.ada-suggest {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid color-mix(in oklab, var(--border) 50%, transparent);
+}
+
+.ada-suggest__hint {
+  font-size: 11px;
+  color: var(--muted-foreground);
+  margin-bottom: 6px;
+}
+
+.ada-suggest__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.ada-suggest__chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--ada-iris-deep);
+  padding: 5px 10px;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--ada-iris) 8%, var(--card));
+  border: 1px solid color-mix(in oklab, var(--ada-iris) 22%, var(--border));
+  cursor: pointer;
+  transition: border-color 0.2s ease, background 0.2s ease, color 0.2s ease;
+}
+
+.ada-suggest__chip svg {
+  color: var(--ada-iris);
+  flex-shrink: 0;
+}
+
+.ada-suggest__chip:hover {
+  border-color: color-mix(in oklab, var(--ada-iris) 50%, var(--border));
+  background: color-mix(in oklab, var(--ada-iris) 16%, var(--card));
+  color: var(--foreground);
+}
+
+.ada-suggest__chip:active {
   transform: scale(0.95);
 }

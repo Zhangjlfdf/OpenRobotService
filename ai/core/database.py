@@ -100,33 +100,59 @@ class ProjectDelivery(Base):
     id = Column(String(64), primary_key=True, comment="项目ID/代码，与code一致")
     code = Column(String(64), unique=True, nullable=False, comment="项目代码")
     name = Column(String(128), nullable=False, comment="项目名称")
+
     system_id = Column(String(50), nullable=True, comment="系统ID")
-    description = Column(String(1000), nullable=True, comment="项目描述")
+    description = Column(Text, nullable=True, comment="项目描述")
     contact_person = Column(String(50), nullable=True, comment="对接人")
-    contact_person_id = Column(String(20), nullable=True, comment="对接人ID")
+    contact_person_id = Column(String(64), nullable=True, comment="对接人ID（与 users.id 同长度）")
+    project_contact = Column(String(50), nullable=True, comment="对接人")
     status = Column(String(20), nullable=False, default="active", comment="状态")
     expected_trend = Column(String(20), nullable=True, comment="预计走向")
     issues = Column(Integer, nullable=False, default=0, comment="问题数")
     risks = Column(Integer, nullable=False, default=0, comment="风险数")
     personnel_plan = Column(String(50), nullable=True, comment="人员计划")
-    risk_list = Column(String(500), nullable=True, comment="风险清单")
+    risk_list = Column(Text, nullable=True, comment="风险清单")
     deployment_date = Column(String(20), nullable=True, comment="部署时间")
     deployment_version = Column(String(50), nullable=True, comment="部署版本")
     recent_delivery_date = Column(String(20), nullable=True, comment="近期交付时间")
-    recent_delivery_content = Column(String(500), nullable=True, comment="近期交付内容")
+    recent_delivery_content = Column(Text, nullable=True, comment="近期交付内容")
     final_delivery_date = Column(String(20), nullable=True, comment="最终交付时间")
-    project_summary = Column(String(1000), nullable=True, comment="项目总结")
+    project_summary = Column(Text, nullable=True, comment="项目总结")
     task_execution_status = Column(String(50), nullable=True, comment="任务执行情况")
-    field_links = Column(String(1000), nullable=True, comment="字段链接(JSON格式)")
+    field_links = Column(Text, nullable=True, comment="字段链接(JSON格式)")
     category_basis = Column(String(20), nullable=False, default="重要紧急", comment="分类依据")
     # 项目扩展信息（递归嵌套 JSON），结构由服务层约定
     ext_info = Column(JSON, nullable=True, comment="项目扩展信息(递归嵌套 JSON)")
     # 乐观锁版本号（backend update_project 维护，AI 侧仅读取）
     version = Column(Integer, nullable=False, default=1, comment="乐观锁版本号")
 
+    project_type = Column(String(20), nullable=True, comment="项目类型（企业微信项目类型字段原值）")
+    stage_notes = Column(Text, nullable=True, comment="生命周期各阶段补充说明(JSON格式，键为阶段名)")
+    risk_carrying_type = Column(String(20), nullable=True, comment="风险承接类型")
+    special_attention = Column(Text, nullable=True, comment="特别关注说明")
+    risk_task_description = Column(Text, nullable=True, comment="风险和任务描述")
+    management_strategy = Column(Text, nullable=True, comment="项目管理策略")
+    project_documents = Column(Text, nullable=True, comment="项目文档(JSON格式，[{name,resource_id,url}])")
+    sales = Column(String(50), nullable=True, comment="销售")
+    pre_sales = Column(String(50), nullable=True, comment="售前")
+    project_manager = Column(String(50), nullable=True, comment="项目经理")
+    project_manager_id = Column(String(64), nullable=True, comment="项目经理ID（与 users.id 同长度，用于关联角色）")
+    field_engineer = Column(String(50), nullable=True, comment="实施工程师")
+
+    internal_code = Column(String(50), nullable=True, comment="内部编号")
+    project_region = Column(String(30), nullable=True, comment="项目区域/地点")
+    total_vehicle_count = Column(Integer, nullable=True, comment="总车数")
+    controller_vendor = Column(String(30), nullable=True, comment="控制器选择")
+    system_integration = Column(Text, nullable=True, comment="系统/外设对接(JSON数组)")
+    server_deployment_status = Column(String(30), nullable=True, comment="服务器部署")
+    settlement_period = Column(String(20), nullable=True, comment="业绩核算期（手工填写，常见YYYYMM如202608，兼容YYYY-MM）")
+    undertake_status = Column(String(10), nullable=False, default="是", comment="是否承接（是/待定；「否」不入库）")
+
     __table_args__ = (
         Index("idx_project_code", "code", unique=True),
         Index("idx_project_status", "status"),
+        Index("idx_project_settlement_period", "settlement_period"),
+        Index("idx_project_undertake_status", "undertake_status"),
     )
 
 

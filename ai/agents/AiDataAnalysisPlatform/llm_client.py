@@ -250,11 +250,12 @@ class LLMClient:
         inner = data.get("data", {}) or {}
         content = inner.get("answer", "")
         tool_calls = inner.get("tool_calls") or []
+        reasoning = inner.get("reasoning") or ""
         logger.info(
-            "LLM 工具调用完成（HTTP）content_len=%d tool_calls=%d",
-            len(content), len(tool_calls),
+            "LLM 工具调用完成（HTTP）content_len=%d tool_calls=%d reasoning_len=%d",
+            len(content), len(tool_calls), len(reasoning),
         )
-        return {"content": content, "tool_calls": tool_calls}
+        return {"content": content, "tool_calls": tool_calls, "reasoning": reasoning}
 
     async def fetch_history(self, session_id: str) -> list[dict]:
         """拉取会话历史轮次（AI 服务端 Redis 记忆），失败/无历史返回空列表。

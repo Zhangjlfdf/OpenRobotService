@@ -1229,6 +1229,7 @@ async def chat(request: ChatRequest) -> dict:
     try:
         t0 = time.perf_counter()
         tool_calls: list = []
+        reasoning = ""
         if request.messages:
             # agentic 多轮工具循环：完整消息列表直连，调用方自管历史注入
             resp = await llm.complete_with_tools(
@@ -1239,6 +1240,7 @@ async def chat(request: ChatRequest) -> dict:
             )
             answer = resp.get("content") or ""
             tool_calls = resp.get("tool_calls") or []
+            reasoning = resp.get("reasoning") or ""
         elif request.tools:
             # 单轮工具调用：历史按文本拼入 prompt
             prompt = await _build_prompt(request.session_id, request.query)
@@ -1251,6 +1253,7 @@ async def chat(request: ChatRequest) -> dict:
             )
             answer = resp.get("content") or ""
             tool_calls = resp.get("tool_calls") or []
+            reasoning = resp.get("reasoning") or ""
         else:
             prompt = await _build_prompt(request.session_id, request.query)
             answer = await llm.complete(
@@ -1263,7 +1266,8 @@ async def chat(request: ChatRequest) -> dict:
         # 空回答不落库（agentic 中间轮只调工具无正文时避免历史污染）
         if request.save_memory and answer.strip():
             await _save_memory(request.session_id, request.query, answer)
-        return {"code": 0, "data": {"answer": answer, "tool_calls": tool_calls, "total_ms": total_ms}}
+        return {"code": 0, "data": {"answer": answer, "tool_calls": tool_calls,
+                                "reasoning": reasoning, "total_ms": total_ms}}
     except Exception as e:
         return {"code": 1, "data": {"error": str(e)}}
 
