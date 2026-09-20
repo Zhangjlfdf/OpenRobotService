@@ -224,8 +224,10 @@ class ProjectResponse(ProjectBase):
     # 运行时附加的分析字段（服务层就地补充，非 Project 表列）：
     # task_execution_stats = {"total_tasks", "finished_tasks", "completion_rate", "manual_switch_count"}
     # latest_manual_switch_count = collection_data 最新一天的 averageManualCount
+    # ticket_count = tasks 表按 project_id 统计的工单数（口径同仪表盘「总工单数」）
     task_execution_stats: Optional[Dict[str, Any]] = None
     latest_manual_switch_count: Optional[float] = None
+    ticket_count: Optional[int] = None
     # 项目扩展信息（递归嵌套 JSON 列）与乐观锁版本号
     ext_info: Optional[Dict[str, Any]] = None
     version: int = 1

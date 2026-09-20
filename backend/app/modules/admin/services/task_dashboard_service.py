@@ -99,6 +99,31 @@ class TaskDashboardService:
         }
 
     @staticmethod
+    async def get_ticket_counts_by_project(
+        db: AsyncSession,
+        project_ids: List[str],
+    ) -> Dict[str, int]:
+        """按项目批量统计工单数（项目进度管理页项目卡右上角展示用）。
+
+        口径与 get_ticket_summary 的 total 一致：监控中的六种状态之和。
+        一条 GROUP BY 取全部项目，返回 {project_id: 工单数}；
+        没有工单的项目不出现在结果里（调用方按 0 兜底）。
+        """
+        if not project_ids:
+            return {}
+
+        query = (
+            select(Task.project_id, func.count(Task.id))
+            .where(
+                Task.project_id.in_(project_ids),
+                Task.status.in_([FRONTEND_STATUS_MAP[key] for key in MONITORED_STATUS_KEYS]),
+            )
+            .group_by(Task.project_id)
+        )
+        rows = (await db.execute(query)).all()
+        return {project_id: count for project_id, count in rows}
+
+    @staticmethod
     async def get_tickets_by_status(
         db: AsyncSession,
         status_key: str,

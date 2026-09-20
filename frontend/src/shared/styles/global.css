@@ -5549,7 +5549,8 @@ html, body, #root {
 .mac-log-card__action { font-size: 13px; color: var(--mac-fg); }
 .mac-log-card__detail { margin-top: 4px; font-size: 12px; color: var(--mac-muted-fg); }
 
-/* 项目进度管理页（对照 macaron projects.index 页） */
+/* 项目进度管理页（对照 macaron projects.index 页）
+   卡片标题行为 flex：项目名自适应省略 + 右上角工单数徽标 */
 .mac-proj-card {
   background: #fff;
   border: 1px solid rgba(232, 234, 234, 0.6);
@@ -5562,7 +5563,11 @@ html, body, #root {
   -webkit-user-select: none;
   touch-action: manipulation;
 }
+/* 标题行：项目名 + 右上角工单数徽标（项目名过长时省略，徽标固定不被挤掉） */
+.mac-proj-card__head { display: flex; align-items: center; gap: 8px; }
 .mac-proj-card__title {
+  flex: 1;
+  min-width: 0;
   font-size: 14.5px;
   font-weight: 700;
   color: var(--mac-fg);
@@ -5570,6 +5575,20 @@ html, body, #root {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.mac-proj-card__tickets {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  border-radius: 13px;
+  background: var(--mac-blue-soft);
+  padding: 2px 8px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--mac-blue-2);
+  white-space: nowrap;
+}
+.mac-proj-card__tickets-num { font-weight: 700; font-variant-numeric: tabular-nums; }
 .mac-proj-card__meta { margin-top: 8px; font-size: 11.5px; color: var(--mac-muted-fg); }
 .mac-progress { margin-top: 12px; }
 .mac-progress__head {
