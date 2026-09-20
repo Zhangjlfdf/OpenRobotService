@@ -28,12 +28,12 @@ QUERY_METRICS_TOOL = {
     "function": {
         "name": "query_metrics",
         "description": (
-            "查询 OpenRobotService 平台统计指标（工单/风险/项目/搬运效率等）。"
+            "查询 OpenRobotService 平台统计指标（工单/风险/项目/搬运效率/项目信息等）。"
             "当用户询问平台数据、统计、趋势、分布、对比时调用。"
             "metric_keys 必须从指标清单中选择。"
             "时间口径：project 维度指标按 settlement_period 业绩核算期（月份）过滤，"
             "用户未提及时间时不要传任何时间参数（查全部项目）；"
-            "工单/风险/搬运效率等维度未提及时间时用 recent_days 近7天。"
+            "工单/风险/搬运效率/项目信息等维度未提及时间时用 recent_days 近7天。"
             "用户只提月份（如「9月份」）时默认当前年份（月份在未来则回退上一年），"
             "用 custom 时间范围查询。"
             "项目未提及时默认只查用户关联的项目（scope_type=user_projects），不要为确认项目而停下；"

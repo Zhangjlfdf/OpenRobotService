@@ -28,6 +28,7 @@ FIELD_LABEL_MAP: dict[str, str] = {
     "project": "项目",
     "risk": "风险",
     "collection": "搬运效率",
+    "project_info": "项目信息",
     "total": "总数",
     "new_count": "新增数",
     "resolved_count": "已解决数",
@@ -72,10 +73,24 @@ FIELD_LABEL_MAP: dict[str, str] = {
     "avg_manual_switch_count": "平均切手动次数",
     "manual_intervention_rate": "人工干预率",
     "robot_group_compare": "各组数据对比",
+    # 项目信息（project_info_node/value/history/mark 四张表）
+    "node_total": "节点总数",
+    "global_node_count": "全局模板节点数",
+    "custom_node_count": "项目自定义节点数",
+    "by_value_type": "值类型分布",
+    "fill_rate": "填写率",
+    "filled_node_count": "已填字段数",
+    "fillable_node_count": "可填字段数",
+    "change_count": "变更次数",
+    "change_by_day": "每日变更",
+    "change_count_by_day": "每日变更次数",
+    "change_by_type": "变更类型分布",
+    "top_marked_nodes": "关注排行",
+    "value_items": "已填字段值明细",
 }
 
 # 百分比类指标字段（value 为 0~100 的数值，卡片展示时带 % 单位）
-_PERCENT_FIELDS: frozenset[str] = frozenset({"resolve_rate", "manual_intervention_rate"})
+_PERCENT_FIELDS: frozenset[str] = frozenset({"resolve_rate", "manual_intervention_rate", "fill_rate"})
 
 # 小数值标量字段：卡片展示保留小数（str(int()) 会截断有效工作时长等小时数）
 _DECIMAL_FIELDS: frozenset[str] = frozenset({
