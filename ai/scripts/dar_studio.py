@@ -1162,11 +1162,14 @@ def _funnel_layers(rows):
     }
 
 
-def _week_stats(rows: list) -> dict:
+def _week_stats(rows: list, unprocessed: list | None = None) -> dict:
     """本周（自然周，周一起）直答率：与漏斗同源同口径，人工标注后即刷。
 
     大字=周直答率（本周 qa 四层中直答正确占比）；小字=周新增段/已判定/直答数。
-    tester/suggested/chitchat/ticket 层的段计入"周新增"，不计入直答率分母。"""
+    tester/suggested/chitchat/ticket 层的段计入"周新增"，不计入直答率分母。
+    0920：走查进度分母改「可标注段」=qa 四层已判定+未标注（本周）——tester/寒暄/
+    猜你想问/提单层本就无需人工标签，按全量新增算分母会让进度永不到 100
+    （用户实锤：全标完仍显示 36%）。"""
     from datetime import datetime, timedelta
     today = datetime.now()
     monday = (today - timedelta(days=today.weekday())).strftime("%Y-%m-%d")
@@ -1185,10 +1188,15 @@ def _week_stats(rows: list) -> dict:
         elif layer == "undetermined":
             n_undet += 1
     judged = n_ans + n_unans + n_uncov + n_undet
+    n_pending = sum(1 for i in (unprocessed or [])
+                    if (i.get("at") or "")[:10] >= monday)
+    labelable = judged + n_pending
     return {"monday": monday, "new_total": n_new, "judged": judged,
             "answered": n_ans, "unanswered": n_unans, "uncovered": n_uncov,
-            "undetermined": n_undet,
-            "rate": round(n_ans / judged * 100, 1) if judged else None}
+            "undetermined": n_undet, "pending": n_pending,
+            "labelable": labelable,
+            "rate": round(n_ans / judged * 100, 1) if judged else None,
+            "progress": round(judged / labelable * 100, 1) if labelable else None}
 
 
 @app.get("/api/funnel")
@@ -1202,7 +1210,7 @@ def funnel(env: str = "prod"):
     if rows is None:
         return {"found": False, **meta}
     return {"found": True, "layers": _funnel_layers(rows),
-            "week": _week_stats(rows),
+            "week": _week_stats(rows, meta.get("unprocessed", [])),
             "unprocessed": meta.get("unprocessed", []),
             "unprocessed_count": len(meta.get("unprocessed", [])),
             "meta": meta}

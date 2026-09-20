@@ -1896,7 +1896,9 @@ function renderWeekCard(){
   const w = fData.week;
   const el = $("#weekcard");
   if(!w){ el.style.display = "none"; return; }
-  const prog = w.new_total ? Math.round(w.judged / w.new_total * 100) : 0;
+  // 0920：走查进度=可标注段（qa 四层已判定+未标注）的已判定占比——
+  // tester/寒暄/猜你想问/提单层无需人工标签，不再计入分母（全标完也到不了 100 的坑）
+  const prog = w.progress ?? (w.labelable ? Math.round(w.judged / w.labelable * 100) : 0);
   el.className = "weekcard";
   el.style.display = "";
   el.innerHTML = `
@@ -1911,7 +1913,8 @@ function renderWeekCard(){
       <div class="wk-item"><div class="n" style="color:var(--ok)">${w.answered}</div><div class="l">直答正确</div></div>
       <div class="wk-item"><div class="n" style="color:#d9534f">${w.unanswered}</div><div class="l">未直答</div></div>
       <div class="wk-item"><div class="n" style="color:#d9534f">${w.uncovered}</div><div class="l">未覆盖</div></div>
-      <div class="wk-item"><div class="n">${prog}%</div><div class="l">走查进度（判定占比）</div></div>
+      <div class="wk-item"><div class="n">${w.pending ?? 0}</div><div class="l">待标注</div></div>
+      <div class="wk-item"><div class="n">${prog}%</div><div class="l">走查进度（可标注段已判定占比）</div></div>
     </div>`;
 }
 
