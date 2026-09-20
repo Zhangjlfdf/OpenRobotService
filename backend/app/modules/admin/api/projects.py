@@ -5,20 +5,35 @@ MIGRATION.md 阶段 3：从 `app/modules/das/api/projects.py` 搬迁而来，
 """
 from fastapi import APIRouter, Depends, Query, HTTPException, Request
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional, Dict, List, Any
 from app.modules.admin.schemas_das.request_models import ProjectCreate, ProjectUpdate, ProjectResponse
 from app.modules.admin.services.project_service import project_service, ProjectConflictError
 from app.modules.admin.services.risk_service import risk_service
 from app.modules.admin.services import project_ai_summary_service
+from app.modules.admin.services.task_dashboard_service import task_dashboard_service
 from app.modules.admin.services.permission_service import PermissionService
 from app.modules.admin.utils_das.config import security, DEBUG_MODE
-from app.core.database import db_manager
+from app.core.database import db_manager, get_async_db as get_db
 from app.modules.admin.api.auth import require_permission
 import logging
 
 logger = logging.getLogger("admin")
 
 project_router = APIRouter(prefix="/projects", tags=["admin-projects"])
+
+
+async def _attach_ticket_counts(db: AsyncSession, projects: List[Dict[str, Any]]) -> None:
+    """给项目列表补上 ticket_count（tasks 表按 project_id 批量统计，口径同仪表盘「总工单数」）。
+
+    项目进度管理页每张项目卡右上角展示该项目的工单数；一条 GROUP BY 覆盖整页项目，
+    不做逐项目查询。
+    """
+    counts = await task_dashboard_service.get_ticket_counts_by_project(
+        db, [str(project["id"]) for project in projects]
+    )
+    for project in projects:
+        project["ticket_count"] = counts.get(str(project["id"]), 0)
 
 
 @project_router.get("/", summary="获取项目列表")
@@ -30,17 +45,21 @@ async def get_projects(
     execution_status: Optional[str] = Query(None, description="按执行状态过滤"),
     contact_person_id: Optional[str] = Query(None, description="按对接人ID过滤"),
     include_analysis: bool = Query(True, description="是否包含分析信息"),
+    db: AsyncSession = Depends(get_db),
     credentials: Optional = Depends(security if not DEBUG_MODE else lambda: None)
 ) -> List[ProjectResponse]:
     projects = []
-    
+
     if keyword:
         projects = project_service.search_projects(keyword)
     elif status or execution_status or contact_person_id:
         projects = project_service.filter_projects(status, execution_status, contact_person_id)
     else:
         projects = project_service.get_projects(skip, limit)
-    
+
+    # 项目卡右上角工单数：与 include_analysis 无关，始终附带
+    await _attach_ticket_counts(db, projects)
+
     if not include_analysis:
         return projects
     
@@ -100,6 +119,7 @@ async def get_projects(
 async def get_my_projects(
     request: Request,
     include_analysis: bool = Query(True, description="是否包含分析信息"),
+    db: AsyncSession = Depends(get_db),
     credentials: Optional = Depends(security if not DEBUG_MODE else lambda: None)
 ) -> List[ProjectResponse]:
     from app.core.security import decode_token
@@ -136,7 +156,10 @@ async def get_my_projects(
         project = project_service.get_project(project_id)
         if project:
             projects.append(project)
-    
+
+    # 项目卡右上角工单数：与 include_analysis 无关，始终附带（口径同 GET /projects/）
+    await _attach_ticket_counts(db, projects)
+
     if not include_analysis:
         return projects
     
