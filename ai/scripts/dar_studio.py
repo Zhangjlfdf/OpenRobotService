@@ -1065,6 +1065,9 @@ def _seg_rows(env):
                     layer = "suggested"
                 elif eff == "寒暄":
                     layer = "chitchat"
+                elif man and eff == "猜你想问":
+                    # 人工判推荐命中（自动池匹配漏掉的措辞变体）→ 归 suggested 层
+                    layer = "suggested"
                 # 人工判非提单类优先于 seg_ticketed（0915 反馈：人工判"未覆盖"被
                 # 压进 ticket 层——人工意图为准）
                 elif man and eff == "未覆盖":
@@ -1261,7 +1264,7 @@ class LabelSegReq(BaseModel):
     label: str
 
 
-_LABELS_VALID = ("直答正确", "未直答", "未覆盖", "直接提单", "建议转单", "寒暄")
+_LABELS_VALID = ("直答正确", "未直答", "未覆盖", "直接提单", "建议转单", "寒暄", "猜你想问")
 
 
 @app.post("/api/label_seg")
@@ -1632,7 +1635,8 @@ def layer_page(env: str = "prod", layer: str = ""):
                 f'<div class="turn"><div class="uq"><b>用户</b> · {esc(rr.get("at", ""))[:19]}'
                 f'<div>{esc(rr.get("q", ""))}</div>{imgs}</div>{acts}{ans}</div>')
         lbls = [("直答正确", "#2e9e5b"), ("未直答", "#d9534f"), ("未覆盖", "#d9534f"),
-                ("直接提单", "#d97706"), ("建议转单", "#d97706"), ("寒暄", "#98a2b3")]
+                ("直接提单", "#d97706"), ("建议转单", "#d97706"), ("寒暄", "#98a2b3"),
+                ("猜你想问", "#b45309")]
         # 标签只属于真实咨询层（0916 用户定调：其他层只是浏览）
         btns = ("".join(
             f'<button class="lb{" on" if r["eff"] == lb and r["src"] == "manual" else ""}" '
