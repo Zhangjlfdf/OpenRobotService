@@ -82,15 +82,21 @@ class SpyAgent(agent_mod.DataAnalysisAgent):
 
 
 class SpyAgenticLLM:
-    """按 script 依次返回 chat_with_tools 结果，记录全部调用与落库。"""
+    """按 script 依次返回 chat_with_tools 结果，记录全部调用与落库。
+
+    chat 方法（追问建议/历史摘要等辅助调用）返回 ``chat_reply`` 配置文本。
+    """
 
     model_name = "spy-agentic-model"
 
-    def __init__(self, script: list[dict], history: list[dict] | None = None):
+    def __init__(self, script: list[dict], history: list[dict] | None = None,
+                 chat_reply: str = "[]"):
         self.script = script
         self.history = history or []
+        self.chat_reply = chat_reply
         self.calls: list[dict] = []
         self.saved_turns: list[tuple] = []
+        self.chat_calls: list[tuple] = []
 
     async def chat_with_tools(self, system_prompt, user_prompt, tools, *,
                               messages=None, session_id=None, temperature=None,
@@ -111,6 +117,10 @@ class SpyAgenticLLM:
 
     async def add_turn(self, session_id: str, role: str, content: str) -> None:
         self.saved_turns.append((session_id, role, content))
+
+    async def chat(self, system_prompt, user_prompt, **kw):
+        self.chat_calls.append((system_prompt, user_prompt, kw))
+        return self.chat_reply, None
 
 
 class SpyPlainLLM:
@@ -156,6 +166,8 @@ def main() -> None:
                 "text": "统计周期：近7天；范围：全部项目。",
                 "charts": [{"type": "bar", "title": "mock-chart"}],
                 "cards": [{"title": "mock-card"}],
+                "scope_title": "罗勇项目",
+                "date_range": "2026-09-14 ~ 2026-09-20",
             }
         return {"text": "未知工具"}
 
@@ -168,6 +180,7 @@ def main() -> None:
             {"role": "user", "content": "你是谁"},
             {"role": "assistant", "content": "我是智能助手"},
         ],
+        chat_reply='["和上周相比呢？", "按项目拆分呢？"]',
     )
     a = SpyAgent(llm=llm)
     evts = asyncio.run(collect(a, question="你好"))
@@ -186,6 +199,9 @@ def main() -> None:
         (meta["conversation_id"], "user", "你好"),
         (meta["conversation_id"], "assistant", "你好呀！想聊点什么？"),
     ]
+    # 追问建议：done 附带 LLM 生成的建议
+    assert done["suggest_questions"] == ["和上周相比呢？", "按项目拆分呢？"]
+    assert llm.chat_calls and "助手回答" in llm.chat_calls[-1][1]
     print("✓ 闲聊：chat 模式 + 历史注入 + 问答对落库")
 
     # 2) 数据问题 → query_metrics → analysis 模式 + charts/cards + messages 回填
@@ -202,6 +218,9 @@ def main() -> None:
     meta2 = evts2[0]
     assert meta2["mode"] == "analysis", meta2
     assert len(meta2["charts"]) == 1 and len(meta2["cards"]) == 1
+    # 数据卡头部元信息：项目名大标题 + 数据日期随 meta 下发
+    assert meta2["scope_title"] == "罗勇项目", meta2
+    assert meta2["date_range"] == "2026-09-14 ~ 2026-09-20", meta2
     assert _joined(evts2) == "近7天工单解决率约 82%，整体稳定。"
     assert [n for n, _ in tool_calls_log] == ["query_metrics"]
     c1 = llm2.calls[1]
@@ -262,6 +281,100 @@ def main() -> None:
     assert _joined(evts5) == "你好"
     assert all(e["type"] in ("meta", "delta", "done") for e in evts5)
     print("✓ 无工具能力：自动降级 chat_stream")
+
+    # 6) reasoning 透传：首轮思考过程作为 reasoning 事件（meta 之前下发）
+    llm6 = SpyAgenticLLM(script=[
+        {"content": "", "reasoning": "用户问数据，先查近7天解决率",
+         "tool_calls": [{"id": "r1", "name": "query_metrics",
+                          "arguments": {"metric_keys": ["ticket.resolve_rate"]}}]},
+        {"content": "近7天解决率 82%。", "reasoning": "", "tool_calls": []},
+    ])
+    a6 = SpyAgent(llm=llm6)
+    evts6 = asyncio.run(collect(a6, question="最近解决率怎么样"))
+    assert evts6[0]["type"] == "reasoning", evts6[0]
+    assert evts6[0]["content"] == "用户问数据，先查近7天解决率"
+    assert evts6[1]["type"] == "meta" and evts6[1]["mode"] == "analysis"
+    print("✓ reasoning 事件透传（meta 之前下发）")
+
+    # 7) 长会话历史压缩：超阈值时最旧轮次 LLM 摘要 + 保留最近轮次
+    long_history = [
+        {"role": "user" if i % 2 == 0 else "assistant", "content": f"历史消息{i}"}
+        for i in range(10)
+    ]
+    llm7 = SpyAgenticLLM(
+        script=[{"content": "基于历史，答案是稳定。", "tool_calls": []}],
+        history=long_history,
+        chat_reply="这是更早对话的摘要内容",
+    )
+    a7 = SpyAgent(llm=llm7)
+    evts7 = asyncio.run(collect(a7, question="和之前比呢"))
+    assert evts7[0]["type"] == "meta" and evts7[0]["mode"] == "chat"
+    c7 = llm7.calls[0]
+    msgs7 = c7["messages"]
+    # system(人设) + system(摘要) + 最近4条 + 当前用户
+    assert [m["role"] for m in msgs7] == [
+        "system", "system", "user", "assistant", "user", "assistant", "user"
+    ], [m["role"] for m in msgs7]
+    assert msgs7[1]["content"].startswith("[更早对话摘要]"), msgs7[1]["content"][:40]
+    assert msgs7[1]["content"].endswith("这是更早对话的摘要内容")
+    assert msgs7[-1]["content"] == "和之前比呢"
+    # 摘要调用使用了摘要提示词，且用户输入包含旧轮文本
+    assert llm7.chat_calls and "历史消息" in llm7.chat_calls[0][1]
+    print("✓ 长会话历史压缩：摘要注入 + 最近轮次保留")
+
+    # 8) 追问建议生成失败 → 静默跳过（suggest_questions=None）
+    llm8 = SpyAgenticLLM(
+        script=[{"content": "你好！", "tool_calls": []}],
+        chat_reply="抱歉，我无法生成建议。",
+    )
+    a8 = SpyAgent(llm=llm8)
+    evts8 = asyncio.run(collect(a8, question="你好"))
+    done8 = evts8[-1]
+    assert done8["type"] == "done" and done8["suggest_questions"] is None
+    print("✓ 追问建议解析失败 → 静默跳过")
+
+    # 9) 默认范围规则：未指定项目时只查用户关联项目（不查全部项目）
+    tools_mod = mods["tools"]
+    rg_mod = mods["report_generator"]
+    _orig_resolve = rg_mod.ReportGenerator._resolve_project_ids_by_user
+
+    async def _check_scope(args, user_id):
+        return await tools_mod._resolve_scope(args, None, user_id)
+
+    rg_mod.ReportGenerator._resolve_project_ids_by_user = staticmethod(
+        lambda uid: ["P001", "P002"]
+    )
+    ids, label = asyncio.run(_check_scope(
+        {"metric_keys": ["project.total"]}, "u1"))
+    assert ids == ["P001", "P002"], ids
+    assert label == "用户关联项目（2 个）", label
+    ids2, _ = asyncio.run(_check_scope(
+        {"metric_keys": ["project.total"], "scope_type": "global"}, "u1"))
+    assert ids2 == ["P001", "P002"], ids2
+    ids3, _ = asyncio.run(_check_scope(
+        {"metric_keys": ["project.total"]}, None))
+    assert ids3 is None, ids3
+
+    rg_mod.ReportGenerator._resolve_project_ids_by_user = staticmethod(
+        lambda uid: []
+    )
+    ids4, label4 = asyncio.run(_check_scope(
+        {"metric_keys": ["project.total"]}, "u1"))
+    assert ids4 == ["__no_project__"] and "无关联项目" in label4, (ids4, label4)
+    rg_mod.ReportGenerator._resolve_project_ids_by_user = _orig_resolve
+
+    ids5, _ = asyncio.run(_check_scope(
+        {"metric_keys": ["project.total"], "scope_type": "single_project",
+         "project_code": "P009"}, "u1"))
+    assert ids5 == ["P009"], ids5
+    print("✓ 默认范围：未指定项目 → 仅用户关联项目；无 user_id 才查全部")
+
+    # 工具描述规则文本：默认 user_projects
+    desc = tools_mod.QUERY_METRICS_TOOL["function"]["description"]
+    assert "user_projects" in desc and "同样只统计用户关联的项目" in desc
+    agentic_prompt = mods["prompts"].build_agentic_system_prompt()
+    assert "未提及项目时默认只查用户关联的项目" in agentic_prompt
+    print("✓ 规则文本：工具描述 + 系统提示词默认用户关联项目")
 
     # 恢复现场（脚本进程内无后续用例，保留也无妨）
     agent_mod.execute_tool = _orig

@@ -5,9 +5,10 @@
 //    52px 液态玻璃圆钮 + 常显小标签 + 可拖拽自由定位；差异点是色相换为深一号蓝（--blue-2）、
 //    呼吸闪烁放慢至 3.6s。
 //  - 点开为右侧抽屉式聊天对话框（窄屏自动全宽），气泡样式复用全局 .chat-bubble 体系，与摇人对话观感一致。
-//  - 问答走真实接口：POST /api/ai/analysis/chat/stream（AiDataAnalysisPlatform 快速对话，流式 SSE），
-//    兼容三种模式：chat（普通聊天）、analysis（数据分析+口径回显）、clarify（澄清追问+候选按钮），
-//    澄清多轮自动携带 conversation_id 关联上下文；流式协议：meta（模式/图表/卡片先行）→ delta（逐块文本）→ done。
+//  - 问答走真实接口：POST /api/ai/analysis/chat/agentic/stream（Agentic 自由对话，LLM 主导+工具调用，流式 SSE），
+//    兼容三种模式：chat（普通聊天）、analysis（数据分析+图表/卡片）、clarify（澄清追问+候选按钮），
+//    澄清多轮自动携带 conversation_id 关联上下文；流式协议：reasoning（思考过程，可选）→ meta（模式/图表/卡片先行）→ delta（逐块文本）→ done（附追问建议）。
+//    后端无工具能力或异常时自动降级到原 /chat/stream 流程，前端无需感知。
 //  - 会话持久化：独立表 dataqa_conversations/messages（/api/dataqa/*），与摇人对话库表完全隔离：
 //    首问自动建会话（标题=首问截断）并逐轮落库；头部可新建会话、查看历史会话列表（恢复完整记录）
 //    并可删除历史会话。
@@ -20,7 +21,7 @@ import { Popup, Button, Toast } from 'tdesign-mobile-react';
 import { Bot, Calendar, Hash, History, MessageSquarePlus, RotateCcw, Send, Sparkles, Square, Target, Trash2, X } from 'lucide-react';
 import MarkdownRenderer from '@/shared/components/MarkdownRenderer';
 import ReactECharts from '@/shared/components/ReactECharts';
-import { analysisChatStream, type AnalysisCard, type AnalysisChart, type AnalysisPlan } from '@/api/analysis';
+import { analysisAgenticChatStream, type AnalysisCard, type AnalysisChart, type AnalysisPlan } from '@/api/analysis';
 import {
   createConversation,
   listMyConversations,
@@ -58,6 +59,14 @@ interface AdaMessage {
   charts?: AnalysisChart[] | null;
   /** 单值指标卡片（analysis 模式，后端采集数据生成） */
   cards?: AnalysisCard[] | null;
+  /** 统计范围标题（单项目时为项目名，作数据卡大标题） */
+  scopeTitle?: string | null;
+  /** 数据日期（具体年月日范围） */
+  dateRange?: string | null;
+  /** 思考过程（agentic 端点 reasoning 事件，可折叠展示，不落库） */
+  reasoning?: string | null;
+  /** 追问建议（agentic done 事件，渲染为「猜你想问」快捷按钮，不落库） */
+  suggestQuestions?: string[];
 }
 
 /** 空态推荐问题（覆盖四大维度常用问法） */
@@ -256,6 +265,8 @@ export default function AdminDataAssistant() {
           let mode: string | undefined;
           let charts: AnalysisChart[] | null = null;
           let cards: AnalysisCard[] | null = null;
+          let scopeTitle: string | null = null;
+          let dateRange: string | null = null;
           if (m.metadata_) {
             try {
               // metadata_ 可能被后端二次 JSON 编码（历史双重编码数据）：首次 parse
@@ -267,10 +278,12 @@ export default function AdminDataAssistant() {
                 mode = typeof obj.mode === 'string' ? obj.mode : undefined;
                 if (Array.isArray(obj.charts)) charts = obj.charts as AnalysisChart[];
                 if (Array.isArray(obj.cards)) cards = obj.cards as AnalysisCard[];
+                scopeTitle = typeof obj.scope_title === 'string' ? obj.scope_title : null;
+                dateRange = typeof obj.date_range === 'string' ? obj.date_range : null;
               }
             } catch { /* 元数据损坏忽略 */ }
           }
-          return { id: uid(), role: (m.role === 'user' ? 'user' : 'assistant') as 'user' | 'assistant', content: m.content, mode, charts, cards };
+          return { id: uid(), role: (m.role === 'user' ? 'user' : 'assistant') as 'user' | 'assistant', content: m.content, mode, charts, cards, scopeTitle, dateRange };
         });
       setConvId(id);
       convIdRef.current = id;
@@ -326,9 +339,9 @@ export default function AdminDataAssistant() {
     if (t) t.style.height = '';
   };
 
-  /** 发送问题：思考占位 → 持久化用户消息 → POST /api/ai/analysis/chat → 定稿并持久化回答
-   *  - 兼容三种模式：chat（普通聊天）、analysis（数据分析+口径回显）、clarify（澄清追问+候选按钮）
-   *  - 澄清多轮时自动携带 conversation_id 关联上下文 */
+  /** 发送问题：思考占位 → 持久化用户消息 → POST /api/ai/analysis/chat/agentic/stream → 定稿并持久化回答
+   *  - 兼容三种模式：chat（普通聊天）、analysis（数据分析+图表/卡片）、clarify（澄清追问+候选按钮）
+   *  - 澄清多轮时自动携带 conversation_id 关联上下文；reasoning 思考过程折叠展示，done 追问建议渲染「猜你想问」 */
   const ask = async (raw: string, opts: { force?: boolean } = {}) => {
     const text = raw.trim();
     if (!text) return;
@@ -371,15 +384,19 @@ export default function AdminDataAssistant() {
     }
 
     try {
-      // 流式问答：meta 先行（模式/图表/卡片/口径），delta 逐块追加回答文本
+      // 流式问答：reasoning 先行（思考过程，可选）→ meta（模式/图表/卡片/口径）→ delta 逐块追加
       let answerAcc = '';
       let modeAcc: 'chat' | 'analysis' | 'clarify' = 'analysis';
       let planAcc: AnalysisPlan | null = null;
       let suggestionsAcc: string[] | undefined;
       let chartsAcc: AnalysisChart[] | null = null;
       let cardsAcc: AnalysisCard[] | null = null;
+      let reasoningAcc: string | null = null;
+      let suggestQuestionsAcc: string[] | undefined;
+      let scopeTitleAcc: string | null = null;
+      let dateRangeAcc: string | null = null;
 
-      await analysisChatStream(
+      await analysisAgenticChatStream(
         {
           question: text,
           user_id: userId || undefined,
@@ -389,6 +406,12 @@ export default function AdminDataAssistant() {
           conversation_id: conversationId ?? undefined,
         },
         {
+          onReasoning: (content) => {
+            if (controller.signal.aborted) return;
+            reasoningAcc = (reasoningAcc || '') + content;
+            setMessages((prev) => prev.map((m) =>
+              m.id === thinkingId ? { ...m, reasoning: reasoningAcc } : m));
+          },
           onMeta: (meta) => {
             if (controller.signal.aborted) return;
             modeAcc = meta.mode;
@@ -396,6 +419,8 @@ export default function AdminDataAssistant() {
             suggestionsAcc = meta.suggestions ?? undefined;
             chartsAcc = meta.charts ?? null;
             cardsAcc = meta.cards ?? null;
+            scopeTitleAcc = meta.scope_title ?? null;
+            dateRangeAcc = meta.date_range ?? null;
             // 更新会话ID（首问/澄清时后端生成，后续轮次带上）
             if (meta.conversation_id) {
               setConversationId(meta.conversation_id);
@@ -408,6 +433,8 @@ export default function AdminDataAssistant() {
                 suggestions: meta.suggestions ?? undefined,
                 charts: meta.charts ?? null,
                 cards: meta.cards ?? null,
+                scopeTitle: meta.scope_title ?? null,
+                dateRange: meta.date_range ?? null,
               } : m));
           },
           onDelta: (content) => {
@@ -416,7 +443,13 @@ export default function AdminDataAssistant() {
             setMessages((prev) => prev.map((m) =>
               m.id === thinkingId ? { ...m, content: answerAcc, typing: false } : m));
           },
-          onDone: () => { /* 定稿与持久化在流结束后统一处理 */ },
+          onDone: (payload) => {
+            // 追问建议（agentic 可选下发）：定稿时写入消息，渲染「猜你想问」
+            if (!controller.signal.aborted && Array.isArray(payload.suggest_questions)
+                && payload.suggest_questions.length > 0) {
+              suggestQuestionsAcc = payload.suggest_questions;
+            }
+          },
         },
         controller.signal,
       );
@@ -432,6 +465,10 @@ export default function AdminDataAssistant() {
           suggestions: suggestionsAcc,
           charts: chartsAcc,
           cards: cardsAcc,
+          reasoning: reasoningAcc,
+          suggestQuestions: suggestQuestionsAcc,
+          scopeTitle: scopeTitleAcc,
+          dateRange: dateRangeAcc,
         } : m));
       if (cid !== null) {
         try {
@@ -439,6 +476,8 @@ export default function AdminDataAssistant() {
             mode: modeAcc,
             charts: chartsAcc,
             cards: cardsAcc,
+            scope_title: scopeTitleAcc,
+            date_range: dateRangeAcc,
           }));
         } catch { /* 落库失败不阻断问答 */ }
       }
@@ -684,6 +723,28 @@ export default function AdminDataAssistant() {
                       {m.mode === 'analysis' && !(m.plan && m.plan.metric_keys.length > 0) && (
                         <div className="ada-bubble__tag">📊 数据分析</div>
                       )}
+                      {/* 数据卡头部：项目名大标题（含具体数据日期，格式「项目名（日期范围）」）；
+                          无项目名时单独展示数据日期行 */}
+                      {m.mode === 'analysis'
+                        && ((m.cards?.length ?? 0) > 0 || (m.charts?.length ?? 0) > 0)
+                        && (m.scopeTitle || m.dateRange) && (
+                        <div className="ada-data-head">
+                          {m.scopeTitle && (
+                            <div className="ada-data-head__title">
+                              {m.scopeTitle}
+                              {m.dateRange && (
+                                <span className="ada-data-head__range">（{m.dateRange}）</span>
+                              )}
+                            </div>
+                          )}
+                          {!m.scopeTitle && m.dateRange && (
+                            <div className="ada-data-head__date">
+                              <Calendar size={11} strokeWidth={2} />
+                              数据日期：{m.dateRange}
+                            </div>
+                          )}
+                        </div>
+                      )}
                       {/* 指标卡片：单值指标（解决率/总数等）大号数字展示 */}
                       {m.mode === 'analysis' && m.cards && m.cards.length > 0 && (
                         <div className="ada-cards">
@@ -699,9 +760,10 @@ export default function AdminDataAssistant() {
                         </div>
                       )}
                       {/* 图表：分布（饼/柱）与趋势（折线），由后端采集数据生成；
-                          多指标趋势图（全为折线）时两列网格展示避免纵向过长 */}
+                          多指标趋势图（全为折线且≥2张）时两列网格展示避免纵向过长，
+                          单图不分组直接铺满整行 */}
                       {m.mode === 'analysis' && m.charts && m.charts.length > 0 && (
-                        <div className={`ada-charts${m.charts.every((c) => c.chart_type === 'line') ? ' ada-charts--grid' : ''}`}>
+                        <div className={`ada-charts${m.charts.length > 1 && m.charts.every((c) => c.chart_type === 'line') ? ' ada-charts--grid' : ''}`}>
                           {m.charts.map((c, i) => (
                             <div key={`${c.title}-${i}`} className="ada-chart">
                               <div className="ada-chart__title">{c.title}</div>
@@ -713,6 +775,13 @@ export default function AdminDataAssistant() {
                             </div>
                           ))}
                         </div>
+                      )}
+                      {/* 思考过程（agentic reasoning 事件）：折叠展示，默认收起 */}
+                      {m.reasoning && (
+                        <details className="ada-reasoning">
+                          <summary>思考过程</summary>
+                          <div className="ada-reasoning__body">{m.reasoning}</div>
+                        </details>
                       )}
                       <MarkdownRenderer content={m.content} compact />
                       {/* clarify 候选按钮：仅最新一条且未被停止的 clarify 消息可点——历史 clarify 按钮
@@ -733,6 +802,26 @@ export default function AdminDataAssistant() {
                                 type="button"
                                 className="ada-clarify__chip"
                                 onClick={() => void continueThought(s)}
+                              >
+                                <Sparkles size={11} strokeWidth={2} />
+                                {s}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                      {/* 追问建议（agentic done 事件）：仅最新一条定稿消息渲染，点击直接提问 */}
+                      {m.suggestQuestions && m.suggestQuestions.length > 0
+                        && !m.typing && m.id === messages[messages.length - 1].id && (
+                        <div className="ada-suggest">
+                          <div className="ada-suggest__hint">猜你想问</div>
+                          <div className="ada-suggest__chips">
+                            {m.suggestQuestions.map((s) => (
+                              <button
+                                key={s}
+                                type="button"
+                                className="ada-suggest__chip"
+                                onClick={() => void ask(s)}
                               >
                                 <Sparkles size={11} strokeWidth={2} />
                                 {s}

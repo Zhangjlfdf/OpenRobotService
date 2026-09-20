@@ -215,7 +215,9 @@ async def quick_chat_stream(request: QuickChatRequest):
 async def agentic_chat_stream(request: QuickChatRequest):
     """Agentic 流式对话：LLM 自主决定聊天或调用工具查询平台数据。
 
-    与 /chat/stream 同 SSE 事件协议（meta → delta* → done / error）。
+    与 /chat/stream 同 SSE 事件协议，额外支持：
+        {"type":"reasoning","content":"..."}  思考过程（可选，meta 之前下发）
+        done 事件附带 suggest_questions：LLM 生成的追问建议（可选）
     不传 data 时进入 agentic 流程（指标问题自动查库，闲聊自由回答）；
     传 data 或 LLM 客户端无工具能力时自动降级到既有 /chat/stream 流程。
     """

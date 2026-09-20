@@ -255,6 +255,25 @@ FAST_PATH_CASES: list[dict] = [
         "scope_type": "global",
     },
     {
+        # 月份词「9月份」→ custom（当月 1 号至月末）显式时间；
+        # 「多少项目」→ 项目维度兜底指标（settlement_period 月份过滤的入口）
+        "question": "9月份有多少项目",
+        "metric_keys": ["project.total", "project.active_count", "project.by_status"],
+        "time_type": "custom",
+        "time_explicit": True,
+        "action": "summary",
+        "scope_type": "global",
+    },
+    {
+        # 时长表达「近3个月」不误入月份词（负向前瞻排除）→ 默认 recent_days 非显式
+        "question": "近3个月有多少项目",
+        "metric_keys": ["project.total", "project.active_count", "project.by_status"],
+        "time_type": "recent_days",
+        "time_explicit": False,
+        "action": "summary",
+        "scope_type": "global",
+    },
+    {
         # 转投：含「搬运」的无数据问法 → 全局无数据项目清单（不触发单项目澄清）
         "question": "近7天哪些项目的搬运效率为空",
         "metric_keys": ["project.no_data_items"],
