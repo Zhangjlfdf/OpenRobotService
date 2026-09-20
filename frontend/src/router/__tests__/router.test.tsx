@@ -1,4 +1,7 @@
 import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
+import { matchPath } from 'react-router-dom';
 import { router } from '../index';
 
 describe('Router Configuration', () => {
@@ -109,5 +112,38 @@ describe('Router Configuration', () => {
     expect(paths).toContain('dashboard/tickets/:status');
     expect(paths).toContain('dashboard/projects/:dimension/:key');
     expect(paths).toContain('entries');
+  });
+});
+
+// —— 真实路由表（src/main.tsx） ——
+// 本目录的 index.tsx 并没有被应用引用（见其文件头），上面那些用例守的是那份留存副本。
+// 应用真正加载的是 main.tsx 内联的 createBrowserRouter：只改上面那份 = 改了不生效，
+// 点击会落到 main.tsx 的 /admin/* 兜底并跳回 /admin（曾把「项目工单卡三格下钻」跳错页）。
+// 这里直接读 main.tsx 源码抽 path 字面量做匹配——不关心它嵌套在哪一层，
+// 只要 URL 能被某条规则匹配上，就不会掉进兜底。
+// 按 cwd 定位（vitest 的 cwd 即 frontend/，与 vite.config.ts 同级）：
+// jsdom 环境下 import.meta.url 不是 file:// 协议，fileURLToPath 会抛「The URL must be of scheme file」
+const MAIN_SRC = readFileSync(path.resolve(process.cwd(), 'src/main.tsx'), 'utf8');
+// 通配（/*、*、/admin/*）一律排除：它们能匹配任何 URL，留着会让下面的断言恒真
+const REAL_ROUTE_PATHS = [...MAIN_SRC.matchAll(/path:\s*'([^']+)'/g)]
+  .map((m) => m[1])
+  .filter((p) => !p.includes('*'));
+/** admin 子路由在 main.tsx 里是相对写法（不带 /admin 前缀），故两种都试 */
+const resolvesInRealRouter = (url: string) =>
+  REAL_ROUTE_PATHS.some((p) => matchPath(`/${p}`, url) !== null || matchPath(`/${p}`, url.replace(/^\/admin/, '')) !== null);
+
+describe('真实路由表（src/main.tsx）', () => {
+  it('项目工单卡三格的下钻路由已挂上（每个按钮各一个列表页）', () => {
+    // 卡片点击后跳的正是这三个 URL（见 ProjectTicketsCard.openTickets）
+    for (const scope of ['all', 'pending', 'overdue']) {
+      expect(resolvesInRealRouter(`/admin/project-detail/P-001/tickets/${scope}`)).toBe(true);
+    }
+    // 反向对照：同层级但规则不存在的路径必须匹配不上，否则上面的断言只是恒真
+    // （:status 是通配段，故用第三段的 tickets 换成 nope 来构造「真不存在」的路径）
+    expect(resolvesInRealRouter('/admin/project-detail/P-001/nope/all')).toBe(false);
+  });
+
+  it('工单条目跳工单详情页的路由也在（/tasks/:id）', () => {
+    expect(resolvesInRealRouter('/tasks/12')).toBe(true);
   });
 });

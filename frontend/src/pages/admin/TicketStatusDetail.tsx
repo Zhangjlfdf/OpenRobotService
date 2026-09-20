@@ -1,4 +1,7 @@
-// 工单状态下钻明细 —— 点击仪表盘某个状态标签后展示该状态下的工单列表
+// 工单下钻明细 —— 点某个汇总数字后展示该口径下的工单列表。两个入口共用这一个页面：
+//   仪表盘统计卡：/admin/dashboard/tickets/:status（全部工单 / 待处理 / 超时工单 + 单一状态）
+//   项目工单卡三格：/admin/project-detail/:id/tickets/:status（总工单 / 正在处理 / 超期工单）
+// 后端同一个 /dashboard/tickets 接口，带 project_ids 就只列这些项目。
 import { useState, useEffect, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { navigateInWechat } from '@/shared/utils/wechatJsSdk';
@@ -17,6 +20,15 @@ const SCOPE_LABELS: Record<string, string> = {
   overdue: '超时工单',
 };
 
+// 从项目详情页的「项目工单」卡下钻时用卡片自己的词（同一个数只在两处叫法不同：
+// 卡片说「正在处理 / 超期工单数」，仪表盘说「待处理 / 超时工单」）——
+// 点进来的标题与刚点的格子对得上，不必回头猜是不是同一个口径。
+const PROJECT_SCOPE_LABELS: Record<string, string> = {
+  all: '总工单',
+  pending: '正在处理',
+  overdue: '超期工单',
+};
+
 // 挂起工单：后端 TaskStatus.PENDING（前端仪表盘 key 为 paused ——「暂停/挂起」，
 // 映射见 backend/app/modules/admin/services/task_dashboard_service.py FRONTEND_STATUS_MAP），
 // 本列表接口返回的是原始枚举值 "pending"，故按 "pending" 判定。
@@ -33,7 +45,9 @@ const SUSPENDED_TAG_BG = `color-mix(in oklab, ${SUSPENDED_BAR} 18%, transparent)
 const SUSPENDED_TAG_FG = macTone('blue-1');
 
 export default function TicketStatusDetail() {
-  const { status = '' } = useParams<{ status: string }>();
+  // 两条入口共用一个页面：仪表盘 = /admin/dashboard/tickets/:status（可看全部的人看全部），
+  // 项目工单卡 = /admin/project-detail/:id/tickets/:status（只看这一个项目）。
+  const { status = '', id: scopedProjectId } = useParams<{ status: string; id?: string }>();
   const navigate = useNavigate();
   const { projectIds, hasPermission } = useAuthStore();
   const canViewAll = hasPermission(PERMISSION_VIEW_ALL);
@@ -42,19 +56,25 @@ export default function TicketStatusDetail() {
   const [loading, setLoading] = useState(true);
 
   const meta = TICKET_STATUS_MAP[status];
-  // 仪表盘统计卡下钻的特殊 scope（组合口径，非单一状态）：
+  // 统计卡下钻的特殊 scope（组合口径，非单一状态）：
   // all=全部 / pending=待处理（处理中+暂停挂起）/ overdue=超时工单，见 dashboard.ts 与后端 task_dashboard_service
   const scopeLabel = SCOPE_LABELS[status];
-  const title = scopeLabel ?? meta?.label ?? status;
+  const title = (scopedProjectId ? PROJECT_SCOPE_LABELS[status] : scopeLabel) ?? meta?.label ?? status;
   const backendReady = scopeLabel ? true : Boolean(meta?.backendReady);
 
   const load = useCallback(async () => {
     setLoading(true);
-    const res = await fetchTicketsByStatus(status, canViewAll ? undefined : projectIds);
+    // 带项目 id 时收窄成这一个项目（后端 project_ids 就是任务表 project_id 的 in 过滤，
+    // 与卡片概览 get_ticket_summary(db, [project_id]) 同一口径，条数因此对得上）；
+    // 否则沿用仪表盘原口径：能看全部的人不过滤，其余人限于自己关联的项目。
+    const res = await fetchTicketsByStatus(
+      status,
+      scopedProjectId ? [scopedProjectId] : (canViewAll ? undefined : projectIds),
+    );
     setItems(res.items);
     setTotal(res.total);
     setLoading(false);
-  }, [status, projectIds, canViewAll]);
+  }, [status, scopedProjectId, projectIds, canViewAll]);
 
   useEffect(() => { load(); }, [load]);
 

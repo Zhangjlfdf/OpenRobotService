@@ -109,11 +109,12 @@ describe('ProjectTicketsCard（项目工单卡）', () => {
     vi.mocked(fetchProjectTicketsOverviewApi).mockResolvedValue(OVERVIEW);
   });
 
-  it('顶部三格：总工单数 / 正在处理（处理中+挂起）/ 已完成（已解决+已关闭）', async () => {
+  it('顶部三格：总工单数 / 正在处理（处理中+挂起）/ 超期工单数', async () => {
     renderCard();
     expect(fetchProjectTicketsOverviewApi).toHaveBeenCalledWith('P-001');
     // fixture 状态分布：new1 / in_progress2 / paused1 / resolved1 / closed1 / cancelled1
-    // 正在处理 = 2+1 = 3；已完成 = 1+1 = 2（新建、已取消不计入这两格，逐格比对防口径回归）
+    // 正在处理 = 2+1 = 3（新建、已取消不计入）；超期取后端 overdue_count，不前端自己比时间
+    // （能比出「几个已超期」的前端算法与后端口径迟早会漂，故逐格比对防回归）
     expect(await screen.findByText('总工单数')).toBeTruthy();
     const stats = Array.from(document.querySelectorAll('.mac-tix__stat')).map((cell) => [
       cell.querySelector('.mac-tix__label')?.textContent,
@@ -122,8 +123,25 @@ describe('ProjectTicketsCard（项目工单卡）', () => {
     expect(stats).toEqual([
       ['总工单数', '7'],
       ['正在处理', '3'],
-      ['已完成', '2'],
+      ['超期工单数', '1'],
     ]);
+  });
+
+  it('三格都是入口：点击进该口径的工单列表（带本项目 id，只列这个项目）', async () => {
+    renderCard();
+    await screen.findByText('总工单数');
+
+    // scope key 与后端 /dashboard/tickets 的组合口径一一对应：all / pending / overdue
+    const targets: Array<[string, string]> = [
+      ['总工单数', '/admin/project-detail/P-001/tickets/all'],
+      ['正在处理', '/admin/project-detail/P-001/tickets/pending'],
+      ['超期工单数', '/admin/project-detail/P-001/tickets/overdue'],
+    ];
+    for (const [label, path] of targets) {
+      mockNavigate.mockClear();
+      fireEvent.click(screen.getByRole('button', { name: new RegExp(label) }));
+      expect(mockNavigate).toHaveBeenCalledWith(path);
+    }
   });
 
   it('默认模式下展示阻滞工单条目（工单号/提单人/接单人/优先级/状态/超期/问题概况）', async () => {

@@ -54,6 +54,17 @@ const renderView = () =>
     <MemoryRouter initialEntries={['/admin/dashboard/tickets/overdue']}>
       <Routes>
         <Route path="/admin/dashboard/tickets/:status" element={<TicketStatusDetail />} />
+        <Route path="/admin/project-detail/:id/tickets/:status" element={<TicketStatusDetail />} />
+      </Routes>
+    </MemoryRouter>,
+  );
+
+/** 项目工单卡三格的下钻入口：路径上带项目 id */
+const renderProjectView = (status = 'overdue') =>
+  render(
+    <MemoryRouter initialEntries={[`/admin/project-detail/P-001/tickets/${status}`]}>
+      <Routes>
+        <Route path="/admin/project-detail/:id/tickets/:status" element={<TicketStatusDetail />} />
       </Routes>
     </MemoryRouter>,
   );
@@ -105,5 +116,30 @@ describe('TicketStatusDetail · 超时工单列表', () => {
     expect(screen.getByText('· 已超时 2天')).toBeInTheDocument();
     expect(screen.getByText('· 已超时 3天')).toBeInTheDocument();
     expect(screen.getByText('· 已超时 2小时')).toBeInTheDocument();
+  });
+
+  // —— 项目工单卡三格的下钻（同一个页面的第二条入口） ——
+
+  it('从项目工单卡进来：请求把范围收窄成这一个项目', async () => {
+    renderProjectView('overdue');
+    await screen.findByText('挂起-最久');
+    // 即便这个用户能看全部（canViewAll=true），项目卡下钻也只列这一个项目
+    expect(mockFetchTickets).toHaveBeenCalledWith('overdue', ['P-001']);
+  });
+
+  it('标题用项目卡自己的词（总工单/正在处理/超期工单），与点进来的格子对得上', async () => {
+    const { unmount } = renderProjectView('pending');
+    expect(await screen.findByText('正在处理 · 工单明细')).toBeInTheDocument();
+    unmount();
+
+    renderProjectView('all');
+    expect(await screen.findByText('总工单 · 工单明细')).toBeInTheDocument();
+  });
+
+  it('仪表盘入口不受影响：仍按「能看全部 = 不过滤」的原口径请求', async () => {
+    renderView();
+    await screen.findByText('挂起-最久');
+    expect(mockFetchTickets).toHaveBeenCalledWith('overdue', undefined);
+    expect(screen.getByText('超时工单 · 工单明细')).toBeInTheDocument();
   });
 });

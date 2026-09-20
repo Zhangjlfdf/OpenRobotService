@@ -1,6 +1,8 @@
 // 项目工单卡（项目详情页）—— 对照原型 components/project/ProjectTicketsCard.tsx，
 // 位于「项目信息管理」与「项目动态」之间，卡片三部分：
-//   ① 顶部三格汇总：总工单数 / 正在处理 / 已完成（状态 key 与仪表盘同口径）；
+//   ① 顶部三格汇总：总工单数 / 正在处理 / 超期工单数（状态 key 与仪表盘同口径）；
+//      三格都是入口，点进该口径的工单列表（/admin/project-detail/:id/tickets/{scope}，
+//      复用仪表盘的明细页并把范围收窄到本项目）；
 //   ② 核心阻滞工单（AI 配置判定，未配置时按优先级/超期默认排序）；
 //      条目整块可点，跳转该工单详情页 /tasks/:id（与仪表盘「工单明细」列表同交互）；
 //   ③ 工单变化趋势（近 8 周每周新建工单数，柱状图，echarts）。
@@ -96,11 +98,19 @@ export default function ProjectTicketsCard({ projectId }: { projectId: string })
     }
   }, [projectId, promptDraft, submitting]);
 
-  // 顶部三格汇总的口径（状态 key 与仪表盘「工单状态监测」一致）：
+  // 顶部三格汇总的口径（状态 key 与仪表盘「工单状态监测」一致；数字同源于后端
+  // task_dashboard_service.get_ticket_summary(db, [project_id])）：
   // 正在处理 = 处理中 + 暂停/挂起（即仪表盘「待处理」口径，新建尚未开始处理不计入）；
-  // 已完成 = 已解决 + 已关闭（已取消不算完成，只在总数中体现）。
+  // 超期工单 = 截止时间已过且仍未完成（直接用后端 overdue_count，与仪表盘「超时工单」同一口径）。
   const inProgressCount = (overview?.by_status.in_progress ?? 0) + (overview?.by_status.paused ?? 0);
-  const completedCount = (overview?.by_status.resolved ?? 0) + (overview?.by_status.closed ?? 0);
+  const overdueCount = overview?.overdue_count ?? 0;
+
+  /** 三格各自的下钻入口：进该口径的工单列表。
+   *  复用仪表盘的明细页（/dashboard/tickets/{scope}，见 TicketStatusDetail），路径上带本项目 id
+   *  把列表限定在这个项目——scope key 与后端 get_tickets_by_status 的组合口径一一对应
+   *  （all=六种状态的总工单 / pending=处理中+挂起 / overdue=超期），所以点进去的条数与格子里的数字同源。 */
+  const openTickets = (scope: 'all' | 'pending' | 'overdue') =>
+    navigateInWechat(navigate, `/admin/project-detail/${projectId}/tickets/${scope}`);
 
   const weekly = overview?.weekly ?? [];
   const trendOption = useMemo(() => ({
@@ -170,20 +180,21 @@ export default function ProjectTicketsCard({ projectId }: { projectId: string })
         <>
           {!collapsed && (
             <>
-              {/* ① 顶部三格汇总：总工单数 / 正在处理 / 已完成（口径见上方注释） */}
+              {/* ① 顶部三格汇总：总工单数 / 正在处理 / 超期工单数（口径见上方注释）；
+                  三格都是入口，点进该口径的工单列表 */}
               <div className="mac-tix__stats">
-                <div className="mac-tix__stat mac-tix__stat--total">
+                <button type="button" className="mac-tix__stat mac-tix__stat--total" onClick={() => openTickets('all')}>
                   <span className="mac-tix__num">{overview.total}</span>
                   <span className="mac-tix__label">总工单数</span>
-                </div>
-                <div className="mac-tix__stat">
+                </button>
+                <button type="button" className="mac-tix__stat" onClick={() => openTickets('pending')}>
                   <span className="mac-tix__num">{inProgressCount}</span>
                   <span className="mac-tix__label">正在处理</span>
-                </div>
-                <div className="mac-tix__stat">
-                  <span className="mac-tix__num">{completedCount}</span>
-                  <span className="mac-tix__label">已完成</span>
-                </div>
+                </button>
+                <button type="button" className="mac-tix__stat" onClick={() => openTickets('overdue')}>
+                  <span className="mac-tix__num">{overdueCount}</span>
+                  <span className="mac-tix__label">超期工单数</span>
+                </button>
               </div>
 
               {/* ② 核心阻滞工单（与上一区块之间加浅灰分节线） */}

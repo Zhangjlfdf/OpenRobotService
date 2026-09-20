@@ -11,12 +11,17 @@
 
 ## 1. 卡片三部分与取数口径
 
-1. **顶部三格汇总（总工单数 / 正在处理 / 已完成）**：复用仪表盘
+1. **顶部三格汇总（总工单数 / 正在处理 / 超期工单数）**：复用仪表盘
    `task_dashboard_service.get_ticket_summary` 的单项目口径——总数 = 监控中的六种状态
    （new / in_progress / paused / resolved / closed / cancelled，后者由 TaskStatus.PENDING /
    CANCELED 回映射）计数之和；**正在处理 = 处理中 + 暂停/挂起**（后端 `pending_count`，
-   即仪表盘「待处理」口径，新建尚未开始处理不计入）；**已完成 = 已解决 + 已关闭**
-   （已取消不算完成，只在总数中体现）。接口返回完整 `by_status`，前端据此派生三格数字。
+   即仪表盘「待处理」口径，新建尚未开始处理不计入）；**超期工单 = 截止时间已过且仍未完成**
+   （后端 `overdue_count`，与仪表盘「超时工单」同一口径）。接口返回完整 `by_status`，
+   前端据此派生前两格数字，超期直接取 `overdue_count`（不自行比时间，避免与后端口径漂移）。
+   **三格都是下钻入口**：点进 `/admin/project-detail/{id}/tickets/{scope}`，scope ∈
+   `all`（总工单）/ `pending`（正在处理）/ `overdue`（超期工单）——复用仪表盘的明细页
+   （`TicketStatusDetail`）与同一个 `GET /dashboard/tickets` 接口，路径上带项目 id 时把
+   `project_ids` 收窄成这一个项目，故点进去的条数与格子里的数字同源。
 2. **核心阻滞工单**：
    - 未配置：默认规则——未完成工单（new / in_progress / pending）按
      「优先级（紧急→低）> 截止时间早者在前（无截止置后）> 创建时间新者在前」取前 3；
@@ -62,7 +67,7 @@
 ```
 
 - `by_status` 为前端状态 key 口径（与仪表盘 `TICKET_STATUS_LIST` 一致），零计数状态也返回 0；
-  卡片顶部三格由它派生：正在处理 = in_progress + paused，已完成 = resolved + closed；
+  卡片顶部三格由它派生：正在处理 = in_progress + paused，超期工单数直接取 `overdue_count`；
 - `blocking.mode`：`ai`（已配置）/ `default`（默认规则）；`default` 模式下若存在旧配置，
   `prompt` 仍会带回，供管理员在既有要求上修改；
 - `tickets` 条目的 `status`/`priority`/`ticket_type` 是**原始枚举值**（前端自行映射标签），
@@ -115,6 +120,8 @@
 - 后端：`backend/tests/test_project_tickets.py`（23 例，反射 runner，见文件头运行方式）——
   周趋势分桶、默认阻滞排序、提示词组装、AI 结果解析容错、阻滞板块取数与降级、
   描述摘要截断、空提示词校验。
-- 前端：`frontend/src/pages/__tests__/ProjectTicketsCard.test.tsx`（11 例）——
-  统计格、阻滞条目各字段、点击条目跳转工单详情、AI 模式徽标/总述/理由、趋势图数据、
-  空态、失败重试、管理员按钮显隐、弹窗预填与提交、空提示词与失败分支。
+- 前端：`frontend/src/pages/__tests__/ProjectTicketsCard.test.tsx`（12 例）——
+  统计格、三格下钻跳转、阻滞条目各字段、点击条目跳转工单详情、AI 模式徽标/总述/理由、
+  趋势图数据、空态、失败重试、管理员按钮显隐、弹窗预填与提交、空提示词与失败分支；
+  下钻页 `TicketStatusDetail` 另见 `__tests__/TicketStatusDetail.test.tsx`（项目入口的
+  收窄请求与标题用项目卡的词，仪表盘入口口径不变）。

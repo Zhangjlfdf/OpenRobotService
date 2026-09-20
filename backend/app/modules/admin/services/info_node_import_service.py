@@ -10,8 +10,11 @@ DeepSeek flash，即 settings.LLM_MODEL_NAME）抽取「信息条目」，再与
   3. unmatched —— 与文件有关但系统没有对应节点 → 勾选后作为新节点创建（附建议归属）。
 
 匹配规则（与需求一致）：条目与节点标题「精确一致，或相似度 ≥ 0.9（满分 1）」（difflib
-序列相似度，规范化空白/标点后比较）；下拉节点还要求识别值命中其可选项，否则按未匹配处理。
-大模型返回的 nodeTitle 只是提示，最终匹配以后端确定性算法为准。
+序列相似度，规范化空白/标点后比较）；匹配到的下拉节点还要求识别值命中其可选项（精确、
+与选项高度相似 ≥ 0.9，车型另有型号写法/中文全称的放宽），装不下就不算数。
+条目最后没落到任何节点上时，先拿识别内容去比「建议归属附近」那些空下拉的可选项——
+能对上一个选项就在下拉里选它，而不是新建一个与下拉各说各话的节点（下拉本来就是「选出来
+的值」）。大模型返回的 nodeTitle 只是提示，最终匹配以后端确定性算法为准。
 """
 from __future__ import annotations
 
@@ -38,6 +41,7 @@ MAX_SHEET_ROWS = 2000              # Excel 每个工作表最多读取行数
 SIMILARITY_THRESHOLD = 0.9         # 节点名相似度阈值（满分 1，与需求一致）
 NAME_MISMATCH_THRESHOLD = 0.6      # 项目名一致性阈值：低于该相似度且互不包含 → 判定不一致（提醒可能导错文件）
 MAX_NODE_DEPTH = 4                 # 信息树最大层级（与前端 PROJECT_INFO_MAX_DEPTH 一致）
+NEARBY_DROPDOWN_DEPTH = 2          # 「建议归属附近」的下拉候选范围：归属节点起往下两级
 LLM_TEMPERATURE = 0.2              # 抽取任务用低温度，减少发散
 LLM_TIMEOUT_SECONDS = 120.0
 
@@ -571,25 +575,20 @@ def _prefer_value_holder(candidates: List[Dict], parent_hint: Optional[str], val
     return holder if holder is not None else picked
 
 
-def snap_select_value(value: str, options: List[str]) -> Optional[str]:
-    """识别值 → 节点可选项（对不上返回 None，由调用方按未匹配处理）。
+_VEHICLE_CODE_SET = {_norm(code) for code in VEHICLE_MODEL_CODES}
 
-    先精确比（忽略大小写、空白与常见标点）；不中时，**只有可选项是车型型号**才再放宽一层：
-    型号大小写/连字符差异、旧型号名（XS1161→XS1201）、值里夹带中文全称或数量
-    （「XCD101 潜伏顶升搬运机器人」「2 台 XCD101」）。一个值里认出多个不同型号时
-    返回 None —— 宁可让用户手动归属，也不要蒙一个。
-    普通下拉（项目类型等）不放宽：「试点项目一期」不该被吸到「试点项目」上。
+
+def _vehicle_option_hits(value: str, options: List[str]) -> List[str]:
+    """值里认出的车型选项（去重、按出现顺序）；可选项不是车型型号时返回空列表。
+
+    三种写法都认：型号（大小写/连字符差异、旧型号 XS1161→XS1201）、型号夹在其它文字里
+    （「XCD101（潜伏顶升搬运机器人 1000 kg）」「2 台 XCD101」）、只写中文全称
+    （「潜伏顶升搬运机器人 1500 kg」→ XCD151，全称表见 VEHICLE_MODEL_NAMES）。
     """
-    exact = next((option for option in options if _norm(option) == _norm(value)), None)
-    if exact is not None:
-        return exact
-    if not value:
-        return None
-
     by_norm = {_norm(code): code for code in VEHICLE_MODEL_CODES}
     model_options = {_norm(option): option for option in options if _norm(option) in by_norm}
     if not model_options:
-        return None
+        return []
 
     hits: List[str] = []
     for token in _MODEL_TOKEN_RE.findall(value):
@@ -601,7 +600,141 @@ def snap_select_value(value: str, options: List[str]) -> Optional[str]:
         option = model_options[_norm(code)]
         if option not in hits:
             hits.append(option)
-    return hits[0] if len(hits) == 1 else None
+    if hits:
+        return hits
+
+    # 没写型号、只写中文全称时按全称认（全称长且唯一，用与节点标题同一个 0.9 阈值比）。
+    # 「型号 + 全称」混写的值上面已经认出型号了，不会再在这里命中第二条，故不会互相打架。
+    for code, name in VEHICLE_MODEL_NAMES.items():
+        option = model_options.get(_norm(code))
+        if option is None or option in hits:
+            continue
+        if _ratio(_norm(value), _norm(name)) >= SIMILARITY_THRESHOLD:
+            hits.append(option)
+    return hits
+
+
+def snap_select_value(value: str, options: List[str]) -> Optional[str]:
+    """识别值 → 节点可选项（对不上返回 None，由调用方按未匹配处理）。
+
+    从严到宽三层：
+      1. 精确比（忽略大小写、空白与常见标点）；
+      2. 车型放宽（仅当可选项本身就是车型型号，见 _vehicle_option_hits）；
+      3. 高度相似：与某个选项的序列相似度 ≥ 0.9 —— 与节点标题匹配同一个阈值，够「非常像」
+         才认。普通下拉（项目类型等）只走到这一层：「试点项目一期」vs「试点项目」只有 0.8，
+         仍按未匹配，不会把内容吸到不相干的选项上。
+    一个值里认出多个不同车型时返回 None —— 宁可让用户手动归属，也不要蒙一个。
+    """
+    exact = next((option for option in options if _norm(option) == _norm(value)), None)
+    if exact is not None:
+        return exact
+    if not value:
+        return None
+
+    hits = _vehicle_option_hits(value, options)
+    if len(hits) == 1:
+        return hits[0]
+    if hits:
+        return None      # 一款以上：不猜；也别再掉进下面的相似度层去蒙一个
+
+    best: Optional[str] = None
+    best_score = 0.0
+    for option in options:
+        score = _ratio(_norm(value), _norm(option))
+        if score > best_score:
+            best, best_score = option, score
+    return best if best_score >= SIMILARITY_THRESHOLD else None
+
+
+def _vicinity_dropdowns(flat: List[Dict], hint_path: Optional[str]) -> List[Dict]:
+    """「建议归属附近」的节点候选（保序去重）：归属节点本身 + 其下 NEARBY_DROPDOWN_DEPTH 层
+    内的后代，归属节点自己就是下拉时再加上它的兄弟。
+
+    兄弟那一层是给车型用的：「车型1」是个下拉（还带「数量」子节点），被前面的条目占用后，
+    同一父级下的「车型2」还能接着装下一款车。路径认不出来时返回空列表——没有「附近」可言。
+    """
+    by_id = {n["id"]: n for n in flat}
+    # 先按整条路径精确认：模板里有标题自带斜杠的节点（「项目区域/地点」），
+    # 逐段拆路径会被这个斜杠带偏、退化成「基础信息」这样的浅层节点。认不出再逐段解析
+    # （大模型给的路径未必逐字一致，也可能是「某某 / 公网ip」这种只有末段能对上的）。
+    wanted = _norm(hint_path or "")
+    root = next((n for n in flat if wanted and _norm(n["path"]) == wanted), None)
+    if root is None:
+        root_id, _ = resolve_parent(flat, hint_path)
+        root = by_id.get(root_id) if root_id is not None else None
+    if root is None:
+        return []
+
+    candidates: List[Dict] = []
+    seen: set = set()
+
+    def add(node: Dict) -> None:
+        if node["id"] not in seen:
+            seen.add(node["id"])
+            candidates.append(node)
+
+    add(root)
+    depth_limit = root["depth"] + NEARBY_DROPDOWN_DEPTH
+    for node in flat:
+        if node["depth"] > depth_limit or node["id"] == root["id"]:
+            continue
+        parent = by_id.get(node["parent_id"])
+        while parent is not None:      # 往上找祖先：找到归属节点就算「在里面」
+            if parent["id"] == root["id"]:
+                add(node)
+                break
+            parent = by_id.get(parent["parent_id"])
+
+    if root["content_type"] == "select":
+        for node in flat:
+            if node["parent_id"] == root["parent_id"]:
+                add(node)
+    return candidates
+
+
+def _snap_into_nearby_dropdown(
+    flat: List[Dict],
+    hint_paths: List[Optional[str]],
+    title: str,
+    values: List[str],
+    used_ids: set,
+) -> Optional[Tuple[Dict, str]]:
+    """条目还没落到节点上 → 去「建议归属附近」的空下拉里认一个选项，返回 (节点, 选项原文)。
+
+    只认空着的下拉：选着别的值的节点不抢（那个值多半是别的条目填的，覆盖它等于凭空改内容）。
+    命中的选项还得与这个下拉「对得上」，两种算对得上：
+      - 值本身就是车型型号——车型目录是封闭集合，值写着哪款车就是哪款车，不必再看标题；
+      - 条目标题与该下拉标题相似度 ≥ 0.9 ——「是/否」「动态密码/静态密码」这类短选项只能靠
+        标题兜底，否则任何一条值写着「是」的信息都会钻进附近随便一个是否型下拉。
+    """
+    tried: set = set(used_ids)
+    title_norm = _norm(title)
+    seen_hints: set = set()
+    for hint in hint_paths:
+        hint_norm = _norm(hint or "")
+        if hint_norm in seen_hints:
+            continue
+        seen_hints.add(hint_norm)
+
+        for node in _vicinity_dropdowns(flat, hint):
+            if node["id"] in tried or node["content_type"] != "select" or not node["options"]:
+                continue
+            if not is_fillable_node(node):
+                continue
+            tried.add(node["id"])
+
+            current = _select_state(node)[0]
+            for value in values:
+                canonical = snap_select_value(value or "", node["options"])
+                if canonical is None:
+                    continue
+                if (_norm(canonical) not in _VEHICLE_CODE_SET
+                        and _ratio(title_norm, _norm(node["title"])) < SIMILARITY_THRESHOLD):
+                    continue
+                if current and _norm(current) != _norm(canonical):
+                    break              # 已选着别的值：不动它，换下一个候选节点
+                return node, canonical
+    return None
 
 
 def match_items(flat: List[Dict], items: List[Dict[str, Optional[str]]]) -> Dict[str, List[Dict]]:
@@ -619,6 +752,8 @@ def match_items(flat: List[Dict], items: List[Dict[str, Optional[str]]]) -> Dict
     overwrite: List[Dict] = []
     unmatched: List[Dict] = []
     seen_node_ids: set = set()
+    placed_values: Dict[Any, str] = {}    # 节点 id → 本轮已安置的规范化值（识别条目重复时据此丢弃）
+    by_id = {n["id"]: n for n in flat}
 
     for item in items:
         title = item["title"] or ""
@@ -654,12 +789,39 @@ def match_items(flat: List[Dict], items: List[Dict[str, Optional[str]]]) -> Dict
                 match = best
 
         # 3) 匹配到下拉节点：识别值必须命中可选项（车型型号再放宽一层），否则按未匹配处理
+        rejected: Optional[Dict] = None
         if match is not None and match["content_type"] == "select":
             canonical = snap_select_value(value, match["options"])
             if canonical is None:
-                match = None
+                rejected, match = match, None
             else:
                 value = canonical
+
+        # 4) 下拉兜底：条目还没落到节点上（没匹配到 / 匹配到的下拉装不下这个值 / 该节点已被
+        #    前面的条目占用）时，先拿识别内容去比「建议归属附近」那些空下拉的可选项——能对上
+        #    一个就在下拉里选它，而不是到「未匹配」里新建一个跟下拉各说各话的节点
+        #    （下拉本来就是「选出来的值」，新建节点等于把同一件事说两遍）。
+        taken: Optional[Dict] = None
+        if match is not None and match["id"] in seen_node_ids:
+            if placed_values.get(match["id"]) == _norm(value):
+                continue                    # 同一条信息重复出现 → 丢弃，不去占第二个下拉
+            taken, match = match, None
+        if match is None:
+            hints: List[Optional[str]] = [parent_hint]
+            for node in (rejected, taken):
+                if node is None:
+                    continue
+                hints.append(node["path"])
+                parent = by_id.get(node["parent_id"])
+                if parent is not None:
+                    hints.append(parent["path"])
+            snapped = _snap_into_nearby_dropdown(flat, hints, title, [value, title], seen_node_ids)
+            if snapped is not None:
+                match, value = snapped
+            elif taken is not None:
+                # 本来就是「匹配到的节点被前面的条目占了」，附近又没有别的下拉能装 → 丢弃。
+                # 不能再掉进未匹配：同一条信息重复出现时，建第二个同名节点纯属噪音。
+                continue
 
         if match is None:
             parent_id, parent_path = resolve_parent(flat, parent_hint)
@@ -672,9 +834,8 @@ def match_items(flat: List[Dict], items: List[Dict[str, Optional[str]]]) -> Dict
             })
             continue
 
-        if match["id"] in seen_node_ids:
-            continue
         seen_node_ids.add(match["id"])
+        placed_values[match["id"]] = _norm(value)
 
         current = _current_text(match)
         if _norm(current) != _norm(value):  # 与现有内容一致时不产生变更

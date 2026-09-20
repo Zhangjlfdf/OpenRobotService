@@ -206,6 +206,10 @@ const router = createBrowserRouter([
               { path: 'dashboard/projects/:dimension/:key', element: <ProjectCategoryDetail /> },
               // 项目详情：点击项目管理列表条目后展示（原样复用项目详情设计稿，见 pages/admin/ProjectDetail.tsx）
               { path: 'project-detail/:id', element: <ProjectDetail /> },
+              // 项目工单卡三格（总工单数 / 正在处理 / 超期工单数）的下钻：只列这一个项目的该类工单。
+              // 复用仪表盘的明细页，页面见到路径上的 :id 就把 project_ids 收窄成这一个项目
+              // （/admin/project-detail/:id/tickets/all|pending|overdue）
+              { path: 'project-detail/:id/tickets/:status', element: <TicketStatusDetail /> },
               { path: 'project-detail/:id/transport-efficiency', element: <TransportEfficiency /> },
               // 编辑项目信息（信息树编辑页）：与详情页同为直挂路由（无 AdminLayout 导航壳）
               { path: 'project-detail/:id/edit', element: <ProjectInfoEdit /> },
