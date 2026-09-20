@@ -8952,13 +8952,19 @@ html, body, #root {
    ProjectTicketsCard 的统计格（px-2 py-2 / 数字 15px / 标签 10.5px / rounded-lg）；
    白底 + 描边 + 柔和阴影的按钮语言，总工单数保持浅蓝底强调，数字用等宽数字对齐 */
 .mac-tix__stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 12px; }
+/* 三格汇总：都是「进此类工单」的入口，渲染成 button ——
+   font/family 与宽高由它自己给出，否则会落回浏览器按钮默认字体与 2px 内边距 */
 .mac-tix__stat {
   display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
   padding: 8px 4px; border-radius: 8px;
   border: 1px solid var(--mac-border);
   background: #fff;
   box-shadow: var(--mac-shadow-soft);
+  font-family: inherit;
+  cursor: pointer;
+  transition: opacity 0.2s;
 }
+.mac-tix__stat:active { opacity: 0.7; }
 .mac-tix__stat--total { background: var(--mac-blue-soft); }
 .mac-tix__num { font-size: 15px; font-weight: 700; color: var(--mac-fg); line-height: 1.3; font-variant-numeric: tabular-nums; }
 .mac-tix__stat--total .mac-tix__num { color: var(--mac-blue-1); }
