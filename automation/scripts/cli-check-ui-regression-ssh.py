@@ -5,6 +5,7 @@ from __future__ import annotations
 import socket
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import httpx
@@ -15,6 +16,12 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from automation.src.ui_regression.config import UiRegressionConfig  # noqa: E402
 from automation.src.ui_regression.tunnels import UiTunnelManager  # noqa: E402
+
+
+HTTP_TIMEOUT_SECONDS = 30.0
+HTTP_ATTEMPTS = 3
+TCP_TIMEOUT_SECONDS = 5.0
+RETRY_DELAY_SECONDS = 2.0
 
 
 def _key_fingerprint(key_path: str) -> str:
@@ -43,14 +50,58 @@ def _key_fingerprint(key_path: str) -> str:
     return fingerprint.stdout.strip()
 
 
-def _check_http(url: str) -> None:
-    response = httpx.get(url, timeout=10.0)
-    response.raise_for_status()
+def _check_http(
+    url: str,
+    *,
+    label: str,
+    attempts: int = HTTP_ATTEMPTS,
+    timeout: float = HTTP_TIMEOUT_SECONDS,
+    retry_delay: float = RETRY_DELAY_SECONDS,
+) -> None:
+    last_error: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        print(f"{label}: attempt {attempt}/{attempts}")
+        try:
+            response = httpx.get(
+                url,
+                timeout=timeout,
+                trust_env=False,
+            )
+            response.raise_for_status()
+            return
+        except Exception as exc:  # noqa: BLE001 - retry keeps the final cause
+            last_error = exc
+            print(f"{label}: attempt {attempt} failed: {exc}")
+            if attempt < attempts:
+                time.sleep(retry_delay)
+    raise RuntimeError(
+        f"{label} failed after {attempts} attempts: {last_error}"
+    ) from last_error
 
 
-def _check_tcp(host: str, port: int) -> None:
-    with socket.create_connection((host, port), timeout=5.0):
-        return
+def _check_tcp(
+    host: str,
+    port: int,
+    *,
+    label: str,
+    attempts: int = HTTP_ATTEMPTS,
+    timeout: float = TCP_TIMEOUT_SECONDS,
+    retry_delay: float = RETRY_DELAY_SECONDS,
+) -> None:
+    last_error: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        print(f"{label}: attempt {attempt}/{attempts}")
+        try:
+            with socket.create_connection((host, port), timeout=timeout):
+                return
+        except OSError as exc:
+            last_error = exc
+            print(f"{label}: attempt {attempt} failed: {exc}")
+            if attempt < attempts:
+                time.sleep(retry_delay)
+    raise RuntimeError(
+        f"{label} failed after {attempts} attempts: {last_error}"
+    ) from last_error
 
 
 def main() -> int:
@@ -61,14 +112,24 @@ def main() -> int:
         backend_url, ai_url = manager.start()
         print(f"SSH forwards ready: {backend_url}, {ai_url}")
 
-        _check_http(f"{backend_url}/api/health")
+        _check_http(
+            f"{backend_url}/api/health",
+            label="Backend health",
+        )
         print("Backend health: OK")
 
-        _check_http(f"{ai_url}/health")
+        _check_http(
+            f"{ai_url}/health",
+            label="Automation AI health",
+        )
         print("Automation AI health: OK")
 
         if config.db_cleanup_enabled and manager.db_local_port is not None:
-            _check_tcp("127.0.0.1", manager.db_local_port)
+            _check_tcp(
+                "127.0.0.1",
+                manager.db_local_port,
+                label="Database forward",
+            )
             print(f"Database forward: OK (127.0.0.1:{manager.db_local_port})")
 
         print("UI regression SSH precheck passed")
