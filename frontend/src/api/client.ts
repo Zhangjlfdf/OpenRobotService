@@ -46,12 +46,15 @@ export interface ApiErrorType {
 export class ApiError extends Error {
   statusCode: number;
   originalError?: unknown;
+  /** 原始错误响应体（如 422 阻塞详情） */
+  errorBody?: unknown;
 
-  constructor(message: string, statusCode: number, originalError?: unknown) {
+  constructor(message: string, statusCode: number, originalError?: unknown, errorBody?: unknown) {
     super(message);
     this.name = 'ApiError';
     this.statusCode = statusCode;
     this.originalError = originalError;
+    this.errorBody = errorBody;
   }
 }
 
@@ -252,10 +255,14 @@ export function createRequest(baseUrl: string, _serviceName = 'API') {
 
       if (!response.ok) {
         let errorMessage = `HTTP错误! 状态码: ${response.status}`;
+        let errorBody: unknown = undefined;
         try {
-          const errorData = await response.json();
-          if (errorData.detail || errorData.message || errorData.error) {
-            errorMessage = buildErrorMessage(errorData, response.status);
+          errorBody = await response.json();
+          if (errorBody) {
+            const eb = errorBody as Record<string, unknown>;
+            if (eb.detail || eb.message || eb.error) {
+              errorMessage = buildErrorMessage(eb, response.status);
+            }
           }
         } catch { /* ignore */ }
 
@@ -314,7 +321,7 @@ export function createRequest(baseUrl: string, _serviceName = 'API') {
           return request<T>(endpoint, options, retries + 1);
         }
 
-        throw new ApiError(errorMessage, response.status);
+        throw new ApiError(errorMessage, response.status, undefined, errorBody);
       }
 
       // 解析响应

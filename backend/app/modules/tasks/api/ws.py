@@ -128,24 +128,29 @@ manager = ConnectionManager(hub)
 
 @router.websocket("/{task_id}/ws")
 async def ws_task_room(websocket: WebSocket, task_id: int, token: str = Query(None)):
-    # 1. 鉴权（query token）
+    # 1. 鉴权（query token）—— 必须在 accept 之前完成，避免 close() 失败
+    #    Starlette: accept() 前调 close() 会抛 "Need to call accept first"
+    auth_code = None
     if not token:
-        await websocket.close(code=4401)
-        return
-    payload = decode_token(token)
-    if not payload or not payload.get("sub"):
-        await websocket.close(code=4401)
-        return
-    username = payload["sub"]
-    user = get_user_with_roles(username)
-    if user is None:
-        await websocket.close(code=4404)
-        return
-    name = user.get("name") or username
-    avatar_resource_id = user.get("avatar_resource_id")
+        auth_code = 4401
+    else:
+        payload = decode_token(token)
+        if not payload or not payload.get("sub"):
+            auth_code = 4401
+        else:
+            username = payload["sub"]
+            user = get_user_with_roles(username)
+            if user is None:
+                auth_code = 4404
+            else:
+                name = user.get("name") or username
+                avatar_resource_id = user.get("avatar_resource_id")
 
-    # 2. 接受连接 + 加入房间
+    # 先 accept 再 close，避免 Starlette 在未 accept 的 WS 上拒绝 close
     await websocket.accept()
+    if auth_code is not None:
+        await websocket.close(code=auth_code)
+        return
     conn = WsConnection(websocket, username, name, task_id, avatar_resource_id)
     await manager.connect(task_id, conn)
 
