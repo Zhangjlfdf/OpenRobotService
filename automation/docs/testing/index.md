@@ -76,7 +76,7 @@
 |------|------|
 | 项目架构 | `docs/project_architecture.md` |
 | 业务规则 | `docs/business_rules.md` |
-| 后端代码总览 | `backend/CODEBASE_OVERVIEW.md` |
+| 后端代码总览 | `docs/CODEBASE_OVERVIEW.md` |
 | 集成设计文档 | `backend/INTEGRATION_DESIGN.md` |
 | 产品需求文档 | `docs/PRD.md` |
 | AI Agent 工作流 | `AGENT.md` |

@@ -3,7 +3,7 @@
 > 本文对 OpenRobotService 仓库**全部代码**（backend / frontend / ai / automation / dags / deploy / scripts）的结构与功能做整体梳理（2026-09-01 基于代码库与既有文档生成）。
 > 相关文档索引：
 > - 产品形态：`docs/PRODUCT/PRODUCT.md`；技术设计蓝图：`docs/PRODUCT/ARCHITECTURE.md`
-> - 后端代码现状（模块级细节）：`backend/CODEBASE_OVERVIEW.md`
+> - 数据库表结构（唯一权威）：`docs/database-erd.md`
 > - 后端 API 清单与权限分析：`backend/API.md`；外部任务源集成设计：`backend/INTEGRATION_DESIGN.md`
 > - AI 服务接口文档：`ai/AI_Service_Description.md`
 > - 前端工程文档（含全部维护历史）：`frontend/项目文档.md`（本地文件，已 gitignore）
@@ -316,7 +316,7 @@ automation/
 | `PRD.md` / `business_rules.md` / `prompt_library.md` / `troubleshooting.md` | 需求 / 业务规则 / 提示词库 / 故障排查 |
 | `AiDiagnosisPlatform_agent_flow.md` / `ORS算法模块图.md` / `USP服务器日志自动拉取分析方案.md` | AI Agent 流程 / 算法模块 / USP 日志方案 |
 | `实时评论WebSocket设计方案.md` / `讨论区消息转发到微信方案.md` | WS / 微信转发设计 |
-| `AI代码修改边界Skill.md` / `agents/` | AI 协作规范 / Agent 设计 |
+| `.claude/SKILLS/代码修改约束/AI代码修改边界Skill.md` / `docs/agents/` | AI 协作规范 / Agent 设计 |
 | `CODEBASE_OVERVIEW.md` | 本文档 |
 
 ---

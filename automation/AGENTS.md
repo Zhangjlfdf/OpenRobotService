@@ -109,7 +109,7 @@ automation/
 ⑧ 生成 Allure 报告
         │
         ▼
-⑨ 更新 `automation/docs/worklog/`
+⑨ 更新任务记录（见 `automation/docs/` 顶层 worklog）
 ```
 
 禁止跳过任何步骤。
@@ -428,7 +428,7 @@ $env:USE_MOCK = "0"; pytest tests/ -m api
 
 ### 2. Worklog（任务完成时）
 
-更新 `automation/docs/worklog/` 下一个新文件（如 `task-NN-description.md`），包含：
+在 `automation/docs/` 顶层新增一个任务记录文件（如 `task-NN-description.md`），包含：
 - 本次目标
 - 阅读内容
 - 修改文件列表
@@ -474,22 +474,9 @@ $env:USE_MOCK = "0"; pytest tests/ -m api
 
 # Worklog 已有记录
 
-参见以下历史任务记录，开始新任务前应阅读最近几条 worklog：
-```
-automation/docs/worklog/task-01-framework-init.md
-automation/docs/worklog/task-02-config.md
-automation/docs/worklog/task-03-logger.md
-automation/docs/worklog/task-04-clients.md
-automation/docs/worklog/task-05-framework-core.md
-automation/docs/worklog/task-06-restructure.md
-automation/docs/worklog/task-07-phase-a.md
-automation/docs/worklog/task-08-review-fixes.md
-automation/docs/worklog/task-09-api-phase0.md
-automation/docs/worklog/task-11-api-phase2-wechat.md
-automation/docs/worklog/task-13-ci-fix.md
-automation/docs/worklog/task-14-ui-module.md
-automation/docs/worklog/task-12-ci-setup.md
-```
+历史任务记录（task-01 ~ task-53）已归档至 **`automation/docs/archive/worklog/`**，仅供追溯，不代表当前口径。
+
+开始新任务前请阅读 `automation/docs/` 顶层最近几条**现行**任务记录；如需追溯早期框架搭建过程，再翻阅 `automation/docs/archive/worklog/`（如 `task-01-framework-init.md`、`task-05-framework-core.md` 等）。
 
 ---
 
@@ -534,7 +521,7 @@ automation/docs/worklog/task-12-ci-setup.md
 - 修改 `ai/` / `backend/` / `frontend/` 业务逻辑
 - 删除已有文档
 - 跳过测试
-- 不更新 `automation/docs/worklog/`
+- 不更新任务记录
 - 一次实现多个模块（超过 10 个文件）
 - 生成无法 Review 的大量代码
 
