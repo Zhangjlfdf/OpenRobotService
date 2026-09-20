@@ -1914,6 +1914,7 @@ function renderWeekCard(){
       <div class="wk-item"><div class="n" style="color:#d9534f">${w.unanswered}</div><div class="l">未直答</div></div>
       <div class="wk-item"><div class="n" style="color:#d9534f">${w.uncovered}</div><div class="l">未覆盖</div></div>
       <div class="wk-item"><div class="n">${w.pending ?? 0}</div><div class="l">待标注</div></div>
+      <div class="wk-item"><div class="n">${w.sug_mix ?? 0}</div><div class="l">含推荐混合</div></div>
       <div class="wk-item"><div class="n">${prog}%</div><div class="l">走查进度（可标注段已判定占比）</div></div>
     </div>`;
 }

@@ -1052,6 +1052,9 @@ def _seg_rows(env):
                 seg_qs = [(rr.get("q") or "").strip()
                           for rr in (c.get("rounds") or [])[a0:a1] if rr.get("q")]
                 seg_has_sug = bool(seg_qs) and all(q in suggested_pool for q in seg_qs)
+                # 0920：段内只要有一轮命中推荐池即记 any_sug——混合段照常留在真实
+                # 层标注，但直答率统计时剔除（0916 口径：推荐点击不进直答统计）
+                seg_any_sug = any(q in suggested_pool for q in seg_qs)
                 # 0915 用户硬要求：SKIP_USER_IDS 静默归到「测试人员」层（不显示排除徽章）
                 is_skip = str(c.get("user_id") or "") in SKIP_USER_IDS
                 if c.get("is_tester") or is_skip:
@@ -1119,6 +1122,8 @@ def _seg_rows(env):
                 rows.append({
                     "cid": c["conversation_id"], "astart": a0, "aend": a1,
                     "layer": layer, "eff": eff, "src": src,
+                    # 段内含推荐池命中轮（混合段）：直答率统计时剔除，标注照常
+                    "any_sug": seg_any_sug,
                     "question": (r0.get("q") or "")[:200],
                     # AI 回答预览：段内第一条非工单动作回答的开头（走查初判不点开也要能看）
                     "answer": next((ai for rr in (c.get("rounds") or [])[a0:a1]
@@ -1173,12 +1178,18 @@ def _week_stats(rows: list, unprocessed: list | None = None) -> dict:
     from datetime import datetime, timedelta
     today = datetime.now()
     monday = (today - timedelta(days=today.weekday())).strftime("%Y-%m-%d")
-    n_new = n_ans = n_unans = n_uncov = n_undet = 0
+    n_new = n_ans = n_unans = n_uncov = n_undet = n_sug_mix = 0
     for r in rows:
         if (r.get("at") or "")[:10] < monday:
             continue
         n_new += 1
         layer = r.get("layer")
+        # 0916 口径：含推荐命中轮的混合段不进直答率分子分母（推荐点击不算
+        # 真实困惑），但照常计入新增/已判定/走查进度——段仍需人工标注
+        if r.get("any_sug"):
+            if layer in ("answered", "unanswered", "uncovered", "undetermined"):
+                n_sug_mix += 1
+            continue
         if layer == "answered":
             n_ans += 1
         elif layer == "unanswered":
@@ -1190,10 +1201,10 @@ def _week_stats(rows: list, unprocessed: list | None = None) -> dict:
     judged = n_ans + n_unans + n_uncov + n_undet
     n_pending = sum(1 for i in (unprocessed or [])
                     if (i.get("at") or "")[:10] >= monday)
-    labelable = judged + n_pending
+    labelable = judged + n_pending + n_sug_mix
     return {"monday": monday, "new_total": n_new, "judged": judged,
             "answered": n_ans, "unanswered": n_unans, "uncovered": n_uncov,
-            "undetermined": n_undet, "pending": n_pending,
+            "undetermined": n_undet, "pending": n_pending, "sug_mix": n_sug_mix,
             "labelable": labelable,
             "rate": round(n_ans / judged * 100, 1) if judged else None,
             "progress": round(judged / labelable * 100, 1) if labelable else None}
@@ -1433,6 +1444,37 @@ def _img_html(f: dict, img_base: str) -> str:
     return (f'<img loading="lazy" src="{path}" alt="{alt}" onerror="imgFail(this)">')
 
 
+_MD_IMG_RE = re.compile(r"!\[([^\]]*)\]\(([^)]+)\)")
+
+
+def _md_img_html(text: str, site_base: str) -> str:
+    """AI 回答 markdown 图转 <img>（0920）：纯文本渲染时 ![](...) 只会显示原始字符。
+
+    URL 解析：http(s) 原样；站内绝对路径（/api/...）补站点前缀
+    （prod=https://usp.ep-zl.com/p、test=http://125.122.97.107/t）；
+    其余按 KB 相对引用兜底。加载失败显示占位+原 URL（404 可见可查）。
+    非图片部分照常 HTML 转义。"""
+    out, pos = [], 0
+    for m in _MD_IMG_RE.finditer(text or ""):
+        out.append(_esc_attr(text[pos:m.start()]))
+        alt, url = (m.group(1) or "").strip(), m.group(2).strip()
+        if url.startswith("http"):
+            full = url
+        elif url.startswith("/"):
+            full = site_base + url
+        else:
+            full = f"{site_base}/api/ai/media/kb/{url}"
+        out.append(
+            f'<span class="mdimg"><img loading="lazy" src="{_esc_attr(full)}" alt="{_esc_attr(alt)}" '
+            f'style="max-width:100%;border-radius:8px;margin:4px 0;display:block" '
+            f'onerror="this.style.display=\'none\';this.parentNode.querySelector(\'.mdalt\').style.display=\'block\'">'
+            f'<span class="mdalt" style="display:none;font-size:12px;color:#d9534f">'
+            f'🖼️ 图片未能加载（{_esc_attr(url[:90])}）</span></span>')
+        pos = m.end()
+    out.append(_esc_attr(text[pos:]))
+    return "".join(out)
+
+
 def _img_js() -> str:
     """seg_page/layer_page 共用图片 JS：重试 2 次（1.5s/4s 退避）+ 大图点击加载。"""
     return """function imgFail(img){
@@ -1486,8 +1528,9 @@ def seg_page(env: str = "prod", cid: int = 0, a0: int = 0, a1: int = 0):
                     break
     if not conv:
         raise HTTPException(404, f"会话 {cid} 不存在")
-    img_base = ("https://usp.ep-zl.com/p" if env == "prod"
-                else "http://125.122.97.107/t") + "/api/call/files/"
+    site_base = ("https://usp.ep-zl.com/p" if env == "prod"
+                 else "http://125.122.97.107/t")
+    img_base = site_base + "/api/call/files/"
 
     def esc(s):
         return (str(s or "").replace("&", "&amp;").replace("<", "&lt;")
@@ -1500,7 +1543,7 @@ def seg_page(env: str = "prod", cid: int = 0, a0: int = 0, a1: int = 0):
             f'<div class="act">🎫 生成工单草稿 #{esc(s.get("db_id") or "?")}</div>'
             for s in (rr.get("a_seg") or []) if s.get("action") == "ticket_draft")
         ans = "".join(
-            f'<div class="ai">{esc(s.get("text", ""))}</div>'
+            f'<div class="ai">{_md_img_html(s.get("text", ""), site_base)}</div>'
             for s in (rr.get("a_seg") or [])
             if s.get("action") != "ticket_draft" and (s.get("text") or "").strip())
         parts.append(
@@ -1562,8 +1605,9 @@ def layer_page(env: str = "prod", layer: str = ""):
                     continue
                 c = json.loads(line)
                 split_rounds[str(c.get("conversation_id"))] = c
-    img_base = ("https://usp.ep-zl.com/p" if env == "prod"
-                else "http://125.122.97.107/t") + "/api/call/files/"
+    site_base = ("https://usp.ep-zl.com/p" if env == "prod"
+                 else "http://125.122.97.107/t")
+    img_base = site_base + "/api/call/files/"
     names = {"total": "全部对话", "tester": "测试人员对话", "chitchat": "寒暄",
              "suggested": "猜你想问（平台推荐）", "ticket": "直接连/转工单",
              "qa": "真实咨询问题（分母·走查全量）", "answered": "直答 ✓",
@@ -1579,7 +1623,7 @@ def layer_page(env: str = "prod", layer: str = ""):
                 f'<div class="act">🎫 生成工单草稿 #{esc(s.get("db_id") or "?")}</div>'
                 for s in (rr.get("a_seg") or []) if s.get("action") == "ticket_draft")
             ans = "".join(
-                f'<div class="ai">{esc(s.get("text", ""))}</div>'
+                f'<div class="ai">{_md_img_html(s.get("text", ""), site_base)}</div>'
                 for s in (rr.get("a_seg") or [])
                 if s.get("action") != "ticket_draft" and (s.get("text") or "").strip())
             turns.append(
@@ -1600,6 +1644,9 @@ def layer_page(env: str = "prod", layer: str = ""):
         nf_span = ""
         if r.get("n_files"):
             nf_span = '<span class="mt" style="color:#3d76c4">📷 ' + str(r["n_files"]) + "</span>"
+        # 0920：含推荐命中轮的混合段打徽标——直答率已剔除，走查时一眼可辨
+        sug_span = ('<span class="mt" style="color:#b45309">◈ 含推荐</span>'
+                    if r.get("any_sug") else "")
         parts.append(
             f'<div class="seg {"is-man" if r["src"] == "manual" else "is-pre"}" id="s{r["cid"]}_{r["astart"]}">'
             f'<div class="sh"><span class="idx">#{idx + 1}</span>'
@@ -1607,7 +1654,7 @@ def layer_page(env: str = "prod", layer: str = ""):
             f'<span class="mt">{esc(r["type"])}</span><span class="mt">{esc(r["user"])}</span>'
             f'<span class="mt">{esc((r["at"] or "")[:16])}</span>'
             f'<span class="mt">会话{r["cid"]}</span>'
-            f'{tk_span}{nf_span}'
+            f'{tk_span}{nf_span}{sug_span}'
             f'</div>{btns}<div class="segs-turns">{"".join(turns) or "<p>（空段）</p>"}</div></div>')
     html = f"""<!DOCTYPE html><html lang="zh"><head><meta charset="utf-8">
 <title>走查 · {esc(names.get(layer, layer))}（{len(items)} 段）</title>
