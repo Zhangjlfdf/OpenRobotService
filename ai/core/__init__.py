@@ -36,6 +36,13 @@ from ai.core.knowledge_worker import (
 from ai.core.verified_backfill import (
     backfill_verified_batch,
 )
+from ai.core.vision_chat import (
+    CHAT_UPLOAD_VISION_SYSTEM,
+    build_chat_upload_vision_user_prompt,
+    compare_chat_vlm_with_atlas,
+    format_atlas_block_for_chat,
+    strip_ungrounded_meanings,
+)
 __all__ = [
     # LLM
     "LLMClient",
@@ -61,4 +68,10 @@ __all__ = [
     "run_knowledge_worker",
     "start_knowledge_worker",
     "backfill_verified_batch",
+    # 开发者看图对照试验（正式上传不走这里）
+    "CHAT_UPLOAD_VISION_SYSTEM",
+    "build_chat_upload_vision_user_prompt",
+    "format_atlas_block_for_chat",
+    "compare_chat_vlm_with_atlas",
+    "strip_ungrounded_meanings",
 ]

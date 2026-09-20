@@ -82,7 +82,7 @@ const adminEntries: Entry[] = [
   { path: '/admin/assign-role', label: '分配角色', desc: '为用户在项目中分配角色', icon: <MacUserCog />, tone: 'blue-2' },
   { path: '/admin/user-setup', label: '设置用户', desc: '迁移用户数据、合并账号', icon: <MacShuffle />, tone: 'blue-3' },
   { path: '/admin/operation-logs', label: '操作记录', desc: '操作日志审计与追溯', icon: <MacScrollText />, tone: 'blue-4' },
-  { path: '/admin/dispatch-dev', label: '开发者模式', desc: '看问题簇、重建簇、一键补索引', icon: <MacClipboardList />, tone: 'blue-4' },
+  { path: '/admin/dispatch-dev', label: '开发者模式', desc: '派单调试、界面图鉴标注', icon: <MacClipboardList />, tone: 'blue-4' },
 ];
 
 const DEV_ENTRY_PATH = '/admin/dispatch-dev';

@@ -21,7 +21,7 @@ def ensure_dispatch_dev_permission() -> None:
         name="显示开发者模式",
         resource_type="frontend",
         action="show",
-        description="后台「其他」中显示派单开发者模式（看簇 / 重建簇 / 补索引 / 转派统计）",
+        description="后台「其他」中显示派单开发者模式（派单调试 / 界面图鉴标注）",
     )
 
 
@@ -119,5 +119,43 @@ async def save_cluster_params(
     ensure_dispatch_dev_permission()
     data = await _proxy(
         "POST", "/api/ai/assigner/debug/clusters/params", timeout=180.0, json=payload or {},
+    )
+    return DataResponse(code=0, message="success", data=data)
+
+
+@router.get("/test-branches", response_model=DataResponse, summary="派单测试分支树")
+async def test_branches(
+    current_user: Dict[str, Any] = require_permission(PERM),
+):
+    """返回派单所有分支 + 当前缓存的测试覆盖状态（秒级返回，不跑 pytest）。"""
+    ensure_dispatch_dev_permission()
+    data = await _proxy("GET", "/api/ai/assigner/debug/test-branches", timeout=30.0)
+    return DataResponse(code=0, message="success", data=data)
+
+
+@router.post("/test-branches/refresh", response_model=DataResponse, summary="手动刷新测试覆盖状态")
+async def test_branches_refresh(
+    current_user: Dict[str, Any] = require_permission(PERM),
+):
+    """手动触发 pytest 全量跑一次，结果写回缓存（5 分钟 TTL）。
+
+    性能说明：跑一次大约 30~120 秒；前端要等接口返回才能继续。
+    """
+    ensure_dispatch_dev_permission()
+    data = await _proxy(
+        "POST", "/api/ai/assigner/debug/test-branches/refresh", timeout=180.0,
+    )
+    return DataResponse(code=0, message="success", data=data)
+
+
+@router.post("/test-run", response_model=DataResponse, summary="模拟提单跑派单")
+async def test_run(
+    payload: Dict[str, Any],
+    current_user: Dict[str, Any] = require_permission(PERM),
+):
+    """模拟提单信息，跑一次完整派单，返回结果 + 命中分支。"""
+    ensure_dispatch_dev_permission()
+    data = await _proxy(
+        "POST", "/api/ai/assigner/debug/test-run", timeout=120.0, json=payload or {},
     )
     return DataResponse(code=0, message="success", data=data)

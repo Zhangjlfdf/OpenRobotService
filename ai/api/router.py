@@ -825,7 +825,8 @@ async def _upload_events(
                 f"[upload] 开始VLM调用: session={session_id[:12]}, "
                 f"image_count={len(data_uris)}, names={names}"
             )
-            # 拉取最近对话上下文，让 VLM 知道图片是在什么排查场景下截的
+            # 拉取最近对话上下文，让 VLM 知道图片是在什么排查场景下截的。
+            # 正式上传保持这段原文。开发者模式的图鉴对照是试验，确认更好之前不要改这里。
             vlm_context = ""
             try:
                 mgr = await get_memory_manager()

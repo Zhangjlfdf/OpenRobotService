@@ -80,6 +80,9 @@ from app.models.module_tree import ModuleTree
 from app.models.module_tree_edit import ModuleTreeEdit
 from app.models.module_tree_node import ModuleTreeNode
 
+# 界面图鉴（标准截图 + 难懂区域标注）
+from app.models.ui_atlas import UiAtlasCard
+
 # 用户信息（JSON 快照）
 from app.models.user_info import UserInfo
 
@@ -112,6 +115,8 @@ __all__ = [
     "Company", "Department",
     # module tree
     "ModuleTree", "ModuleTreeEdit", "ModuleTreeNode",
+    # ui atlas
+    "UiAtlasCard",
     # user info
     "UserInfo",
     # user statistics

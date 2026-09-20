@@ -1,4 +1,4 @@
-// 派单开发者模式：看问题簇、重建簇、一键补索引、转派指标。
+// 派单开发者模式：看问题簇、重建簇、一键补索引、转派指标、派单测试。
 // 入口在「其他」，权限 frontend:admin:dispatch-dev:show（admin 直通仍可见）。
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
@@ -7,12 +7,24 @@ import { createRequest } from '@/api/client';
 import API_CONFIG from '@/config/api';
 import { useAuthStore } from '@/stores/auth';
 import ReactECharts from '@/shared/components/ReactECharts';
+import UiAtlasPanel from '@/pages/admin/UiAtlasPanel';
 
 export const PERM_DISPATCH_DEV = 'frontend:admin:dispatch-dev:show';
 
 function pct(v: number | null | undefined): string {
   if (v == null || Number.isNaN(Number(v))) return '—';
   return `${(Number(v) * 100).toFixed(1)}%`;
+}
+
+function formatPytestTime(ts: number | string | null | undefined): string {
+  if (ts == null) return '';
+  const t = Number(ts);
+  if (!Number.isFinite(t)) return '';
+  const diff = Math.max(0, Math.floor((Date.now() - t * 1000) / 1000));
+  if (diff < 60) return `${diff} 秒前`;
+  if (diff < 3600) return `${Math.floor(diff / 60)} 分钟前`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)} 小时前`;
+  return `${Math.floor(diff / 86400)} 天前`;
 }
 
 function TicketLink({ taskId, title }: { taskId: number; title?: string }) {
@@ -260,6 +272,555 @@ function unwrap<T>(raw: unknown): T {
   return raw as T;
 }
 
+// ── 派单测试面板 ──
+
+interface TestScenario {
+  label?: string;
+  title: string;
+  desc?: string;
+  problem_description?: string;
+  robot_type?: string;
+  fault_code?: string;
+  dispatch_hint?: string;
+  preferred_assignee?: string;
+  preferred_assignee_remark?: string;
+  prev_assignee?: string;
+  contact?: string;
+  creator?: string;
+  repeat?: number;
+  expected_branch?: string;
+  note?: string;
+}
+interface BranchChild {
+  id: string;
+  step?: string;
+  title: string;
+  desc?: string;
+  tests?: string[];
+  test_status?: 'passed' | 'failed' | 'untested';
+  example?: TestScenario;
+}
+interface BranchNode {
+  id: string;
+  step: string;
+  title: string;
+  desc: string;
+  children: BranchChild[];
+}
+interface BranchTreeData {
+  branches: BranchNode[];
+  total_passed: number;
+  total_failed: number;
+  covered_by_run?: number;
+  pytest_ran_at?: number | string | null;
+  pytest_cache_hit?: boolean;
+  cache_age_seconds?: number;
+  ttl_seconds?: number;
+}
+interface HitPathNode {
+  step: string;
+  branch: string;
+  id: string;
+}
+interface TestRunResult {
+  engineer_id: string;
+  engineer_name: string;
+  confidence_score: number;
+  decision_type: string;
+  reasoning: string;
+  preferred_id?: string | null;
+  matched_pref?: boolean | null;
+  profile?: Record<string, unknown> | null;
+  candidates?: Array<Record<string, unknown>> | null;
+}
+interface TestRunData {
+  result: TestRunResult;
+  hit_path: HitPathNode[];
+  candidate_count: number;
+}
+
+const STATUS_COLOR: Record<string, string> = {
+  passed: '#2ba471',
+  failed: '#e34d4d',
+  untested: '#c9d4d9',
+};
+const STATUS_LABEL: Record<string, string> = {
+  passed: '已通过',
+  failed: '失败',
+  untested: '未测',
+};
+
+const PRESET_TICKETS: TestScenario[] = [
+  { label: '指定人', title: '指定处理人：张三', desc: '车辆在站点停下不动' },
+  { label: '模糊(severe)', title: '坏了', desc: '不知道啥情况', dispatch_hint: 'severe' },
+  { label: '故障码', title: '车辆报错', desc: '车辆无法启动', fault_code: 'E1001' },
+  { label: '车型+故障', title: 'S20 车辆故障', desc: '车停了不动', robot_type: 'S20', fault_code: 'E2002' },
+];
+
+// 一键跑全部场景：覆盖所有派单分支
+const ALL_SCENARIOS: TestScenario[] = [
+  // Step 0 — 指定人
+  { label: 'Step0 命中指定人', title: '指定处理人：张三', desc: '车辆在站点停下不动' },
+  { label: 'Step0 未命中指定人', title: '指定处理人：不存在的ID', desc: '车辆在站点停下不动' },
+  // 倾向人
+  { label: '倾向人连续确认', title: '车辆故障', desc: '车不动了', preferred_assignee: '1' },
+  { label: '倾向人画像不完整', title: '车辆故障', desc: '车不动了', preferred_assignee: '999' },
+  // Step 1 — 部门收紧
+  { label: 'Step1 部门硬过滤', title: 'S20 车辆故障', desc: '车停了不动', robot_type: 'S20', fault_code: 'E2002' },
+  { label: 'Step1 无部门信号', title: '车辆报错', desc: '车辆无法启动', fault_code: 'E1001' },
+  // Step 2 — severe 跳过
+  { label: 'Step2 severe 跳Step7', title: '坏了', desc: '不知道啥情况', dispatch_hint: 'severe' },
+  { label: 'Step2 正常流程', title: '车辆故障', desc: '车不动了' },
+  // Step 3 — 三路召回
+  { label: 'Step3 画像召回', title: 'S20 车辆故障', desc: '车停了不动', robot_type: 'S20', fault_code: 'E2002' },
+  { label: 'Step3 相似工单', title: '车辆无法启动', desc: '故障码 E1001，启动不了' },
+  { label: 'Step3 问题簇', title: '车辆在站点停下不动', desc: '到站后不动，指示灯闪红灯' },
+  // Step 4 — 精排
+  { label: 'Step4 倾向人保底', title: '车辆故障', desc: '车不动了', preferred_assignee: '1' },
+  // Step 6 — LLM 决策
+  { label: 'Step6 LLM成功', title: 'S20 车辆故障', desc: '车停了不动，故障码E2002', robot_type: 'S20', fault_code: 'E2002' },
+  // Step 7 — 兜底
+  { label: 'Step7 派对接人', title: '车辆故障', desc: '车不动了', contact: '对接人' },
+  { label: 'Step7 无法指派', title: '未知问题', desc: '不清楚什么情况' },
+  // 重派场景
+  { label: '重派场景', title: '车辆故障', desc: '车不动了', prev_assignee: '1', preferred_assignee: '2' },
+];
+
+function DispatchTestPanel() {
+  const [branches, setBranches] = useState<BranchTreeData | null>(null);
+  const [branchesLoading, setBranchesLoading] = useState(false);
+  const [branchesRefreshing, setBranchesRefreshing] = useState(false);
+  const [running, setRunning] = useState(false);
+  const [runResult, setRunResult] = useState<TestRunData | null>(null);
+  const [runError, setRunError] = useState('');
+
+  const [title, setTitle] = useState('车辆在站点停下不动');
+  const [desc, setDesc] = useState('车辆到站后不动了，指示灯闪红灯');
+  const [robotType, setRobotType] = useState('');
+  const [faultCode, setFaultCode] = useState('');
+  const [dispatchHint, setDispatchHint] = useState('');
+  const [preferredAssignee, setPreferredAssignee] = useState('');
+  const [remark, setRemark] = useState('');
+  const [prevAssignee, setPrevAssignee] = useState('');
+  const [contact, setContact] = useState('');
+  const [creator, setCreator] = useState('');
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [batchRunning, setBatchRunning] = useState(false);
+  const [batchProgress, setBatchProgress] = useState<{ current: number; total: number; label: string }>({ current: 0, total: 0, label: '' });
+
+  const loadBranches = useCallback(async () => {
+    setBranchesLoading(true);
+    try {
+      const data = unwrap<BranchTreeData>(await request('/dispatch-dev/test-branches', { skipCache: true }));
+      setBranches(data);
+    } catch (e) {
+      Toast({ message: e instanceof Error ? e.message : '加载分支失败', theme: 'error' });
+    } finally {
+      setBranchesLoading(false);
+    }
+  }, []);
+
+  const refreshTests = useCallback(async () => {
+    // 手动触发 pytest 全量跑一次；耗时 30~120 秒，前端按钮要禁用 + loading 文案。
+    setBranchesRefreshing(true);
+    try {
+      const data = unwrap<BranchTreeData>(await request('/dispatch-dev/test-branches/refresh', {
+        method: 'POST',
+        timeout: 180000,
+      }));
+      setBranches(data);
+      if (data?.pytest_cache_hit) {
+        Toast({ message: `复用上次结果（${data.cache_age_seconds ?? '?'}s 前）`, theme: 'success' });
+      } else {
+        Toast({ message: `测试结果已刷新：通过 ${data?.total_passed ?? 0} / 失败 ${data?.total_failed ?? 0}`, theme: 'success' });
+      }
+    } catch (e) {
+      Toast({ message: e instanceof Error ? e.message : '刷新测试结果失败', theme: 'error' });
+    } finally {
+      setBranchesRefreshing(false);
+    }
+  }, []);
+
+  useEffect(() => { loadBranches(); }, [loadBranches]);
+
+  const applyPreset = (preset: TestScenario) => {
+    setTitle(preset.title || '');
+    setDesc(preset.problem_description || preset.desc || '');
+    setRobotType(preset.robot_type || '');
+    setFaultCode(preset.fault_code || '');
+    setDispatchHint(preset.dispatch_hint || '');
+    setPreferredAssignee(preset.preferred_assignee || '');
+    setRemark(preset.preferred_assignee_remark || '');
+    setPrevAssignee(preset.prev_assignee || '');
+    setContact(preset.contact || '');
+    setCreator(preset.creator || '');
+  };
+
+  const payloadFromScenario = (scenario: TestScenario): Record<string, string> => {
+    const payload: Record<string, string> = {
+      title: scenario.title,
+      problem_description: scenario.problem_description || scenario.desc || '',
+    };
+    if (scenario.robot_type) payload.robot_type = scenario.robot_type;
+    if (scenario.fault_code) payload.fault_code = scenario.fault_code;
+    if (scenario.dispatch_hint) payload.dispatch_hint = scenario.dispatch_hint;
+    if (scenario.preferred_assignee) payload.preferred_assignee = scenario.preferred_assignee;
+    if (scenario.preferred_assignee_remark) payload.preferred_assignee_remark = scenario.preferred_assignee_remark;
+    if (scenario.prev_assignee) payload.prev_assignee = scenario.prev_assignee;
+    if (scenario.contact) payload.contact = scenario.contact;
+    if (scenario.creator) payload.creator = scenario.creator;
+    return payload;
+  };
+
+  const currentPayload = (): Record<string, string> => {
+    const payload: Record<string, string> = { title, problem_description: desc };
+    if (robotType) payload.robot_type = robotType;
+    if (faultCode) payload.fault_code = faultCode;
+    if (dispatchHint) payload.dispatch_hint = dispatchHint;
+    if (preferredAssignee) payload.preferred_assignee = preferredAssignee;
+    if (remark) payload.preferred_assignee_remark = remark;
+    if (prevAssignee) payload.prev_assignee = prevAssignee;
+    if (contact) payload.contact = contact;
+    if (creator) payload.creator = creator;
+    return payload;
+  };
+
+  const runPayload = async (payload: Record<string, string>, repeat = 1) => {
+    let last: TestRunData | null = null;
+    for (let i = 0; i < Math.max(1, repeat); i += 1) {
+      last = unwrap<TestRunData>(await request('/dispatch-dev/test-run', {
+        method: 'POST',
+        timeout: 120000,
+        body: JSON.stringify(payload),
+      }));
+    }
+    return last;
+  };
+
+  const runTest = async () => {
+    setRunning(true);
+    setRunError('');
+    setRunResult(null);
+    try {
+      const data = await runPayload(currentPayload());
+      if (data) setRunResult(data);
+      // 跑完自动刷新分支覆盖树
+      loadBranches();
+    } catch (e) {
+      setRunError(e instanceof Error ? e.message : '模拟派单失败');
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  const runScenario = async (scenario: TestScenario) => {
+    applyPreset(scenario);
+    setRunning(true);
+    setRunError('');
+    setRunResult(null);
+    try {
+      const data = await runPayload(payloadFromScenario(scenario), scenario.repeat || 1);
+      if (data) setRunResult(data);
+      await loadBranches();
+    } catch (e) {
+      setRunError(e instanceof Error ? e.message : '模拟派单失败');
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  const batchRunAll = async () => {
+    const realProfileScenarios = (branches?.branches || []).flatMap((node) =>
+      (node.children || [])
+        .filter((child) => child.example)
+        .map((child) => ({ ...(child.example as TestScenario), label: `${node.step} ${child.title}` })),
+    );
+    const scenarios = realProfileScenarios.length ? realProfileScenarios : ALL_SCENARIOS;
+    setBatchRunning(true);
+    setRunError('');
+    setRunResult(null);
+    setBatchProgress({ current: 0, total: scenarios.length, label: '' });
+    try {
+      for (let i = 0; i < scenarios.length; i++) {
+        const s = scenarios[i];
+        setBatchProgress({ current: i + 1, total: scenarios.length, label: s.label || s.title });
+        try {
+          await runPayload(payloadFromScenario(s), s.repeat || 1);
+        } catch {
+          // 单个场景失败不中断，继续跑下一个
+        }
+      }
+      // 全部跑完后刷新分支覆盖
+      await loadBranches();
+      Toast({ message: '全部场景跑完，分支覆盖已更新', theme: 'success' });
+    } catch (e) {
+      Toast({ message: e instanceof Error ? e.message : '批量跑单失败', theme: 'error' });
+    } finally {
+      setBatchRunning(false);
+      setBatchProgress({ current: 0, total: 0, label: '' });
+    }
+  };
+
+  const branchNodes = branches?.branches || [];
+  const passedCount = branches?.total_passed ?? 0;
+  const failedCount = branches?.total_failed ?? 0;
+  const runCovered = branches?.covered_by_run ?? 0;
+  const totalBranches = branchNodes.reduce((n, b) => n + (b.children?.length || 0), 0);
+  const coveredBranches = branchNodes.reduce((n, b) => n + (b.children || []).filter(c => c.test_status === 'passed').length, 0);
+  const coveragePct = totalBranches > 0 ? Math.round((coveredBranches / totalBranches) * 100) : 0;
+
+  return (
+    <div className="dispatch-test">
+      {/* 分支树 */}
+      <section className="dispatch-dev__card">
+        <div className="dispatch-dev__head">
+          <span className="dispatch-dev__title">派单分支覆盖</span>
+          <div className="dispatch-dev__head-actions">
+            <button
+              type="button"
+              className="dispatch-dev__btn"
+              disabled={batchRunning || running}
+              onClick={batchRunAll}
+            >
+              {batchRunning ? `跑场景中… (${batchProgress.current}/${batchProgress.total})` : '一键跑全部场景'}
+            </button>
+            <button
+              type="button"
+              className="dispatch-dev__btn dispatch-dev__btn--ghost"
+              disabled={branchesRefreshing}
+              onClick={refreshTests}
+              title="跑一遍 pytest，更新每个分支的通过失败状态（耗时 30~120s）"
+            >
+              {branchesRefreshing ? '跑测试中…' : '刷新测试结果'}
+            </button>
+            <button
+              type="button"
+              className="dispatch-dev__btn dispatch-dev__btn--ghost"
+              disabled={branchesLoading}
+              onClick={loadBranches}
+              title="秒级刷新：重新拉分支树（不跑 pytest）"
+            >
+              {branchesLoading ? '刷新中…' : '刷新分支树'}
+            </button>
+          </div>
+        </div>
+        <p className="dispatch-dev__hint">
+          派单流程共 8 个 Step、{totalBranches} 条分支。绿色=已通过、灰色=未测、红色=失败。
+          点「一键跑全部场景」会优先遍历每条分支上的真实画像示例；也可以在单个分支点「载入例子」后手动改字段。
+          {' '}「刷新测试结果」会跑一遍 pytest（耗时 30~120 秒），用结果标记每条分支。
+          {branches?.pytest_ran_at
+            ? `（当前测试结果更新于 ${formatPytestTime(branches.pytest_ran_at)}）`
+            : '（尚未跑过 pytest，所有分支显示为未测）'}
+        </p>
+        {batchRunning ? (
+          <div className="dispatch-test__batch-progress">
+            <Loading text={`跑场景 ${batchProgress.current}/${batchProgress.total}：${batchProgress.label}`} />
+          </div>
+        ) : null}
+        <div className="dispatch-test__summary">
+          <span>pytest 通过 {passedCount}</span>
+          <span>失败 {failedCount}</span>
+          <span>跑单覆盖 {runCovered} 条</span>
+          <span>分支覆盖 {coveredBranches}/{totalBranches} ({coveragePct}%)</span>
+        </div>
+        {branchesLoading && !branches ? (
+          <div className="dispatch-dev__empty"><Loading text="加载分支…" /></div>
+        ) : (
+          <div className="dispatch-test__tree">
+            {branchNodes.map((node) => (
+              <div key={node.id} className="dispatch-test__branch">
+                <div className="dispatch-test__branch-head">
+                  <span className="dispatch-test__step">{node.step}</span>
+                  <span className="dispatch-test__branch-title">{node.title}</span>
+                </div>
+                <p className="dispatch-test__branch-desc">{node.desc}</p>
+                <div className="dispatch-test__children">
+                  {(node.children || []).map((child) => {
+                    const status = child.test_status || 'untested';
+                    return (
+                      <div key={child.id} className={`dispatch-test__child dispatch-test__child--${status}`}>
+                        <i className="dispatch-test__dot" style={{ background: STATUS_COLOR[status] }} />
+                        <span className="dispatch-test__child-title">{child.title}</span>
+                        <em className="dispatch-test__child-status">{STATUS_LABEL[status]}</em>
+                        {child.example ? (
+                          <>
+                            <button
+                              type="button"
+                              className="dispatch-test__mini-btn"
+                              onClick={() => applyPreset(child.example as TestScenario)}
+                              title={child.example.note || '载入这个分支的真实画像示例'}
+                            >
+                              载入例子
+                            </button>
+                            <button
+                              type="button"
+                              className="dispatch-test__mini-btn"
+                              disabled={running || batchRunning}
+                              onClick={() => runScenario(child.example as TestScenario)}
+                              title={child.example.note || '直接跑这个分支的真实画像示例'}
+                            >
+                              跑此例
+                            </button>
+                          </>
+                        ) : null}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+
+      {/* 模拟提单 */}
+      <section className="dispatch-dev__card">
+        <div className="dispatch-dev__head">
+          <span className="dispatch-dev__title">模拟提单</span>
+        </div>
+        <p className="dispatch-dev__hint">
+          填写工单信息后点「跑派单」，会走一次完整派单流程，并显示命中了哪条分支。
+        </p>
+        <div className="dispatch-test__presets">
+          {PRESET_TICKETS.map((p) => (
+            <button
+              key={p.label}
+              type="button"
+              className="dispatch-dev__btn dispatch-dev__btn--ghost"
+              onClick={() => applyPreset(p)}
+            >
+              {p.label}
+            </button>
+          ))}
+        </div>
+        <div className="dispatch-test__form">
+          <label>
+            <span>标题</span>
+            <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="工单标题" />
+          </label>
+          <label>
+            <span>问题描述</span>
+            <textarea value={desc} onChange={(e) => setDesc(e.target.value)} rows={3} placeholder="问题描述" />
+          </label>
+          <label>
+            <span>车型</span>
+            <input value={robotType} onChange={(e) => setRobotType(e.target.value)} placeholder="如 S20" />
+          </label>
+          <label>
+            <span>故障码</span>
+            <input value={faultCode} onChange={(e) => setFaultCode(e.target.value)} placeholder="如 E1001" />
+          </label>
+          <label>
+            <span>信息充分性</span>
+            <select value={dispatchHint} onChange={(e) => setDispatchHint(e.target.value)}>
+              <option value="">信息充分（默认）</option>
+              <option value="lacking">lacking（信息不足）</option>
+              <option value="severe">severe（严重不足）</option>
+            </select>
+          </label>
+          <button
+            type="button"
+            className="dispatch-dev__btn dispatch-dev__btn--ghost dispatch-test__toggle-advanced"
+            onClick={() => setShowAdvanced((v) => !v)}
+          >
+            {showAdvanced ? '收起高级选项' : '展开高级选项'}
+          </button>
+          {showAdvanced ? (
+            <>
+              <label>
+                <span>倾向处理人 ID</span>
+                <input value={preferredAssignee} onChange={(e) => setPreferredAssignee(e.target.value)} placeholder="users.id" />
+              </label>
+              <label>
+                <span>重派备注</span>
+                <input value={remark} onChange={(e) => setRemark(e.target.value)} placeholder="希望派给熟悉…的人" />
+              </label>
+              <label>
+                <span>原处理人 ID</span>
+                <input value={prevAssignee} onChange={(e) => setPrevAssignee(e.target.value)} placeholder="users.id" />
+              </label>
+              <label>
+                <span>联系人</span>
+                <input value={contact} onChange={(e) => setContact(e.target.value)} placeholder="对接人" />
+              </label>
+              <label>
+                <span>提单人 ID</span>
+                <input value={creator} onChange={(e) => setCreator(e.target.value)} placeholder="users.id" />
+              </label>
+            </>
+          ) : null}
+        </div>
+        <button
+          type="button"
+          className="dispatch-dev__btn dispatch-test__run-btn"
+          disabled={running}
+          onClick={runTest}
+        >
+          {running ? '派单中…' : '跑派单'}
+        </button>
+      </section>
+
+      {/* 派单结果 */}
+      {runError ? (
+        <section className="dispatch-dev__card">
+          <div className="dispatch-dev__head"><span className="dispatch-dev__title">派单失败</span></div>
+          <p className="dispatch-dev__hint dispatch-dev__hint--error">{runError}</p>
+        </section>
+      ) : runResult ? (
+        <section className="dispatch-dev__card">
+          <div className="dispatch-dev__head">
+            <span className="dispatch-dev__title">派单结果</span>
+            <span className="dispatch-dev__hint" style={{ margin: 0 }}>
+              候选 {runResult.candidate_count} 人
+            </span>
+          </div>
+          {/* 命中路径 */}
+          <div className="dispatch-test__hit-path">
+            <span className="dispatch-test__sub">命中分支</span>
+            <div className="dispatch-test__path-chain">
+              {runResult.hit_path.map((node, idx) => (
+                <span key={idx} className="dispatch-test__path-node">
+                  <em>{node.step}</em>
+                  <span>{node.branch}</span>
+                  {idx < runResult.hit_path.length - 1 ? <i className="dispatch-test__arrow">→</i> : null}
+                </span>
+              ))}
+            </div>
+          </div>
+          {/* 结果详情 */}
+          <div className="dispatch-test__result">
+            <div className="dispatch-test__result-row">
+              <span>指派工程师</span>
+              <strong>{runResult.result.engineer_name || '（未指派）'}</strong>
+              <em>{runResult.result.engineer_id || '—'}</em>
+            </div>
+            <div className="dispatch-test__result-row">
+              <span>决策类型</span>
+              <strong>{runResult.result.decision_type || '—'}</strong>
+            </div>
+            <div className="dispatch-test__result-row">
+              <span>置信度</span>
+              <strong>{(runResult.result.confidence_score * 100).toFixed(1)}%</strong>
+            </div>
+            {runResult.result.reasoning ? (
+              <div className="dispatch-test__result-row">
+                <span>理由</span>
+                <span className="dispatch-test__reasoning">{runResult.result.reasoning}</span>
+              </div>
+            ) : null}
+            {runResult.result.matched_pref != null ? (
+              <div className="dispatch-test__result-row">
+                <span>倾向人命中</span>
+                <strong>{runResult.result.matched_pref ? '是' : '否'}</strong>
+              </div>
+            ) : null}
+          </div>
+        </section>
+      ) : null}
+    </div>
+  );
+}
+
 export default function DispatchDev() {
   const navigate = useNavigate();
   const allowed = useAuthStore((s) => s.hasPermission(PERM_DISPATCH_DEV));
@@ -279,6 +840,7 @@ export default function DispatchDev() {
   const [savingParams, setSavingParams] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [listKey, setListKey] = useState<TicketListKey | null>(null);
+  const [mainTab, setMainTab] = useState<'metrics' | 'atlas' | 'test'>('metrics');
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -512,7 +1074,34 @@ export default function DispatchDev() {
 
   return (
     <div className="dispatch-dev">
-      {loading ? (
+      <div className="dispatch-dev__tabs">
+        <button
+          type="button"
+          className={`dispatch-dev__tab${mainTab === 'metrics' ? ' is-active' : ''}`}
+          onClick={() => setMainTab('metrics')}
+        >
+          派单调试
+        </button>
+        <button
+          type="button"
+          className={`dispatch-dev__tab${mainTab === 'test' ? ' is-active' : ''}`}
+          onClick={() => setMainTab('test')}
+        >
+          派单测试
+        </button>
+        <button
+          type="button"
+          className={`dispatch-dev__tab${mainTab === 'atlas' ? ' is-active' : ''}`}
+          onClick={() => setMainTab('atlas')}
+        >
+          界面图鉴
+        </button>
+      </div>
+      {mainTab === 'atlas' ? (
+        <UiAtlasPanel />
+      ) : mainTab === 'test' ? (
+        <DispatchTestPanel />
+      ) : loading ? (
         <div className="dispatch-dev__empty"><Loading text="加载中..." /></div>
       ) : error ? (
         <div className="dispatch-dev__empty">{error}</div>
