@@ -1046,10 +1046,12 @@ def _seg_rows(env):
                             seg_ticketed = True
                             if s.get("db_id"):
                                 tic_ids.append(s["db_id"])
-                # 猜你想问=元筛选，优先于人工标签（用户口径：推荐点击不进直答
-                # 统计，标没标过都一样——0916 走查实锤已标段命中池仍留在 qa）
-                seg_has_sug = any(((rr.get("q") or "").strip() in suggested_pool)
-                                  for rr in (c.get("rounds") or [])[a0:a1])
+                # 猜你想问=元筛选（0920 修正口径）：仅段内**全部**咨询回合都命中
+                # 推荐池才判 suggested——多轮段碰巧含一条推荐问题不再整段旁支
+                # （用户拍板：混合段不过滤，真实提问跟着陪葬没道理）
+                seg_qs = [(rr.get("q") or "").strip()
+                          for rr in (c.get("rounds") or [])[a0:a1] if rr.get("q")]
+                seg_has_sug = bool(seg_qs) and all(q in suggested_pool for q in seg_qs)
                 # 0915 用户硬要求：SKIP_USER_IDS 静默归到「测试人员」层（不显示排除徽章）
                 is_skip = str(c.get("user_id") or "") in SKIP_USER_IDS
                 if c.get("is_tester") or is_skip:
@@ -1089,11 +1091,16 @@ def _seg_rows(env):
                     layer = "uncovered"
                 else:
                     layer = "undetermined"
+                # 段内须有「提问且 AI 有回答」的回合（0920：AI 未回答/回答全空的
+                # 服务异常段不可标注，不进未标注——dar_l3 分母同口径）
+                seg_answerable = any(
+                    cls[j].get("q") and any(a.strip() for a in (c["rounds"][j].get("a") or []))
+                    for j in range(a0, min(a1, len(rounds))))
                 # 0915 用户反馈：fresh import + 无判定（无人工 + 无 AI 预标）= 不进漏斗
                 # 等用户跑 l3 / 人工标注后再进入——避免空段被错放任何"已判定"层
                 # tester/suggested/寒暄 是元筛选层（不依赖 eff），保留
                 # SKIP 用户也保留在 tester 层
-                if (not eff and layer == "undetermined"
+                if (not eff and layer == "undetermined" and seg_answerable
                     and not c.get("is_tester") and not seg_has_sug
                     and str(c.get("user_id") or "") not in SKIP_USER_IDS):
                     unprocessed.append({

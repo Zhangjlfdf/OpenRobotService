@@ -21,6 +21,7 @@ import glob
 import io
 import json
 import os
+import re
 import sys
 from datetime import datetime, timedelta
 
@@ -110,9 +111,52 @@ def main():
     pre = {} if args.bounds_only else load_pre()
     if args.bounds_only:
         print("切题轮：不注入预标/检索（先人工定边界，判定在边界定稿后跑）")
+    # 标注轮会话筛选（0920）：与漏斗「未标注」同口径——只列含待标注段的会话，
+    # 不再全量塞 7/8 月已判定的老会话淹没用。待标注段=无人工标签∧无 L3 预标
+    # ∧段内有咨询（非寒暄）∧段内问题不在「猜你想问」推荐池（元筛选层，旁支）
+    suggested_pool = set()
+    if not args.bounds_only:
+        sug_p = os.path.join(os.path.dirname(os.path.dirname(HERE)),
+                             "frontend", "src", "shared", "data", "suggestedQuestions.ts")
+        try:
+            suggested_pool = {m.group(1).strip()
+                              for m in re.finditer(r"'([^']+)'", open(sug_p, encoding="utf-8").read())}
+        except OSError:
+            print("猜你想问池缺失（suggestedQuestions.ts），元筛选跳过")
+
+    def _has_pending_seg(cid, rounds, cls):
+        """该会话是否含待标注段（漏斗 unprocessed 的会话级判据，bounds/预标同口径）。"""
+        if cid in man_bounds:
+            starts = dar_segs.effective_starts(rounds, cid, man_bounds, man_labels,
+                                               pre_starts={int(x) for x in (pre.get(cid) or {})
+                                                           if str(x).isdigit() or isinstance(x, int)},
+                                               frozen_len=man_frozen)
+        else:
+            starts = [0] + [i for i in range(1, len(cls))
+                            if cls[i].get("topic", 0) != cls[i - 1].get("topic", 0)]
+        for tid, s in enumerate(starts):
+            e = starts[tid + 1] if tid + 1 < len(starts) else len(rounds)
+            if (man_labels.get(cid) or {}).get(str(s)):
+                continue
+            if s in {int(x) for x in (pre.get(cid) or {})
+                     if str(x).isdigit() or isinstance(x, int)}:
+                continue
+            # 0920 口径（与漏斗 _seg_rows 同）：段内须有「提问且 AI 有回答」的
+            # 回合——纯寒暄、AI 未回答/回答全空的服务异常段都不可标注
+            if not any(cls[i].get("q") and any(a.strip() for a in (rounds[i].get("a") or []))
+                       for i in range(s, e)):
+                continue
+            # 猜你想问：仅段内**全部**咨询回合都命中推荐池才判 suggested——
+            # 多轮段碰巧含一条推荐问题不再整段旁支（混合段不过滤，用户拍板）
+            consult = [(rounds[i].get("q") or "").strip() for i in range(s, e)
+                       if cls[i].get("q") and (rounds[i].get("q") or "").strip()]
+            if consult and all(q in suggested_pool for q in consult):
+                continue
+            return True
+        return False
 
     out = []
-    n_man = n_llm_multi = n_noise = 0
+    n_man = n_llm_multi = n_noise = n_done = 0
     for c in convs:
         rounds = c["rounds"]
         # 切题轮：单回合无切分余地，跳过；标注轮保留——单问单答也要打标签，
@@ -128,6 +172,11 @@ def main():
         # （带工单的保留——纯提单会话是「直接提单」标的标的；指标层本就跳过无咨询段）
         if not any(k["q"] for k in cls) and not (c.get("tasks") or []):
             n_noise += 1
+            continue
+        # 标注轮：无待标注段的会话不进列表（已全部判定，07/08 月老会话的来源）；
+        # tester 会话同漏斗口径排除（元筛选层，7/8 月测试流量的大头）
+        if not args.bounds_only and (c.get("is_tester") or not _has_pending_seg(cid, rounds, cls)):
+            n_done += 1
             continue
         if len({k.get("topic", 0) for k in cls}) >= 2:
             n_llm_multi += 1
@@ -191,7 +240,8 @@ def main():
         fh.write(html)
     print(f"生成 {path}")
     print(f"会话 {len(out)} 个（≥2 回合），回合 {sum(len(c['rounds']) for c in out)}"
-          + (f"，滤掉纯寒暄（无咨询无工单）{n_noise} 个" if n_noise else ""))
+          + (f"，滤掉纯寒暄（无咨询无工单）{n_noise} 个" if n_noise else "")
+          + (f"，滤掉已全部判定的 {n_done} 个（标注轮只列有待标注段的会话）" if n_done else ""))
     if man_bounds:
         print(f"人工边界嵌入 {n_man} 个已切会话（初始切分=人工边界），LLM 切出多话题的 {n_llm_multi} 个")
     else:
