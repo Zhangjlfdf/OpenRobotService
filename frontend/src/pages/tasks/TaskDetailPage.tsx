@@ -37,7 +37,7 @@ import type { ProjectMember } from '@/api/projects';
 import { dedupeFileNames } from '@/shared/utils/uniqueFileNames';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { urlTransformAllowDataImage } from '@/shared/utils/markdown';
+import { appUrlTransform } from '@/shared/utils/markdown';
 
 // 状态文字色（设计稿 statusText 蓝阶：待处理 blue-3 / 处理中·进行中 blue-2 / 已解决 blue-1 / 关闭·取消 muted）
 const STATUS_TEXT_COLOR_MAP: Record<string, string> = {
@@ -2064,7 +2064,7 @@ export default function TaskDetailPage() {
           {diagnosisReport ? (
             <ReactMarkdown
               remarkPlugins={[remarkGfm]}
-              urlTransform={urlTransformAllowDataImage}
+              urlTransform={appUrlTransform}
             >
               {diagnosisReport}
             </ReactMarkdown>
