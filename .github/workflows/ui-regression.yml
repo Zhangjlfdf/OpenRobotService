@@ -112,6 +112,9 @@ jobs:
           chmod 600 "$HOME/.ssh/ci_key"
           echo "UI_REGRESSION_SSH_KEY=$HOME/.ssh/ci_key" >> "$GITHUB_ENV"
 
+      - name: Preflight real environment SSH forwards
+        run: python automation/scripts/cli-check-ui-regression-ssh.py
+
       - name: Build frontend
         run: npm run build --prefix frontend
 
