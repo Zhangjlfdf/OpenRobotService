@@ -788,12 +788,10 @@ export interface RelationBlockProps {
   customer?: string;
   canOperate: boolean;
   blockedError?: BlockedErrorDetail | null;
-  /** 无关联时是否隐藏整个区块 */
-  hideWhenEmpty?: boolean;
 }
 
 export default function RelationBlock({
-  taskId, projectName, projectId, customer, canOperate, blockedError, hideWhenEmpty,
+  taskId, projectName, projectId, customer, canOperate, blockedError,
 }: RelationBlockProps) {
   const navigate = useNavigate();
 
@@ -1200,9 +1198,6 @@ export default function RelationBlock({
       </div>
     );
   };
-
-  // 无关联时隐藏整个区块（等数据加载完再判断，避免初始闪烁）
-  if (hideWhenEmpty && !loading && totalRelations === 0) return null;
 
   return (
     <div className="detail-card" style={{ marginTop: 12 }}>
