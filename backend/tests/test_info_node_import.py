@@ -12,6 +12,7 @@ from app.modules.admin.services.info_node_import_service import (
     VEHICLE_MODEL_CODES,
     _current_text,
     _select_state,
+    _snap_into_nearby_dropdown,
     build_import_prompt,
     build_node_catalog,
     build_vehicle_model_catalog,
@@ -288,6 +289,145 @@ def test_vehicle_model_snaps_into_dropdown_on_import():
     ])
     assert snapped["fill"][0]["node_id"] == "m1"
     assert snapped["fill"][0]["value"] == "XS1201"
+
+
+def _two_model_tree():
+    """硬件 / 车辆 / 车型1 + 车型2（各带「数量」子节点）——模板里多个车型槽位的样子。"""
+    def model(nid, title, qid, order):
+        return {
+            "id": nid, "title": title, "content_type": "select", "sort_order": order,
+            "value": json.dumps({"selected": "", "options": ["XC1051", "XCD101"]}),
+            "children": [
+                {"id": qid, "title": "数量", "content_type": "text", "value": "", "sort_order": 0, "children": []},
+            ],
+        }
+
+    return [{
+        "id": "h1", "title": "硬件", "content_type": "text", "value": None, "sort_order": 0,
+        "children": [{
+            "id": "v1", "title": "车辆", "content_type": "text", "value": None, "sort_order": 0,
+            "children": [model("m1", "车型1", "q1", 0), model("m2", "车型2", "q2", 1)],
+        }],
+    }]
+
+
+def test_unmatched_item_snaps_into_nearby_dropdown():
+    """没匹配到节点（大模型只给了建议归属）时，先比「建议归属附近」那些空下拉的可选项。
+
+    需求原话：识别出来的内容要先和下拉选项匹配，相似度高就选它，不要在该节点下新建节点。
+    """
+    flat = flatten_tree(_vehicle_tree())
+    result = match_items(flat, [{
+        "title": "潜伏顶升搬运机器人 1000 kg", "value": "XCD101（潜伏顶升搬运机器人 1000 kg）",
+        "node_title": None, "suggested_parent_path": "硬件 / 车辆",
+    }])
+    # 值吸到「车型1」下拉、写成选项原文，而不是到未匹配里新建一个「XCD101」节点
+    assert [row["node_id"] for row in result["fill"]] == ["m1"]
+    assert result["fill"][0]["value"] == "XCD101"
+    assert result["unmatched"] == []
+
+    # 那个下拉本来就选着同一个值 → 视为已满足：不产生变更，也不新建重复节点
+    settled = flatten_tree(_vehicle_tree())
+    next(n for n in settled if n["id"] == "m1")["value"] = json.dumps(
+        {"selected": "XCD101", "options": ["XC1051", "XCD101"]})
+    assert match_items(settled, [{
+        "title": "潜伏顶升搬运机器人 1000 kg", "value": "XCD101（潜伏顶升搬运机器人 1000 kg）",
+        "node_title": None, "suggested_parent_path": "硬件 / 车辆",
+    }]) == {"fill": [], "overwrite": [], "unmatched": []}
+
+    # 附近的下拉选着别的值 → 不抢（那个值多半是别的条目填的），老老实实进未匹配
+    busy = flatten_tree(_vehicle_tree())
+    next(n for n in busy if n["id"] == "m1")["value"] = json.dumps(
+        {"selected": "XC1051", "options": ["XC1051", "XCD101"]})
+    blocked = match_items(busy, [{
+        "title": "潜伏顶升搬运机器人 1000 kg", "value": "XCD101（潜伏顶升搬运机器人 1000 kg）",
+        "node_title": None, "suggested_parent_path": "硬件 / 车辆",
+    }])
+    assert blocked["fill"] == [] and len(blocked["unmatched"]) == 1
+
+
+def test_second_model_falls_to_next_empty_model_dropdown():
+    """一个车型节点只装一款车：第一条占了「车型1」，第二条顺到「车型2」，不是新建节点。"""
+    items = [
+        {"title": "XC1051", "value": "XC1051", "node_title": "车型1",
+         "quantity": "2 台", "suggested_parent_path": "硬件 / 车辆"},
+        {"title": "XCD101", "value": "XCD101", "node_title": "车型1",
+         "quantity": "3 台", "suggested_parent_path": "硬件 / 车辆"},
+    ]
+    by_node = {row["node_id"]: row for row in match_items(flatten_tree(_two_model_tree()), items)["fill"]}
+    assert by_node["m1"]["value"] == "XC1051" and by_node["q1"]["value"] == "2 台"
+    assert by_node["m2"]["value"] == "XCD101" and by_node["q2"]["value"] == "3 台"
+
+    # 同一款车重复出现（大模型重复输出）→ 丢弃，不去占第二个车型槽位
+    dup = match_items(flatten_tree(_two_model_tree()), [items[0], dict(items[0])])
+    assert [row["node_id"] for row in dup["fill"]] == ["m1", "q1"]
+
+
+def _usp_tree():
+    """基础信息 / 客户信息 / 是否已与USP对接过（是|否）——真实模板里的选择型字段。"""
+    return [{
+        "id": "b1", "title": "基础信息", "content_type": "text", "value": None, "sort_order": 0,
+        "children": [{
+            "id": "c1", "title": "客户信息", "content_type": "text", "value": "", "sort_order": 0,
+            "children": [{
+                "id": "c11", "title": "是否已与USP对接过", "content_type": "select",
+                "value": json.dumps({"selected": "", "options": ["是", "否"]}), "sort_order": 0, "children": [],
+            }],
+        }],
+    }]
+
+
+def test_nearby_dropdown_needs_matching_title_for_plain_options():
+    """「是/否」这类短选项必须标题对得上才认。
+
+    不然任何一条值写着「是」的信息都会钻进附近随便一个是否型下拉——把内容填错地方，
+    比留在未匹配里让用户自己定更糟。车型不受这条限制（车型目录是封闭集合，值自证身份）。
+    """
+    flat = flatten_tree(_usp_tree())
+    node = next(n for n in flat if n["id"] == "c11")
+    assert _snap_into_nearby_dropdown(
+        flat, ["基础信息 / 客户信息"], "是否已与USP对接过", ["是"], set()) == (node, "是")
+    assert _snap_into_nearby_dropdown(
+        flat, ["基础信息 / 客户信息"], "是否需要验收", ["是"], set()) is None
+
+    # 端到端：另一个是否类问题不被吸到「是否已与USP对接过」上，留在未匹配由用户决定
+    result = match_items(flat, [{
+        "title": "是否需要验收", "value": "是", "node_title": None,
+        "suggested_parent_path": "基础信息 / 客户信息",
+    }])
+    assert result["fill"] == []
+    assert len(result["unmatched"]) == 1
+    assert result["unmatched"][0]["suggested_parent_id"] == "c1"
+
+
+def test_vicinity_handles_titles_containing_slash():
+    """模板里「项目区域/地点」这种标题自带斜杠：路径不能按 "/" 拆错。
+
+    拆错的后果是「附近」认到浅一层的「基础信息」，两层窗口够不着真正的归属子树，值吸不到下拉上。
+    """
+    tree = [{
+        "id": "b1", "title": "基础信息", "content_type": "text", "value": None, "sort_order": 0,
+        "children": [{
+            "id": "p1", "title": "项目区域/地点", "content_type": "text", "value": None, "sort_order": 0,
+            "children": [{
+                "id": "g1", "title": "区域详情", "content_type": "text", "value": None, "sort_order": 0,
+                "children": [{
+                    "id": "a1", "title": "区域选项", "content_type": "select",
+                    "value": json.dumps({"selected": "", "options": ["大陆(China Mainland)", "亚洲Asia"]}),
+                    "sort_order": 0, "children": [],
+                }],
+            }],
+        }],
+    }]
+    flat = flatten_tree(tree)
+    # 逐段解析碰上斜杠标题会停在「基础信息」（浅一层）——正因如此才会先按整条路径精确认
+    assert resolve_parent(flat, "基础信息 / 项目区域/地点")[0] == "b1"
+
+    node = next(n for n in flat if n["id"] == "a1")
+    # 值写法与选项只差全角/半角括号 → 归一后相等，认成该选项并回写选项原文
+    assert _snap_into_nearby_dropdown(
+        flat, ["基础信息 / 项目区域/地点"], "区域选项", ["大陆（China Mainland）"], set()) == (
+            node, "大陆(China Mainland)")
 
 
 def _live_flat():
