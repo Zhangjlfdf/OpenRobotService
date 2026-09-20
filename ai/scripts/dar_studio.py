@@ -1095,7 +1095,7 @@ def _seg_rows(env):
                 # 服务异常段不可标注，不进未标注——dar_l3 分母同口径）
                 seg_answerable = any(
                     cls[j].get("q") and any(a.strip() for a in (c["rounds"][j].get("a") or []))
-                    for j in range(a0, min(a1, len(rounds))))
+                    for j in range(a0, min(a1, len(cls), len(c["rounds"] or []))))
                 # 0915 用户反馈：fresh import + 无判定（无人工 + 无 AI 预标）= 不进漏斗
                 # 等用户跑 l3 / 人工标注后再进入——避免空段被错放任何"已判定"层
                 # tester/suggested/寒暄 是元筛选层（不依赖 eff），保留
