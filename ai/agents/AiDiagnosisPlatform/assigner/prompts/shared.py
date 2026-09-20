@@ -196,13 +196,70 @@ def person_anti_hallucination() -> str:
     """看人画像时的反幻觉：可以推断谁能接，但不能编造其职责。"""
     return (
         "【反幻觉】可以推断「这类故障/需求谁能接」，"
-        "但依据必须落在该人卡片上已写出的责任模块、职责上；"
+        "但依据必须落在该人卡片上已写出的责任模块、负责内容、职责上；"
         "禁止编造、脑补、补全其未写明的负责内容；"
         "禁止把别人的模块或职责安到此人头上。"
     )
 
 
-def engineer_brief_lines(eng, duty_max: int = 200) -> List[str]:
+def _scope_lookup(product: str, fname: str, keywords_map: dict, anchors_map: dict):
+    key = f"{product}-{fname}"
+    kws = keywords_map.get(key) or keywords_map.get(fname) or []
+    anc = anchors_map.get(key) or anchors_map.get(fname) or ""
+    return kws, anc
+
+
+def format_function_scope(fname: str, keywords=None, anchor: str = "") -> str:
+    """功能名 + 树上仍保存的关键词 / 一句话说明。与功能名重复的不写。"""
+    name = (fname or "").strip()
+    seen = {name}
+    extras = []
+    for raw in keywords or []:
+        kw = str(raw).strip()
+        if kw and kw not in seen:
+            seen.add(kw)
+            extras.append(kw)
+    anc = (anchor or "").strip()
+    if anc and anc not in seen:
+        extras.append(anc)
+    if not extras:
+        return name
+    return f"{name}（{'；'.join(extras)}）"
+
+
+def responsible_content_for(eng, keywords_map=None, anchors_map=None, max_chars: int = 400) -> str:
+    """把责任树 keywords / anchor 接到该人负责的功能后面。
+
+    不再作为独立召回支路；只丰富职责卡片上的「负责内容」。
+    """
+    if keywords_map is None or anchors_map is None:
+        from ai.agents.AiDiagnosisPlatform.assigner.settings import current_scope_maps
+        live_kws, live_anc = current_scope_maps()
+        if keywords_map is None:
+            keywords_map = live_kws
+        if anchors_map is None:
+            anchors_map = live_anc
+    parts = []
+    for product in (eng.responsibility_modules or {}):
+        for fname in eng.function_names_for_product(product):
+            kws, anc = _scope_lookup(product, fname, keywords_map or {}, anchors_map or {})
+            piece = format_function_scope(fname, kws, anc)
+            if piece == (fname or "").strip():
+                continue
+            parts.append(piece)
+    text = "；".join(p for p in parts if p)
+    if len(text) > max_chars:
+        return text[: max_chars - 1].rstrip() + "…"
+    return text
+
+
+def engineer_brief_lines(
+    eng,
+    duty_max: int = 200,
+    scope_max: int = 400,
+    keywords_map=None,
+    anchors_map=None,
+) -> List[str]:
     """L1（及需要看人画像的 Step）共用的工程师卡片。"""
     from ai.agents.AiDiagnosisPlatform.assigner.ranking.tags import llm_person_label
 
@@ -212,9 +269,18 @@ def engineer_brief_lines(eng, duty_max: int = 200) -> List[str]:
     if eng.company:
         bits.append(f"公司:{eng.company}")
     duty = (eng.duty_text or "").strip()
-    return [
+    scope = responsible_content_for(
+        eng,
+        keywords_map=keywords_map,
+        anchors_map=anchors_map,
+        max_chars=scope_max,
+    )
+    lines = [
         f"- {llm_person_label(eng=eng)}",
         "  " + " ".join(bits),
         f"  责任模块:{eng.modules_display() or '无'}",
-        f"  职责:{duty[:duty_max] if duty else '无'}",
     ]
+    if scope:
+        lines.append(f"  负责内容:{scope}")
+    lines.append(f"  职责:{duty[:duty_max] if duty else '无'}")
+    return lines

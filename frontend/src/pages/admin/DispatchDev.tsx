@@ -1015,9 +1015,12 @@ export default function DispatchDev() {
   const weeklyOption = useMemo(() => {
     const weeks = reassign?.weekly || [];
     const labels = weeks.map((w) => w.label);
+    const aiCounts = weeks.map((w) => Number(w.metrics?.ai_assign_total ?? 0));
+    const countLabels = aiCounts.map((n) => `${n}次`);
     const seriesOf = (getter: (m: ReassignMetrics) => number | null | undefined, name: string, color: string) => ({
       name,
       type: 'line' as const,
+      xAxisIndex: 0,
       smooth: true,
       symbol: 'circle',
       symbolSize: 7,
@@ -1032,21 +1035,44 @@ export default function DispatchDev() {
       color: ['#227197', '#e37318', '#2ba471'],
       tooltip: {
         trigger: 'axis',
-        valueFormatter: (v: number | null) => (v == null ? '—' : `${v}%`),
+        formatter: (
+          params: Array<{ dataIndex?: number; marker?: string; seriesName?: string; value?: number | null }>,
+        ) => {
+          const idx = params?.[0]?.dataIndex ?? 0;
+          const head = `${weeks[idx]?.label || ''}<br/>AI 派单 ${aiCounts[idx] ?? 0} 次`;
+          const rows = (params || [])
+            .filter((p) => p.seriesName)
+            .map((p) => (
+              `${p.marker || ''}${p.seriesName || ''} ${p.value == null ? '—' : `${p.value}%`}`
+            )).join('<br/>');
+          return `${head}<br/>${rows}`;
+        },
       },
       legend: {
         top: 0,
         itemWidth: 10,
         itemHeight: 10,
         textStyle: { color: '#888d8f', fontSize: 11 },
+        data: ['错派率', '重派不准确率', '不准确率'],
       },
-      grid: { left: 36, right: 12, top: 36, bottom: 28, containLabel: false },
-      xAxis: {
-        type: 'category',
-        data: labels,
-        axisLabel: { color: '#888d8f', fontSize: 10, rotate: labels.length > 6 ? 30 : 0 },
-        axisLine: { lineStyle: { color: '#e8eaea' } },
-      },
+      grid: { left: 36, right: 12, top: 36, bottom: 58, containLabel: false },
+      xAxis: [
+        {
+          type: 'category',
+          data: labels,
+          axisLabel: { color: '#888d8f', fontSize: 10, rotate: labels.length > 6 ? 30 : 0 },
+          axisLine: { lineStyle: { color: '#e8eaea' } },
+        },
+        {
+          type: 'category',
+          data: countLabels,
+          position: 'bottom',
+          offset: labels.length > 6 ? 30 : 22,
+          axisTick: { show: false },
+          axisLine: { show: false },
+          axisLabel: { color: '#227197', fontSize: 11, fontWeight: 600, interval: 0 },
+        },
+      ],
       yAxis: {
         type: 'value',
         min: 0,
@@ -1058,6 +1084,17 @@ export default function DispatchDev() {
         seriesOf((m) => m.misassign_rate_of_signal ?? m.misassign_rate_of_reassign, '错派率', '#227197'),
         seriesOf((m) => m.redispatch_inaccurate_rate_of_reviewed, '重派不准确率', '#e37318'),
         seriesOf((m) => m.inaccurate_rate_of_ai_assign, '不准确率', '#2ba471'),
+        {
+          type: 'bar' as const,
+          xAxisIndex: 1,
+          data: aiCounts.map(() => 0),
+          barWidth: 1,
+          silent: true,
+          tooltip: { show: false },
+          legendHoverLink: false,
+          itemStyle: { opacity: 0 },
+          emphasis: { disabled: true },
+        },
       ],
     };
   }, [reassign?.weekly]);
@@ -1214,11 +1251,11 @@ export default function DispatchDev() {
                   </div>
                 ) : null}
                 <div className="dispatch-dev__chart">
-                  <span className="dispatch-dev__sub">按周趋势（最近 {reassign?.weekly?.length ?? 0} 周，比率单位 %）</span>
+                  <span className="dispatch-dev__sub">按周趋势（最近 {reassign?.weekly?.length ?? 0} 周；折线为比率 %，横轴下方为当周 AI 派单次数）</span>
                   {(reassign?.weekly || []).length === 0 ? (
                     <div className="dispatch-dev__empty-row">还没有带时间的转派 / 派单记录，趋势图暂时为空</div>
                   ) : (
-                    <ReactECharts option={weeklyOption} style={{ height: 280 }} notMerge />
+                    <ReactECharts option={weeklyOption} style={{ height: 320 }} notMerge />
                   )}
                 </div>
               </>

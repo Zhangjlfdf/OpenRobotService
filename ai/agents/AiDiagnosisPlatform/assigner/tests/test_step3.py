@@ -25,6 +25,8 @@ def _cfg(**kwargs):
             "batch_top_min": 2, "batch_top_max": 4,
             "single_round_max": 12, "batch_size": 8,
         },
+        module_keywords={},
+        module_anchor_texts={},
     )
     data.update(kwargs)
     return SimpleNamespace(**data)
@@ -591,3 +593,69 @@ class TestClusterLearningSource:
         assert is_cluster_learning_source("") is False
         assert is_cluster_learning_source(None) is False
         assert is_cluster_learning_source("ai_agent") is False
+
+
+class TestResponsibleContentFromTree:
+    """责任树 keywords / anchor 接到「负责内容」，不恢复独立召回支路。"""
+
+    def test_format_skips_name_duplicates(self):
+        """数据校验：与功能名相同的关键词、回退锚不写入括号。"""
+        from ai.agents.AiDiagnosisPlatform.assigner.prompts.shared import (
+            format_function_scope,
+        )
+        assert format_function_scope("任务下发") == "任务下发"
+        assert format_function_scope("任务下发", ["任务下发", "派工"], "任务下发") == "任务下发（派工）"
+        assert format_function_scope(
+            "任务下发", ["派工"], "把任务发给执行人",
+        ) == "任务下发（派工；把任务发给执行人）"
+
+    def test_brief_omits_line_without_extras(self):
+        """正常流程：树上没有额外关键词/说明时，卡片不写负责内容，避免与责任模块重复。"""
+        from ai.agents.AiDiagnosisPlatform.assigner.prompts.shared import (
+            engineer_brief_lines,
+        )
+        text = "\n".join(engineer_brief_lines(_eng("u-a", "甲"), keywords_map={}, anchors_map={}))
+        assert "责任模块:" in text
+        assert "负责内容:" not in text
+        assert "职责:负责前端" in text
+
+    def test_brief_appends_keywords_and_anchor(self):
+        """正常流程：功能后接树上仍保存的关键词和一句话说明。"""
+        from ai.agents.AiDiagnosisPlatform.assigner.prompts.shared import (
+            engineer_brief_lines,
+        )
+        kws = {"摇人吧服务号-页面": ["页面", "入口", "派工"]}
+        anc = {"摇人吧服务号-页面": "入口进不去时看前端页面"}
+        text = "\n".join(engineer_brief_lines(
+            _eng("u-a", "甲"), keywords_map=kws, anchors_map=anc,
+        ))
+        assert "负责内容:页面（入口；派工；入口进不去时看前端页面）" in text
+
+    def test_l1_prompt_uses_config_maps(self):
+        """正常流程：画像 prompt 带负责内容；口径仍是卡片补充，不是召回支路。"""
+        cfg = _cfg(
+            module_keywords={"摇人吧服务号-页面": ["派工"]},
+            module_anchor_texts={"摇人吧服务号-页面": "把任务发给执行人"},
+        )
+        prompt = LlmRecall(cfg)._build_prompt(_ticket(), [_eng("u-a", "甲")], top_k=1)
+        assert "负责内容:页面（派工；把任务发给执行人）" in prompt
+        assert "用来认口语/别称，不是另一路召回" in prompt
+        assert "负责内容里的关键词" in prompt
+
+    def test_step6_prompt_shows_scope(self):
+        """正常流程：仲裁排名行同样带负责内容。"""
+        cfg = _cfg(
+            module_keywords={"摇人吧服务号-页面": ["派工"]},
+            module_anchor_texts={"摇人吧服务号-页面": "把任务发给执行人"},
+        )
+        ranked = {
+            "u-a": {
+                "total_score": 0.9, "llm_score": 0.9, "semantic_score": 0.0,
+                "history_score": 0.0, "level_multiplier": 1.0, "dept_multiplier": 1.0,
+            },
+        }
+        prompt = LlmDecision(cfg)._build_prompt(
+            _ticket(), [_eng("u-a", "甲")], RecallResult(), ranked,
+        )
+        assert "负责内容:页面（派工；把任务发给执行人）" in prompt
+        assert "关键词召回" not in prompt

@@ -13,6 +13,7 @@ from ai.agents.AiDiagnosisPlatform.assigner.ranking.tags import (
     recall_source_label,
     score_tag_labels,
 )
+from ai.agents.AiDiagnosisPlatform.assigner.prompts.shared import responsible_content_for
 
 from ai.core.logging import get_logger
 
@@ -385,6 +386,14 @@ class LlmDecision:
                 f"#{rank} {llm_person_label(eng=eng)} | {_lv_txt} | {dep} "
                 f"|{eng.modules_display()}{tag_str}"
             )
+            scope = responsible_content_for(
+                eng,
+                keywords_map=getattr(self._config, "module_keywords", None),
+                anchors_map=getattr(self._config, "module_anchor_texts", None),
+                max_chars=240,
+            )
+            if scope:
+                lines.append(f"   负责内容:{scope}")
             lines.append(
                 f"   分数: 总={d.get('total_score',0):.2f} "
                 f"画像={d.get('llm_score',0):.2f} "

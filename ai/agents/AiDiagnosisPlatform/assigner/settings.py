@@ -1,7 +1,8 @@
 """配置加载器：统一加载 assigner/config/config.yaml 下的派单配置
 
 配置项与消费方对应关系（与 config.yaml 头部注释保持一致）：
-- module_keywords      → recall/history_recall.py（L3 历史召回：历史工单标签提取）
+- module_keywords      → prompts/shared.py（职责卡片「负责内容」）+ recall/history_recall.py（历史工单标签提取）
+- module_anchor_texts  → prompts/shared.py（职责卡片「负责内容」；不再作独立语义召回）
 - job_level_penalty    → ranking/ranker.py（职级折扣）
 - department_routing   → filtering/dept_router.py（R2/R3 融合与门槛）
 - departments          → 已不再从 yaml 读；只认 DB departments.profile_text
@@ -23,6 +24,20 @@ except ImportError:
 
 CLUSTER_OVERRIDE_KEYS = ("cluster_merge", "cluster_assign", "cluster_min_size")
 _OVERRIDE_FILE = Path(__file__).parent / "config" / "runtime_overrides.yaml"
+
+# 责任树叶子上的 keywords / anchor。召回支路已撤，给职责卡片当「负责内容」。
+_SCOPE_KEYWORDS: Dict[str, list] = {}
+_SCOPE_ANCHORS: Dict[str, str] = {}
+
+
+def publish_scope_maps(keywords: Dict[str, list] | None, anchors: Dict[str, str] | None) -> None:
+    global _SCOPE_KEYWORDS, _SCOPE_ANCHORS
+    _SCOPE_KEYWORDS = dict(keywords or {})
+    _SCOPE_ANCHORS = dict(anchors or {})
+
+
+def current_scope_maps() -> tuple[Dict[str, list], Dict[str, str]]:
+    return _SCOPE_KEYWORDS, _SCOPE_ANCHORS
 
 
 def load_runtime_overrides() -> dict:
@@ -106,8 +121,9 @@ class AssignerConfig:
     """派单配置对象：从 config/config.yaml 一次性加载全部派单参数。
 
     各属性含义：
-    - module_keywords:      {模块名: [关键词]}，供 L3 历史召回提取历史工单标签
-    - module_classify:      {产品: {功能name: 功能name}}，责任树派生，供 L3 问题域等使用
+    - module_keywords:      {产品-功能name: [关键词]}，职责卡片「负责内容」+ 历史工单标签提取
+    - module_anchor_texts:  {产品-功能name: 一句话说明}，职责卡片「负责内容」（召回支路已撤）
+    - module_classify:      {产品: {功能name: 功能name}}，责任树派生
     - job_level_penalty:    {职级: 惩罚系数}，精排后按职级打折
     - department_routing:   部门路由融合权重与 hard/soft 门槛
     - departments:          部门画像（只认 DB，yaml 不补漏；空则 dept_profiles_missing）
@@ -174,6 +190,7 @@ class AssignerConfig:
             self.module_keywords = {}
             self.module_anchor_texts = {}
             self.module_classify = {}
+        publish_scope_maps(self.module_keywords, self.module_anchor_texts)
         # job_level_penalty 的 key 在 YAML 中是整数，需显式转 int
         raw = config.get("job_level_penalty", {})
         self.job_level_penalty = {int(k): v for k, v in raw.items()}

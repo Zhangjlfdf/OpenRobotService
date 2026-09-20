@@ -19,6 +19,8 @@ def _cfg(**kwargs):
         preferred_floor=0.9,
         llm_decision_topk=0,
         yaorenba_force_module_owner=True,
+        module_keywords={},
+        module_anchor_texts={},
     )
     data.update(kwargs)
     return SimpleNamespace(**data)
