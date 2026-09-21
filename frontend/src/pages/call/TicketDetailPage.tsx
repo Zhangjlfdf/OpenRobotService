@@ -15,7 +15,7 @@ import { Folder, UserRound, Clock, AlarmClock, Download, FileImage, FileText, Fi
 import PersonArrow from '@/shared/components/PersonArrow';
 import { getMyProjects, getProjectMembers, type ProjectItem, type ProjectMember } from '@/api/projects';
 import { qaGetTicket, fetchWithAuth } from '@/api/ai';
-import { cancelTicket, urgeTicket, reportTicket, uploadCommentAttachment } from '@/api/ticket';
+import { cancelTicket, urgeTicket, reportTicket, uploadCommentAttachment, getProxyRelations, type ProxyRelation } from '@/api/ticket';
 import {
   isTerminalTicketStatus,
   canUrgeTicket,
@@ -32,6 +32,7 @@ import DiscussionPanel from '@/shared/components/DiscussionPanel';
 import TicketDynamicsCard from '@/shared/components/TicketDynamicsCard';
 import StepNegotiationCard from '@/shared/components/StepNegotiationCard';
 import SpecDocCard from '@/shared/components/SpecDocCard';
+import ProxyRelationBanner from '@/shared/components/ProxyRelationBanner';
 import { useStepNegotiation } from '@/shared/hooks/useStepNegotiation';
 import { useResolveTicket } from '@/shared/hooks/useResolveTicket';
 import UserSelect from '@/shared/components/UserSelect';
@@ -195,6 +196,9 @@ export default function TicketDetailPage() {
   const [allUsers, setAllUsers] = useState<ProjectMember[]>([]);
   // @U老师 AI 讨论中标记
   const [askingAI, setAskingAI] = useState(false);
+  // 代他人提单（代理提单）：关系横幅数据。走独立接口（非参与人 403 → 置空不渲染），
+  // 与系统任务详情页同一组件同一口径，避免两处详情页体验分叉。
+  const [proxyRelation, setProxyRelation] = useState<ProxyRelation | null>(null);
 
   // 竞态保护：fetchDetail 是异步多段 await，切换工单（sessionId 变化）时上一个工单的请求可能仍在飞行中，
   // 其响应若晚于新工单返回，会 setTicket 覆盖新工单、或用 setTicket((prev)=>...) 把旧工单字段合并进新工单，
@@ -262,6 +266,10 @@ export default function TicketDetailPage() {
           attachments: ((taskDetail as unknown as { attachments?: unknown[] }).attachments as Array<Record<string, unknown>> | undefined) ?? [],
         });
         setAiSummary(typeof taskDetail.metadata_info?.ai_summary === 'string' ? taskDetail.metadata_info.ai_summary : '');
+        // 代他人提单（代理提单）：关系数据独立拉取（失败不阻断详情渲染，仅横幅缺失）
+        getProxyRelations(dbId)
+          .then((list) => { if (!isStale()) setProxyRelation(list?.[0] || null); })
+          .catch(() => { if (!isStale()) setProxyRelation(null); });
         return;
       }
       const res = await qaGetTicket(sessionId);
@@ -835,6 +843,19 @@ export default function TicketDetailPage() {
             </Tag>
             <span className="detail-card__id">{ticket.ticket_id || ''}</span>
           </div>
+          {/* 代他人提单（代理提单）：关系横幅（代理人「你代 X 提交」/ 被代理人
+              「X 代你提交」+ 确认跟进 / 与我无关）。非参与人后端 403 → 不渲染。 */}
+          {proxyRelation && (
+            <ProxyRelationBanner
+              ticketId={ticket.ticket_id || ticket.id || ''}
+              relation={proxyRelation}
+              onChanged={(updated) => {
+                setProxyRelation(updated);
+                // 关系变更影响可操作项（pending 只读 → acknowledged 获协办权），刷新详情
+                fetchDetail(true);
+              }}
+            />
+          )}
           <h2 className="detail-card__title"><TitleEllipsis text={ticket.title || '(无标题)'} lines={3} titleClassName="detail-card__title-inner" as="span" fontSize={19} lineHeight={1.3} /></h2>
           {/* 元信息网格（设计稿 04：2×2 MetaItem，lucide 图标 + 标签 + 值） */}
           <div className="detail-card__info-grid">

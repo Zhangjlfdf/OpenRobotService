@@ -779,6 +779,18 @@ async def get_task(
             logger.warning(f"任务未找到: task_id={task_id}")
             raise HTTPException(status_code=404, detail="任务未找到")
         logger.info(f"获取任务详情成功: task_id={task_id}, load_comments={load_comments}")
+
+        # 代他人提单（代理提单）：详情接口回填代理关系字段（口径与列表一致：
+        # 视角标记按 token 身份判定，姓名仅参与人可见）——
+        # 作为详情页「关系横幅」独立接口的兜底，也让代理关系在全链路可审计。
+        try:
+            from app.core.security import decode_token as _decode_token
+            _payload = _decode_token(token) if token else None
+            _me_username = (_payload or {}).get("sub")
+            _user_map = await TicketService._get_user_map(token)
+            await TicketService._attach_proxy_relations(db, [ticket], _user_map, _me_username)
+        except Exception as proxy_err:
+            logger.warning(f"代理关系回填失败 task_id={task_id}: {proxy_err}")
         
         # 记录查看操作日志（带5分钟去重）
         if token:

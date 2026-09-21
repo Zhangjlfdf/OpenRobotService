@@ -4855,6 +4855,46 @@ class AiDiagnosisPlatform:
 
         record = upsert_task(ticket, created_by=created_by)
 
+        # 代他人提单（代理提单）：AI 转工单链路的代提关系落地。
+        # 此前 overrides.on_behalf_of 在 upsert_task 里被静默丢弃（该路径不经过
+        # tasks 服务 create_ticket），导致「弹窗勾了代提 → 列表/详情无标记、
+        # 被代理人收不到提醒」。此处补上，且失败**不静默**：回传前端明确提示。
+        proxy_relation = None
+        proxy_relation_error = ""
+        _on_behalf = str(ticket.get("on_behalf_of") or "").strip()
+        if _on_behalf:
+            try:
+                from ai.core.task_adapter import bind_proxy_relation
+                proxy_relation = bind_proxy_relation(record.id, _on_behalf, created_by)
+                if proxy_relation:
+                    logger.info(
+                        f"[confirm] 代提关系已建立: db_id={record.id} "
+                        f"agent={proxy_relation.get('agent_id')} "
+                        f"principal={proxy_relation.get('principal_id')} "
+                        f"created={proxy_relation.get('created')}"
+                    )
+                    try:
+                        from app.utils.notification_utils import NotificationUtils
+                        await NotificationUtils.send_proxy_relation_notification(
+                            ticket_id=record.id,
+                            title=ticket.get("title", "") or "",
+                            project_name=ticket.get("project", "") or "",
+                            agent_name=proxy_relation.get("agent_name") or created_by,
+                            principal_name=proxy_relation.get("principal_name") or "",
+                            action="created",
+                            user_names=[proxy_relation.get("principal_id")],
+                        )
+                    except Exception as _ne:
+                        # 通知失败不回滚关系（关系已在库，被代理人可从「待我跟进」看到）
+                        logger.warning(f"[confirm] 代提通知发送失败 db_id={record.id}: {_ne}")
+            except Exception as _pe:
+                proxy_relation_error = str(_pe)
+                logger.error(
+                    f"[confirm] 代提关系建立失败 db_id={record.id} "
+                    f"on_behalf_of={_on_behalf}: {_pe}",
+                    exc_info=True,
+                )
+
         agent_state.ticket_seq += 1
         _reset_state_after_submit(agent_state, memory, ticket, record.id)
         # 对话记录附件回改文件名（生成时拿不到工单 id）；mock 全栈测试无
@@ -4878,7 +4918,11 @@ class AiDiagnosisPlatform:
 
         logger.info(f"[confirm] 工单已提交: session={session_id}, db_id={record.id}")
         return {"code": 0, "data": {"ticket": ticket, "db_id": record.id,
-                                     "notice": "工单已生成并保存，等待自动派单。"}}
+                                     "notice": "工单已生成并保存，等待自动派单。",
+                                     # 代他人提单：关系结果随响应回传（失败时前端提示用户，
+                                     # 避免"勾了代提但没生效"再次静默）
+                                     "proxy_relation": proxy_relation,
+                                     "proxy_relation_error": proxy_relation_error}}
 
     async def collect_title(self, session_id: str) -> str:
         """等待该会话的后台标题任务落地并返回标题（SSE 生产者流结束后调用，
