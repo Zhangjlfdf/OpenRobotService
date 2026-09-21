@@ -1548,23 +1548,29 @@ class SummarizeRequest(BaseModel):
 
 class TaskDiagnoseRequest(BaseModel):
     task_id: str = Field(..., description="工单 ID")
+    username: str = Field(default="", description="当前用户（后端从 token 解析，前端可不传）")
 
 class TaskDiscussRequest(BaseModel):
     task_id: str = Field(..., description="工单 ID")
     query: str = Field(..., description="用户问题（如 @U老师 帮我分析这个日志）")
-    context: dict = Field(default_factory=dict, description="讨论上下文 {recent_comments: [{author, content}]}")
+    context: dict = Field(default_factory=dict, description="讨论上下文 {recent_comments, quoted_comment, reply_to}")
+    username: str = Field(default="", description="当前用户（后端从 token 解析，前端可不传）")
 
 @task_agent_router.post("/diagnose", summary="诊断报告（[帮我分析] 按钮）")
-async def task_diagnose(body: TaskDiagnoseRequest) -> dict:
+async def task_diagnose(body: TaskDiagnoseRequest, request: Request) -> dict:
     """全能力诊断 → 即时返回报告（不存库）"""
     import logging, time
     logger = logging.getLogger("TASK_AGENT")
     t_start = time.perf_counter()
-    logger.info(f"[diagnose] 入口: task_id={body.task_id}")
+    # 从 token 解析当前用户，注入用户画像让 AI 按身份调整回答深浅
+    username, _ = _current_user(request)
+    if not username:
+        username = (body.username or "").strip()
+    logger.info(f"[diagnose] 入口: task_id={body.task_id}, user={username}")
     try:
         from ai.agents.AiTaskPlatform import get_task_agent
         agent = await get_task_agent()
-        result = await agent.diagnose(task_id=body.task_id)
+        result = await agent.diagnose(task_id=body.task_id, username=username)
         elapsed = (time.perf_counter() - t_start) * 1000
         report_len = len(result.get("report_md", ""))
         logger.info(f"[diagnose] 完成: task_id={body.task_id}, elapsed={elapsed:.0f}ms, "
@@ -1578,13 +1584,17 @@ async def task_diagnose(body: TaskDiagnoseRequest) -> dict:
 
 
 @task_agent_router.post("/discuss", summary="@U老师 讨论")
-async def task_discuss(body: TaskDiscussRequest) -> dict:
+async def task_discuss(body: TaskDiscussRequest, request: Request) -> dict:
     """@U老师 讨论回复（带讨论上下文，按需调日志子Agent）→ 写 task_comments"""
     import logging, time
     logger = logging.getLogger("TASK_AGENT")
     t_start = time.perf_counter()
     query_preview = (body.query or "")[:60]
-    logger.info(f"[discuss] 入口: task_id={body.task_id}, query={query_preview}")
+    # 从 token 解析当前用户，注入用户画像让 AI 按身份调整回答深浅
+    username, _ = _current_user(request)
+    if not username:
+        username = (body.username or "").strip()
+    logger.info(f"[discuss] 入口: task_id={body.task_id}, query={query_preview}, user={username}")
     try:
         from ai.agents.AiTaskPlatform import get_task_agent
         agent = await get_task_agent()
@@ -1592,6 +1602,7 @@ async def task_discuss(body: TaskDiscussRequest) -> dict:
             task_id=body.task_id,
             query=body.query,
             context=body.context,
+            username=username,
         )
         elapsed = (time.perf_counter() - t_start) * 1000
         reply_len = len(result.get("reply", ""))
