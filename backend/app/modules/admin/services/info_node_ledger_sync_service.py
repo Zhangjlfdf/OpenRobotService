@@ -71,9 +71,11 @@ ADAPTER_DEFAULTS: Dict[str, Tuple[str, ...]] = {"status": ("待开始",)}
 # 与文件导入同一套标题判等口径（去空白与常见标点、统一小写），两处不能漂移。
 _norm = import_service._norm
 
-# 台账里用于「定位是哪一条记录」的列：它们是台账自身的主键列，不是项目信息，
-# 不参与节点匹配（树里没有、也不该有同名节点；参与了只会变成两条噪音「缺少的节点」）。
-LOCATOR_FIELDS = ("项目编号", "项目名称")
+# 台账里用于「定位是哪一条记录」的列：它是台账自身的主键列，项目名在系统里是
+# project.name、不是信息节点，不参与节点匹配（树里没有、也不该有同名节点）。
+# 「项目编号」2026-09-21 起**不再是定位列**：模板里新增了同名节点（基础信息/项目编号），
+# 台账编号要一并填进去（用户口径），所以它按普通列参与比对。
+LOCATOR_FIELDS = ("项目名称",)
 
 # 「按下拉选项认领」的取值门槛：规范化后至少 2 个字。单字值（是/否/高）满树的下拉都有，
 # 即便某一刻只有一个下拉装着它，也不该拿它当归属依据。
@@ -368,7 +370,7 @@ def build_sync_preview(project_id: str) -> Dict[str, Any]:
         "project_code": project["code"],
         # 台账「更新时间」列（镜像落在 project.recent_delivery_date 上）：给用户一个台账新鲜度的判断依据
         "ledger_updated_at": _value_text(values.get("更新时间")) or None,
-        # 参与比对的字段数（本项目有值的台账列，不含项目编号/项目名称这两个定位列）
+        # 参与比对的字段数（本项目有值的台账列，不含「项目名称」这个定位列）
         "field_count": len(items),
         # 镜像的台账列总数：说明「台账还有多少列本项目没值」
         "mirror_field_total": len(PROJECT_LEDGER_FIELDS),

@@ -129,14 +129,14 @@ def test_ledger_values_skips_adapter_empty_fallbacks():
 def test_ledger_items_skips_empty_and_locator_columns():
     items = sync_service._ledger_items(_values())
     titles = [item["title"] for item in items]
-    # 定位列（项目编号/项目名称）不是项目信息、空字段没什么可同步
-    assert titles == ["更新时间", "销售", "实施工程师", "项目区域", "项目类型", "总车数", "是否承接"]
-    assert "项目编号" not in titles and "项目名称" not in titles
+    # 定位列只剩「项目名称」（= project.name，不是信息节点）、空字段没什么可同步
+    assert titles == ["项目编号", "更新时间", "销售", "实施工程师", "项目区域", "项目类型", "总车数", "是否承接"]
+    assert "项目名称" not in titles
     assert "空字段示例" not in titles and "附件示例" not in titles
 
     first = items[0]
     assert first == {
-        "title": "更新时间", "value": "2026-09-19 11:20",
+        "title": "项目编号", "value": "69",
         "node_title": None, "quantity": None, "suggested_parent_path": None,
     }
     # 布尔列按中文落进节点
@@ -305,7 +305,7 @@ def test_build_sync_preview_buckets_and_meta():
     # 元信息：台账更新时间（镜像列）+ 参与比对的字段数 + 镜像的列总数
     assert result["project_code"] == "69"
     assert result["ledger_updated_at"] == "2026-09-19 11:20"
-    assert result["field_count"] == 7
+    assert result["field_count"] == 8     # 项目编号已按普通列参与比对（不再是定位列）
     assert result["mirror_field_total"] == len(sync_service.PROJECT_LEDGER_FIELDS)
 
     # 将填写：空节点（「销售」），「项目区域」经分组指位落到「区域选项」
@@ -360,6 +360,26 @@ def test_build_sync_preview_matches_by_option_value():
     assert "项目生命周期" not in unmatched_titles
     # 同名但装不下（下拉里没有「普通项目」）的仍按未匹配 + 补选项的说明处理
     assert "项目类型" in unmatched_titles
+
+
+def test_build_sync_preview_fills_project_code_node():
+    """台账「项目编号」不再是定位列：树里有同名节点（模板默认有）就直接填进去。"""
+    original = sync_service._load_local_context
+    project = {"id": "69", "code": "69", "name": "江苏南京本川XSC仓储项目"}
+    flat = _flat() + [{
+        "id": "c9", "parent_id": "r1", "title": "项目编号", "content_type": "text",
+        "value": None, "options": [], "depth": 2,
+        "path": "基础信息 / 项目编号", "path_titles": [], "has_children": False,
+    }]
+    try:
+        _stub(project, _values(), flat)
+        result = sync_service.build_sync_preview("69")
+    finally:
+        _restore(original)
+
+    filled = {row["node_id"]: row["value"] for row in result["fill"]}
+    assert filled["c9"] == "69"
+    assert "项目编号" not in {row["title"] for row in result["unmatched"]}
 
 
 def test_build_sync_preview_rejects_project_without_nodes():

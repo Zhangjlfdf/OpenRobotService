@@ -47,6 +47,13 @@ LLM_TIMEOUT_SECONDS = 120.0
 
 SYSTEM_PROMPT = "你是项目信息整理助手，只输出 JSON，不输出任何解释文字或 Markdown 代码块。"
 
+# 节点路径的层级分隔符（提示词、预览、前端展示同一口径）
+PATH_SEPARATOR = " / "
+
+# 「车型1」「车型 2」这类车型槽位（与前端 optionCatalog 的 VEHICLE_MODEL_TITLE 同口径）。
+# 别放宽成 startswith("车型")——模板里的车型分组就叫「车型信息」，那样会把分组本身当成槽位。
+_VEHICLE_SLOT_TITLE = re.compile(r"^车型\s*\d*$")
+
 # AGV 车型目录（66 款）——信息树里存在车辆/车型节点时注入提示词，规范车型写法。
 # 型号清单与前端 frontend/src/shared/utils/vehicleModels.ts 的 VEHICLE_MODEL_CODES
 # **必须一字不差**，改动时两边同步；库里车型1/车型2 的 config.options 由
@@ -333,7 +340,7 @@ def flatten_tree(roots: List[Dict]) -> List[Dict]:
                 "value": item.get("value"),
                 "options": _select_state(item)[1] if item.get("content_type") == "select" else [],
                 "depth": depth,
-                "path": " / ".join(path_titles),
+                "path": PATH_SEPARATOR.join(path_titles),
                 "path_titles": path_titles,
                 "has_children": bool(item.get("children")),
             })
@@ -363,21 +370,37 @@ def build_node_catalog(flat: List[Dict]) -> str:
 
 
 def find_vehicle_parent_path(flat: List[Dict]) -> Optional[str]:
-    """车型信息的建议归属路径：优先取「车型N」节点的父级（车辆），否则取「车辆」节点本身。
+    """车型信息的建议归属路径（模板里是「硬件 / 车型信息」）。
 
-    返回 None 表示信息树里没有车辆/车型节点（提示词不注入车型清单）。
+    车型槽位（车型1/车型2…）的父级优先——槽位在哪个分组下，分组就是归属路径；
+    树里只有分组、没铺槽位时退一步取分组节点本身（标题含「车辆」，或叫「车型信息」
+    这类以「车型」开头的分组名）。
+    返回 None 表示信息树里没有车型节点（提示词不注入车型清单）。
     """
     by_id = {n["id"]: n for n in flat}
     fallback: Optional[str] = None
     for node in flat:
         title = (node.get("title") or "").strip()
-        if title.startswith("车型"):
+        if _VEHICLE_SLOT_TITLE.match(title):
             parent = by_id.get(node.get("parent_id"))
             if parent is not None:
                 return parent["path"]
-        elif "车辆" in title and fallback is None:
+        elif ("车辆" in title or title.startswith("车型")) and fallback is None:
             fallback = node["path"]
     return fallback
+
+
+def find_vehicle_total_count_path(flat: List[Dict],
+                                  vehicle_parent_path: Optional[str]) -> Optional[str]:
+    """车型分组下「总车数」节点的路径；树里没这个节点就返回 None。
+
+    台账/文件里的「总车数」是整车台数，与车型1/车型2 各自的「数量」是两回事，
+    提示词要分开交代（见 build_import_prompt 的车型块）。
+    """
+    if not vehicle_parent_path:
+        return None
+    expected = f"{vehicle_parent_path}{PATH_SEPARATOR}总车数"
+    return next((node["path"] for node in flat if node["path"] == expected), None)
 
 
 def build_vehicle_model_catalog() -> str:
@@ -393,14 +416,18 @@ def build_import_prompt(
     file_text: str,
     project_name: str = "",
     vehicle_parent_path: Optional[str] = None,
+    vehicle_total_count_path: Optional[str] = None,
 ) -> str:
     """文件识别提示词：约束大模型只抽真实信息、按 0.9 把握匹配节点、固定 JSON 输出。
 
     同时把「本次导入的目标项目名称」告知大模型，并要求它回传「文件里自己写的项目名称」
     （projectName），供后端比对、提醒用户可能导错了文件。
-    信息树里有车辆/车型节点时（vehicle_parent_path 非空）额外注入 AGV 车型清单，
+    信息树里有车型节点时（vehicle_parent_path 非空）额外注入 AGV 车型清单，
     让车型落到「车型N」下拉框的值上（与模板页「填入车型目录」同一份目录），
     数量随同一条的 quantity 字段给出，由 match_items 填进该车型下的「数量」子节点。
+    车型分组下还有「总车数」节点时（vehicle_total_count_path 非空）另加一条规则：
+    整车总台数填那个节点，别和各车型自己的「数量」混起来（也不许把各车型加起来充当总数）。
+    其余新增节点（项目编号/订单号/时间信息汇总/版本号…）都在节点清单里，按通用匹配规则走。
     """
     target = project_name or "（未提供）"
     rules = """1. 只抽取文件里明确写到的信息，禁止编造、外推或用常识补全；文件里没写的节点不要出现在结果里。
@@ -417,6 +444,11 @@ def build_import_prompt(
    - 车型型号写进**车型节点的值**，不是写进标题：该车型若对应清单里「{vehicle_parent_path}」下某个「车型N」节点（内容类型 select），把 nodeTitle 填成该节点标题、value 填**清单里的车型型号**（文件写法不同时用清单写法，如「XC1051」，旧型号 XS1161 一律写 XS1201）；
    - 该车型的数量放进同一条的 quantity 字段（如「6 台」），后端会填到该车型节点下的「数量」子节点；文件没写数量就填 null。不要再单独输出「数量」条目；
    - 清单里的「车型N」节点数不够（车型比节点多）时，多出来的车型 nodeTitle 填 null、suggestedParentPath 填「{vehicle_parent_path}」，title 填清单里的车型型号，quantity 照填。"""
+        if vehicle_total_count_path:
+            rules += f"""
+9. 整车总台数（文件里写明的「总车数 / 整车数量 / 全场共 X 台」这类**总数**）单独一条：nodeTitle 填「总车数」、value 填文件里的台数原文、quantity 填 null。
+   - 这条与第 8 条各车型的 quantity 是两回事，别互相顶替；文件只给了各车型明细、没写总数时不要输出这条（**禁止**把各车型数量加起来当总数）。
+   - 反过来文件只写了总数、没有分车型明细时，就只输出这一条，不要硬凑车型。"""
         vehicle_block = f"""
 下面是 AGV 车型清单（「型号（中文全称）」，没带名称的型号只有型号本身），用于规范车型信息的写法：
 <<<车型清单
@@ -932,9 +964,12 @@ async def analyze_import_file(project_id: str, filename: str, data: bytes) -> Di
 
     project_name = _get_project_name(project_id)
     flat = flatten_tree(roots)
-    # 信息树有车辆/车型节点时注入 AGV 车型清单，让车型信息的 title 直接用车型型号
+    # 信息树有车型节点时注入 AGV 车型清单，让车型信息的 title 直接用车型型号；
+    # 车型分组下还有「总车数」时（模板默认有）另行交代它和各车型「数量」的区别
     vehicle_parent = find_vehicle_parent_path(flat)
-    prompt = build_import_prompt(build_node_catalog(flat), text, project_name, vehicle_parent)
+    vehicle_total_count = find_vehicle_total_count_path(flat, vehicle_parent)
+    prompt = build_import_prompt(build_node_catalog(flat), text, project_name,
+                                 vehicle_parent, vehicle_total_count)
     content = await _call_llm(prompt)
     parsed = parse_llm_payload(content)
     items = parsed["items"]

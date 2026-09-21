@@ -337,7 +337,7 @@ export interface ApiLedgerSyncResult {
   project_code: string;
   /** 台账「更新时间」列（本项目在台账里没这一列时为 null） */
   ledger_updated_at: string | null;
-  /** 参与比对的字段数（本项目有值的台账列，不含项目编号/项目名称这两列定位列） */
+  /** 参与比对的字段数（本项目有值的台账列，不含「项目名称」这个定位列） */
   field_count: number;
   /** 台账镜像的列总数，用于说明「台账还有多少列本项目没值」 */
   mirror_field_total: number;
