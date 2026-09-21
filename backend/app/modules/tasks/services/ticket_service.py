@@ -21,6 +21,8 @@ from app.services.user_service import user_service
 from app.core.user_identity import identity_keys, to_user_id, to_username
 from app.modules.tasks import participant_service
 
+logger = logging.getLogger(__name__)
+
 
 # ──────────────────────────────────────────────────────────────
 # AI 服务 Assigner Worker 集成：Redis Pub/Sub
