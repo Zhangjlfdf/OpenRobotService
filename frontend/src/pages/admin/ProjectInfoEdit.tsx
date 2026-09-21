@@ -27,9 +27,11 @@ import { createRequest } from '@/api/client';
 import API_CONFIG from '@/config/api';
 import { useAuthStore, PERM_PROJECT_INFO_TEMPLATE } from '@/stores/auth';
 import ProjectInfoFileImport from './ProjectInfoFileImport';
+import ProjectInfoLedgerSync from './ProjectInfoLedgerSync';
 import {
   MacChevronDown, MacChevronRight, MacChevronsDownUp, MacChevronsUpDown, MacDownload, MacFileText,
-  MacGripVertical, MacHistory, MacImage, MacMoreHorizontal, MacPencil, MacPlus, MacScrollText, MacTrash2, MacUpload,
+  MacGripVertical, MacHistory, MacImage, MacMoreHorizontal, MacPencil, MacPlus, MacRefreshCw, MacScrollText,
+  MacTrash2, MacUpload,
 } from '@/shared/components/macaronIcons';
 import {
   computeInfoCompleteness,
@@ -106,6 +108,7 @@ export default function ProjectInfoEdit() {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
   const [fileImportOpen, setFileImportOpen] = useState(false);
+  const [ledgerSyncOpen, setLedgerSyncOpen] = useState(false);
   const [collapsedIds, setCollapsedIds] = useState<Set<string>>(() => loadCollapsedIds(id));
   const [editingId, setEditingId] = useState<string | null>(null);
   const [menuNode, setMenuNode] = useState<ProjectInfoNode | null>(null);
@@ -519,7 +522,7 @@ export default function ProjectInfoEdit() {
       <Navbar title="编辑项目信息" leftArrow onLeftClick={() => navigate(-1)} fixed />
       <div style={{ padding: 16, paddingTop: 64 }}>
         <section className="mac-card mac-card--pad">
-          <div className="mac-info__head">
+          <div className="mac-info__head mac-info__head--wrap">
             <div className="mac-info__title-wrap">
               <h3 className="mac-info__title">信息节点</h3>
               <p className="mac-info__subtitle">
@@ -527,8 +530,18 @@ export default function ProjectInfoEdit() {
               </p>
             </div>
             <div className="mac-info__actions">
-              <button type="button" className="mac-btn mac-btn--ghost mac-info__iconbtn" onClick={expandAll} title="全部展开" aria-label="全部展开"><MacChevronsUpDown size={15} /></button>
-              <button type="button" className="mac-btn mac-btn--ghost mac-info__iconbtn" onClick={collapseAll} title="全部折叠" aria-label="全部折叠"><MacChevronsDownUp size={15} /></button>
+              {/* 台账同步：读本地库里的企业微信台账镜像，与信息节点比对后逐条确认（矛盾→覆盖 / 缺少→新建）。
+                  与「文件导入」同门槛：要读整棵树，只有能改本项目信息树的人看得到。 */}
+              {canEditTree && (
+                <button
+                  type="button"
+                  className="mac-btn mac-btn--outline mac-info__act"
+                  title="与项目台账同步本项目的信息节点"
+                  onClick={() => setLedgerSyncOpen(true)}
+                >
+                  <MacRefreshCw size={13} />同步
+                </button>
+              )}
               {canEditTemplate && (
                 <button
                   type="button"
@@ -551,6 +564,9 @@ export default function ProjectInfoEdit() {
                   <MacPlus size={13} />新标签
                 </button>
               )}
+              {/* 展开/折叠是纯视图按钮（图标态），放到最右，前面留给「改数据」的动作 */}
+              <button type="button" className="mac-btn mac-btn--ghost mac-info__iconbtn" onClick={expandAll} title="全部展开" aria-label="全部展开"><MacChevronsUpDown size={15} /></button>
+              <button type="button" className="mac-btn mac-btn--ghost mac-info__iconbtn" onClick={collapseAll} title="全部折叠" aria-label="全部折叠"><MacChevronsDownUp size={15} /></button>
             </div>
           </div>
 
@@ -658,6 +674,16 @@ export default function ProjectInfoEdit() {
       <ProjectInfoFileImport
         visible={fileImportOpen}
         onClose={() => setFileImportOpen(false)}
+        projectId={id}
+        nodes={nodes}
+        canEditTree={canEditTree}
+        onApplied={() => { void reload(); void syncHistoryMeta(); }}
+      />
+
+      {/* 台账同步：企业微信台账的本地镜像 → 本项目信息节点（打开即拉预览 → 勾选确认 → 逐节点落库） */}
+      <ProjectInfoLedgerSync
+        visible={ledgerSyncOpen}
+        onClose={() => setLedgerSyncOpen(false)}
         projectId={id}
         nodes={nodes}
         canEditTree={canEditTree}

@@ -8,7 +8,7 @@
 //     附件为 {name, resource_id, size}，其余为字符串或 null；
 //   - 换父/排序走 move；import 为纯增补（只增不改不删，不再清空旧节点）；
 //   - 删除节点会连带删除整棵子树，但只允许删本项目的增补节点。
-import { createRequest } from './client';
+import { ApiError, createRequest } from './client';
 import API_CONFIG from '@/config/api';
 
 /** 下拉 / 布尔类节点的值：选项来自字段定义（服务端合并下发），selected 是本项目的选中项 */
@@ -268,6 +268,8 @@ export interface ApiParseNewItem {
   /** 建议归属节点（后端已解析并校验层级）；null=前端用「导入信息」兜底 */
   suggested_parent_id: string | null;
   suggested_parent_path: string | null;
+  /** 「为什么没匹配上」的说明（台账同步会带：如同名节点是下拉、可选项里没有这个值） */
+  note?: string | null;
 }
 
 /** POST /info-nodes/projects/{id}/parse-file 返回 */
@@ -311,6 +313,56 @@ export async function parseImportFileApi(projectId: string, file: File): Promise
       ? data.file_project_name
       : null,
     name_mismatch: !!data?.name_mismatch,
+    fill: Array.isArray(data?.fill) ? data.fill : [],
+    overwrite: Array.isArray(data?.overwrite) ? data.overwrite : [],
+    unmatched: Array.isArray(data?.unmatched) ? data.unmatched : [],
+  };
+}
+
+// —— 企业微信台账同步：后端读本地台账镜像比对 → 三类预览（不落库，确认后走上面的 CRUD） ——
+
+/** GET /info-nodes/projects/{id}/ledger-sync 返回（三组结构与文件识别完全一致） */
+export interface ApiLedgerSyncResult {
+  project_id: string;
+  /** 当前系统内的项目名称 */
+  project_name: string;
+  project_code: string;
+  /** 台账「更新时间」列（本项目在台账里没这一列时为 null） */
+  ledger_updated_at: string | null;
+  /** 参与比对的字段数（本项目有值的台账列，不含项目编号/项目名称这两列定位列） */
+  field_count: number;
+  /** 台账镜像的列总数，用于说明「台账还有多少列本项目没值」 */
+  mirror_field_total: number;
+  fill: ApiParseMatchedItem[];
+  overwrite: ApiParseMatchedItem[];
+  unmatched: ApiParseNewItem[];
+}
+
+/** 拉取台账同步预览（只读不写）：项目不存在时 404，项目还没有信息节点时 400 */
+export async function fetchLedgerSyncPreviewApi(projectId: string): Promise<ApiLedgerSyncResult> {
+  let data: ApiLedgerSyncResult;
+  try {
+    data = await request()<ApiLedgerSyncResult>(
+      `/info-nodes/projects/${encodeURIComponent(projectId)}/ledger-sync`,
+    );
+  } catch (err) {
+    // 这条路由的 404 本该只出现在「项目不存在」且带中文原因；FastAPI 默认的 "Not Found"
+    // 只可能是**后端没有这条路由**——后端还在跑旧代码（改了路由没重启后端），
+    // 或前端比后端先发版。直接把 "Not Found" 摆给用户没人看得懂，换成能照着做的提示。
+    if (err instanceof ApiError && err.statusCode === 404 && /^not\s*found$/i.test(err.message.trim())) {
+      throw new Error('后端没有「台账同步」接口（404）——后端可能还在跑旧代码，请重启后端后再试');
+    }
+    throw err;
+  }
+  return {
+    project_id: data?.project_id ?? projectId,
+    project_name: data?.project_name ?? '',
+    project_code: data?.project_code ?? '',
+    ledger_updated_at: typeof data?.ledger_updated_at === 'string' && data.ledger_updated_at
+      ? data.ledger_updated_at
+      : null,
+    field_count: data?.field_count ?? 0,
+    mirror_field_total: data?.mirror_field_total ?? 0,
     fill: Array.isArray(data?.fill) ? data.fill : [],
     overwrite: Array.isArray(data?.overwrite) ? data.overwrite : [],
     unmatched: Array.isArray(data?.unmatched) ? data.unmatched : [],

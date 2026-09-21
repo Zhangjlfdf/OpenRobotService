@@ -1,6 +1,6 @@
 # 项目扩展信息（ext_info）与项目信息树（info_nodes）后端接口变更说明
 
-> 变更日期：2026-09-14（初版）；2026-09-15 新增 5.8 文件识别接口；2026-09-16 新增 4.4 AI 项目摘要接口、5.9 / 5.10 节点操作记录（编辑历史）接口、5.11～5.13 节点关注与项目动态接口；2026-09-17 4.4 的大模型客户端改为 backend 自维护的 `app/core/llm_client.py`（不再依赖仓库根 `ai/core/llm.py`，`requirements.txt` 移除 tenacity）；同日性能修复：info-nodes 组纯同步路由去 async（改走 FastAPI 线程池，避免同步 DB 阻塞事件循环）、parse-file 文件抽取移入线程池（`asyncio.to_thread`）、5.13 项目动态查询改 `GROUP BY max(id)` 按主键回查（不再全量拉历史）、info_node 三 service 与 project_service 收敛共享 `app/core/db.py` 引擎（`pool_pre_ping`/`pool_recycle`，空闲连接失效自愈）
+> 变更日期：2026-09-14（初版）；2026-09-15 新增 5.8 文件识别接口；2026-09-16 新增 4.4 AI 项目摘要接口、5.9 / 5.10 节点操作记录（编辑历史）接口、5.11～5.13 节点关注与项目动态接口；2026-09-17 4.4 的大模型客户端改为 backend 自维护的 `app/core/llm_client.py`（不再依赖仓库根 `ai/core/llm.py`，`requirements.txt` 移除 tenacity）；同日性能修复：info-nodes 组纯同步路由去 async（改走 FastAPI 线程池，避免同步 DB 阻塞事件循环）、parse-file 文件抽取移入线程池（`asyncio.to_thread`）、5.13 项目动态查询改 `GROUP BY max(id)` 按主键回查（不再全量拉历史）、info_node 三 service 与 project_service 收敛共享 `app/core/db.py` 引擎（`pool_pre_ping`/`pool_recycle`，空闲连接失效自愈）；2026-09-20 新增 5.16 企业微信台账同步预览接口（项目信息编辑页「同步」：把台账列名与信息节点对齐后给出 填写 / 覆盖 / 新增 三组预览，**不落库**）；2026-09-21 5.16 的台账数据源改为**本地 `project` 表镜像**（不再请求 AI 服务的 /api/ai/wecom/projects，删掉 503 失败态与「台账里找不到记录」的 400，路由由 async 改回同步 def、走线程池）
 > 模块：`app/modules/admin`（后台管理）
 > 路由公共前缀：`/api/admin`（`/api` 来自 `API_V1_STR`，`/admin` 来自 `admin_router`）
 
@@ -430,6 +430,29 @@ Service：[info_node_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/ap
 - `POST`：保存全局字段定义，**保存即对全体项目生效**（项目不再持有节点副本，无需同步）。`dry_run=true` 只预览影响面；否则校验后更新/新增/停用全局节点行。模板里移除的字段是**停用**（`status='disabled'`）而非删除，项目已填的值留在 `project_info_value`，字段加回来即恢复。校验失败 → `400`。
 - 与 5.2/5.14 的分界：改「全体项目共用的字段定义」走这里；改「我这个项目自己的树」走 5.2/5.14。节点级接口（5.3～5.5）碰到全局字段行一律 `403 全局字段定义请在「详情模板」里修改`。
 
+### 5.16 GET /info-nodes/projects/{project_id}/ledger-sync —— 企业微信台账同步预览（**不落库**）
+
+- 鉴权：与 5.8 同门槛——**该项目下的人**或 admin（要读整棵树，且会把项目信息回显给调用方）。
+- 数据源：**本地 `project` 表里本项目那一行**——企业微信智能表格台账的同步镜像（平时由 `app/integrations/sources/wecom/adapter.py` 写进来，与项目列表页「项目经理」取的是同一张表的同一行）。不请求外部服务、不需要企业微信凭据，整个比对都在本地库完成，所以没有「台账服务不可达」这种失败态。
+- Service 逻辑（`info_node_ledger_sync_service.build_sync_preview`，与 5.8 共用 `info_node_import_service` 的匹配内核）：
+  1. 一个连接里读完：项目行（不存在 → `404 项目不存在`）+ 该行的台账值 + 展平后的信息树（无节点 → `400 该项目还没有信息节点…`）；
+  2. 行 → 台账列：按模块里的 `PROJECT_LEDGER_FIELDS` 把字段名反查回台账列名（**与 adapter 的 `map_wecom_record_to_project` 一一对应，改台账列名要两处一起改**）。只收「原样落到字段上」的列——adapter 换过词的不进表（「项目类型」还落进 `category_basis`，那是 `CATEGORY_MAP` 换过的另一套词：普通项目 → 重要不紧急，加工过的值不是台账原文）；`status` 等于 adapter 对空列的兜底值 `待开始` 时跳过（那不是台账里的话）。`项目编号`/`项目名称` 两列只用于展示，不参与比对；
+  3. 台账列 → 条目（`title` = 列名，`value` = 文本，附件这类无文本的列跳过）。匹配走内核的标题判等（归一后精确 + 相似度 ≥0.9 兜底）：台账列名要么对得上某个可填节点标题，要么不算匹配——台账是甲方口径的宽表，列名与节点名不同义的一律不猜（用户口径「匹配不到的先忽略」）。**这里没有大模型参与**，也没有 5.8 的「建议归属附近的下拉」兜底（台账条目不带 `suggested_parent_path`，`_vicinity_dropdowns` 对空路径返回空）；
+  4. 台账列名落在**分组节点**上时（同名，或列名是分组名去掉了限定词——`项目区域` ⊂ `项目区域/地点`），且该分组下**只有一个**装得下这个值的下拉子节点时，把值挂到那个下拉上（否则会新建一个与下拉各说各话的同名节点）；命中下拉但选项里没有这个值时，交给前端提示「先去编辑页补选项」而不是新建同名节点；
+  5. 分桶三组（与 5.8 同结构）：`fill`（节点为空）/ `overwrite`（节点有内容且与台账不同，即「矛盾」）/ `unmatched`（台账有、树里没有的列，附 `suggested_parent_path` 与 `note` 说明）；`unmatched` 的归属建议同样只按标题关系给——命中同名分组 → 挂到该分组下；相近的本身就是分组（`项目区域` vs `项目区域/地点`）→ 也挂到该分组下，并说明「在它下面新建」；标题互为包含关系（短的 ≥2 字且被长的包含）→ 挂到那个更具体的节点所在的层级，给不出关系就留空由前端用「导入信息」根兜底。
+- 响应 `200`：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `project_id` / `project_name` / `project_code` | string | 本项目 |
+| `ledger_updated_at` | string \| null | 台账「更新时间」列（镜像落在 `project.recent_delivery_date`），前端展示数据新鲜度 |
+| `field_count` / `mirror_field_total` | int | 本项目**有值**的台账列数（不含定位列）/ 镜像的台账列总数，让用户知道「台账还有多少列本项目没值」 |
+| `fill` / `overwrite` | 数组 | 元素：`node_id, path, title, content_type, current, value`（`current` 为原内容，矛盾行靠它显示「原内容 → 新内容」） |
+| `unmatched` | 数组 | 元素：`title, value, suggested_parent_id, suggested_parent_path, note`（`node_title`/`quantity` 恒为 null，台账没有车型那种「一款一条」的结构；`note` 是「为什么没匹配上」的说明，可为空） |
+
+- 错误：`400`（项目还没有信息树）；`404`（项目不存在）。**没有 503**——数据源在本地库里。
+- **本接口不写库**：与 5.8 一样由前端预览勾选后逐节点落库（fill/overwrite 走 5.3，unmatched 走 5.2）。默认勾选按入口不同：「同步信息」弹层**三组默认全勾**（用户口径「节点默认全选」，一步到位；没有改树权限时 `unmatched` 那组仍置灰不勾），「文件导入」仍是只默认勾 `fill`（识别可能有偏差，先填空的最保险）。
+
 ## 六、并发与一致性小结
 
 1. **ext_info 并发编辑**：靠 `version` 乐观锁（冲突 409）+ 更新瞬间行锁串行化；内部系统写入不带 version，显式绕过乐观锁。
@@ -443,14 +466,14 @@ Service：[info_node_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/ap
 
 | 状态码 | 场景 | 来源 |
 |--------|------|------|
-| 400 | 更新节点时无任何有效字段；授权接口 type 参数非法；AI 摘要时信息树无节点 | info-nodes / licenses / projects（ai-summary） |
+| 400 | 更新节点时无任何有效字段；授权接口 type 参数非法；AI 摘要时信息树无节点；台账同步时项目还没有信息节点 | info-nodes / licenses / projects（ai-summary） |
 | 401 | 未提供/无效 token、token 缺用户信息（/me 类接口）；关注/项目动态接口识别不到登录人（5.11～5.13，关注列表按人隔离） | projects、info-nodes |
-| 403 | 不是这个项目的人动结构（5.2～5.6、5.8）：`只有该项目下的人员可以编辑项目信息树`；改全局字段定义（5.3～5.5）：`全局字段定义请在「详情模板」里修改`；没有模板权限码碰 `/template`：`权限不足` | info-nodes |
+| 403 | 不是这个项目的人动结构（5.2～5.6、5.8、5.16）：`只有该项目下的人员可以编辑项目信息树`；改全局字段定义（5.3～5.5）：`全局字段定义请在「详情模板」里修改`；没有模板权限码碰 `/template`：`权限不足` | info-nodes |
 | 404 | 项目/节点不存在（含软删除项目）；对不存在的节点点关注（5.12） | projects、info-nodes |
 | 409 | 项目编号/名称重复；**乐观锁版本冲突** | projects（PUT） |
 | 422 | 请求体字段非法：`changes` 的 `limit` 越界（1～500）、`limit` 非整数 | info-nodes（changes） |
 | 500 | 权限服务联动失败、删除项目外键残留等 | projects |
-| 503 | 文件识别接口 / AI 项目摘要：`LLM_API_KEY` 未配置或大模型调用失败 | info-nodes（parse-file）、projects（ai-summary） |
+| 503 | 文件识别接口 / AI 项目摘要：`LLM_API_KEY` 未配置或大模型调用失败（detail 透传大模型给的中文原因） | info-nodes（parse-file）、projects（ai-summary） |
 
 ## 八、涉及文件清单
 
@@ -460,9 +483,9 @@ Service：[info_node_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/ap
 | 模型 | [app/models/delivery.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/models/delivery.py)（Project / ProjectInfoNode / ProjectInfoNodeChange / ProjectInfoNodeMark）、[models_das/models.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/models_das/models.py)（再导出） |
 | Schema | [schemas_das/request_models.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/schemas_das/request_models.py) |
 | API | [api/projects.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/api/projects.py)、[api/info_nodes.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/api/info_nodes.py) |
-| Service | [services/project_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/services/project_service.py)、[services/info_node_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/services/info_node_service.py)、[services/info_node_import_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/services/info_node_import_service.py)、[services/project_ai_summary_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/services/project_ai_summary_service.py)（4.4）、[services/info_node_change_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/services/info_node_change_service.py)（2.4 / 5.9 / 5.10，另被 info_node_service、info_template_service 调用写记录）、[services/info_node_mark_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/services/info_node_mark_service.py)（2.5 / 5.11～5.13，另被 info_node_service、info_template_service 调用清理标注） |
+| Service | [services/project_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/services/project_service.py)、[services/info_node_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/services/info_node_service.py)、[services/info_node_import_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/services/info_node_import_service.py)、[services/project_ai_summary_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/services/project_ai_summary_service.py)（4.4）、[services/info_node_change_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/services/info_node_change_service.py)（2.4 / 5.9 / 5.10，另被 info_node_service、info_template_service 调用写记录）、[services/info_node_mark_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/services/info_node_mark_service.py)（2.5 / 5.11～5.13，另被 info_node_service、info_template_service 调用清理标注）、[services/info_node_ledger_sync_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/services/info_node_ledger_sync_service.py)（5.16 企业微信台账同步预览：读本地 `project` 表镜像，复用 info_node_import_service 的 `match_items` 内核，自己不引大模型也不调外部服务，只做「台账列名 → 节点」的精确对齐 + 归属建议） |
 | 公共组件 | [app/core/llm_client.py](file:///d:/CODE/9_14/OpenRobotService/backend/app/core/llm_client.py)（backend 自维护的 LLM 客户端：DeepSeek/OpenAI 兼容非流式补全 + 网络重试，供 4.4 AI 摘要等 backend 大模型功能共用；密钥/模型与「文件识别」同源于 `settings`） |
-| 测试 | [tests/test_info_nodes_authz.py](file:///d:/CODE/9_9/OpenRobotService/backend/tests/test_info_nodes_authz.py)（信息树写接口的鉴权闸门：项目成员放行/非成员全拦/节点级按归属项目判/全局字段放行给 Service/值写入与增补信息仍是登录即可/详情模板要权限码，11 用例）、[tests/test_info_node_import.py](file:///d:/CODE/9_9/OpenRobotService/backend/tests/test_info_node_import.py)（文本抽取/目录与 prompt 构造/LLM 返回解析/0.9 阈值匹配/select 选项匹配与「建议归属附近下拉」兜底/归属解析，29 用例）、[tests/test_project_ai_summary.py](file:///d:/CODE/9_9/OpenRobotService/backend/tests/test_project_ai_summary.py)（节点内容解码/信息树渲染/prompt 组装/输出清洗，10 用例）、[tests/test_info_node_change.py](file:///d:/CODE/9_9/OpenRobotService/backend/tests/test_info_node_change.py)（节点值→人话/逐字段变动文案/各操作类型文案/记录 id 时间有序，26 用例）、[tests/test_info_node_mark.py](file:///d:/CODE/9_9/OpenRobotService/backend/tests/test_info_node_mark.py)（根标题回溯/关注切换按人过滤（假 session）/标注清理，15 用例） |
+| 测试 | [tests/test_info_nodes_authz.py](file:///d:/CODE/9_9/OpenRobotService/backend/tests/test_info_nodes_authz.py)（信息树写接口的鉴权闸门：项目成员放行/非成员全拦/节点级按归属项目判/全局字段放行给 Service/值写入与增补信息仍是登录即可/详情模板要权限码，11 用例）、[tests/test_info_node_import.py](file:///d:/CODE/9_9/OpenRobotService/backend/tests/test_info_node_import.py)（文本抽取/目录与 prompt 构造/LLM 返回解析/0.9 阈值匹配/select 选项匹配与「建议归属附近下拉」兜底/归属解析，29 用例）、[tests/test_project_ai_summary.py](file:///d:/CODE/9_9/OpenRobotService/backend/tests/test_project_ai_summary.py)（节点内容解码/信息树渲染/prompt 组装/输出清洗，10 用例）、[tests/test_info_node_change.py](file:///d:/CODE/9_9/OpenRobotService/backend/tests/test_info_node_change.py)（节点值→人话/逐字段变动文案/各操作类型文案/记录 id 时间有序，26 用例）、[tests/test_info_node_mark.py](file:///d:/CODE/9_9/OpenRobotService/backend/tests/test_info_node_mark.py)（根标题回溯/关注切换按人过滤（假 session）/标注清理，15 用例）、[tests/test_info_node_ledger_sync.py](file:///d:/CODE/9_9/OpenRobotService/backend/tests/test_info_node_ledger_sync.py)（台账同步 5.16：取值口径 / `project` 行 → 台账列还原（含 adapter 兜底值跳过）/ 空值与定位列过滤 / 分组指位（同名与去限定词）/ 未匹配条目的归属建议与备注 / 整条预览的分桶与元信息，13 用例） |
 | 模板 | [config/project_templates/default.yaml](file:///d:/CODE/9_9/OpenRobotService/backend/app/config/project_templates/default.yaml) |
 | 路由挂载 | [modules/admin/__init__.py](file:///d:/CODE/9_9/OpenRobotService/backend/app/modules/admin/__init__.py) |
 
@@ -483,3 +506,4 @@ Service：[info_node_service.py](file:///d:/CODE/9_9/OpenRobotService/backend/ap
 13. 展示页「项目信息管理」卡：一级标签**之下的子节点**右侧渲染星标（对照原型叶子星标，按用户口径落到全部子节点），进页面拉 `GET /marks` 点亮**自己**关注过的项（按人隔离，服务端按 token 过滤，前端无需传用户参数）；点击调 `POST /nodes/{id}/mark`（乐观翻转，失败回滚并 Toast），关注变化成功后通知外层刷新「项目动态」卡。响应体与共享版一致，前端每个登录人看到的列表各是各的。
 14. 「项目动态」卡 = `GET /activity`：每条只渲染 `root_title · node_title`（与根同名时不重复拼前缀）+ `detail`，**不展示时间与人员**；无关注/无变动给空态引导（「去信息卡点星标」），加载失败给重试入口。
 15. 项目详情页卡片裁剪（按用户要求）：只保留 项目概况 / 项目信息管理 / 项目动态 三张卡；原「项目生命周期」卡删除后**项目阶段**下拉挪进项目概况（仍可编辑）；基础画像 / 风险管理 / 责任体系等被删卡片的字段在前端本页不再有编辑入口（后端字段未动）。
+16. 信息编辑页「同步」（`ProjectInfoLedgerSync.tsx`，入口在卡头操作区最左、`canEditTree` 才显示）走 5.16：弹层标题「同步信息」，小字为「基础信息比对：…」；打开即拉预览（转圈 → 三组勾选 → 确认后逐节点 CRUD，与 7 同款弹层，共用 `ProjectInfoImportPreview.tsx`）。前端约定：**三组默认全勾**（用户口径「节点默认全选」，落库前仍可逐条取消；共用组件用 `defaultCheckedAll` 开关，文件导入不受影响），`unmatched` 组在 `canEditTree=false` 时置灰且不默认勾（新建节点要改树结构）；预览取不到时（`400` 还没有信息节点 / `404` 项目不存在）在弹层里显示 detail 原文 + 「重试」，不留空预览。落库成功后外层刷新树与历史水位。

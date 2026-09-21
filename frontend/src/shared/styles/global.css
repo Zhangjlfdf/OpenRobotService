@@ -9009,6 +9009,12 @@ html, body, #root {
 .mac-info__edit, .mac-info__collapse, .mac-info__iconbtn { padding: 6px; line-height: 0; border-radius: 9px; }
 .mac-info__edit { display: inline-flex; align-items: center; gap: 4px; padding: 5px 9px; font-size: 12px; line-height: 1.2; }
 .mac-info__act { display: inline-flex; align-items: center; gap: 4px; padding: 5px 9px; font-size: 11.5px; line-height: 1.2; }
+/* —— 编辑页卡头动作多（同步/详情模板/文件导入/新标签 + 展开折叠）：430px 卡内只有 364px，
+   六个按钮单行要 384px，放不下时标题会被压成一字一行、最后一个按钮被切掉。
+   加了 --wrap 的卡头允许整块动作区落到标题下面，动作区自己再右对齐换行；标题始终单行（副标题也能整句显示）。 */
+.mac-info__head--wrap { flex-wrap: wrap; row-gap: 6px; }
+.mac-info__head--wrap .mac-info__title-wrap { flex: 1 1 auto; }
+.mac-info__head--wrap .mac-info__actions { flex: 1 1 auto; min-width: 0; flex-wrap: wrap; justify-content: flex-end; }
 
 /* —— 显示内容标签池（浏览卡） —— */
 .mac-info__poolhead { display: flex; align-items: center; justify-content: space-between; margin-top: 14px; }
@@ -9324,6 +9330,8 @@ html, body, #root {
 .mac-import__old { color: var(--mac-muted-fg); }
 .mac-import__new { color: var(--mac-blue-1); }
 .mac-import__note { font-size: 10.5px; line-height: 1.5; color: var(--mac-muted-fg); overflow-wrap: anywhere; }
+/* 台账同步的「为什么没匹配上」说明（如同名下拉装不下这个值）：同排版，暖色提示要留意 */
+.mac-import__note--warn { color: #ad6800; }
 .mac-import__actions { display: flex; gap: 10px; margin-top: 16px; }
 .mac-import__actions .mac-btn { flex: 1; }
 
