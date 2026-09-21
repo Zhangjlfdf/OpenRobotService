@@ -5,6 +5,10 @@
   将填写   —— 节点现在是空的，勾选后填入；
   将覆盖   —— 节点已有内容且与台账不一致（**矛盾**），勾选后才覆盖；
   未匹配   —— 台账里有这一列、树里没有对应节点（**缺少的节点**），勾选后新建。
+
+匹配不只按列名：台账的称呼与信息树节点常对不上，所以先把**值**拿去认节点——
+值正好是某个下拉节点的可选项时（列名「项目生命周期」、值「售前方案」对节点「项目特性 /
+时间线 / 大节点」），就认到那个节点上，不另建节点（见 _pin_option_values）。
 本模块只算不写：用户在前端勾选确认后，由前端逐节点走既有 CRUD 落库（与文件导入同一条路径）。
 
 台账来源 = **本地 project 表里本项目那一行**。企业微信智能表格的台账由
@@ -70,6 +74,10 @@ _norm = import_service._norm
 # 台账里用于「定位是哪一条记录」的列：它们是台账自身的主键列，不是项目信息，
 # 不参与节点匹配（树里没有、也不该有同名节点；参与了只会变成两条噪音「缺少的节点」）。
 LOCATOR_FIELDS = ("项目编号", "项目名称")
+
+# 「按下拉选项认领」的取值门槛：规范化后至少 2 个字。单字值（是/否/高）满树的下拉都有，
+# 即便某一刻只有一个下拉装着它，也不该拿它当归属依据。
+MIN_OPTION_VALUE_LEN = 2
 
 # 「相近标题」判据：两个标题（规范化后）一方包含另一方，且短的一方至少 2 个字。
 # 台账列名常是节点名加了限定词（「实施工程师」对「实施」、「项目区域」对「项目区域/地点」），
@@ -190,6 +198,50 @@ def _dropdown_child_taking(flat: List[Dict], group: Dict, value: str) -> Optiona
     return hits[0] if len(hits) == 1 else None
 
 
+def _option_taker(flat: List[Dict], value: str) -> Optional[Dict]:
+    """树里「唯一一个」可选项**精确等于**该值的下拉节点（没有、或有多个都返回 None）。
+
+    只认精确命中，不走 snap_select_value 的相似度与车型放宽：这一层是在没有标题线索时
+    单凭值去认节点，证据本来就弱，宁可少认几个。「唯一」是硬门槛——车型1/2/3 装着同一套
+    型号，值只说明「是这一款车」，说明不了属于哪一辆，这种情况交回未匹配让用户决定。
+    """
+    target = _norm(value)
+    if len(target) < MIN_OPTION_VALUE_LEN:
+        return None
+    found: Optional[Dict] = None
+    for node in flat:
+        if node["content_type"] != "select" or not node["options"]:
+            continue
+        if not import_service.is_fillable_node(node):
+            continue
+        if not any(_norm(option) == target for option in node["options"]):
+            continue
+        if found is not None:
+            return None          # 第二个装得下这个值的下拉 → 无从判断，不猜
+        found = node
+    return found
+
+
+def _pin_option_values(flat: List[Dict], items: List[Dict[str, Optional[str]]]) -> None:
+    """台账某一列的**值**正好是某个下拉节点的可选项时，把这个条目指到那个节点上。
+
+    节点名与台账列名对不上也认：台账「项目生命周期」的值是「售前方案」，树里没有叫这个名的
+    节点，但「项目特性 / 时间线 / 大节点」是下拉、选项里就有「售前方案」——同一个阶段在台账
+    与信息树里各有一套说法，值能对上就说明说的是同一件事，没有理由再另建一个节点（这正是
+    以前「同步」把「项目生命周期」「承接描述」堆进「导入信息」根节点的由来）。
+    做法与 _pin_group_values 一致：给条目补 node_title（match_items 认它），取值校验、
+    填/覆盖分桶、落库都照旧走同一条路径。
+
+    先于 _pin_group_values 跑：按值精确命中可选项，比按列名包含关系去认要硬。
+    """
+    for item in items:
+        if item.get("node_title"):
+            continue
+        node = _option_taker(flat, item["value"] or "")
+        if node is not None:
+            item["node_title"] = node["title"]
+
+
 def _pin_group_values(flat: List[Dict], items: List[Dict[str, Optional[str]]]) -> None:
     """台账列名落在一个分组节点上时，把这个值指到分组下装得下它的那个下拉里。
 
@@ -199,6 +251,8 @@ def _pin_group_values(flat: List[Dict], items: List[Dict[str, Optional[str]]]) -
     节点」），后续的取值校验、填/覆盖分桶全部照旧走 match_items，不另开一条落库路径。
     """
     for item in items:
+        if item.get("node_title"):
+            continue             # 已按值认到下拉上的不重算（_pin_option_values 的证据更硬）
         group = _find_value_group(flat, item["title"] or "")
         if group is None:
             continue
@@ -300,7 +354,9 @@ def build_sync_preview(project_id: str) -> Dict[str, Any]:
         raise ValueError("该项目还没有信息节点，请先在编辑页新建节点后再同步")
 
     items = _ledger_items(values)
-    # 台账列名落在分组节点上的（项目区域 → 项目区域/地点）先指到分组下的下拉上，再走统一匹配
+    # 先按「值 = 某个下拉的可选项」认节点（项目生命周期 售前方案 → 项目特性/时间线/大节点），
+    # 再按「列名落在分组节点上」（项目区域 → 项目区域/地点）兜一层，最后走统一匹配
+    _pin_option_values(flat, items)
     _pin_group_values(flat, items)
     buckets = import_service.match_items(flat, items)
     for row in buckets["unmatched"]:

@@ -341,12 +341,21 @@ def import_info_tree(project_id: str, data: InfoNodeImport,
 def get_info_node_changes(
     project_id: str,
     node_id: Optional[str] = Query(None, description="节点ID；给了则只返回该节点的历史（含其直接子节点的删除记录）"),
+    include_descendants: bool = Query(
+        False, description="把范围放大到该节点的整棵子树（一级标签的「修改记录」用）"),
     limit: int = Query(100, ge=1, le=500, description="最多返回条数（最新在前）"),
 ):
     """节点编辑历史。传 node_id 返回该节点的记录（自身操作 + 其子节点的删除记录）；
-    不传则返回项目全部记录（含整树级导入）。"""
+    不传则返回项目全部记录（含整树级导入）。
+
+    include_descendants=true 时按整棵子树取（前端只在一级标签上这么请求）：
+    根节点的「历史」要看的是这一级标签下所有节点的变动，而不只是它自己。
+    该参数只在给了 node_id 时有意义。"""
     if node_id:
-        changes = info_node_change_service.list_for_node(project_id, node_id, limit)
+        if include_descendants:
+            changes = info_node_change_service.list_for_subtree(project_id, node_id, limit)
+        else:
+            changes = info_node_change_service.list_for_node(project_id, node_id, limit)
     else:
         changes = info_node_change_service.list_project_changes(project_id, limit)
     return {"changes": changes}

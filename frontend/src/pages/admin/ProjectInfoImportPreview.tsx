@@ -7,7 +7,12 @@
 // 三组（与需求一致）：
 //   将填写      节点当前为空，勾选后直接填入
 //   将覆盖      节点已有内容，勾选后才会覆盖；每行显示「原内容 → 新内容」
-//   未匹配到节点 勾选后作为新节点创建；每行显示建议归属（没有归属时用「导入信息」兜底）
+//   未匹配到节点 勾选后作为新节点创建；每行显示建议归属
+//
+// 「没归属的条目怎么办」两个入口口径不同（allowFallbackRoot）：
+//   文件导入 —— 按需建一个「导入信息」根节点把它们装起来（设计稿的兜底）；
+//   台账同步 —— **不新建任何根节点**（用户口径「不要新增根节点，而是和各节点及其下拉选项
+//   相匹配」）：没有归属的条目在预览里置灰、默认不勾，只作为「台账里有、树里还没有」的提醒。
 //
 // 默认勾选由入口决定（defaultCheckedAll）：文件导入只勾「将填写」（识别可能有偏差，先填空的
 // 最保险）；台账同步要一步到位，默认三组全勾（用户口径「节点默认全选」）。
@@ -26,8 +31,11 @@ import {
 } from '@/shared/utils/projectInfoTree';
 import { isKnownVehicleModel, VEHICLE_MODEL_CODES } from '@/shared/utils/vehicleModels';
 
-/** 未匹配条目没有建议归属时的兜底根节点（按需创建，与设计稿一致） */
+/** 未匹配条目没有建议归属时的兜底根节点（按需创建；只有文件导入会走到这里） */
 const FALLBACK_ROOT_TITLE = '导入信息';
+
+/** 台账同步下「没归属的条目」为什么不能勾（与文件导入的兜底根节点相对） */
+const NO_TARGET_NOTE = '树里没有对应的节点，也没有相近的归类位置——同步不新建一级标签，可到编辑页增补这类字段后再同步';
 
 /** 三类预览数据；文件识别与台账同步的后端返回都是这个形状（两边各自还带别的字段） */
 export interface ImportPreviewData {
@@ -47,6 +55,8 @@ interface ImportRow {
   fresh?: ApiParseNewItem;
   /** 匹配条目对应的本地节点；本地树里找不到时整行降级为「未匹配」 */
   node?: ProjectInfoNode;
+  /** 落不了库的原因（有值即置灰不勾）：台账同步下没有归属的条目 */
+  blocked?: string;
 }
 
 const GROUP_META: { key: ImportGroup; label: string; hint: string }[] = [
@@ -55,20 +65,32 @@ const GROUP_META: { key: ImportGroup; label: string; hint: string }[] = [
   { key: 'unmatched', label: '未匹配到节点', hint: '勾选后作为新节点创建' },
 ];
 
+/** 台账同步的第三组说明：没有归属的条目不建节点，与上面那句合起来读 */
+const UNMATCHED_HINT_NO_ROOT = '勾选后建在建议归属的节点下；没有归属的只作提醒，不会新建一级标签';
+
 /** 预览数据 + 本地节点 → 渲染行；匹配条目在本地的节点不存在（被其他协作者删/改）时降级为未匹配 */
-function buildRows(result: ImportPreviewData | null, nodes: ProjectInfoNode[]): ImportRow[] {
+function buildRows(
+  result: ImportPreviewData | null,
+  nodes: ProjectInfoNode[],
+  allowFallbackRoot: boolean,
+): ImportRow[] {
   if (!result) return [];
   const byId = new Map(nodes.map((node) => [node.id, node]));
   const rows: ImportRow[] = [];
 
+  const pushFresh = (fresh: ApiParseNewItem, key: string) => {
+    // 没有建议归属的条目：文件导入有「导入信息」兜底根可去，台账同步哪儿也不建 → 置灰不勾
+    const blocked = !allowFallbackRoot && !fresh.suggested_parent_id ? NO_TARGET_NOTE : undefined;
+    rows.push({ key, group: 'unmatched', fresh, blocked });
+  };
+
   const pushMatched = (group: 'fill' | 'overwrite', item: ApiParseMatchedItem, index: number) => {
     const node = byId.get(item.node_id);
     if (!node || (node.content_type !== 'text' && node.content_type !== 'select')) {
-      rows.push({
-        key: `${group}-${index}`,
-        group: 'unmatched',
-        fresh: { title: item.title, value: item.value, suggested_parent_id: null, suggested_parent_path: item.path },
-      });
+      pushFresh({
+        title: item.title, value: item.value,
+        suggested_parent_id: null, suggested_parent_path: item.path,
+      }, `${group}-${index}`);
       return;
     }
     rows.push({ key: `${group}-${index}`, group, matched: item, node });
@@ -76,16 +98,17 @@ function buildRows(result: ImportPreviewData | null, nodes: ProjectInfoNode[]): 
 
   result.fill.forEach((item, index) => pushMatched('fill', item, index));
   result.overwrite.forEach((item, index) => pushMatched('overwrite', item, index));
-  result.unmatched.forEach((item, index) => rows.push({ key: `unmatched-${index}`, group: 'unmatched', fresh: item }));
+  result.unmatched.forEach((item, index) => pushFresh(item, `unmatched-${index}`));
   return rows;
 }
 
 /** 默认勾选：只勾「将填写」（节点本来就空，直接填风险最小）；全勾模式下三组都上，
- * 但「未匹配到节点」在没有改树权限时仍然不勾——那组是置灰的，勾上只会让按钮数字骗人 */
+ * 但「未匹配到节点」里落不了库的那些（没归属、或没有改树权限）仍然不勾——
+ * 它们是置灰的，勾上只会让按钮数字骗人 */
 function defaultChecked(rows: ImportRow[], all: boolean, canEditTree: boolean): Set<string> {
   return new Set(
     rows
-      .filter((row) => (all
+      .filter((row) => row.blocked === undefined && (all
         ? !(row.group === 'unmatched' && !canEditTree)
         : row.group === 'fill'))
       .map((row) => row.key),
@@ -94,7 +117,7 @@ function defaultChecked(rows: ImportRow[], all: boolean, canEditTree: boolean): 
 
 export default function ProjectInfoImportPreview({
   result, projectId, nodes, canEditTree, confirmText = '确认导入', defaultCheckedAll = false,
-  onApplied, onClose,
+  allowFallbackRoot = true, onApplied, onClose,
 }: {
   /** 待预览的三组数据；null 表示还没拿到（不渲染内容行） */
   result: ImportPreviewData | null;
@@ -107,12 +130,14 @@ export default function ProjectInfoImportPreview({
   confirmText?: string;
   /** 打开时三组是否默认全勾（默认只勾「将填写」；台账同步要一步到位，传 true） */
   defaultCheckedAll?: boolean;
+  /** 没有建议归属的条目能不能落到「导入信息」兜底根节点上（文件导入 true；台账同步 false） */
+  allowFallbackRoot?: boolean;
   /** 落库后回调（调用方重新拉树）；随后会关闭弹层 */
   onApplied: () => void;
   /** 取消 / 落库完成后关闭（调用方顺手重置自己的预览数据） */
   onClose: () => void;
 }) {
-  const rows = buildRows(result, nodes);
+  const rows = buildRows(result, nodes, allowFallbackRoot);
   const [checked, setChecked] = useState<Set<string>>(
     () => defaultChecked(rows, defaultCheckedAll, canEditTree),
   );
@@ -123,7 +148,7 @@ export default function ProjectInfoImportPreview({
   const [seenResult, setSeenResult] = useState(result);
   if (seenResult !== result) {
     setSeenResult(result);
-    setChecked(defaultChecked(buildRows(result, nodes), defaultCheckedAll, canEditTree));
+    setChecked(defaultChecked(buildRows(result, nodes, allowFallbackRoot), defaultCheckedAll, canEditTree));
   }
 
   const toggle = (key: string) => setChecked((current) => {
@@ -137,9 +162,9 @@ export default function ProjectInfoImportPreview({
 
   const applyImport = async () => {
     // 「未匹配到节点」要新建节点（结构类接口）：不是本项目的人时即便混进了勾选也跳过，
-    // 否则整批会在中途 403 中断，前面已写入的值又回滚不了
+    // 否则整批会在中途 403 中断，前面已写入的值又回滚不了；落不了库的行（blocked）同理
     const picked = rows.filter(
-      (row) => checked.has(row.key) && (canEditTree || row.group !== 'unmatched'),
+      (row) => checked.has(row.key) && !row.blocked && (canEditTree || row.group !== 'unmatched'),
     );
     if (!picked.length) {
       Toast({ message: '请先勾选要导入的信息', theme: 'warning' });
@@ -178,6 +203,7 @@ export default function ProjectInfoImportPreview({
         // 不动全局模板）；canEditTree 为假时根本到不了这里——那组在预览里已置灰不可勾。
         let parentId: string | null = fresh.suggested_parent_id ?? null;
         if (!parentId) {
+          if (!allowFallbackRoot) continue;   // 台账同步：没有归属的不建（行上已置灰，这里兜底）
           if (!fallbackRootId) {
             fallbackRootId = nodes.find((node) => node.parent_id === null && node.title === FALLBACK_ROOT_TITLE)?.id
               ?? (await createInfoNode(projectId, null, nextSort(null), FALLBACK_ROOT_TITLE, canEditTree)).id;
@@ -229,14 +255,14 @@ export default function ProjectInfoImportPreview({
               <p className="mac-import__group-hint">
                 {group.key === 'unmatched' && !canEditTree
                   ? '新建节点要改信息树结构，只有该项目的人员（或管理员）能导；这一组请交给他们'
-                  : group.hint}
+                  : group.key === 'unmatched' && !allowFallbackRoot ? UNMATCHED_HINT_NO_ROOT : group.hint}
               </p>
               {items.map((row) => (
                 <label key={row.key} className="mac-import__row">
                   <input
                     type="checkbox"
                     checked={checked.has(row.key)}
-                    disabled={row.group === 'unmatched' && !canEditTree}
+                    disabled={row.blocked !== undefined || (row.group === 'unmatched' && !canEditTree)}
                     onChange={() => toggle(row.key)}
                     aria-label={`选择 ${row.matched ? row.matched.path : row.fresh?.title ?? ''}`}
                   />
@@ -252,7 +278,9 @@ export default function ProjectInfoImportPreview({
                     )}
                     {row.group === 'unmatched' && (
                       <span className="mac-import__note">
-                        建议归属：{row.fresh?.suggested_parent_path || `${FALLBACK_ROOT_TITLE}（将自动创建）`}
+                        {row.blocked
+                          ? row.blocked
+                          : `建议归属：${row.fresh?.suggested_parent_path || `${FALLBACK_ROOT_TITLE}（将自动创建）`}`}
                         {row.fresh?.quantity ? ` · 数量 ${row.fresh.quantity}（落车型子节点）` : ''}
                       </span>
                     )}

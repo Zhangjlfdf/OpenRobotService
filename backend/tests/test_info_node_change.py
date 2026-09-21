@@ -25,6 +25,7 @@ MagicMock 引擎报 InvalidRequestError）：
     "
 """
 import uuid
+from types import SimpleNamespace
 
 from app.modules.admin.services.info_node_change_service import (
     _new_id,
@@ -36,6 +37,7 @@ from app.modules.admin.services.info_node_change_service import (
     build_sync_detail,
     build_value_detail,
     describe_value,
+    subtree_node_ids,
 )
 
 
@@ -146,6 +148,56 @@ class TestStructuralDetails:
 
     def test_模板变更文案(self):
         assert build_sync_detail(2, 5, 1) == "全局模板变更：新增 2 个、更新 5 个、停用 1 个节点"
+
+
+class TestSubtreeNodeIds:
+    """一级标签的「修改记录」按子树取记录，子树 id 的算法（纯函数，不连库）。
+
+    行只用到 id / parent_id；调用方传的是按 sort_order 排好的行，
+    同级顺序靠入参顺序保持（与 get_tree 组装出的顺序一致）。
+    """
+
+    def _row(self, node_id, parent_id):
+        return SimpleNamespace(id=node_id, parent_id=parent_id)
+
+    def test_含根节点且按先序(self):
+        rows = [
+            self._row("r", None),
+            self._row("a", "r"),
+            self._row("a1", "a"),
+            self._row("a2", "a"),
+            self._row("b", "r"),
+        ]
+        assert subtree_node_ids(rows, "r") == ["r", "a", "a1", "a2", "b"]
+        # 从中间一层取也一样：自己在前，子孙随后
+        assert subtree_node_ids(rows, "a") == ["a", "a1", "a2"]
+
+    def test_兄弟分支与本树之外的根不进来(self):
+        rows = [
+            self._row("r", None),
+            self._row("a", "r"),
+            self._row("other", None),
+            self._row("other1", "other"),
+        ]
+        assert subtree_node_ids(rows, "r") == ["r", "a"]
+
+    def test_同级顺序保持入参顺序(self):
+        # sort_order 已由调用方排好：入参里 a2 在 a1 前，先序就按这个来
+        rows = [self._row("r", None), self._row("a2", "r"), self._row("a1", "r")]
+        assert subtree_node_ids(rows, "r") == ["r", "a2", "a1"]
+
+    def test_根节点已不在节点表里时只有它自己(self):
+        # 看一个已被删除的节点的历史：rows 里查不到它，与 list_for_node 表现一致
+        rows = [self._row("r", None), self._row("a", "r")]
+        assert subtree_node_ids(rows, "gone") == ["gone"]
+
+    def test_脏数据成环不死循环(self):
+        rows = [self._row("a", "b"), self._row("b", "a")]
+        assert subtree_node_ids(rows, "a") == ["a", "b"]
+
+    def test_接受字典行(self):
+        rows = [{"id": "r", "parent_id": None}, {"id": "a", "parent_id": "r"}]
+        assert subtree_node_ids(rows, "r") == ["r", "a"]
 
 
 class TestRecordId:

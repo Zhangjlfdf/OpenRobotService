@@ -13,6 +13,8 @@
 //   所以这里除了藏按钮，saveValue 也必须走值写入接口（否则普通用户一保存就 403）。
 //
 // 每行的「历史」看该节点的操作记录（时间 / 人员 / 变动；子节点被删除时记录在父节点下）。
+// 一级标签的「历史」是**整棵子树**的变动汇总，按节点分组渲染成 Markdown 文档
+// （shared/utils/historyMarkdown.ts，字符串由前端拼、react-markdown 渲染）；子节点仍是逐条列表。
 // 有本机没看过的新记录时历史按钮右上角出小红点：保存成功后立即出，点开该节点历史才消失；
 // 该节点所在的一级节点（根节点）同时出点，作为「这个一级标签下有未看过的变动」的汇总。
 // 已读水位按「项目 + 登录用户」存本机（localStorage，见 shared/utils/projectInfoTree.ts）。
@@ -22,6 +24,8 @@
 // 操作记录由后端在每个写接口里随业务同事务落库（backend .../services/info_node_change_service.py），前端只读。
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { BackTop, Input, Navbar, Popup, Toast } from 'tdesign-mobile-react';
 import { createRequest } from '@/api/client';
 import API_CONFIG from '@/config/api';
@@ -51,6 +55,7 @@ import {
   saveCollapsedIds,
   saveHistorySeen,
   setInfoNodeValue,
+  SUBTREE_HISTORY_LIMIT,
   subtreeNodeIds,
   unseenHistoryChain,
   unseenHistoryNodes,
@@ -61,6 +66,7 @@ import {
   type ProjectInfoNode,
   type ProjectInfoSelectValue,
 } from '@/shared/utils/projectInfoTree';
+import { buildHistoryMarkdown, HISTORY_ACTION_NAMES } from '@/shared/utils/historyMarkdown';
 import type { ApiInfoNodeChange } from '@/api/infoNodes';
 
 type DropMode = 'child' | 'before';
@@ -72,15 +78,6 @@ const CONTENT_TYPE_NAMES: Record<ProjectInfoContentType, string> = {
 };
 /** 增补信息可选的内容形式（增补只加末级字段，不做下拉/附件以外的东西） */
 const CUSTOM_NODE_TYPES: ProjectInfoContentType[] = ['text', 'select', 'image', 'file'];
-/** 操作记录的类型标签（与后端 action 一一对应） */
-const HISTORY_ACTION_NAMES: Record<string, string> = {
-  create: '新增',
-  update: '修改',
-  move: '移动',
-  delete: '删除',
-  import: '导入',
-  sync: '模板同步',
-};
 
 /** 接口错误 → 提示文案（各写操作共用） */
 const errMsg = (err: unknown) => (err instanceof Error && err.message ? err.message : '请稍后重试');
@@ -211,14 +208,21 @@ export default function ProjectInfoEdit() {
   // 打开某节点的编辑历史。点开即已读，而且**整棵子树一起读**：
   // 红点是「这一片有你没看过的变动」，从更新的节点一路点到一级标签，看到的都是同一片变动，
   // 所以点开链上任一处的历史，这一串小红点就该一起消失。
+  //
+  // 一级标签（根节点）看的是**整棵子树**的变动，以 Markdown 汇总展示（见 historyMarkdown）：
+  // 它自己是「这一片的汇总」，只列它一行的记录看不出这一级到底改过什么。
+  // 子节点保持原来的逐条列表——那是具体某一项的明细。
   const openHistory = async (node: ProjectInfoNode) => {
     setHistoryNode(node);
     setHistoryChanges([]);
     setHistoryError(false);
     setHistoryLoading(true);
     historyRequestRef.current = node.id;
+    const isRoot = node.parent_id === null;
     try {
-      const records = await loadInfoNodeChanges(id, node.id);
+      const records = await loadInfoNodeChanges(id, node.id, isRoot
+        ? { includeDescendants: true, limit: SUBTREE_HISTORY_LIMIT }
+        : {});
       if (historyRequestRef.current !== node.id) return; // 期间切到了别的节点，丢弃本次结果
       setHistoryChanges(records);
       // 水位推进：子树里每个节点都记成它的最新记录 id（summary 里那份；缺了就用本节点的记录兜底）
@@ -493,6 +497,14 @@ export default function ProjectInfoEdit() {
     [nodes, unseenHistoryIds],
   );
 
+  // 一级标签的历史是整棵子树的汇总，渲染成 md 文档（子节点仍是上面的逐条列表）
+  const historyMarkdown = useMemo(
+    () => (historyNode && historyNode.parent_id === null
+      ? buildHistoryMarkdown(historyNode, historyChanges, nodes, { limit: SUBTREE_HISTORY_LIMIT })
+      : ''),
+    [historyNode, historyChanges, nodes],
+  );
+
   const rowProps = {
     byParent, collapsedIds, editingId, draggingId, dropTarget, uploadingNodeId,
     historyDotIds, canEdit: canEditTree,
@@ -693,7 +705,10 @@ export default function ProjectInfoEdit() {
       {/* 编辑历史：后端真实操作记录（时间/人员/节点/具体变动）；打开即标记已读（小红点消失） */}
       <Popup visible={!!historyNode} onClose={() => setHistoryNode(null)} placement="bottom" showOverlay>
         <div className="mac-sheet">
-          <h4 className="mac-sheet__title">编辑历史{historyNode ? ` · ${historyNode.title}` : ''}</h4>
+          <h4 className="mac-sheet__title">
+            编辑历史{historyNode ? ` · ${historyNode.title}` : ''}
+            {historyNode?.parent_id === null ? '（含子节点）' : ''}
+          </h4>
           {historyLoading ? (
             <div className="mac-info__state">正在加载编辑历史…</div>
           ) : historyError ? (
@@ -712,7 +727,16 @@ export default function ProjectInfoEdit() {
           ) : historyChanges.length === 0 ? (
             <div className="mac-info__state">
               暂无编辑记录
-              <div className="mac-info__state-sub">该节点的新增、修改、移动会记录在这里；子节点被删除时，删除记录显示在本节点下</div>
+              <div className="mac-info__state-sub">
+                {historyNode?.parent_id === null
+                  ? '这一级标签下（含所有子节点）的新增、修改、移动、删除都会汇总在这里'
+                  : '该节点的新增、修改、移动会记录在这里；子节点被删除时，删除记录显示在本节点下'}
+              </div>
+            </div>
+          ) : historyMarkdown ? (
+            /* 一级标签：整棵子树的变动按节点分组，用 react-markdown 渲染（真解析，动态文本已在生成时转义） */
+            <div className="mac-history__md">
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{historyMarkdown}</ReactMarkdown>
             </div>
           ) : (
             <ul className="mac-history">

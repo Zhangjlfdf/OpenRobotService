@@ -1,7 +1,8 @@
 """企业微信台账同步（info_node_ledger_sync_service）纯函数测试 —— 不连库、不调外部服务。
 
 覆盖：台账取值口径（_value_text）、project 行 → 台账列还原（含 adapter 兜底值的跳过）、
-列 → 条目（空值/定位列过滤）、分组指位（同名分组 / 台账列名是分组名去限定词）、
+列 → 条目（空值/定位列过滤）、按值指位（值 = 某个下拉的可选项，列名对不上也认；多个候选
+与单字值都不认）、分组指位（同名分组 / 台账列名是分组名去限定词）、
 未匹配条目的归属建议与备注（同名分组 / 同名但装不下 / 包含关系相近 / 相近的是分组 /
 都给不出），以及 build_sync_preview 的三组分桶与元信息（打桩本地上下文）。
 """
@@ -189,6 +190,49 @@ def test_dropdown_child_taking_only_accepts_a_single_candidate():
     assert sync_service._dropdown_child_taking(flat2, group, "大陆(China Mainland)") is None
 
 
+# —— 按值指位（列名对不上、值对得上） ——
+
+def test_option_taker_requires_a_single_exact_hit():
+    flat = _flat()
+    # 值正好是「项目类型」的一项
+    assert sync_service._option_taker(flat, "试点项目")["id"] == "c3"
+    # 精确比：只像不算（「试点项目一期」与选项「试点项目」相似但不等），不做车型放宽
+    assert sync_service._option_taker(flat, "试点项目一期") is None
+    # 选项里没有这个值
+    assert sync_service._option_taker(flat, "火星项目") is None
+    # 单字值不当归属依据（满树的下拉都可能是「是/否」），哪怕眼下只有一个装得下
+    flat_yn = flat + [{
+        "id": "p3", "parent_id": "r2", "title": "是否已在用", "content_type": "select",
+        "value": None, "options": ["是", "否"], "depth": 2,
+        "path": "人员信息 / 是否已在用", "path_titles": [], "has_children": False,
+    }]
+    assert sync_service._option_taker(flat_yn, "是") is None
+
+    # 两个下拉装着同一项 → 说明不了值是给谁的，不认
+    flat2 = flat + [{
+        "id": "c31", "parent_id": "r1", "title": "项目类别", "content_type": "select",
+        "value": None, "options": ["试点项目", "推广项目"], "depth": 2,
+        "path": "基础信息 / 项目类别", "path_titles": [], "has_children": False,
+    }]
+    assert sync_service._option_taker(flat2, "试点项目") is None
+
+
+def test_pin_option_values_matches_by_value_not_name():
+    flat = _flat()
+    items = sync_service._ledger_items(_values(**{"项目生命周期": "试点项目", "承接描述": "火星"}))
+    sync_service._pin_option_values(flat, items)
+
+    # 台账「项目生命周期」在树里没有同名节点，但值「试点项目」是「项目类型」的一项 → 认到它上
+    pinned = next(item for item in items if item["title"] == "项目生命周期")
+    assert pinned["node_title"] == "项目类型"
+    # 认不出的不动，交给 match_items 与备注
+    assert next(item for item in items if item["title"] == "承接描述")["node_title"] is None
+    # 已经有指位的条目（分组指位先行）不重算
+    pinned["node_title"] = "区域选项"
+    sync_service._pin_option_values(flat, items)
+    assert pinned["node_title"] == "区域选项"
+
+
 # —— 未匹配条目的归属建议与备注 ——
 
 def test_enrich_unmatched_suggests_group_parent():
@@ -296,6 +340,26 @@ def test_build_sync_preview_reports_conflicts_as_overwrite():
     overwritten = {row["node_id"]: (row["current"], row["value"]) for row in result["overwrite"]}
     assert overwritten["p1"] == ("旧销售", "张三")     # 矛盾：原内容 → 台账值，等用户点头
     assert all(row["node_id"] != "p2" for row in result["overwrite"])   # 与台账一致 → 不产生变更
+
+
+def test_build_sync_preview_matches_by_option_value():
+    original = sync_service._load_local_context
+    project = {"id": "69", "code": "69", "name": "江苏南京本川XSC仓储项目"}
+    try:
+        # 「项目生命周期」「承接描述」在树里都没有同名节点（老同步会把它们堆进「导入信息」根节点）；
+        # 值对上「项目类型」的可选项时认到那个节点上，对不上的仍留在未匹配
+        _stub(project, _values(**{"项目生命周期": "试点项目"}), _flat())
+        result = sync_service.build_sync_preview("69")
+    finally:
+        _restore(original)
+
+    filled = {row["node_id"]: row["value"] for row in result["fill"]}
+    assert filled["c3"] == "试点项目"
+    assert result["overwrite"] == []
+    unmatched_titles = {row["title"] for row in result["unmatched"]}
+    assert "项目生命周期" not in unmatched_titles
+    # 同名但装不下（下拉里没有「普通项目」）的仍按未匹配 + 补选项的说明处理
+    assert "项目类型" in unmatched_titles
 
 
 def test_build_sync_preview_rejects_project_without_nodes():

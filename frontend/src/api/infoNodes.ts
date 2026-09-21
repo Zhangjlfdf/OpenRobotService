@@ -182,10 +182,18 @@ export interface ApiInfoNodeChange {
   created_at: string;
 }
 
-/** 某节点的编辑历史：自身操作 + 其直接子节点的删除记录（最新在前） */
-export async function fetchInfoNodeChangesApi(projectId: string, nodeId: string, limit = 100): Promise<ApiInfoNodeChange[]> {
+/** 某节点的编辑历史：自身操作 + 其直接子节点的删除记录（最新在前）。
+ *  includeDescendants=true 时范围放大到整棵子树（一级标签的「修改记录」用，
+ *  子节点被删的记录也在里面）；两种口径都由后端算好归属。 */
+export async function fetchInfoNodeChangesApi(
+  projectId: string,
+  nodeId: string,
+  options: { limit?: number; includeDescendants?: boolean } = {},
+): Promise<ApiInfoNodeChange[]> {
+  const query = new URLSearchParams({ node_id: nodeId, limit: String(options.limit ?? 100) });
+  if (options.includeDescendants) query.set('include_descendants', 'true');
   const data = await request()<{ changes?: ApiInfoNodeChange[] }>(
-    `/info-nodes/projects/${encodeURIComponent(projectId)}/changes?node_id=${encodeURIComponent(nodeId)}&limit=${limit}`,
+    `/info-nodes/projects/${encodeURIComponent(projectId)}/changes?${query.toString()}`,
   );
   return Array.isArray(data?.changes) ? data.changes : [];
 }

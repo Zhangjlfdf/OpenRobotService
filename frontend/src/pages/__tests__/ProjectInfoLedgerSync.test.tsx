@@ -78,11 +78,19 @@ const RESULT: ApiLedgerSyncResult = {
     node_id: 'c1', path: '基础信息 / 客户信息', title: '客户信息',
     content_type: 'text', current: '中力', value: '浙江中力',
   }],
-  unmatched: [{
-    title: '项目类型', value: '普通项目',
-    suggested_parent_id: null, suggested_parent_path: null,
-    note: '树里已有同名节点「项目类型」，但它是下拉、可选项里没有这个值——先到编辑页给它补上选项，比新建一个同名节点合适',
-  }],
+  unmatched: [
+    // 有建议归属：勾选后建在它下面（这两条不受「不新建一级标签」影响）
+    {
+      title: '售后服务', value: '有质保',
+      suggested_parent_id: 'p1', suggested_parent_path: '基础信息 / 订单信息',
+    },
+    // 没归属：同步不新建一级标签 → 置灰不勾，只作提醒
+    {
+      title: '项目类型', value: '普通项目',
+      suggested_parent_id: null, suggested_parent_path: null,
+      note: '树里已有同名节点「项目类型」，但它是下拉、可选项里没有这个值——先到编辑页给它补上选项，比新建一个同名节点合适',
+    },
+  ],
 };
 
 const renderDialog = (onApplied = vi.fn(), canEditTree = true) => {
@@ -123,8 +131,11 @@ describe('ProjectInfoLedgerSync（企业微信台账同步）', () => {
     expect(screen.getByText(/原内容：中力 →/)).toBeTruthy();
     expect(screen.getByText(/先到编辑页给它补上选项/)).toBeTruthy();
 
-    // 用户口径「节点默认全选」：填写 1 + 覆盖 1 + 新建 1
+    // 用户口径「节点默认全选」：填写 1 + 覆盖 1 + 有归属的新建 1；没归属的那条置灰不勾
     expect(screen.getByText('确认同步（3）')).toBeTruthy();
+    expect(screen.getByText(/建议归属：基础信息 \/ 订单信息/)).toBeTruthy();
+    expect(screen.getByText(/同步不新建一级标签/)).toBeTruthy();
+    expect((screen.getByLabelText('选择 项目类型') as HTMLInputElement).disabled).toBe(true);
   });
 
   it('预览取不到时弹层里说明原因并可重试，失败期间不显示任何预览', async () => {
@@ -155,20 +166,45 @@ describe('ProjectInfoLedgerSync（企业微信台账同步）', () => {
     // 默认全勾（3 项），先把「将覆盖」那条取消掉——矛盾要用户点头才覆盖，取消即不写
     fireEvent.click(screen.getByLabelText('选择 基础信息 / 客户信息'));
     expect(screen.getByText('确认同步（2）')).toBeTruthy();
-    // 未匹配条目没有建议归属 → 落库时挂到「导入信息」兜底根下
     fireEvent.click(screen.getByText('确认同步（2）'));
 
     await waitFor(() => expect(onApplied).toHaveBeenCalled());
     expect(setInfoNodeValueApi).toHaveBeenCalledWith('c2', 'P1', 'SAP ECC');
+    // 有建议归属的未匹配条目：建在建议的父节点下（不再挂到兜底根）
     expect(createInfoNodeApi).toHaveBeenCalledWith('P1', expect.objectContaining({
-      parent_id: null, title: '导入信息',
+      parent_id: 'p1', title: '售后服务',
     }));
-    expect(setInfoNodeValueApi).toHaveBeenCalledWith('server-1', 'P1', '普通项目');
+    expect(setInfoNodeValueApi).toHaveBeenCalledWith('server-1', 'P1', '有质保');
+    // 用户口径「不要新增根节点」：没有归属的条目一条也不建，连「导入信息」根节点都不该出现
+    expect(createInfoNodeApi).not.toHaveBeenCalledWith('P1', expect.objectContaining({
+      title: '导入信息',
+    }));
+    expect(createInfoNodeApi).toHaveBeenCalledTimes(1);
+    expect(setInfoNodeValueApi).not.toHaveBeenCalledWith('server-1', 'P1', '普通项目');
     // 没勾的「将覆盖」不写库——矛盾要用户点头才覆盖
     expect(setInfoNodeValueApi).not.toHaveBeenCalledWith('c1', expect.anything(), expect.anything());
     expect(vi.mocked(Toast)).toHaveBeenCalledWith(expect.objectContaining({
       message: '已填写 1 项，覆盖 0 项，新增 1 项',
     }));
+  });
+
+  it('没有归属的条目：同步不新建一级标签，只作提醒（置灰、不计入按钮数字）', async () => {
+    vi.mocked(fetchLedgerSyncPreviewApi).mockResolvedValue({
+      ...RESULT,
+      unmatched: [RESULT.unmatched[1]],
+    });
+    const onApplied = renderDialog();
+    await screen.findByText('将填写');
+
+    const box = screen.getByLabelText('选择 项目类型') as HTMLInputElement;
+    expect(box.disabled).toBe(true);
+    expect(box.checked).toBe(false);
+    expect(screen.queryByText(/导入信息/)).toBeNull();          // 不再承诺「将自动创建」
+    expect(screen.getByText(/没有归属的只作提醒/)).toBeTruthy();
+
+    fireEvent.click(screen.getByText('确认同步（2）'));            // 填写 1 + 覆盖 1
+    await waitFor(() => expect(onApplied).toHaveBeenCalled());
+    expect(createInfoNodeApi).not.toHaveBeenCalled();
   });
 
   it('不是本项目的人：未匹配组置灰不可勾（新建节点要改树结构）', async () => {
@@ -178,6 +214,7 @@ describe('ProjectInfoLedgerSync（企业微信台账同步）', () => {
     await screen.findByText('将填写');
 
     expect((screen.getByLabelText('选择 项目类型') as HTMLInputElement).disabled).toBe(true);
+    expect((screen.getByLabelText('选择 售后服务') as HTMLInputElement).disabled).toBe(true);
     expect(screen.getByText(/只有该项目的人员/)).toBeTruthy();
     expect((screen.getByLabelText('选择 基础信息 / 订单信息 / ERP') as HTMLInputElement).disabled).toBe(false);
   });

@@ -2,11 +2,13 @@
 //
 // 和「文件导入」是一件事的两种信息源：那边读上传的文档，这边读**企业微信台账在本地库里的镜像**
 // （project 表，平时由 wecom adapter 从智能表格同步进来；后端 info_node_ledger_sync_service
-// 把台账各列反向还原成「列名 → 值」）。后端再拿现有信息节点按标题比对，回三类：将填写 /
+// 把台账各列反向还原成「列名 → 值」）。后端再拿现有信息节点比对（列名 + 值：值正好是某个
+// 下拉节点的可选项时也认，见 info_node_ledger_sync_service._pin_option_values），回三类：将填写 /
 // 将覆盖（节点已有内容且与台账不一致 = 矛盾）/ 未匹配到节点（台账有这一列、树里没有 = 缺少的节点）。
 //
 // 本弹层只负责「打开即拉预览」与来源说明；预览列表与落库都交给 ProjectInfoImportPreview，
-// 与文件导入共用同一套行为（勾选确认后逐节点走既有 CRUD，不落库的东西一律不写）。
+// 与文件导入共用同一套行为（勾选确认后逐节点走既有 CRUD，不落库的东西一律不写），
+// 差别只在 allowFallbackRoot=false：同步**不新建一级标签**，没有归属的条目只作提醒。
 //
 // 拉不到（项目不存在 / 项目还没有信息节点）时不猜也不静默：弹层里写明原因并给「重试」，
 // 比一闪而过的 Toast 更容易看清——用户要据此决定是先去编辑页建节点，还是找运维看数据。
@@ -68,7 +70,8 @@ export default function ProjectInfoLedgerSync({ visible, onClose, projectId, nod
         <h4 className="mac-sheet__title">同步信息</h4>
         <p className="mac-import__hint">
           基础信息比对：把本项目在台账里的基础信息与现有节点逐项核对，不一致的列在「将覆盖」，
-          台账有、节点没有的列在「未匹配到节点」。勾选哪条才写哪条。
+          台账有、节点没有的列在「未匹配到节点」。列名与节点名对不上、但值正好是某个下拉的一项时，
+          也归到那个节点上（比如「项目生命周期」的值对上「时间线 / 大节点」）。勾选哪条才写哪条。
         </p>
 
         {loading && <div className="mac-info__state">正在读取台账…</div>}
@@ -99,6 +102,7 @@ export default function ProjectInfoLedgerSync({ visible, onClose, projectId, nod
               canEditTree={canEditTree}
               confirmText="确认同步"
               defaultCheckedAll
+              allowFallbackRoot={false}
               onApplied={onApplied}
               onClose={onClose}
             />
