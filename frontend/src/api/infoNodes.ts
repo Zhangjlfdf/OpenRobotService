@@ -157,15 +157,23 @@ export async function importInfoTreeApi(projectId: string, nodes: ApiInfoTreeImp
   return data?.imported ?? 0;
 }
 
-/** 一键清空本项目**已填的内容**（只清值；节点与结构保留）；返回清掉的字段数。
+/** 一键清空（恢复为模板结构）的结果：清掉的内容数 + 删掉的增补节点数 */
+export interface ApiResetInfoTreeResult {
+  /** 留下来的全局字段（模板）上被清掉的内容数 */
+  cleared: number;
+  /** 删掉的本项目增补节点数（导入 / 同步 / 「增补信息」加进来的，含子孙） */
+  nodesRemoved: number;
+}
+
+/** 一键清空：删掉本项目增补的节点、清掉全部已填值，恢复成模板的样子，返回两个计数。
  *  后端逐条记入编辑历史（delete + change_reason=一键清空），门槛与结构类接口相同（项目成员）。
  */
-export async function clearProjectInfoValuesApi(projectId: string): Promise<number> {
-  const data = await request()<{ cleared?: number }>(
-    `/info-nodes/projects/${encodeURIComponent(projectId)}/clear-values`,
+export async function resetProjectInfoTreeApi(projectId: string): Promise<ApiResetInfoTreeResult> {
+  const data = await request()<{ cleared?: number; nodes_removed?: number }>(
+    `/info-nodes/projects/${encodeURIComponent(projectId)}/reset-to-template`,
     { method: 'POST' },
   );
-  return data?.cleared ?? 0;
+  return { cleared: data?.cleared ?? 0, nodesRemoved: data?.nodes_removed ?? 0 };
 }
 
 /** 按后端模板重建信息树 —— 已废弃。
