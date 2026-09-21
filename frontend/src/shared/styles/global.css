@@ -9405,3 +9405,48 @@ html, body, #root {
 .mac-tpl__preview-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 7px 2px; border-bottom: 1px solid var(--mac-border); }
 .mac-tpl__preview-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; color: var(--mac-fg); }
 .mac-tpl__preview-stat { flex-shrink: 0; font-size: 11px; color: var(--mac-muted-fg); }
+
+/* —— 工单关联策略配置页（TaskPolicyPage）—— */
+.task-policy-wrap { padding: 14px 14px 30px; }
+.task-policy-loading, .task-policy-empty { padding: 40px 0; text-align: center; color: var(--mac-muted-fg); font-size: 13px; }
+.task-policy-group { margin-bottom: 20px; }
+.task-policy-group__title { margin: 0; font-size: 14px; font-weight: 700; color: var(--mac-fg); }
+.task-policy-group__desc { margin: 4px 0 10px; font-size: 12px; line-height: 1.6; color: var(--mac-muted-fg); }
+
+.task-policy-row {
+  display: flex; align-items: center; gap: 12px; width: 100%;
+  margin-top: 8px; padding: 12px 14px; border: 1px solid var(--mac-border);
+  border-radius: 12px; background: #fff; box-shadow: var(--mac-shadow-soft);
+  cursor: pointer; text-align: left; font: inherit; color: inherit;
+  transition: opacity 0.15s, box-shadow 0.15s;
+}
+.task-policy-row:active { opacity: 0.85; }
+.task-policy-row:disabled { opacity: 0.6; cursor: not-allowed; }
+/* 不同色相——红（阻塞）/蓝（子工单）/紫（同步） */
+.task-policy-row--red { border-left: 3px solid #ef4444; }
+.task-policy-row--blue { border-left: 3px solid #3697c3; }
+.task-policy-row--purple { border-left: 3px solid #a855f7; }
+.task-policy-row--gray { border-left: 3px solid #9ca3af; }
+
+.task-policy-row__body { flex: 1; min-width: 0; }
+.task-policy-row__title { font-size: 13.5px; font-weight: 600; color: var(--mac-fg); }
+.task-policy-row__desc { margin-top: 3px; font-size: 11.5px; line-height: 1.55; color: var(--mac-muted-fg); }
+.task-policy-row__hint { margin-top: 5px; font-size: 10.5px; color: var(--mac-blue-1); }
+
+/* 开关：iOS 风格，左灰右蓝 */
+.task-policy-row__switch {
+  position: relative; flex-shrink: 0; width: 44px; height: 24px;
+  border-radius: 999px; background: #d1d5db; transition: background 0.2s;
+}
+.task-policy-row__switch.on { background: #3697c3; }
+.task-policy-row__switch.loading { opacity: 0.7; }
+.task-policy-row__thumb {
+  position: absolute; top: 2px; left: 2px; width: 20px; height: 20px;
+  border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,0.15);
+  transition: transform 0.2s;
+}
+.task-policy-row__switch.on .task-policy-row__thumb { transform: translateX(20px); }
+
+.task-policy-footer { margin-top: 16px; padding: 10px 12px; border-radius: 10px; background: var(--mac-secondary); font-size: 11px; line-height: 1.65; color: var(--mac-muted-fg); }
+
+.admin-no-perm { padding: 60px 20px; text-align: center; color: var(--mac-muted-fg); font-size: 14px; }

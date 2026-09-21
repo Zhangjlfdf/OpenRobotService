@@ -35,6 +35,10 @@ class TicketCreate(TicketBase):
                     "被代理人须为注册在职用户，后端二次校验；关系建立为 pending，"
                     "确认跟随后获协办权。",
     )
+    # ── 协商节点初始化：前端可显式指定初始 step ──
+    # 留空时后端自动按 ticket_type 取 TaskStep 模板的第一个节点
+    curr_step_id: Optional[int] = Field(None, description="初始协商节点ID（不传则后端按 ticket_type 自动取第一个节点）")
+    curr_step_endtime: Optional[datetime] = Field(None, description="初始协商节点截止时间（naive UTC，不传则兜底 deadline_at 或 +7 天）")
 
 
 class TicketUpdate(BaseModel):
@@ -419,6 +423,9 @@ class TaskRelationBrief(BaseModel):
     status: TicketStatus
     created_by_name: Optional[str] = None
     assigned_to_name: Optional[str] = None
+
+    class Config:
+        from_attributes = True
 
 
 class ProxyRelationDeclineRequest(BaseModel):
