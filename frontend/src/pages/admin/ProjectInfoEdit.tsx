@@ -38,7 +38,6 @@ import {
   MacTrash2, MacUpload,
 } from '@/shared/components/macaronIcons';
 import {
-  clearInfoNodeValues,
   computeInfoCompleteness,
   createInfoNode,
   deleteInfoNode,
@@ -53,6 +52,7 @@ import {
   patchInfoNode,
   PROJECT_INFO_MAX_DEPTH,
   removeInfoNode,
+  resetInfoTreeToTemplate,
   saveCollapsedIds,
   saveHistorySeen,
   setInfoNodeValue,
@@ -68,7 +68,11 @@ import {
   type ProjectInfoSelectValue,
 } from '@/shared/utils/projectInfoTree';
 import { buildHistoryMarkdown, HISTORY_ACTION_NAMES } from '@/shared/utils/historyMarkdown';
-import { clearProjectInfoValuesApi, type ApiInfoNodeChange } from '@/api/infoNodes';
+import {
+  resetProjectInfoTreeApi,
+  type ApiInfoNodeChange,
+  type ApiResetInfoTreeResult,
+} from '@/api/infoNodes';
 
 type DropMode = 'child' | 'before';
 const CONTENT_TYPE_NAMES: Record<ProjectInfoContentType, string> = {
@@ -338,15 +342,22 @@ export default function ProjectInfoEdit() {
     setDeleteNode(null);
   };
 
-  // 一键清空：只清本项目已填的**内容**（节点与结构保留），逐条记入编辑历史。
-  // 前端先把整棵树的显示值清成空（乐观），后端返回真正清掉的字段数。
+  // 一键清空：把本项目恢复成模板的样子——导入 / 同步 / 「增补信息」加进来的节点连子孙
+  // 一起删掉，剩下的全局字段值清空，逐条记入编辑历史。前端先按同一口径换掉整棵树（乐观），
+  // 后端返回真正清掉的内容数与删掉的节点数。
   const confirmClearAll = () => {
     setClearAllOpen(false);
     setTreeEpoch((n) => n + 1);          // 让输入框们重新挂载，界面上真的变空
     void applyMutation(
-      clearInfoNodeValues(nodes),
-      () => clearProjectInfoValuesApi(id),
-      (result) => `已清空 ${Number(result) || 0} 项已填内容`,
+      resetInfoTreeToTemplate(nodes),
+      () => resetProjectInfoTreeApi(id),
+      (result) => {
+        const { cleared, nodesRemoved } = result as ApiResetInfoTreeResult;
+        const parts: string[] = [];
+        if (nodesRemoved) parts.push(`删除 ${nodesRemoved} 个增补节点`);
+        if (cleared) parts.push(`清空 ${cleared} 项已填内容`);
+        return parts.length ? `已恢复为模板结构：${parts.join('、')}` : '本来就与模板一致，没有可清的内容';
+      },
     );
   };
 
@@ -578,13 +589,13 @@ export default function ProjectInfoEdit() {
                   <MacRefreshCw size={13} />同步
                 </button>
               )}
-              {/* 一键清空：把本项目已填的内容全部清掉（节点与结构保留）。比填一个值重得多，
-                  与「同步」同门槛（能改这棵树的人），且必须先过确认弹层。 */}
+              {/* 一键清空：把本项目恢复成模板的样子（删掉导入/同步/增补的节点 + 清掉全部已填值）。
+                  比填一个值重得多，与「同步」同门槛（能改这棵树的人），且必须先过确认弹层。 */}
               {canEditTree && (
                 <button
                   type="button"
                   className="mac-btn mac-btn--outline mac-info__act"
-                  title="清空本项目所有已填的信息（节点与结构保留）"
+                  title="清空本项目所有已填的信息，并删除导入/同步/增补的节点（恢复成模板结构）"
                   onClick={() => setClearAllOpen(true)}
                 >
                   <MacTrash2 size={13} />一键清空
@@ -693,14 +704,14 @@ export default function ProjectInfoEdit() {
         </div>
       </Popup>
 
-      {/* 一键清空确认（清的是全项目已填的内容，与删除节点一样属重操作，二次确认后才发请求） */}
+      {/* 一键清空确认（删增补节点 + 清全部已填值，与删除节点一样属重操作，二次确认后才发请求） */}
       <Popup visible={clearAllOpen} onClose={() => setClearAllOpen(false)} placement="bottom" showOverlay>
         <div className="mac-sheet">
           <h4 className="mac-sheet__title">一键清空</h4>
           <p className="mac-info__confirm">
-            清空本项目所有已填的内容？节点与结构（含增补节点）保留，下拉选项、关注标注、
-            编辑历史也不受影响；每次清空都记一条编辑历史，可查是谁清的。
-            已上传的附件只解除挂载，文件本体仍在资源库里。
+            清空本项目所有已填的内容，并删除导入/同步/增补加进来的节点，恢复成模板的样子？
+            全局字段（模板）与编辑历史保留；增补节点上的关注随节点清掉；已上传的附件只解除挂载，
+            文件本体仍在资源库里。每次清空都记一条编辑历史，可查是谁清的。
           </p>
           <div className="mac-info__confirm-actions">
             <button type="button" className="mac-btn mac-btn--outline" onClick={() => setClearAllOpen(false)}>取消</button>

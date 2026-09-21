@@ -1,6 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import {
-  clearInfoNodeValues,
   computeInfoCompleteness,
   countInfoValues,
   createInfoNode,
@@ -20,6 +19,7 @@ import {
   patchInfoNode,
   REGION_MAINLAND,
   removeInfoNode,
+  resetInfoTreeToTemplate,
   saveHistorySeen,
   setInfoNodeValue,
   SUBTREE_HISTORY_LIMIT,
@@ -476,21 +476,24 @@ describe('本地纯函数', () => {
     expect(completeness.get('d')).toEqual({ total: 1, empty: 1, incomplete: true });
   });
 
-  it('clearInfoNodeValues 清掉各类值，节点与下拉选项都还在', () => {
+  it('resetInfoTreeToTemplate 删掉增补节点、清掉全局字段的值，下拉选项保留', () => {
     const tree: ProjectInfoNode[] = [
       { ...base[0], value: '中力' },                                             // 文字：清成空串
       { ...base[1], content_type: 'select', value: { selected: '试点项目', options: ['试点项目', 'PK项目'] } },
       { ...base[2], content_type: 'file', value: { name: 'a.pdf', resource_id: '7', size: 100 } },
       { ...base[3], value: '' },                                                 // 本来就没填：原样返回
+      { ...base[0], id: 'x1', is_custom: true, value: '导入/同步加进来的' },       // 增补节点：连节点一起没
+      { ...base[1], id: 'x2', is_custom: true, parent_id: 'x1', value: '' },      // 增补节点的子节点同样没
     ];
-    const next = clearInfoNodeValues(tree);
+    const next = resetInfoTreeToTemplate(tree);
 
-    expect(next.map((node) => node.id)).toEqual(['a', 'b', 'c', 'd']);            // 节点一个不少
+    expect(next.map((node) => node.id)).toEqual(['a', 'b', 'c', 'd']);            // 只剩全局（模板）字段
     expect(next[0].value).toBe('');
     expect(next[1].value).toEqual({ selected: '', options: ['试点项目', 'PK项目'] });  // 选项属于字段定义，不能清
     expect(next[2].value).toBeNull();
     expect(next[3]).toBe(tree[3]);                                              // 空值节点没被重建
     expect(tree[0].value).toBe('中力');                                          // 不改原数组（乐观更新后再回滚得回来）
+    expect(tree).toHaveLength(6);                                               // 原数组本身一个不少
   });
 });
 

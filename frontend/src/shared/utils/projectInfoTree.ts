@@ -494,12 +494,16 @@ export function patchInfoNode(
 }
 
 /**
- * 一键清空（乐观更新）：把所有节点的值换成「空」，节点本身原样留着。
- * 下拉清掉选中项、**保留选项**（选项属于字段定义，清了就没得选了）；
+ * 一键清空（乐观更新）：把树恢复成模板的样子——本项目增补的节点（导入 / 同步 /
+ * 「增补信息」加进来的，is_custom）连子孙一起删掉，剩下的全局字段值清空。
+ * 与后端 reset-to-template 同一口径；全局节点与它们的字段定义原样留着。
+ * 值：下拉清掉选中项、**保留选项**（选项属于字段定义，清了就没得选了）；
  * 附件置 null（文件本体在资源库里不动，只是不再挂在这个节点上）；其余置空串。
  */
-export function clearInfoNodeValues(nodes: ProjectInfoNode[]): ProjectInfoNode[] {
-  return nodes.map((node) => (hasFieldValue(node) ? { ...node, value: emptyValueOf(node) } : node));
+export function resetInfoTreeToTemplate(nodes: ProjectInfoNode[]): ProjectInfoNode[] {
+  return nodes
+    .filter((node) => !node.is_custom)
+    .map((node) => (hasFieldValue(node) ? { ...node, value: emptyValueOf(node) } : node));
 }
 
 function emptyValueOf(node: ProjectInfoNode): ProjectInfoSelectValue | ProjectInfoFileValue | string | null {
