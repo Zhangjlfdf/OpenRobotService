@@ -20,7 +20,7 @@ import re
 from datetime import date, datetime, timedelta
 from typing import AsyncIterator
 
-from sqlalchemy import func as sa_func
+from sqlalchemy import func as sa_func, or_ as sa_or
 
 from ai.core.database import (
     SessionLocal,
@@ -30,6 +30,10 @@ from ai.core.database import (
     User,
     UserProjectRole,
     CollectionData,
+    ProjectInfoNode,
+    ProjectInfoValue,
+    ProjectInfoValueHistory,
+    ProjectInfoNodeMark,
 )
 
 from .llm_client import LLMClient
@@ -98,6 +102,16 @@ _RISK_STATUS_CN = {
     "open": "未关闭",
     "opened": "未关闭",
     "closed": "已关闭",
+}
+
+# 项目信息变更历史 operation_type → 中文（project_info_value_history 表）
+_PROJECT_INFO_OP_CN = {
+    "create": "新增值",
+    "update": "修改值",
+    "delete": "删除值",
+    "node_create": "新增节点",
+    "node_move": "移动节点",
+    "node_rename": "节点改名",
 }
 
 
@@ -661,6 +675,7 @@ class ReportDataCollector:
         project_keys: set[str] = set()
         risk_keys: set[str] = set()
         collection_keys: set[str] = set()
+        project_info_keys: set[str] = set()
 
         for key in metric_keys:
             metric = get_metric_def(key)
@@ -675,10 +690,12 @@ class ReportDataCollector:
                 risk_keys.add(key)
             elif metric.dimension == "collection":
                 collection_keys.add(key)
+            elif metric.dimension == "project_info":
+                project_info_keys.add(key)
 
         logger.info(
-            "按指标采集 ticket=%s project=%s risk=%s collection=%s",
-            ticket_keys, project_keys, risk_keys, collection_keys,
+            "按指标采集 ticket=%s project=%s risk=%s collection=%s project_info=%s",
+            ticket_keys, project_keys, risk_keys, collection_keys, project_info_keys,
         )
 
         result: dict = {"date_range": date_range_str}
@@ -694,6 +711,10 @@ class ReportDataCollector:
         if collection_keys:
             result["collection"] = self._collect_collection_metrics(
                 collection_keys, start, end
+            )
+        if project_info_keys:
+            result["project_info"] = self._collect_project_info_metrics(
+                project_info_keys, start, end
             )
 
         return result
@@ -1200,6 +1221,225 @@ class ReportDataCollector:
             for key, field in scalar_fields.items():
                 if key in keys:
                     result[field] = summary.get(field)
+
+            return result
+        finally:
+            db.close()
+
+    # ── 项目信息维度指标采集 ────────────────────────────────
+
+    def _collect_project_info_metrics(
+        self, keys: set[str], start: datetime, end: datetime
+    ) -> dict:
+        """采集项目信息管理四张表的指标（表结构与 backend delivery.py 对齐）。
+
+        数据关系：
+        - project_info_node：字段定义（project_id IS NULL=全局模板，非空=项目增补），
+          只描述结构不存值；
+        - project_info_value：各项目实际值，UNIQUE(project_id, node_id)，不预建空行；
+        - project_info_value_history：值/结构变更历史，changed_at 为时间口径，
+          old/new_value 为原生 JSON 前后值；
+        - project_info_node_mark：节点关注（主键 node_id+operator，每人一份）。
+
+        范围过滤：传入 project_ids 时，节点取「全局模板 + 范围内项目增补」，
+        值/历史/关注一律按 project_id 过滤；未传入则全量统计。
+        填写率分母：全局 field 节点数 × 项目数 + 各项目增补 field 节点数。
+        """
+        db = self._get_db()
+        try:
+            # 节点：active 的全局模板节点 +（范围过滤下）项目增补节点
+            node_q = db.query(ProjectInfoNode).filter(
+                ProjectInfoNode.status == "active"
+            )
+            if self._project_ids:
+                node_q = node_q.filter(
+                    sa_or(
+                        ProjectInfoNode.project_id.is_(None),
+                        ProjectInfoNode.project_id.in_(self._project_ids),
+                    )
+                )
+            nodes = node_q.all()
+            field_nodes = [n for n in nodes if n.node_type == "field"]
+            global_fields = [n for n in field_nodes if n.project_id is None]
+            node_map = {n.id: n for n in nodes}
+
+            result: dict = {}
+
+            # -- 节点统计 --
+            if "project_info.node_total" in keys:
+                result["node_total"] = len(nodes)
+            if "project_info.global_node_count" in keys:
+                result["global_node_count"] = sum(
+                    1 for n in nodes if n.project_id is None
+                )
+            if "project_info.custom_node_count" in keys:
+                result["custom_node_count"] = sum(
+                    1 for n in nodes if n.project_id is not None
+                )
+
+            # -- 字段值类型分布（只统计 field 节点，root/group 无值语义） --
+            if "project_info.by_value_type" in keys:
+                by_type: dict[str, int] = {}
+                for n in field_nodes:
+                    vt = n.value_type or "text"
+                    by_type[vt] = by_type.get(vt, 0) + 1
+                result["by_value_type"] = by_type
+
+            # -- 项目口径：范围过滤下的项目清单 --
+            project_q = db.query(ProjectDelivery.id, ProjectDelivery.name)
+            if self._project_ids:
+                project_q = project_q.filter(
+                    ProjectDelivery.id.in_(self._project_ids)
+                )
+            project_rows = project_q.all()
+            project_names = {
+                str(pid): name for pid, name in project_rows if pid
+            }
+            project_ids = list(project_names.keys())
+
+            # -- 已填值（不预建空行，有行即已填） --
+            value_q = db.query(ProjectInfoValue)
+            if self._project_ids:
+                value_q = value_q.filter(
+                    ProjectInfoValue.project_id.in_(project_ids)
+                )
+            values = value_q.all()
+            filled_by_project: dict[str, int] = {}
+            for v in values:
+                filled_by_project[v.project_id] = (
+                    filled_by_project.get(v.project_id, 0) + 1
+                )
+
+            # -- 变更历史 --
+            hist_q = db.query(ProjectInfoValueHistory)
+            if self._project_ids:
+                hist_q = hist_q.filter(
+                    ProjectInfoValueHistory.project_id.in_(project_ids)
+                )
+            histories = hist_q.all()
+
+            start_str = start.strftime("%Y-%m-%d")
+            end_str = end.strftime("%Y-%m-%d")
+
+            if "project_info.change_count" in keys or "project_info.change_by_day" in keys:
+                by_day: dict[str, int] = {}
+                in_range: list = []
+                for h in histories:
+                    day = (h.changed_at or "")[:10]
+                    if day and start_str <= day <= end_str:
+                        in_range.append(h)
+                        by_day[day] = by_day.get(day, 0) + 1
+                if "project_info.change_count" in keys:
+                    result["change_count"] = len(in_range)
+                    # 顺带按天序列：标量指标配趋势图（图+文字展示）
+                    result["change_count_by_day"] = dict(sorted(by_day.items()))
+                if "project_info.change_by_day" in keys:
+                    result["change_by_day"] = dict(sorted(by_day.items()))
+
+            if "project_info.change_by_type" in keys:
+                by_op: dict[str, int] = {}
+                for h in histories:
+                    op = _PROJECT_INFO_OP_CN.get(
+                        h.operation_type or "", h.operation_type or "未知"
+                    )
+                    by_op[op] = by_op.get(op, 0) + 1
+                result["change_by_type"] = by_op
+
+            # -- 填写率与完整度明细（共用一次聚合） --
+            if any(
+                k in keys
+                for k in ("project_info.fill_rate", "project_info.items")
+            ):
+                custom_fields_by_project: dict[str, int] = {}
+                for n in field_nodes:
+                    if n.project_id:
+                        custom_fields_by_project[n.project_id] = (
+                            custom_fields_by_project.get(n.project_id, 0) + 1
+                        )
+                fillable_by_project = {
+                    pid: len(global_fields) + custom_fields_by_project.get(pid, 0)
+                    for pid in project_ids
+                }
+                fillable_total = sum(fillable_by_project.values())
+                filled_total = sum(filled_by_project.values())
+
+                if "project_info.fill_rate" in keys:
+                    rate = (
+                        (filled_total / fillable_total * 100)
+                        if fillable_total
+                        else 0.0
+                    )
+                    result["fill_rate"] = round(rate, 1)
+                    result["filled_node_count"] = filled_total
+                    result["fillable_node_count"] = fillable_total
+
+                if "project_info.items" in keys:
+                    last_change: dict[str, str] = {}
+                    for h in histories:
+                        if not h.project_id:
+                            continue
+                        cur = last_change.get(h.project_id) or ""
+                        if (h.changed_at or "") > cur:
+                            last_change[h.project_id] = h.changed_at
+                    rows = []
+                    for pid in project_ids:
+                        filled = filled_by_project.get(pid, 0)
+                        fillable = fillable_by_project.get(pid, 0)
+                        rows.append({
+                            "项目名称": project_names.get(pid, pid),
+                            "已填字段数": filled,
+                            "可填字段数": fillable,
+                            "填写率": round(filled / fillable * 100, 1) if fillable else 0.0,
+                            "最近变更时间": last_change.get(pid),
+                        })
+                    rows.sort(key=lambda r: (-r["填写率"], -r["已填字段数"]))
+                    result["items"] = rows[:50]
+
+            # -- 已填字段值明细（可按值内容回答具体字段问题） --
+            if "project_info.value_items" in keys:
+                ordered = sorted(
+                    values,
+                    key=lambda v: (v.project_id or "", v.node_id or ""),
+                )
+                items = []
+                for v in ordered:
+                    node = node_map.get(v.node_id)
+                    raw = v.value_json
+                    if isinstance(raw, (dict, list)):
+                        raw = json.dumps(raw, ensure_ascii=False)
+                    items.append({
+                        "项目名称": project_names.get(v.project_id, v.project_id),
+                        "字段名": node.node_name if node else v.node_id,
+                        "值": (str(raw) if raw is not None else "")[:120],
+                        "更新时间": v.updated_at,
+                    })
+                    if len(items) >= 100:
+                        break
+                result["value_items"] = items
+
+            # -- 被关注最多的节点（星标，project_info_node_mark） --
+            if "project_info.top_marked_nodes" in keys:
+                mark_q = db.query(ProjectInfoNodeMark)
+                if self._project_ids:
+                    mark_q = mark_q.filter(
+                        ProjectInfoNodeMark.project_id.in_(project_ids)
+                    )
+                marks = mark_q.all()
+                mark_count: dict[str, int] = {}
+                for m in marks:
+                    mark_count[m.node_id] = mark_count.get(m.node_id, 0) + 1
+                top = sorted(
+                    mark_count.items(), key=lambda kv: kv[1], reverse=True
+                )[:10]
+                result["top_marked_nodes"] = [
+                    {
+                        "节点名": (
+                            node_map[nid].node_name if nid in node_map else nid
+                        ),
+                        "关注数": cnt,
+                    }
+                    for nid, cnt in top
+                ]
 
             return result
         finally:

@@ -157,18 +157,92 @@ class ProjectDelivery(Base):
 
 
 class ProjectInfoNode(Base):
-    """项目信息树节点（仅查询，字段对齐 backend/app/models/delivery.py ProjectInfoNode）"""
+    """项目信息树节点定义（仅查询，字段对齐 backend/app/models/delivery.py ProjectInfoNode）。
+
+    双用途：project_id IS NULL = 全局模板节点（所有项目共享同一份字段定义）；
+    project_id = A = 项目 A 的增补自定义节点（仅 A 可见）。
+    节点只描述结构（叫什么、什么类型），不存值——项目实际数据在
+    project_info_value，靠 (project_id, node_id) 关联。
+    """
     __tablename__ = "project_info_node"
 
-    id = Column(String(64), primary_key=True, comment="节点UUID(客户端生成)")
-    project_id = Column(String(64), nullable=False, comment="所属项目ID")
+    id = Column(String(64), primary_key=True, comment="节点永久身份(UUID)，改名/挪位不换")
+    project_id = Column(String(64), nullable=True, comment="NULL=全局模板节点；非 NULL=该项目专属的增补节点")
     parent_id = Column(String(64), nullable=True, comment="父节点ID, NULL=根节点")
-    title = Column(String(255), nullable=False, comment="节点标题")
-    content_type = Column(String(32), nullable=False, default="text", comment="内容类型")
-    value = Column(Text, nullable=True, comment="节点值")
-    sort_order = Column(Integer, nullable=False, default=0, comment="同级排序")
+    node_key = Column(String(191), nullable=False, comment="程序用稳定标识(如 base.customer_info)，建立后不可改")
+    node_name = Column(String(255), nullable=False, comment="节点显示名")
+    node_type = Column(String(16), nullable=False, default="field", comment="节点类型: root/group/field")
+    value_type = Column(String(32), nullable=False, default="text", comment="值类型: text/number/boolean/date/select/multi_select/person/attachment/json")
+    sort_order = Column(Integer, nullable=False, default=0, comment="同级排序(升序)")
+    required = Column(Boolean, nullable=False, default=False, comment="是否必填")
+    allow_custom = Column(Boolean, nullable=False, default=False, comment="是否允许在其下增补项目自定义子节点")
+    config = Column(JSON, nullable=True, comment="节点配置: 下拉选项、单位、占位提示等")
+    status = Column(String(16), nullable=False, default="active", comment="状态: active/disabled（停用保留历史与值，仅隐去）")
+    created_by = Column(String(64), nullable=True, comment="创建人登录名（全局节点为管理员）")
+    created_at = Column(String(30), nullable=False, comment="创建时间")
+    updated_by = Column(String(64), nullable=True, comment="最近修改人登录名")
+    updated_at = Column(String(30), nullable=False, comment="更新时间")
+
+
+class ProjectInfoValue(Base):
+    """项目信息值表（仅查询，字段对齐 backend/app/models/delivery.py ProjectInfoValue）。
+
+    某个项目的某个节点的当前值：UNIQUE(project_id, node_id)，一个项目对一个节点
+    只有一份当前值。不预创建空值——没填过的节点这里就没有行，查询时 LEFT JOIN。
+    value_json 存原生 JSON，具体形状由节点的 value_type 决定。
+    """
+    __tablename__ = "project_info_value"
+
+    id = Column(String(64), primary_key=True, comment="记录UUID")
+    project_id = Column(String(64), nullable=False, comment="值所属项目ID")
+    node_id = Column(String(64), nullable=False, comment="对应的节点ID（全局节点或本项目增补节点）")
+    value_json = Column(JSON, nullable=True, comment="节点值(原生JSON: 字符串/数字/数组/对象)")
     created_at = Column(String(30), nullable=False, comment="创建时间")
     updated_at = Column(String(30), nullable=False, comment="更新时间")
+    updated_by = Column(String(64), nullable=True, comment="最近修改人登录名")
+
+
+class ProjectInfoValueHistory(Base):
+    """项目信息值变更历史（仅查询，字段对齐 backend/app/models/delivery.py ProjectInfoValueHistory）。
+
+    每一行是「谁在什么时候把哪个节点的值从什么改成了什么」。
+    old_value / new_value 与 value_json 同尺度；node_key/node_name/node_type
+    是写入时的快照，节点改名/停用后历史仍可追溯。
+    operation_type 覆盖值变动 create/update/delete 与结构变动
+    node_create/node_move/node_rename 两类操作。
+    """
+    __tablename__ = "project_info_value_history"
+
+    id = Column(String(64), primary_key=True, comment="记录UUID（时间有序，可当水位比较）")
+    project_id = Column(String(64), nullable=False, comment="所属项目ID（历史按项目隔离，必填）")
+    node_id = Column(String(64), nullable=True, comment="被操作的节点ID；整树级操作为 NULL")
+    parent_id = Column(String(64), nullable=True, comment="上级节点ID")
+    node_key = Column(String(191), nullable=False, default="", comment="写入时的节点标识快照")
+    node_name = Column(String(255), nullable=False, default="", comment="写入时的节点名称快照")
+    node_type = Column(String(16), nullable=True, comment="写入时的节点类型快照")
+    old_value = Column(JSON, nullable=True, comment="变更前的值（原生JSON）")
+    new_value = Column(JSON, nullable=True, comment="变更后的值（原生JSON）")
+    operation_type = Column(String(16), nullable=False, comment="操作类型: create/update/delete/node_create/node_move/node_rename")
+    changed_by = Column(String(64), nullable=True, comment="操作人登录名")
+    changed_by_name = Column(String(64), nullable=True, comment="操作人显示名")
+    change_reason = Column(Text, nullable=True, comment="变更原因（预留）")
+    detail = Column(Text, nullable=True, comment="具体变动的人话描述")
+    changed_at = Column(String(30), nullable=False, comment="操作时间")
+
+
+class ProjectInfoNodeMark(Base):
+    """项目信息树节点「关注」标注（仅查询，字段对齐 backend/app/models/delivery.py ProjectInfoNodeMark）。
+
+    每人一份关注列表：主键 (node_id, operator)，同一节点可被多人各存一行。
+    project_id 注明关注发生在哪个项目维度。
+    """
+    __tablename__ = "project_info_node_mark"
+
+    node_id = Column(String(64), primary_key=True, comment="被关注的节点ID")
+    operator = Column(String(64), primary_key=True, comment="关注人登录名（关注列表按人隔离）")
+    project_id = Column(String(64), nullable=False, comment="所属项目ID")
+    operator_name = Column(String(64), nullable=True, comment="关注人显示名")
+    created_at = Column(String(30), nullable=False, comment="关注时间")
 
 
 class Risk(Base):
