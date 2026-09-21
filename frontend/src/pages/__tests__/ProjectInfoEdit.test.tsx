@@ -4,6 +4,7 @@ import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import ProjectInfoEdit from '../admin/ProjectInfoEdit';
 import {
+  clearProjectInfoValuesApi,
   createInfoNodeApi,
   createCustomInfoNodeApi,
   deleteInfoNodeApi,
@@ -25,6 +26,7 @@ vi.mock('@/api/infoNodes', () => ({
   moveInfoNodeApi: vi.fn(),
   deleteInfoNodeApi: vi.fn(),
   importInfoTreeApi: vi.fn(),
+  clearProjectInfoValuesApi: vi.fn(),
   // 编辑历史：进页面会拉一次「各节点最新记录时间」算小红点，缺了页面会直接崩
   fetchInfoNodeChangesApi: vi.fn(),
   fetchInfoNodeChangeSummaryApi: vi.fn(),
@@ -309,6 +311,42 @@ describe('ProjectInfoEdit（信息树编辑页）', () => {
       expect(deleteInfoNodeApi).toHaveBeenCalledWith('r1');
     });
     expect(screen.queryByText('基础信息')).toBeNull();
+  });
+
+  it('一键清空：先确认再清（清掉值、节点还在），并把清掉的条数报出来', async () => {
+    vi.mocked(clearProjectInfoValuesApi).mockResolvedValue(1);
+    renderEdit();
+    await screen.findByText('基础信息');
+
+    fireEvent.click(screen.getByRole('button', { name: '一键清空' }));
+    // 确认弹层：没点「清空」之前不发请求
+    expect(screen.getByText(/清空本项目所有已填的内容/)).toBeTruthy();
+    expect(clearProjectInfoValuesApi).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: '清空' }));
+    await waitFor(() => expect(clearProjectInfoValuesApi).toHaveBeenCalledWith('P1'));
+    await waitFor(() => {
+      expect((screen.getByLabelText('客户信息内容') as HTMLTextAreaElement).value).toBe('');
+    });
+    // 节点与结构保留
+    expect(screen.getByText('基础信息')).toBeTruthy();
+    expect(screen.getByText('客户信息')).toBeTruthy();
+  });
+
+  it('一键清空：确认前点「取消」不发请求', async () => {
+    renderEdit();
+    await screen.findByText('基础信息');
+    fireEvent.click(screen.getByRole('button', { name: '一键清空' }));
+    fireEvent.click(screen.getByRole('button', { name: '取消' }));
+    expect(clearProjectInfoValuesApi).not.toHaveBeenCalled();
+  });
+
+  it('不是这个项目的人看不到「一键清空」（值写入门槛之外的重操作）', async () => {
+    authState.permissions = [];
+    authState.projectIds = [];       // 只在别的项目下有角色
+    renderEdit();
+    await screen.findByText('基础信息');
+    expect(screen.queryByRole('button', { name: '一键清空' })).toBeNull();
   });
 
   it('全局字段定义不给结构操作，只留历史（改定义要走「详情模板」）', async () => {

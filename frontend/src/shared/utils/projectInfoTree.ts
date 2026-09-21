@@ -493,6 +493,24 @@ export function patchInfoNode(
   return nodes.map((node) => (node.id === id ? { ...node, ...updates } : node));
 }
 
+/**
+ * 一键清空（乐观更新）：把所有节点的值换成「空」，节点本身原样留着。
+ * 下拉清掉选中项、**保留选项**（选项属于字段定义，清了就没得选了）；
+ * 附件置 null（文件本体在资源库里不动，只是不再挂在这个节点上）；其余置空串。
+ */
+export function clearInfoNodeValues(nodes: ProjectInfoNode[]): ProjectInfoNode[] {
+  return nodes.map((node) => (hasFieldValue(node) ? { ...node, value: emptyValueOf(node) } : node));
+}
+
+function emptyValueOf(node: ProjectInfoNode): ProjectInfoSelectValue | ProjectInfoFileValue | string | null {
+  if (node.content_type === 'select') {
+    const current = node.value as ProjectInfoSelectValue | null;
+    return { selected: '', options: current?.options ?? [] };
+  }
+  if (node.content_type === 'file' || node.content_type === 'image') return null;
+  return '';
+}
+
 /** 删除节点及其全部后代节点 */
 export function removeInfoNode(nodes: ProjectInfoNode[], id: string): ProjectInfoNode[] {
   const doomed = new Set<string>([id]);

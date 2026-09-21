@@ -157,6 +157,17 @@ export async function importInfoTreeApi(projectId: string, nodes: ApiInfoTreeImp
   return data?.imported ?? 0;
 }
 
+/** 一键清空本项目**已填的内容**（只清值；节点与结构保留）；返回清掉的字段数。
+ *  后端逐条记入编辑历史（delete + change_reason=一键清空），门槛与结构类接口相同（项目成员）。
+ */
+export async function clearProjectInfoValuesApi(projectId: string): Promise<number> {
+  const data = await request()<{ cleared?: number }>(
+    `/info-nodes/projects/${encodeURIComponent(projectId)}/clear-values`,
+    { method: 'POST' },
+  );
+  return data?.cleared ?? 0;
+}
+
 /** 按后端模板重建信息树 —— 已废弃。
  *  新结构下全局字段定义是所有项目共用的一份（project_info_node 里 project_id 为空的行），
  *  每个项目读树时自动带上，不存在「本项目缺字段需要补种」的情况，后端也已移除该接口。
