@@ -6,7 +6,8 @@
 **鉴权口径**
   结构类写接口 = 改「这个项目的树」：`POST /projects/{id}`（增补节点）、
   `POST /projects/{id}/import`（文件导入落库的整树导入）、`PUT /nodes/{id}`、
-  `PATCH /nodes/{id}/move`、`DELETE /nodes/{id}`、`POST /projects/{id}/parse-file`
+  `PATCH /nodes/{id}/move`、`DELETE /nodes/{id}`、`POST /projects/{id}/parse-file`、
+  `GET /projects/{id}/ledger-sync`（企业微信台账同步预览，读整棵树 + 读本地台账镜像）
   → **该项目下的人**（user_project_roles 里该项目有任一角色）都能改，admin 直通
   （`require_project_member`）。节点级路由的项目不在路径上，按节点反查归属项目
   （`_require_node_project_member`）。只靠前端藏按钮是拦不住的（接口可直连），
@@ -50,6 +51,7 @@ from app.modules.admin.services.info_node_service import info_node_service
 from app.modules.admin.services.info_node_change_service import info_node_change_service
 from app.modules.admin.services.info_node_mark_service import info_node_mark_service
 from app.modules.admin.services import info_node_import_service
+from app.modules.admin.services import info_node_ledger_sync_service
 from app.modules.admin.services.info_template_service import info_template_service
 from app.models.delivery import PROJECT_INFO_VALUE_TYPES
 
@@ -339,12 +341,21 @@ def import_info_tree(project_id: str, data: InfoNodeImport,
 def get_info_node_changes(
     project_id: str,
     node_id: Optional[str] = Query(None, description="节点ID；给了则只返回该节点的历史（含其直接子节点的删除记录）"),
+    include_descendants: bool = Query(
+        False, description="把范围放大到该节点的整棵子树（一级标签的「修改记录」用）"),
     limit: int = Query(100, ge=1, le=500, description="最多返回条数（最新在前）"),
 ):
     """节点编辑历史。传 node_id 返回该节点的记录（自身操作 + 其子节点的删除记录）；
-    不传则返回项目全部记录（含整树级导入）。"""
+    不传则返回项目全部记录（含整树级导入）。
+
+    include_descendants=true 时按整棵子树取（前端只在一级标签上这么请求）：
+    根节点的「历史」要看的是这一级标签下所有节点的变动，而不只是它自己。
+    该参数只在给了 node_id 时有意义。"""
     if node_id:
-        changes = info_node_change_service.list_for_node(project_id, node_id, limit)
+        if include_descendants:
+            changes = info_node_change_service.list_for_subtree(project_id, node_id, limit)
+        else:
+            changes = info_node_change_service.list_for_node(project_id, node_id, limit)
     else:
         changes = info_node_change_service.list_project_changes(project_id, limit)
     return {"changes": changes}
@@ -452,6 +463,28 @@ async def parse_import_file(project_id: str, file: UploadFile = File(...),
         raise HTTPException(status_code=400, detail=str(exc))
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
+
+
+@info_node_router.get("/projects/{project_id}/ledger-sync",
+                      summary="企业微信台账同步预览（不落库；项目成员）")
+def preview_ledger_sync(project_id: str,
+                        current_user: Dict[str, Any] = Depends(require_project_member)):
+    """把企业微信台账里本项目的记录与现有信息节点比对，返回三类预览：
+
+    将填写（节点是空的）/ 将覆盖（节点已有内容且与台账不一致 = **矛盾**）/
+    未匹配到节点（台账有这一列、树里没有 = **缺少的节点**）。
+    前端据这些分组提醒用户，由用户逐条决定「增加」还是「覆盖」。
+
+    台账读的是本地 project 表（企微智能表格同步进来的镜像，与项目列表页同一份数据），
+    不调外部服务；与 /parse-file 同一套匹配内核，也只读不写，确认后的落库走既有的值写入/
+    增补节点 CRUD。错误约定：400=项目还没有信息节点，404=项目不存在。
+    """
+    try:
+        return info_node_ledger_sync_service.build_sync_preview(project_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 # ── 详情模板（全局字段定义）：全局角色 开发者 / 超级管理员 维护 ──

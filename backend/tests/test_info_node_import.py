@@ -18,6 +18,7 @@ from app.modules.admin.services.info_node_import_service import (
     build_vehicle_model_catalog,
     extract_text,
     find_vehicle_parent_path,
+    find_vehicle_total_count_path,
     flatten_tree,
     match_items,
     parse_llm_items,
@@ -182,7 +183,7 @@ def test_build_catalog_and_prompt():
 
 
 def _vehicle_tree():
-    """真实模板片段：硬件 / 车辆 / 车型1（下拉）/ 数量。
+    """真实模板片段：硬件 / 车型信息 / 车型1（下拉）/ 数量。
 
     车型1 是「自带值又有子节点」的节点：value 是选中的车型型号，子节点「数量」另填。
     """
@@ -191,8 +192,10 @@ def _vehicle_tree():
             "id": "h1", "title": "硬件", "content_type": "text", "value": None, "sort_order": 0,
             "children": [
                 {
-                    "id": "v1", "title": "车辆", "content_type": "text", "value": None, "sort_order": 0,
+                    "id": "v1", "title": "车型信息", "content_type": "text", "value": None, "sort_order": 0,
                     "children": [
+                        # 与各车型「数量」并列的整车台数（模板 2026-09-21 新增）
+                        {"id": "t1", "title": "总车数", "content_type": "text", "value": "", "sort_order": 0, "children": []},
                         {
                             "id": "m1", "title": "车型1", "content_type": "select",
                             "value": json.dumps({"selected": "", "options": ["XC1051", "XCD101"]}),
@@ -216,11 +219,11 @@ def test_match_vehicle_model_into_select_node():
     """
     flat = flatten_tree(_vehicle_tree())
     # 清单里车型1 标了 (可填)：它是下拉、又是匹配候选
-    assert "硬件 / 车辆 / 车型1\tselect\t(可填)\t可选项：XC1051|XCD101" in build_node_catalog(flat)
+    assert "硬件 / 车型信息 / 车型1\tselect\t(可填)\t可选项：XC1051|XCD101" in build_node_catalog(flat)
 
     result = match_items(flat, [
-        {"title": "XC1051", "value": "XC1051", "node_title": "车型1", "suggested_parent_path": "硬件 / 车辆"},
-        {"title": "数量", "value": "6 台", "node_title": "数量", "suggested_parent_path": "硬件 / 车辆 / 车型1"},
+        {"title": "XC1051", "value": "XC1051", "node_title": "车型1", "suggested_parent_path": "硬件 / 车型信息"},
+        {"title": "数量", "value": "6 台", "node_title": "数量", "suggested_parent_path": "硬件 / 车型信息 / 车型1"},
     ])
     by_node = {row["node_id"]: row for row in result["fill"]}
     assert by_node["m1"]["value"] == "XC1051"   # 型号落成下拉值
@@ -237,12 +240,12 @@ def test_vehicle_quantity_lands_in_child_node():
     flat = flatten_tree(_vehicle_tree())
     result = match_items(flat, [{
         "title": "XC1051", "value": "XC1051", "node_title": "车型1",
-        "quantity": "6 台", "suggested_parent_path": "硬件 / 车辆",
+        "quantity": "6 台", "suggested_parent_path": "硬件 / 车型信息",
     }])
     by_node = {row["node_id"]: row for row in result["fill"]}
     assert by_node["m1"]["value"] == "XC1051"          # 型号落成下拉值
     assert by_node["q1"]["value"] == "6 台"            # 数量落进子节点
-    assert by_node["q1"]["path"] == "硬件 / 车辆 / 车型1 / 数量"
+    assert by_node["q1"]["path"] == "硬件 / 车型信息 / 车型1 / 数量"
     assert result["overwrite"] == [] and result["unmatched"] == []
 
     # 「数量」已有内容 → 进「将覆盖」而不是重复填
@@ -250,7 +253,7 @@ def test_vehicle_quantity_lands_in_child_node():
     next(n for n in flat_with_qty if n["id"] == "q1")["value"] = "2 台"
     again = match_items(flat_with_qty, [{
         "title": "XC1051", "value": "XC1051", "node_title": "车型1",
-        "quantity": "6 台", "suggested_parent_path": "硬件 / 车辆",
+        "quantity": "6 台", "suggested_parent_path": "硬件 / 车型信息",
     }])
     assert [row["node_id"] for row in again["overwrite"]] == ["q1"]
     assert again["overwrite"][0]["current"] == "2 台"
@@ -276,7 +279,7 @@ def test_vehicle_model_snaps_into_dropdown_on_import():
     """文件里的车型写法与目录不完全一致时，也能吸到下拉节点上而不是变成未匹配。"""
     flat = flatten_tree(_vehicle_tree())
     result = match_items(flat, [
-        {"title": "XS1161", "value": "XS1161", "node_title": None, "suggested_parent_path": "硬件 / 车辆"},
+        {"title": "XS1161", "value": "XS1161", "node_title": None, "suggested_parent_path": "硬件 / 车型信息"},
     ])
     # 旧型号写法的目标是 XS1201 —— 测试树的选项里没有它，退化成未匹配（不硬塞）
     assert result["fill"] == [] and len(result["unmatched"]) == 1
@@ -285,14 +288,14 @@ def test_vehicle_model_snaps_into_dropdown_on_import():
     next(n for n in flat2 if n["id"] == "m1")["options"] = ["XS1201", "XCD101"]
     snapped = match_items(flat2, [
         {"title": "超薄托盘堆垛机器人 2000 kg", "value": "XS1161（原型号）", "node_title": "车型1",
-         "suggested_parent_path": "硬件 / 车辆"},
+         "suggested_parent_path": "硬件 / 车型信息"},
     ])
     assert snapped["fill"][0]["node_id"] == "m1"
     assert snapped["fill"][0]["value"] == "XS1201"
 
 
 def _two_model_tree():
-    """硬件 / 车辆 / 车型1 + 车型2（各带「数量」子节点）——模板里多个车型槽位的样子。"""
+    """硬件 / 车型信息 / 车型1 + 车型2（各带「数量」子节点）——模板里多个车型槽位的样子。"""
     def model(nid, title, qid, order):
         return {
             "id": nid, "title": title, "content_type": "select", "sort_order": order,
@@ -305,7 +308,7 @@ def _two_model_tree():
     return [{
         "id": "h1", "title": "硬件", "content_type": "text", "value": None, "sort_order": 0,
         "children": [{
-            "id": "v1", "title": "车辆", "content_type": "text", "value": None, "sort_order": 0,
+            "id": "v1", "title": "车型信息", "content_type": "text", "value": None, "sort_order": 0,
             "children": [model("m1", "车型1", "q1", 0), model("m2", "车型2", "q2", 1)],
         }],
     }]
@@ -319,7 +322,7 @@ def test_unmatched_item_snaps_into_nearby_dropdown():
     flat = flatten_tree(_vehicle_tree())
     result = match_items(flat, [{
         "title": "潜伏顶升搬运机器人 1000 kg", "value": "XCD101（潜伏顶升搬运机器人 1000 kg）",
-        "node_title": None, "suggested_parent_path": "硬件 / 车辆",
+        "node_title": None, "suggested_parent_path": "硬件 / 车型信息",
     }])
     # 值吸到「车型1」下拉、写成选项原文，而不是到未匹配里新建一个「XCD101」节点
     assert [row["node_id"] for row in result["fill"]] == ["m1"]
@@ -332,7 +335,7 @@ def test_unmatched_item_snaps_into_nearby_dropdown():
         {"selected": "XCD101", "options": ["XC1051", "XCD101"]})
     assert match_items(settled, [{
         "title": "潜伏顶升搬运机器人 1000 kg", "value": "XCD101（潜伏顶升搬运机器人 1000 kg）",
-        "node_title": None, "suggested_parent_path": "硬件 / 车辆",
+        "node_title": None, "suggested_parent_path": "硬件 / 车型信息",
     }]) == {"fill": [], "overwrite": [], "unmatched": []}
 
     # 附近的下拉选着别的值 → 不抢（那个值多半是别的条目填的），老老实实进未匹配
@@ -341,7 +344,7 @@ def test_unmatched_item_snaps_into_nearby_dropdown():
         {"selected": "XC1051", "options": ["XC1051", "XCD101"]})
     blocked = match_items(busy, [{
         "title": "潜伏顶升搬运机器人 1000 kg", "value": "XCD101（潜伏顶升搬运机器人 1000 kg）",
-        "node_title": None, "suggested_parent_path": "硬件 / 车辆",
+        "node_title": None, "suggested_parent_path": "硬件 / 车型信息",
     }])
     assert blocked["fill"] == [] and len(blocked["unmatched"]) == 1
 
@@ -350,9 +353,9 @@ def test_second_model_falls_to_next_empty_model_dropdown():
     """一个车型节点只装一款车：第一条占了「车型1」，第二条顺到「车型2」，不是新建节点。"""
     items = [
         {"title": "XC1051", "value": "XC1051", "node_title": "车型1",
-         "quantity": "2 台", "suggested_parent_path": "硬件 / 车辆"},
+         "quantity": "2 台", "suggested_parent_path": "硬件 / 车型信息"},
         {"title": "XCD101", "value": "XCD101", "node_title": "车型1",
-         "quantity": "3 台", "suggested_parent_path": "硬件 / 车辆"},
+         "quantity": "3 台", "suggested_parent_path": "硬件 / 车型信息"},
     ]
     by_node = {row["node_id"]: row for row in match_items(flatten_tree(_two_model_tree()), items)["fill"]}
     assert by_node["m1"]["value"] == "XC1051" and by_node["q1"]["value"] == "2 台"
@@ -439,7 +442,7 @@ def _live_flat():
     tree = [{
         "id": "h1", "title": "硬件", "content_type": "text", "value": None, "sort_order": 0,
         "children": [{
-            "id": "v1", "title": "车辆", "content_type": "text", "value": None, "sort_order": 0,
+            "id": "v1", "title": "车型信息", "content_type": "text", "value": None, "sort_order": 0,
             "children": [{
                 "id": "m1", "title": "车型1", "content_type": "select",
                 "value": {"selected": "XCD061", "options": ["XC1051", "XCD101", "XS1201", "XCD061"]},
@@ -469,7 +472,7 @@ def test_live_shape_import_matches_dropdown_and_quantity():
     flat = _live_flat()
     result = match_items(flat, [{
         "title": "车型1", "value": "XC1051（原 XC1050）", "node_title": "车型1",
-        "quantity": "6 台", "suggested_parent_path": "硬件 / 车辆",
+        "quantity": "6 台", "suggested_parent_path": "硬件 / 车型信息",
     }])
     by_node = {row["node_id"]: row for row in result["overwrite"]}
     assert by_node["m1"]["value"] == "XC1051"      # 值吸到下拉
@@ -480,7 +483,7 @@ def test_live_shape_import_matches_dropdown_and_quantity():
     # 值本来就一致 → 不产生任何变更（旧代码因为读不到当前值，会反复重复写）
     same = match_items(_live_flat(), [{
         "title": "车型1", "value": "XCD061", "node_title": "车型1",
-        "quantity": None, "suggested_parent_path": "硬件 / 车辆",
+        "quantity": None, "suggested_parent_path": "硬件 / 车型信息",
     }])
     assert same == {"fill": [], "overwrite": [], "unmatched": []}
 
@@ -492,7 +495,7 @@ def test_same_title_prefers_node_that_can_hold_the_value():
     按标题取第一个会一直写那个孤儿节点，下拉永远空着。
     """
     tree = [{
-        "id": "v1", "title": "车辆", "content_type": "text", "value": None, "sort_order": 0,
+        "id": "v1", "title": "车型信息", "content_type": "text", "value": None, "sort_order": 0,
         "children": [
             # 旧导入留下的孤儿：同名、文本、有独占的子节点（排序在前）
             {"id": "orphan", "title": "车型1", "content_type": "text", "value": "XSC121", "sort_order": 3, "children": []},
@@ -544,7 +547,7 @@ def test_same_title_prefers_node_that_can_hold_the_value():
 def test_quantity_without_child_node_falls_back_to_unmatched():
     """车型下还没有「数量」子节点时，数量不能悄悄吞掉，要提示在车型下增补。"""
     tree = [{
-        "id": "v1", "title": "车辆", "content_type": "text", "value": None, "sort_order": 0,
+        "id": "v1", "title": "车型信息", "content_type": "text", "value": None, "sort_order": 0,
         "children": [{
             "id": "m3", "title": "车型3", "content_type": "select",
             "value": {"selected": "", "options": ["XC1051", "XCD101"]}, "sort_order": 0, "children": [],
@@ -559,7 +562,7 @@ def test_quantity_without_child_node_falls_back_to_unmatched():
     row = result["unmatched"][0]
     assert row["title"] == "数量" and row["value"] == "2 台"
     assert row["suggested_parent_id"] == "m3"                 # 挂到车型3 下
-    assert row["suggested_parent_path"] == "车辆 / 车型3"
+    assert row["suggested_parent_path"] == "车型信息 / 车型3"
 
 
 def test_vehicle_catalog_completeness():
@@ -580,13 +583,25 @@ def test_vehicle_catalog_completeness():
 
 def test_find_vehicle_parent_path():
     flat = flatten_tree(_vehicle_tree())
-    # 「车型1」的父级是「车辆」→ 车型信息归属到 硬件 / 车辆
-    assert find_vehicle_parent_path(flat) == "硬件 / 车辆"
-    # 只有「车辆」没有「车型N」→ 归属到车辆节点本身
-    bare = flatten_tree([{"id": "v9", "title": "车辆", "content_type": "text", "value": None, "sort_order": 0, "children": []}])
-    assert find_vehicle_parent_path(bare) == "车辆"
+    # 「车型1」的父级就是车型分组 → 归属到 硬件 / 车型信息（分组自己也叫「车型…」，
+    # 别把它的父级「硬件」当成归属路径）
+    assert find_vehicle_parent_path(flat) == "硬件 / 车型信息"
+    # 只有分组、没铺「车型N」槽位 → 归属到分组节点本身（新旧两个名字都认）
+    for title in ("车型信息", "车辆"):
+        bare = flatten_tree([{"id": "v9", "title": title, "content_type": "text",
+                              "value": None, "sort_order": 0, "children": []}])
+        assert find_vehicle_parent_path(bare) == title
     # 信息树里没有车辆/车型节点 → None（提示词不注入车型清单）
     assert find_vehicle_parent_path(flatten_tree(_tree())) is None
+
+
+def test_find_vehicle_total_count_path():
+    """「总车数」只在车型分组下才算数（别的分组同名节点不是它）。"""
+    flat = flatten_tree(_vehicle_tree())
+    assert find_vehicle_total_count_path(flat, "硬件 / 车型信息") == "硬件 / 车型信息 / 总车数"
+    # 没有车型分组 / 分组下没有总车数 → None（提示词不加那一条规则）
+    assert find_vehicle_total_count_path(flat, None) is None
+    assert find_vehicle_total_count_path(flat, "硬件") is None
 
 
 def test_build_prompt_vehicle_catalog_injection():
@@ -594,17 +609,28 @@ def test_build_prompt_vehicle_catalog_injection():
     prompt = build_import_prompt(
         build_node_catalog(flat), "现场部署 XCD101 潜伏顶升搬运机器人 2 台", "中力越南项目",
         find_vehicle_parent_path(flat),
+        find_vehicle_total_count_path(flat, find_vehicle_parent_path(flat)),
     )
     # 车型清单进提示词，归属路径取车型节点的父级，并附车型专用规则
     assert "车型清单" in prompt
     assert "XCD101（潜伏顶升搬运机器人 1000 kg）" in prompt
-    assert "suggestedParentPath 填「硬件 / 车辆」" in prompt
+    assert "suggestedParentPath 填「硬件 / 车型信息」" in prompt
     assert "\n8. " in prompt
+    # 总车数与各车型「数量」分开交代：不许把各车型加起来充当总数
+    assert "\n9. " in prompt
+    assert "总车数" in prompt and "禁止" in prompt
 
-    # 没有车辆节点的信息树不注入车型清单，也没有第 8 条规则
+    # 没有车型节点的信息树不注入车型清单，也没有第 8/9 条规则
     plain = build_import_prompt(build_node_catalog(flatten_tree(_tree())), "客户：中力", "中力越南项目")
     assert "车型清单" not in plain and "XC1051" not in plain
-    assert "\n8. " not in plain
+    assert "\n8. " not in plain and "\n9. " not in plain
+
+    # 有车型分组但分组下没有「总车数」（老库还没跑迁移）→ 只加第 8 条
+    no_total = build_import_prompt(
+        build_node_catalog(flatten_tree(_vehicle_tree())), "x", "中力越南项目",
+        "硬件 / 车型信息", None,
+    )
+    assert "\n8. " in no_total and "\n9. " not in no_total
 
 
 def test_project_name_mismatch():
@@ -630,7 +656,7 @@ def test_parse_llm_items_strips_fence_and_normalizes():
         "items": [
             {"title": "客户信息", "value": " 浙江中力 ", "nodeTitle": "客户信息", "suggestedParentPath": None},
             {"title": "数量", "value": 3, "nodeTitle": None, "quantity": " 6 台 ",
-             "suggestedParentPath": "硬件 / 车辆"},
+             "suggestedParentPath": "硬件 / 车型信息"},
             {"title": "空值条目", "value": "   ", "nodeTitle": None},
             {"title": "", "value": "无标题", "nodeTitle": None},
         ],
@@ -641,7 +667,7 @@ def test_parse_llm_items_strips_fence_and_normalizes():
          "quantity": None, "suggested_parent_path": None},
         # quantity（车型数量）跟着条目一起归一，没有的补 None
         {"title": "数量", "value": "3", "node_title": None,
-         "quantity": "6 台", "suggested_parent_path": "硬件 / 车辆"},
+         "quantity": "6 台", "suggested_parent_path": "硬件 / 车型信息"},
     ]
 
 
@@ -676,7 +702,7 @@ def test_match_fill_overwrite_unmatched():
         _item("ERP模块", "SAP ECC", "ERP模块"),              # 末级且为空 → 将填写
         _item("客户信息", "浙江中力", "客户信息"),            # 已有内容 → 将覆盖
         _item("ERP模块", "重复条目", "ERP模块"),              # 同一节点第二次 → 去重
-        _item("设备数量", "3 台", None, "硬件 / 车辆"),       # 匹配不上 → 未匹配（建议归属不在树里）
+        _item("设备数量", "3 台", None, "硬件 / 车型信息"),       # 匹配不上 → 未匹配（建议归属不在树里）
         _item("节拍", "60 秒", None, "基础信息 / 订单信息"),  # 匹配不上 → 未匹配（建议归属存在）
     ]
     result = match_items(flat, items)
