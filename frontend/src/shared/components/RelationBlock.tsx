@@ -28,6 +28,7 @@ import {
   type BlockedErrorDetail,
   type RelationTreeNode,
   type RelationTreeResponse,
+  type TicketType,
 } from '@/api/ticket';
 import { PRIORITY_DISPLAY_MAP, TICKET_TYPE_DISPLAY_MAP } from '@/shared/constants/ticket';
 
@@ -1030,7 +1031,7 @@ export default function RelationBlock({
       const newTicket = await createTicket({
         title: creatingSubtaskTitle.trim(),
         description: creatingSubtaskDesc.trim() || '（自动创建子任务）',
-        ticket_type: creatingSubtaskTicketType || ticketType || 'problem',
+        ticket_type: (creatingSubtaskTicketType || ticketType || 'problem') as TicketType,
         priority: (creatingSubtaskPriority as any) || 'medium',
         // 指定处理人：选了直接派给此人；没选则不传 → 后端创建 status=NEW → AI 派单 Worker 重新派单
         assigned_to: creatingSubtaskAssignee?.id ?? undefined,
