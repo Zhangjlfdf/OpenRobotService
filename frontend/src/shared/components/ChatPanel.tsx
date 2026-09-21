@@ -2812,6 +2812,13 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
         return;
       }
 
+      // 代他人提单（代理提单）：关系建立失败必须让用户看见 —— 工单已提交成功，
+      // 但代提未生效；此前该结果被静默丢弃，用户全无感知（列表/详情无标记、被代理人无提醒）。
+      const proxyErr = res.data?.proxy_relation_error;
+      if (proxyErr) {
+        Toast({ message: `代提未生效：${proxyErr}`, theme: 'warning' });
+      }
+
       // 工单1 概览气泡数据：以 confirm_submit 返回的 ticket（实际入库的那份）为准。
       // 之前用本地 draft（弹窗时的第一版 LLM 草稿）——confirm_submit 内部会重新
       // _build_ticket 生成第二版，两次 LLM 调用有随机性，导致卡片标题/描述与
