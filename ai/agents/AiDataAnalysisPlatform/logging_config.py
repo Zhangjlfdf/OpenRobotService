@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Dict
@@ -30,6 +31,24 @@ _FILE_LEVEL = logging.INFO
 
 # 日志格式
 _FORMATTER_STR = "%(asctime)s [%(levelname)s][%(filename)s:%(lineno)d]: %(message)s"
+
+
+class _WindowsSafeRotatingFileHandler(RotatingFileHandler):
+    """Windows 下文件被占用时跳过本次轮转，避免日志异常刷屏。"""
+
+    def doRollover(self):
+        if sys.platform != "win32":
+            super().doRollover()
+            return
+        if self.stream:
+            self.stream.close()
+            self.stream = None
+        try:
+            super().doRollover()
+        except PermissionError:
+            self.mode = "a"
+            self.stream = self._open()
+
 
 # 已初始化的 logger 缓存
 _initialized_loggers: Dict[str, logging.Logger] = {}
@@ -100,7 +119,7 @@ def get_logger(module_name: str) -> logging.Logger:
 
     # ── INFO 文件处理器（仅记录 INFO 级别）──────────────────
     info_file = os.path.join(_LOG_DIR, f"{module_name}.info.log")
-    info_handler = RotatingFileHandler(
+    info_handler = _WindowsSafeRotatingFileHandler(
         info_file,
         maxBytes=_MAX_BYTES_MB * 1024 * 1024,
         backupCount=_BACKUP_COUNT,
@@ -113,7 +132,7 @@ def get_logger(module_name: str) -> logging.Logger:
 
     # ── ERROR 文件处理器（ERROR 及以上）────────────────────
     error_file = os.path.join(_LOG_DIR, f"{module_name}.error.log")
-    error_handler = RotatingFileHandler(
+    error_handler = _WindowsSafeRotatingFileHandler(
         error_file,
         maxBytes=_MAX_BYTES_MB * 1024 * 1024,
         backupCount=_BACKUP_COUNT,

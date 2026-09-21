@@ -13,6 +13,7 @@ from ai.agents.AiDiagnosisPlatform.assigner.ranking.tags import (
     recall_source_label,
     score_tag_labels,
 )
+from ai.agents.AiDiagnosisPlatform.assigner.prompts.shared import responsible_content_for
 
 from ai.core.logging import get_logger
 
@@ -346,17 +347,21 @@ class LlmDecision:
 
     def _build_prompt(self, ticket, engineers, recall_result, ranked_scores, extra_hints=None, product: str = ""):
         from ai.agents.AiDiagnosisPlatform.assigner.prompts.step6 import (
+            FEATURE_ROLE_ROUTING,
             IRON_RULES,
             JUDGE_HINTS,
             OUTPUT_CONTRACT,
         )
         lines = [
             "你是本工单派单的『最终拍板决策者』。",
-            "系统已通过召回与精排准备好带依据的候选排名。精排是最强参考，最终选谁由你决定。",
+            "系统已通过召回与精排准备好带依据的候选排名。精排是最强参考，最终选谁由你决定。"
+            "若判定为需求单，还须按【仅需求单·产品/研发分流】决定先产品还是研发。",
             "",
             IRON_RULES,
             "",
             JUDGE_HINTS,
+            "",
+            FEATURE_ROLE_ROUTING,
             "",
             "【候选人排名（已含职级折扣；#1 为总分最高）】",
         ]
@@ -381,6 +386,14 @@ class LlmDecision:
                 f"#{rank} {llm_person_label(eng=eng)} | {_lv_txt} | {dep} "
                 f"|{eng.modules_display()}{tag_str}"
             )
+            scope = responsible_content_for(
+                eng,
+                keywords_map=getattr(self._config, "module_keywords", None),
+                anchors_map=getattr(self._config, "module_anchor_texts", None),
+                max_chars=240,
+            )
+            if scope:
+                lines.append(f"   负责内容:{scope}")
             lines.append(
                 f"   分数: 总={d.get('total_score',0):.2f} "
                 f"画像={d.get('llm_score',0):.2f} "

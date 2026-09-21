@@ -12,6 +12,7 @@ import { createRequest } from '@/api/client';
 import API_CONFIG from '@/config/api';
 import { POLL_INTERVAL_MS } from '@/config/poll';
 import { buildRelevanceFilters } from '@/shared/utils/ticketFilters';
+import { getMyFollowupsCount } from '@/api/ticket';
 import AdminDataAssistant from '@/shared/components/AdminDataAssistant';
 
 const TAB_PATHS: Record<WorkbenchTab, string> = {
@@ -89,6 +90,20 @@ export default function MainLayout() {
   // 无用户名时无法计算「待我处理」，不展示角标。
   const [mineTicketCount, setMineTicketCount] = useState<number | null>(null);
 
+  // 代他人提单：「待我跟进」数（我是被代理人且关系仍为 pending）。
+  // 与「待我处理」并列展示——一个是待办量，一个是待确认的代提关系，语义不同不合并。
+  const [followupCount, setFollowupCount] = useState<number>(0);
+
+  const fetchFollowupCount = useCallback(async () => {
+    if (!username && !userId) return;
+    try {
+      const { count } = await getMyFollowupsCount();
+      setFollowupCount(count || 0);
+    } catch {
+      // 计数失败保留旧角标，不打扰页面
+    }
+  }, [username, userId]);
+
   const fetchMineTicketCount = useCallback(async () => {
     if (!username && !userId) return;
     try {
@@ -111,9 +126,13 @@ export default function MainLayout() {
 
   useEffect(() => {
     fetchMineTicketCount();
-    const timer = window.setInterval(fetchMineTicketCount, POLL_INTERVAL_MS);
+    fetchFollowupCount();
+    const timer = window.setInterval(() => {
+      fetchMineTicketCount();
+      fetchFollowupCount();
+    }, POLL_INTERVAL_MS);
     return () => window.clearInterval(timer);
-  }, [fetchMineTicketCount]);
+  }, [fetchMineTicketCount, fetchFollowupCount]);
 
   // 外层滚动容器（.tabbar-shell__content）：Dashboard(/admin) 直接渲染在这里，
   // 而 AdminLayout 子页(/admin/*) 又嵌套在此容器内。从 Dashboard 滚到底部再点进
@@ -161,6 +180,14 @@ export default function MainLayout() {
                   <span className="app-bottom-nav__badge" data-testid="nav-badge-tasks">
                     {mineTicketCount > 999 ? '999+' : mineTicketCount}
                   </span>
+                )}
+                {/* 代他人提单：「待我跟进」纯圆点角标（无数字，避免与「待我处理」数字混淆） */}
+                {tab === 'tasks' && followupCount > 0 && (
+                  <span
+                    className="app-bottom-nav__dot"
+                    data-testid="nav-dot-followups"
+                    title={`${followupCount} 个他人代你提交的工单待确认跟进`}
+                  />
                 )}
               </span>
               <span className="app-bottom-nav__label">{label}</span>

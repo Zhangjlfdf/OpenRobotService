@@ -51,6 +51,7 @@ class MetricDimension(str, Enum):
     PROJECT = "project"
     RISK = "risk"
     COLLECTION = "collection"  # collection_data 采集数据表（搬运效率等）
+    PROJECT_INFO = "project_info"  # 项目信息管理（project_info_node/value/history/mark 四张表）
 
 
 # ── 输出形态 ──────────────────────────────────────────────────
@@ -204,7 +205,7 @@ _PROJECT_METRICS: list[MetricDef] = [
         key="project.total",
         dimension=MetricDimension.PROJECT,
         label="项目总数",
-        desc="交付项目的总数",
+        desc="交付项目的总数；时间口径为 settlement_period 业绩核算期（用户提及月份时按该字段过滤）",
         requires_time_range=False,
         output_type=MetricOutputType.SCALAR,
         collect_fn="_project_total_metric",
@@ -430,6 +431,110 @@ _COLLECTION_METRICS: list[MetricDef] = [
     ),
 ]
 
+# 项目信息管理（project_info_node / project_info_value / project_info_value_history /
+# project_info_node_mark 四张表）。口径对齐 backend/app/models/delivery.py 的新结构：
+# node 存字段定义（project_id IS NULL=全局模板），value 存各项目实际值，
+# history 存值/结构变更（与写值同事务），mark 存每人一份的节点关注。
+_PROJECT_INFO_METRICS: list[MetricDef] = [
+    MetricDef(
+        key="project_info.node_total",
+        dimension=MetricDimension.PROJECT_INFO,
+        label="信息节点总数",
+        desc="项目信息树节点总数（含全局模板节点与项目增补节点）",
+        requires_time_range=False,
+        output_type=MetricOutputType.SCALAR,
+        collect_fn="_project_info_node_total_metric",
+    ),
+    MetricDef(
+        key="project_info.global_node_count",
+        dimension=MetricDimension.PROJECT_INFO,
+        label="全局模板节点数",
+        desc="全局模板节点数（project_id 为空、所有项目共享的字段定义）",
+        requires_time_range=False,
+        output_type=MetricOutputType.SCALAR,
+        collect_fn="_project_info_global_node_count_metric",
+    ),
+    MetricDef(
+        key="project_info.custom_node_count",
+        dimension=MetricDimension.PROJECT_INFO,
+        label="项目自定义节点数",
+        desc="各项目增补的自定义节点数（project_id 不为空）",
+        requires_time_range=False,
+        output_type=MetricOutputType.SCALAR,
+        collect_fn="_project_info_custom_node_count_metric",
+    ),
+    MetricDef(
+        key="project_info.by_value_type",
+        dimension=MetricDimension.PROJECT_INFO,
+        label="字段值类型分布",
+        desc="按值类型（text/number/date/select等）统计字段节点数量的分布",
+        requires_time_range=False,
+        output_type=MetricOutputType.DISTRIBUTION,
+        collect_fn="_project_info_by_value_type_metric",
+    ),
+    MetricDef(
+        key="project_info.fill_rate",
+        dimension=MetricDimension.PROJECT_INFO,
+        label="信息填写率",
+        desc="已填写值的字段数占全部可填字段（全局字段节点数×项目数）的百分比",
+        requires_time_range=False,
+        output_type=MetricOutputType.SCALAR,
+        collect_fn="_project_info_fill_rate_metric",
+    ),
+    MetricDef(
+        key="project_info.change_count",
+        dimension=MetricDimension.PROJECT_INFO,
+        label="信息变更次数",
+        desc="指定时间范围内项目信息值的变更次数（含新增/修改/删除）",
+        output_type=MetricOutputType.SCALAR,
+        collect_fn="_project_info_change_count_metric",
+    ),
+    MetricDef(
+        key="project_info.change_by_day",
+        dimension=MetricDimension.PROJECT_INFO,
+        label="信息变更趋势",
+        desc="指定时间范围内每日信息变更次数的趋势（按天统计）",
+        output_type=MetricOutputType.TREND,
+        collect_fn="_project_info_change_by_day_metric",
+    ),
+    MetricDef(
+        key="project_info.change_by_type",
+        dimension=MetricDimension.PROJECT_INFO,
+        label="变更类型分布",
+        desc="按操作类型（create/update/delete/node_create/node_move/node_rename）统计的变更记录分布",
+        requires_time_range=False,
+        output_type=MetricOutputType.DISTRIBUTION,
+        collect_fn="_project_info_change_by_type_metric",
+    ),
+    MetricDef(
+        key="project_info.top_marked_nodes",
+        dimension=MetricDimension.PROJECT_INFO,
+        label="被关注最多的节点",
+        desc="被星标关注次数最多的节点排行（关注数来自 project_info_node_mark）",
+        requires_time_range=False,
+        output_type=MetricOutputType.LIST,
+        collect_fn="_project_info_top_marked_nodes_metric",
+    ),
+    MetricDef(
+        key="project_info.value_items",
+        dimension=MetricDimension.PROJECT_INFO,
+        label="已填字段值明细",
+        desc="各项目已填写的字段值明细（项目/字段名/值），可按值内容回答具体字段问题",
+        requires_time_range=False,
+        output_type=MetricOutputType.LIST,
+        collect_fn="_project_info_value_items_metric",
+    ),
+    MetricDef(
+        key="project_info.items",
+        dimension=MetricDimension.PROJECT_INFO,
+        label="项目信息完整度明细",
+        desc="每个项目的字段填写情况（已填字段数/可填字段数/填写率/最近变更时间）",
+        requires_time_range=False,
+        output_type=MetricOutputType.LIST,
+        collect_fn="_project_info_items_metric",
+    ),
+]
+
 # ── 维度分组 ──────────────────────────────────────────────────
 
 DIMENSION_GROUPS: dict[str, _DimensionGroup] = {
@@ -452,6 +557,11 @@ DIMENSION_GROUPS: dict[str, _DimensionGroup] = {
         label="搬运效率",
         table_name="collection_data",
         metrics=_COLLECTION_METRICS,
+    ),
+    "project_info": _DimensionGroup(
+        label="项目信息",
+        table_name="project_info_node/project_info_value/project_info_value_history/project_info_node_mark",
+        metrics=_PROJECT_INFO_METRICS,
     ),
 }
 

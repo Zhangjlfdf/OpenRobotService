@@ -1,3 +1,8 @@
+// ⚠️ 本文件未被应用引用（全仓库没有 import '@/router'）——应用真正使用的路由表是
+// src/main.tsx 里内联的那个 createBrowserRouter（带 errorElement / basename / 懒加载兜底）。
+// 在此处加路由不会生效：请求会落到 main.tsx 的 /admin/* 兜底（AdminFallback → 跳回 /admin），
+// 表现为「点了按钮跳错页」。改路由请改 src/main.tsx；本文件仅作历史留存，
+// 由 __tests__/router.test.tsx 中的真实路由表用例守着别再走错地方。
 import { lazy } from 'react';
 import { createBrowserRouter, Navigate, Outlet } from 'react-router-dom';
 import { AuthGuard } from '@/shared/utils/authGuard';
@@ -25,6 +30,8 @@ const TicketStatusDetail = lazy(() => import('@/pages/admin/TicketStatusDetail')
 const ProjectCategoryDetail = lazy(() => import('@/pages/admin/ProjectCategoryDetail'));
 const ProjectDetail = lazy(() => import('@/pages/admin/ProjectDetail'));
 const TransportEfficiency = lazy(() => import('@/pages/admin/TransportEfficiency'));
+// 项目信息管理（项目详细信息）编辑页：项目详情卡右上角「编辑」进入
+const ProjectInfoEdit = lazy(() => import('@/pages/admin/ProjectInfoEdit'));
 
 // 三大核心功能（明细列表页）
 const TicketMonitor = lazy(() => import('@/pages/admin/TicketMonitor'));
@@ -87,7 +94,12 @@ export const router = createBrowserRouter([
           { path: 'dashboard/projects/:dimension/:key', element: <ProjectCategoryDetail /> },
           // 项目详情：点击项目管理列表条目后展示（原样复用项目详情设计稿，见 pages/admin/ProjectDetail.tsx）
           { path: 'project-detail/:id', element: <ProjectDetail /> },
+          // 项目工单卡三格汇总的下钻：只列这一个项目的该类工单（复用仪表盘的明细页，
+          // 页面见到路径上的 :id 就把 project_ids 收窄成这一个项目）
+          { path: 'project-detail/:id/tickets/:status', element: <TicketStatusDetail /> },
           { path: 'project-detail/:id/transport-efficiency', element: <TransportEfficiency /> },
+          // 编辑项目信息（信息树编辑页）：与详情页同为直挂路由（无 AdminLayout 导航壳）
+          { path: 'project-detail/:id/edit', element: <ProjectInfoEdit /> },
           // 次级入口：三大功能传统列表页 + 管理员工具
           { path: 'entries', element: <AdminEntries /> },
           {

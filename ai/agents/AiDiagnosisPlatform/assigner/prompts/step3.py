@@ -6,6 +6,7 @@ from typing import List
 
 from ai.agents.AiDiagnosisPlatform.assigner.prompts.shared import (
     engineer_brief_lines,
+    feature_role_routing_guidance,
     person_anti_hallucination,
     ticket_fields_block,
     ticket_type_person_guidance,
@@ -18,6 +19,8 @@ def build_l1(
     engineers: List[EngineerProfile],
     top_min: int = 3,
     top_max: int = 6,
+    keywords_map=None,
+    anchors_map=None,
 ) -> str:
     """构造画像召回 prompt。
 
@@ -48,8 +51,10 @@ def build_l1(
     lines = [
         intro,
         ticket_type_person_guidance(ticket).rstrip(),
+        feature_role_routing_guidance().rstrip(),
         "工单写的是现象或需求，不是职责原文。先看懂本单要解决什么，再对照各人卡片判断谁能接。",
-        "职责文案可以为空；责任模块是选人的主依据。有职责文案时作补充，无职责文案时只依据责任模块，"
+        "职责文案可以为空；责任模块是选人的主依据。负责内容里的关键词和一句话说明来自责任树，"
+        "用来认口语/别称，不是另一路召回。有职责或负责内容时作补充，没有时只依据责任模块，"
         "禁止因此压低分数，也禁止臆造未写出的职责。",
         "不要用过往工单经验（相似工单和问题簇另有两路），也不要求卡片字面等于标题。",
         "故障码、车型若出现，只帮助理解现象，不单独作为选人硬条件。",
@@ -61,14 +66,16 @@ def build_l1(
         "  - 0.40～0.54：仅沾边；把握不足时宁可不选入 rankings",
         "  - 低于 0.40：不要写入 rankings",
         "每位入选的人都必须写 reason：用姓名，一句话，点出工单里哪句现象/需求，"
-        "以及据此判断该人哪条责任模块（或职责）能接。",
+        "以及据此判断该人哪条责任模块、负责内容或职责能接。",
         "",
         ticket_fields_block(ticket).rstrip(),
         "",
         "【候选工程师】",
     ]
     for e in engineers:
-        lines.extend(engineer_brief_lines(e))
+        lines.extend(
+            engineer_brief_lines(e, keywords_map=keywords_map, anchors_map=anchors_map)
+        )
 
     lines.extend([
         "",

@@ -15,6 +15,7 @@
 - 传 project_ids（即使为空）：仅统计指定项目内的数据
 """
 import asyncio
+import logging
 import re
 import time
 
@@ -27,10 +28,12 @@ from app.core.database import get_async_db as get_db
 from app.core.database import AsyncSessionLocal
 from app.models.delivery import UNDERTAKE_PENDING, UNDERTAKE_YES
 from app.modules.admin.services.task_dashboard_service import task_dashboard_service
-from app.modules.admin.services.project_service import project_service
+from app.modules.admin.services.project_service import project_service, NO_TASK_EXECUTION_STATS
 from app.modules.admin.services.risk_service import risk_service
 
 dashboard_router = APIRouter(prefix="/dashboard", tags=["admin-dashboard"])
+
+logger = logging.getLogger(__name__)
 
 PROJECT_STAGE_MAP = {
     "pre_sales": ["售前方案"],
@@ -113,9 +116,10 @@ def _enrich_projects_with_analysis(projects: List[Dict]) -> None:
 
     与 /projects/ 接口 include_analysis 逻辑保持一致：
     - risks：未关闭风险数（status != 关闭 计 1）
-    - task_execution_stats：近 7 天任务统计（总数/完成数/完成率，来自 collection_data）
-    - latest_manual_switch_count：切手动次数（collection_data 最新一天的
-      averageManualCount.averageManualCount，见 get_task_execution_metrics_7d_batch）
+    - task_execution_stats：任务统计（总数/完成数/完成率 + data_date 数据日期，
+      来自 collection_data 该项目已导入的最新一天）
+    - latest_manual_switch_count：切手动次数（同一最新一天的
+      averageManualCount.averageManualCount，见 get_task_execution_metrics_latest_batch）
     数据均按项目码批量查询（各 1 条 SQL），避免逐项目循环 3N 条查询。
     """
     project_codes = [p["project_code"] for p in projects]
@@ -123,16 +127,13 @@ def _enrich_projects_with_analysis(projects: List[Dict]) -> None:
         return
 
     detailed_risks = risk_service.get_detailed_open_risks_by_project_codes(project_codes)
-    metrics_7d = project_service.get_task_execution_metrics_7d_batch(project_codes)
+    metrics_latest = project_service.get_task_execution_metrics_latest_batch(project_codes)
 
     for project in projects:
         project_code = project["project_code"]
-        metric = metrics_7d.get(project_code)
+        metric = metrics_latest.get(project_code)
         project["risks"] = sum(1 for risk in detailed_risks.get(project_code, []) if risk.get("status") != "关闭")
-        project["task_execution_stats"] = (
-            metric["stats"] if metric
-            else {"total_tasks": 0, "finished_tasks": 0, "completion_rate": None, "manual_switch_count": None}
-        )
+        project["task_execution_stats"] = metric["stats"] if metric else NO_TASK_EXECUTION_STATS
         project["latest_manual_switch_count"] = (
             metric["stats"].get("manual_switch_count") if metric else None
         )
@@ -454,9 +455,32 @@ async def _run_summary_all_query(fn, pid_list):
     """在独立 AsyncSession 中执行仪表盘子查询，供 asyncio.gather 并发。
 
     SQLAlchemy 的 AsyncSession 不允许并发使用，因此每个子查询各开一个会话。
+    同时记录子查询耗时，便于定位首屏慢在哪个统计上（调试日志）。
     """
+    start = time.monotonic()
     async with AsyncSessionLocal() as session:
-        return await fn(session, pid_list)
+        result = await fn(session, pid_list)
+    elapsed_ms = (time.monotonic() - start) * 1000
+    logger.info(
+        "[dashboard summary-all] 子查询 %s 耗时 %.0fms (scope=%s)",
+        getattr(fn, "__name__", str(fn)),
+        elapsed_ms,
+        "all" if pid_list is None else f"{len(pid_list)}个项目",
+    )
+    return result
+
+
+def _run_summary_all_sync_timed(pid_list):
+    """线程池执行项目同步统计（月度/紧急度/项目简表），并记录耗时。"""
+    start = time.monotonic()
+    result = _compute_summary_all_sync_parts(pid_list)
+    elapsed_ms = (time.monotonic() - start) * 1000
+    logger.info(
+        "[dashboard summary-all] 同步部分 _compute_summary_all_sync_parts 耗时 %.0fms (scope=%s)",
+        elapsed_ms,
+        "all" if pid_list is None else f"{len(pid_list)}个项目",
+    )
+    return result
 
 
 @dashboard_router.get("/summary-all", response_model=Dict[str, Any])
@@ -495,14 +519,19 @@ async def get_dashboard_summary_all(
     now = time.monotonic()
     cached = _summary_all_cache.get(cache_key)
     if cached and now - cached[0] < _SUMMARY_ALL_TTL_SECONDS:
+        logger.info(
+            "[dashboard summary-all] 命中进程内缓存，直接返回 (耗时 %.0fms)",
+            (time.monotonic() - now) * 1000,
+        )
         return cached[1]
 
+    overall_start = time.monotonic()
     tickets, source, response_time, avg_close_time, sync_parts = await asyncio.gather(
         _run_summary_all_query(task_dashboard_service.get_ticket_summary, pid_list),
         _run_summary_all_query(task_dashboard_service.get_source_analysis, pid_list),
         _run_summary_all_query(task_dashboard_service.get_response_time_analysis, pid_list),
         _run_summary_all_query(task_dashboard_service.get_avg_close_time_analysis, pid_list),
-        run_in_threadpool(_compute_summary_all_sync_parts, pid_list),
+        run_in_threadpool(_run_summary_all_sync_timed, pid_list),
     )
     monthly, urgency, projects_brief = sync_parts
 
@@ -517,6 +546,11 @@ async def get_dashboard_summary_all(
     }
     resp = {"code": 0, "data": data}
     _summary_all_cache[cache_key] = (time.monotonic(), resp)
+    logger.info(
+        "[dashboard summary-all] 总耗时 %.0fms (scope=%s)",
+        (time.monotonic() - overall_start) * 1000,
+        "all" if pid_list is None else f"{len(pid_list)}个项目",
+    )
     return resp
 
 

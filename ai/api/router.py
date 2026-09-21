@@ -17,6 +17,7 @@ from typing import Dict, List, Optional
 from fastapi import APIRouter, Depends, UploadFile, File, Form, Query, Request, Header, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+from starlette.concurrency import run_in_threadpool
 
 from ai.core.logging import get_logger
 
@@ -825,7 +826,8 @@ async def _upload_events(
                 f"[upload] 开始VLM调用: session={session_id[:12]}, "
                 f"image_count={len(data_uris)}, names={names}"
             )
-            # 拉取最近对话上下文，让 VLM 知道图片是在什么排查场景下截的
+            # 拉取最近对话上下文，让 VLM 知道图片是在什么排查场景下截的。
+            # 正式上传保持这段原文。开发者模式的图鉴对照是试验，确认更好之前不要改这里。
             vlm_context = ""
             try:
                 mgr = await get_memory_manager()
@@ -1184,6 +1186,17 @@ class ChatRequest(BaseModel):
     max_tokens: int = Field(default=2000)
     temperature: float = Field(default=0.7, ge=0, le=2)
     system_prompt: str = Field(default="", max_length=20000, description="可选系统提示词")
+    tools: list | None = Field(
+        default=None, description="OpenAI tools 协议工具定义；非空时走工具调用模式"
+    )
+    messages: list | None = Field(
+        default=None,
+        description="完整消息列表（agentic 多轮工具循环）；非空时优先于 query/system_prompt，"
+                    "历史由调用方自行管理",
+    )
+    save_memory: bool = Field(
+        default=True, description="是否保存本轮问答到会话记忆；agentic 工具中间轮传 False"
+    )
 
 
 async def _save_memory(session_id: str, query: str, answer: str):
@@ -1215,17 +1228,47 @@ async def _build_prompt(session_id: str, query: str) -> str:
 async def chat(request: ChatRequest) -> dict:
     llm = await get_llm_client()
     try:
-        prompt = await _build_prompt(request.session_id, request.query)
         t0 = time.perf_counter()
-        answer = await llm.complete(
-            prompt=prompt,
-            system_prompt=request.system_prompt or None,
-            max_tokens=request.max_tokens,
-            temperature=request.temperature,
-        )
+        tool_calls: list = []
+        reasoning = ""
+        if request.messages:
+            # agentic 多轮工具循环：完整消息列表直连，调用方自管历史注入
+            resp = await llm.complete_with_tools(
+                tools=request.tools or [],
+                messages=[dict(m) for m in request.messages],
+                max_tokens=request.max_tokens,
+                temperature=request.temperature,
+            )
+            answer = resp.get("content") or ""
+            tool_calls = resp.get("tool_calls") or []
+            reasoning = resp.get("reasoning") or ""
+        elif request.tools:
+            # 单轮工具调用：历史按文本拼入 prompt
+            prompt = await _build_prompt(request.session_id, request.query)
+            resp = await llm.complete_with_tools(
+                tools=request.tools,
+                prompt=prompt,
+                system_prompt=request.system_prompt or None,
+                max_tokens=request.max_tokens,
+                temperature=request.temperature,
+            )
+            answer = resp.get("content") or ""
+            tool_calls = resp.get("tool_calls") or []
+            reasoning = resp.get("reasoning") or ""
+        else:
+            prompt = await _build_prompt(request.session_id, request.query)
+            answer = await llm.complete(
+                prompt=prompt,
+                system_prompt=request.system_prompt or None,
+                max_tokens=request.max_tokens,
+                temperature=request.temperature,
+            )
         total_ms = round((time.perf_counter() - t0) * 1000)
-        await _save_memory(request.session_id, request.query, answer)
-        return {"code": 0, "data": {"answer": answer, "total_ms": total_ms}}
+        # 空回答不落库（agentic 中间轮只调工具无正文时避免历史污染）
+        if request.save_memory and answer.strip():
+            await _save_memory(request.session_id, request.query, answer)
+        return {"code": 0, "data": {"answer": answer, "tool_calls": tool_calls,
+                                "reasoning": reasoning, "total_ms": total_ms}}
     except Exception as e:
         return {"code": 1, "data": {"error": str(e)}}
 
@@ -1271,6 +1314,25 @@ async def chat_stream(request: ChatRequest):
 # 会话记忆 (prefix /api/ai/memory)
 # ============================================================
 memory_router = APIRouter(prefix="/api/ai/memory", tags=["会话记忆"])
+
+
+class MemoryTurnRequest(BaseModel):
+    session_id: str = Field(..., min_length=1, max_length=128, description="会话 ID")
+    role: str = Field(..., description="角色：user / assistant")
+    content: str = Field(..., max_length=200000, description="消息内容")
+
+
+@memory_router.post("/turn", summary="追加一条会话记忆")
+async def add_memory_turn(request: MemoryTurnRequest) -> dict:
+    """供 agentic 等自管记忆的调用方显式追加轮次。"""
+    try:
+        if request.role not in ("user", "assistant"):
+            return {"code": 1, "data": {"error": "role 必须为 user 或 assistant"}}
+        mgr = await get_memory_manager()
+        await mgr.add_turn(request.session_id, request.role, request.content)
+        return {"code": 0, "data": {"status": "ok"}}
+    except Exception as e:
+        return {"code": 1, "data": {"error": str(e)}}
 
 
 @memory_router.get("/history", summary="查看对话历史")
@@ -1337,21 +1399,40 @@ async def list_all_tickets(
     try:
         from ai.core.task_adapter import task_to_dict
         from app.models.task import Task, TaskStatus, TaskType
+        from app.models.task_proxy_relation import TaskProxyRelation
         from app.core.db import SessionLocal
+        from app.core.user_identity import identity_keys
         from app.services.user_service import UserService
-        from sqlalchemy import desc, func
+        from sqlalchemy import desc, func, or_
 
         # username → 展示名（与任务服务 /api/tasks 一致的解析口径）
         user_map = UserService.get_user_map()
 
+        # 当前用户可比身份键（username / users.id 双认）：归属过滤 + 代提视角判定共用
+        _me_keys = identity_keys(username) if username else []
+
         db = SessionLocal()
         try:
-            q = db.query(Task).filter(Task.source.in_(["ai", "manual"]))
-            # 按创建者过滤（非 admin 只看自己的）
-            if username:
-                from app.core.user_identity import identity_keys
-                keys = identity_keys(username)
-                q = q.filter(Task.created_by.in_(keys) if keys else Task.created_by == username)
+            # 归属过滤（非 admin 只看与自己相关的）：我创建的 OR 我是被代理人的。
+            # 后者由代他人提单的关系表派生（口径同 tasks 服务列表的 principalBy），
+            # 否则被代理人看不到「他人代我提」的单、无法进入待确认流程。
+            _principal_task_ids: List[int] = []
+            if username and _me_keys:
+                _principal_task_ids = [
+                    row[0] for row in db.query(TaskProxyRelation.task_id).filter(
+                        TaskProxyRelation.principal_id.in_(_me_keys)
+                    ).all() if row[0]
+                ]
+
+            def _apply_owner_filter(query):
+                if not username:
+                    return query
+                own = Task.created_by.in_(_me_keys) if _me_keys else Task.created_by == username
+                if not _principal_task_ids:
+                    return query.filter(own)
+                return query.filter(or_(own, Task.id.in_(_principal_task_ids)))
+
+            q = _apply_owner_filter(db.query(Task).filter(Task.source.in_(["ai", "manual"])))
             # status/type 字符串 → 枚举；非法值（如旧值 dispatched）降级为不过滤
             if status:
                 try:
@@ -1381,11 +1462,9 @@ async def list_all_tickets(
                         pass
             # 各状态数量分布（口径：source + username，不含 status/type/keyword/exclude 等筛选），
             # 复用本接口一并返回，供前端各状态 Tab 计数与 badge 使用，无需额外统计接口
-            stat_q = db.query(Task.status, func.count(Task.id)).filter(Task.source.in_(["ai", "manual"]))
-            if username:
-                from app.core.user_identity import identity_keys
-                keys = identity_keys(username)
-                stat_q = stat_q.filter(Task.created_by.in_(keys) if keys else Task.created_by == username)
+            stat_q = _apply_owner_filter(
+                db.query(Task.status, func.count(Task.id)).filter(Task.source.in_(["ai", "manual"]))
+            )
             by_status = {s.value: 0 for s in TaskStatus}
             for st, cnt in stat_q.group_by(Task.status).all():
                 key = st.value if isinstance(st, TaskStatus) else st
@@ -1399,6 +1478,17 @@ async def list_all_tickets(
             # 二次派单感知增强（M3）：批量取各工单最新一条派单日志 → redispatch_tip（避免 N+1）
             from app.models.task_dispatch_log import TaskDispatchLog
             _ids = [r.id for r in rows]
+
+            # 代他人提单（代理关系）：批量回填，单次 IN 查询避免 N+1。
+            # 视角标记按当前登录用户判定；姓名仅对参与人下发（脱敏口径与
+            # tasks 服务 TicketService._attach_proxy_relations 一致）。
+            rel_map: Dict[int, TaskProxyRelation] = {}
+            if _ids:
+                for _rel in db.query(TaskProxyRelation).filter(
+                    TaskProxyRelation.task_id.in_(_ids)
+                ).all():
+                    rel_map.setdefault(_rel.task_id, _rel)
+
             tip_map: Dict[int, Optional[str]] = {}
             if _ids:
                 _log_rows = db.query(TaskDispatchLog).filter(
@@ -1411,11 +1501,31 @@ async def list_all_tickets(
                     _seen.add(_lr.task_id)
                     tip_map[_lr.task_id] = await _redispatch_tip_for_log(_lr, user_map)
 
+            # 评论区参与人堆叠：批量聚合（评论数排序 + 未读红点），一次 IN 查询无 N+1。
+            # 复用 backend 的 participant_service，口径与系统任务列表完全一致。
+            participants_map: Dict[int, list] = {}
+            if _ids:
+                from app.modules.tasks.participant_service import build_participants_map
+                participants_map = await run_in_threadpool(
+                    build_participants_map, db, _ids, username or None
+                )
+
             items = []
             for r in rows:
                 d = task_to_dict(r)
                 created_by = r.created_by or ""
                 assigned_to = r.assigned_to or ""
+                # 代他人提单：本单关系 + 当前用户视角标记（前端据此渲染「代 XX」胶囊 /
+                # 「待你跟进」角标，不再自行拼身份判定——重名/id 混用易判错）
+                _rel = rel_map.get(r.id)
+                _is_agent = bool(_rel and _me_keys and _rel.agent_id in _me_keys)
+                _is_principal = bool(_rel and _me_keys and _rel.principal_id in _me_keys)
+                _is_participant = bool(
+                    _rel and _me_keys and (
+                        _is_agent or _is_principal
+                        or created_by in _me_keys or assigned_to in _me_keys
+                    )
+                )
                 items.append({
                     "id": d["id"], "session_id": d["session_id"], "ticket_ai_id": d["ticket_ai_id"],
                     "title": d["title"], "description": d["description"], "type": d["type"],
@@ -1435,6 +1545,20 @@ async def list_all_tickets(
                     "assigned_to_name": user_map.get(assigned_to, assigned_to) if assigned_to else "",
                     # 二次派单感知增强（M3）：派单结果提醒一句话摘要（无提醒为 null）
                     "redispatch_tip": tip_map.get(r.id) or None,
+                    # 评论区参与人头像堆叠（发起人 | 堆叠 | 处理人），
+                    # 复用后端同一聚合服务，保证两个列表口径一致（含红点 has_unread）。
+                    "participants": participants_map.get(r.id, []),
+                    # 代他人提单（代理提单）：关系状态 + 视角标记 + 参与人姓名。
+                    # 姓名对非参与人下发 None（避免通过列表探测他人代理关系）。
+                    "proxy_relation_status": _rel.relation_status if _rel else None,
+                    "is_proxy_agent": _is_agent,
+                    "is_principal": _is_principal,
+                    "proxy_agent_name": (
+                        user_map.get(_rel.agent_id) or _rel.agent_username or _rel.agent_id
+                    ) if _is_participant else None,
+                    "proxy_principal_name": (
+                        user_map.get(_rel.principal_id) or _rel.principal_username or _rel.principal_id
+                    ) if _is_participant else None,
                 })
             return {"code": 0, "data": {"total": total, "skip": skip, "limit": limit, "items": items,
                                         "by_status": by_status, "active_total": active_total}}
@@ -1474,23 +1598,29 @@ class SummarizeRequest(BaseModel):
 
 class TaskDiagnoseRequest(BaseModel):
     task_id: str = Field(..., description="工单 ID")
+    username: str = Field(default="", description="当前用户（后端从 token 解析，前端可不传）")
 
 class TaskDiscussRequest(BaseModel):
     task_id: str = Field(..., description="工单 ID")
     query: str = Field(..., description="用户问题（如 @U老师 帮我分析这个日志）")
-    context: dict = Field(default_factory=dict, description="讨论上下文 {recent_comments: [{author, content}]}")
+    context: dict = Field(default_factory=dict, description="讨论上下文 {recent_comments, quoted_comment, reply_to}")
+    username: str = Field(default="", description="当前用户（后端从 token 解析，前端可不传）")
 
 @task_agent_router.post("/diagnose", summary="诊断报告（[帮我分析] 按钮）")
-async def task_diagnose(body: TaskDiagnoseRequest) -> dict:
+async def task_diagnose(body: TaskDiagnoseRequest, request: Request) -> dict:
     """全能力诊断 → 即时返回报告（不存库）"""
     import logging, time
     logger = logging.getLogger("TASK_AGENT")
     t_start = time.perf_counter()
-    logger.info(f"[diagnose] 入口: task_id={body.task_id}")
+    # 从 token 解析当前用户，注入用户画像让 AI 按身份调整回答深浅
+    username, _ = _current_user(request)
+    if not username:
+        username = (body.username or "").strip()
+    logger.info(f"[diagnose] 入口: task_id={body.task_id}, user={username}")
     try:
         from ai.agents.AiTaskPlatform import get_task_agent
         agent = await get_task_agent()
-        result = await agent.diagnose(task_id=body.task_id)
+        result = await agent.diagnose(task_id=body.task_id, username=username)
         elapsed = (time.perf_counter() - t_start) * 1000
         report_len = len(result.get("report_md", ""))
         logger.info(f"[diagnose] 完成: task_id={body.task_id}, elapsed={elapsed:.0f}ms, "
@@ -1504,13 +1634,17 @@ async def task_diagnose(body: TaskDiagnoseRequest) -> dict:
 
 
 @task_agent_router.post("/discuss", summary="@U老师 讨论")
-async def task_discuss(body: TaskDiscussRequest) -> dict:
+async def task_discuss(body: TaskDiscussRequest, request: Request) -> dict:
     """@U老师 讨论回复（带讨论上下文，按需调日志子Agent）→ 写 task_comments"""
     import logging, time
     logger = logging.getLogger("TASK_AGENT")
     t_start = time.perf_counter()
     query_preview = (body.query or "")[:60]
-    logger.info(f"[discuss] 入口: task_id={body.task_id}, query={query_preview}")
+    # 从 token 解析当前用户，注入用户画像让 AI 按身份调整回答深浅
+    username, _ = _current_user(request)
+    if not username:
+        username = (body.username or "").strip()
+    logger.info(f"[discuss] 入口: task_id={body.task_id}, query={query_preview}, user={username}")
     try:
         from ai.agents.AiTaskPlatform import get_task_agent
         agent = await get_task_agent()
@@ -1518,6 +1652,7 @@ async def task_discuss(body: TaskDiscussRequest) -> dict:
             task_id=body.task_id,
             query=body.query,
             context=body.context,
+            username=username,
         )
         elapsed = (time.perf_counter() - t_start) * 1000
         reply_len = len(result.get("reply", ""))

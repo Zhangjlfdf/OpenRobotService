@@ -20,7 +20,7 @@ description: OpenRobotService 自动化测试平台工作流。Use when the user
 → ⑥ 实现(一次只改一个模块,≤10 文件) → ⑦ pytest 验证 → ⑧ Allure 报告 → ⑨ 更新 worklog
 ```
 
-禁止:跳过分析直接写码、一次实现整个模块、不更新 `automation/docs/worklog/`。
+禁止:跳过分析直接写码、一次实现整个模块、不更新任务记录（现行任务记录放 `automation/docs/` 顶层；历史流水账 `automation/docs/archive/worklog/` 仅追溯用）。
 
 ## 2. 目录速查
 
@@ -32,7 +32,7 @@ automation/
 ├── ci_ai_gen/      # AI 测试生成流水线(prompts/ + run_pipeline.py + extract_api.py + gates.py)
 ├── testdata/cases/api-test-cases.xlsx   # ★ 用例唯一权威,数据驱动核心
 ├── scripts/        # cli-*.py 工具
-├── docs/           # testing/analysis(7要素分析) testing/scenarios(8覆盖场景) worklog/ 任务记录
+├── docs/           # testing/analysis(7要素分析) testing/scenarios(8覆盖场景) archive/ 历史归档
 └── output/         # Allure 报告(gitignored)
 ```
 
@@ -95,13 +95,13 @@ python -m automation.ci_ai_gen.run_pipeline --spec-dir <openapi目录> --out-dir
 - 四角色:`analyzer`(分析)→ `case-gen`(用例)→ `script-gen`(脚本)→ `gate`(门禁审阅,2 轮修复上限)
 - 产物归档:`automation/references/generated-cases/{run_id}/`(含 cases.xlsx 已映射平台格式)
 - **闭环规则**:AI 产物不直接入库;审阅确认后再将 `cases.xlsx` 内容合并进 `testdata/cases/api-test-cases.xlsx` 转正
-- 设计文档:`automation/docs/ci-ai-test-pipeline.md`;CI 触发:`.github/workflows/ai-test.yml`
+- 设计文档:`automation/docs/archive/ci-ai-test-pipeline.md`;CI 触发:`.github/workflows/ai-test.yml`
 
 ## 6. 文档要求
 
 - 分析文档:7 要素(功能点/业务流程/状态流转/权限矩阵/接口列表/风险点/边界条件),参考 `automation/docs/testing/analysis/analysis-{module}.md`
 - 场景设计:8 覆盖类型,输出到 `automation/docs/testing/scenarios/`
-- 任务记录:每次任务更新 `automation/docs/worklog/task-NN-*.md`(目标/阅读/修改文件/测试结果/风险/下一步)
+- 任务记录:每次任务在 `automation/docs/` 顶层新建任务记录(目标/阅读/修改文件/测试结果/风险/下一步);历史流水账见 `automation/docs/archive/worklog/`
 
 ## 7. 禁止事项
 

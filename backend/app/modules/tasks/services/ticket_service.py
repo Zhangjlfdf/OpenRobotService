@@ -1,22 +1,64 @@
 import logging
 import threading
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, or_, and_, case
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timedelta, timezone
+
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, func, or_, and_, case
 from sqlalchemy.orm import joinedload
 from sqlalchemy.orm.attributes import set_committed_value
 from starlette.concurrency import run_in_threadpool
 
 from app.modules.tasks.models.ticket import Ticket, TicketComment, TicketStatus, TicketPriority, TicketType
-from app.models.task import TaskFollower, TaskParticipant
+from app.models.task import TaskFollower, TaskParticipant, TaskStep
+from app.models.task_proxy_relation import TaskProxyRelation, ProxyRelationStatus
 from app.models.identity import UserDB
 from app.modules.tasks.schemas.ticket import TicketCreate, TicketUpdate, TicketCommentCreate, TicketCommentUpdate, TicketQueryParams, TicketFilterRequest, QuotedComment
 from app.core.config import settings
 from app.utils.notification_utils import NotificationUtils
 from app.utils.image_processor import ImageProcessor
 from app.services.user_service import user_service
-from app.core.user_identity import identity_keys, to_user_id
+from app.core.user_identity import identity_keys, to_user_id, to_username
+from app.modules.tasks import participant_service
+
+
+# ──────────────────────────────────────────────────────────────
+# AI 服务 Assigner Worker 集成：Redis Pub/Sub
+# ──────────────────────────────────────────────────────────────
+# 频道名和消息格式与 ai/core/memory.py 的 publish_new_ticket 完全一致
+#   await client.publish("usp:new_ticket", str(task_id))
+_ASSIGNER_PUBSUB_CHANNEL = "usp:new_ticket"
+
+
+async def _publish_new_ticket_to_assigner(task_id: int) -> None:
+    """发布新工单到 AI 服务 Assigner Worker（异步，fire-and-forget）。
+
+    Assigner Worker（ai/agents/.../assigner/pipeline/worker.py）订阅
+    ``usp:new_ticket``，收到后会触发 DispatchFlow 完整流水线派单
+    （Step0 指定人 → Step1 部门收紧 → Step2~4 召回精排 → Step6 LLM 决策 → Step7 兜底）。
+
+    与 ChatPanel 提单走的是**同一条派单路径**，派单质量和一致性有保证。
+
+    失败降级：Redis 不可用（未启动 / 连接超时） → 静默跳过，工单
+    assigned_to 保持 NULL、status=NEW，靠 Assigner Worker 的定时 MySQL
+    扫描兜底（通常分钟级，而非 24H）。
+    """
+    try:
+        import redis.asyncio as redis_async
+        url = f"redis://{settings.REDIS_HOST}:{settings.REDIS_PORT}/{settings.REDIS_DB}"
+        client = redis_async.from_url(
+            url, decode_responses=True,
+            socket_connect_timeout=2, socket_timeout=2,
+        )
+        try:
+            await client.ping()
+            await client.publish(_ASSIGNER_PUBSUB_CHANNEL, str(task_id))
+            logger.info(f"已发布新工单到 Assigner Worker: ticket_id={task_id}")
+        finally:
+            await client.close()
+    except Exception as e:
+        # 降级：不阻塞 create_ticket 返回，Worker 定时扫描兜底
+        logger.warning(f"发布到 Assigner Worker 失败 ticket_id={task_id}: {e}")
 
 
 def convert_to_shanghai_time(dt: Optional[datetime]) -> Optional[datetime]:
@@ -98,6 +140,111 @@ class TicketService:
         return identity_keys(raw)
 
     @staticmethod
+    async def _principal_task_ids(db: AsyncSession, current_user_name: str) -> List[int]:
+        """当前用户作为**被代理人**的工单 id 列表（供列表过滤拼 SQL 条件）。
+
+        代提改造（决策 10）：pending 也可在「待我处理」看到（需确认跟进），
+        故不按状态过滤；具体可见性由工单状态另行约束。
+        """
+        keys = TicketService._assignee_match_values(current_user_name)
+        if not keys:
+            return []
+        try:
+            from app.models.task_proxy_relation import TaskProxyRelation
+
+            result = await db.execute(
+                select(TaskProxyRelation.task_id).where(
+                    TaskProxyRelation.principal_id.in_(keys)
+                )
+            )
+            return [row[0] for row in result.all() if row[0]]
+        except Exception as e:
+            logger.warning(f"查询被代理工单失败 user={current_user_name}: {e}")
+            return []
+
+    @staticmethod
+    async def _notify_principal_key(db: AsyncSession, task_id: Optional[int]) -> Optional[str]:
+        """取本单**已确认跟进**的被代理人标识（用于通知并集）。
+
+        决策 10：pending 期间被代理人只读、不参与协商，故不接收状态变更通知，
+        仅接收代提成功那一封（由 create_ticket 单独发送）。
+        """
+        if not task_id:
+            return None
+        try:
+            from app.modules.tasks.services.proxy_relation_service import ProxyRelationService
+
+            rel = await ProxyRelationService.get_task_relation(db, task_id)
+            if rel and rel.relation_status == ProxyRelationStatus.ACKNOWLEDGED:
+                return rel.principal_id
+        except Exception as e:
+            logger.warning(f"取被代理人通知标识失败 task_id={task_id}: {e}")
+        return None
+
+    @staticmethod
+    async def _attach_proxy_relations(
+        db: AsyncSession,
+        tickets: List[Any],
+        user_map: Dict[str, str],
+        current_username: Optional[str],
+    ) -> None:
+        """批量回填列表卡片的代理关系信息（单次 IN 查询，避免 N+1）。
+
+        回填字段（挂在 ORM 实例上，由响应模型决定是否输出）：
+        - proxy_relation_status：pending / acknowledged / declined
+        - proxy_agent_name / proxy_principal_name：参与人姓名（来自 user_map）
+        - is_proxy_agent / is_principal：当前登录用户视角标记，供前端免二次判定
+        """
+        if not tickets:
+            return
+        try:
+            task_ids = [t.id for t in tickets if getattr(t, "id", None)]
+            if not task_ids:
+                return
+            rows = await db.execute(
+                select(TaskProxyRelation).where(TaskProxyRelation.task_id.in_(task_ids))
+            )
+            rel_map: Dict[int, TaskProxyRelation] = {}
+            for rel in rows.scalars().all():
+                rel_map.setdefault(rel.task_id, rel)
+
+            if not rel_map:
+                return
+
+            me_keys = set(TicketService._assignee_match_values(current_username or ""))
+            for ticket in tickets:
+                rel = rel_map.get(getattr(ticket, "id", None))
+                if not rel:
+                    continue
+                is_proxy_agent = bool(me_keys) and rel.agent_id in me_keys
+                is_principal = bool(me_keys) and rel.principal_id in me_keys
+                # 脱敏：仅当当前用户是本单参与人（代理人/被代理人/提单人/处理人）时，
+                # 才下发「谁代谁提单」的姓名，避免通过列表接口探测他人代理关系。
+                is_participant = (
+                    is_proxy_agent
+                    or is_principal
+                    or (bool(me_keys) and getattr(ticket, "created_by", None) in me_keys)
+                    or (bool(me_keys) and getattr(ticket, "assigned_to", None) in me_keys)
+                )
+                setattr(ticket, "proxy_relation_status", rel.relation_status)
+                setattr(ticket, "is_proxy_agent", is_proxy_agent)
+                setattr(ticket, "is_principal", is_principal)
+                if is_participant:
+                    setattr(
+                        ticket, "proxy_agent_name",
+                        user_map.get(rel.agent_id) or rel.agent_username or rel.agent_id,
+                    )
+                    setattr(
+                        ticket, "proxy_principal_name",
+                        user_map.get(rel.principal_id) or rel.principal_username or rel.principal_id,
+                    )
+                else:
+                    setattr(ticket, "proxy_agent_name", None)
+                    setattr(ticket, "proxy_principal_name", None)
+        except Exception as e:
+            logger.warning(f"回填代提关系失败: {e}")
+
+    @staticmethod
     def _redispatch_tip(log, user_map: Dict[str, str]) -> Optional[str]:
         """生成派单结果提醒的一句话摘要（无提醒返回 None）。
 
@@ -133,6 +280,53 @@ class TicketService:
         return tips
 
     @staticmethod
+    async def _resolve_principal(
+        on_behalf_of: Optional[str],
+        created_by_id: str,
+        created_by_name: str,
+        user_map: Dict[str, str],
+    ) -> Optional[str]:
+        """解析代提的被代理人 users.id（含在职校验）。
+
+        返回 None 表示普通自提单。校验不通过抛 ProxyRelationError：
+        - 被代理人不存在 / 已停用（微信模板消息依赖 openid，非在职用户收不到提醒）
+        - 等于代理人自己（「代自己提单」无意义，应为普通提单）
+
+        安全：以服务端查询为准，不信任前端传入的 id 形态。
+        """
+        raw = (on_behalf_of or "").strip()
+        if not raw:
+            return None
+
+        from app.modules.tasks.services.proxy_relation_service import ProxyRelationError
+        from app.core.db import SessionLocal
+        from app.models.identity import UserDB
+
+        def _query():
+            sync_db = SessionLocal()
+            try:
+                return (
+                    sync_db.query(UserDB)
+                    .filter((UserDB.id == raw) | (UserDB.username == raw))
+                    .first()
+                )
+            finally:
+                sync_db.close()
+
+        user = await run_in_threadpool(_query)
+        if not user:
+            raise ProxyRelationError("被代理人不存在", 400)
+        if (getattr(user, "status", "") or "").lower() != "active":
+            raise ProxyRelationError("被代理人已停用，无法办理代提（将收不到提醒）", 400)
+
+        principal_id = (user.id or "").strip()
+        if not principal_id:
+            raise ProxyRelationError("被代理人身份异常", 400)
+        if principal_id == created_by_id or principal_id == (created_by_name or "").strip():
+            raise ProxyRelationError("请勿为本人代提，直接提交即可", 400)
+        return principal_id
+
+    @staticmethod
     async def create_ticket(db: AsyncSession, ticket_data: TicketCreate, created_by: str, comment_attachment_map: dict, token: Optional[str] = None) -> Ticket:
         processed_attachments = []
         for attachment in ticket_data.attachments or []:
@@ -155,10 +349,17 @@ class TicketService:
 
         created_by_id = to_user_id(created_by) or created_by
         assigned_to_raw = ticket_data.assigned_to
-        assigned_to_id = (to_user_id(assigned_to_raw) or assigned_to_raw) if assigned_to_raw else created_by_id
+        # 前端显式传了 assigned_to → 用它；没传 → 留 None，创建后立即触发 AI 派单
+        assigned_to_id = (to_user_id(assigned_to_raw) or assigned_to_raw) if assigned_to_raw else None
 
         user_map = await TicketService._get_user_map(token)
         created_by_name = user_map.get(created_by_id, created_by)
+
+        # 代他人提单：解析被代理人（必须在职注册用户，微信推送依赖 openid）。
+        # 校验失败直接抛错，避免建出无人可跟进的"半吊子"代提单。
+        principal_id = await TicketService._resolve_principal(
+            ticket_data.on_behalf_of, created_by_id, created_by_name, user_map
+        )
 
         async with db.begin():
             db_ticket = Ticket(
@@ -183,6 +384,44 @@ class TicketService:
             )
             db.add(db_ticket)
             await db.flush()
+
+            # 初始化协商节点
+            # 优先级：前端显式传入的 curr_step_id → 后端按 ticket_type 自动取 TaskStep 模板第一个节点
+            step_id = ticket_data.curr_step_id if ticket_data.curr_step_id is not None else db_ticket.curr_step_id
+            if step_id is None:
+                step_result = await db.execute(
+                    select(TaskStep)
+                    .where(TaskStep.task_type == ticket_data.ticket_type)
+                    .order_by(TaskStep.sequence.asc())
+                    .limit(1)
+                )
+                step_row = step_result.unique().scalar_one_or_none()
+                step_id = step_row.id if step_row else None
+                step_name = step_row.step_name if step_row else None
+            else:
+                # 前端传了 curr_step_id → 反查 step_name 补全
+                step_result = await db.execute(select(TaskStep).where(TaskStep.id == int(step_id)))
+                step_row = step_result.unique().scalar_one_or_none()
+                step_name = step_row.step_name if step_row else None
+                if step_row and step_row.task_type != ticket_data.ticket_type:
+                    # step 模板不属于该 ticket_type → 忽略，让下面兜底取第一个
+                    step_id = None
+                    step_name = None
+
+            if step_id is not None:
+                db_ticket.curr_step_id = int(step_id)
+                db_ticket.curr_step_name = step_name or ''
+                # 节点结束时间：前端显式传的 curr_step_endtime > deadline_at > +7 天兜底
+                if ticket_data.curr_step_endtime is not None:
+                    db_ticket.curr_step_endtime = ticket_data.curr_step_endtime
+                elif db_ticket.curr_step_endtime is None:
+                    db_ticket.curr_step_endtime = (
+                        db_ticket.deadline_at
+                        or datetime.now(timezone.utc) + timedelta(days=7)
+                    )
+                # 若前端没传 deadline_at，用节点结束时间反填
+                if db_ticket.deadline_at is None:
+                    db_ticket.deadline_at = db_ticket.curr_step_endtime
 
             ticket_id = db_ticket.id
 
@@ -218,6 +457,54 @@ class TicketService:
                 logger.warning(f"新建工单通知发送失败 ticket_id={ticket.id}: {e}")
         else:
             logger.info(f"工单未显式指派受理人，跳过新建通知: ticket_id={ticket.id}, assigned_to={ticket.assigned_to}")
+
+        # ── 未显式指定处理人 → 发布到 AI 服务 Assigner Worker 立即派单 ──
+        # 与 ChatPanel 提单走同一条派单路径（DispatchFlow Step0~Step7 完整流水线）。
+        # 派单是**异步**的——publish 之后 create_ticket 立即返回，Assigner Worker
+        # 在另一端收到 Redis Pub/Sub 后执行派单并写回 tasks.assigned_to。
+        # 派单完成后 Assigner Worker 内部会发通知，create_ticket 侧不再等待。
+        if not assigned_to_raw:
+            await _publish_new_ticket_to_assigner(ticket.id)
+
+        # 代他人提单：写入关系（pending）并通知被代理人。
+        # 失败不阻塞提单主流程（工单已落库，代理人仍是 created_by，可正常推进）。
+        if principal_id:
+            try:
+                from app.modules.tasks.services.proxy_relation_service import (
+                    ProxyRelationService,
+                )
+                relation = await ProxyRelationService.create_relation(
+                    db,
+                    task_id=ticket.id,
+                    agent_id=created_by_id,
+                    agent_username=to_username(created_by_id),
+                    principal_id=principal_id,
+                    principal_username=to_username(principal_id),
+                )
+                if relation:
+                    await db.commit()
+                    principal_name = user_map.get(principal_id, principal_id)
+                    await ProxyRelationService.mark_notified(db, relation.id)
+                    await db.commit()
+                    # 通知被代理人：复用模板 5，发起人写「张三（代你提交）」
+                    await NotificationUtils.send_proxy_relation_notification(
+                        ticket_id=ticket.id,
+                        title=ticket.title or "",
+                        project_name=ticket.project_name or "",
+                        agent_name=created_by_name,
+                        principal_name=principal_name,
+                        action="created",
+                        user_names=[principal_id],
+                        token=token,
+                    )
+                    logger.info(
+                        f"代提关系已建立并通知被代理人: task_id={ticket.id} "
+                        f"agent={created_by_id} principal={principal_id}"
+                    )
+            except Exception as e:
+                logger.warning(
+                    f"代提关系写入/通知失败 task_id={ticket.id} principal={principal_id}: {e}"
+                )
 
         return ticket
 
@@ -453,6 +740,30 @@ class TicketService:
             )
             return query.where(Ticket.id.in_(participant_subq))
 
+        # 「我是被代理人的」：走 task_proxy_relation 表子查询。
+        # 安全：忽略前端 value，统一用服务端解析的 current_username，杜绝越权看他人代提关系。
+        if field_type == 'principal':
+            if not current_username:
+                return query.where(Ticket.id.is_(None))
+            principal_keys = TicketService._assignee_match_values(current_username)
+            principal_subq = select(TaskProxyRelation.task_id).where(
+                TaskProxyRelation.principal_id.in_(principal_keys)
+            )
+            return query.where(Ticket.id.in_(principal_subq))
+
+        # 「代理关系状态」：按 relation_status 过滤（pending / acknowledged / declined）
+        if field_type == 'proxy_status':
+            statuses = value if isinstance(value, list) else [value]
+            statuses = [str(s).strip() for s in statuses if str(s or "").strip()]
+            if not statuses:
+                return query
+            rel_subq = select(TaskProxyRelation.task_id).where(
+                TaskProxyRelation.relation_status.in_(statuses)
+            )
+            if op == 'ne':
+                return query.where(Ticket.id.notin_(rel_subq))
+            return query.where(Ticket.id.in_(rel_subq))
+
         if op == 'is_null':
             return query.where(column.is_(None))
         elif op == 'not_null':
@@ -600,7 +911,14 @@ class TicketService:
             'followedBy': (None, 'followed'),
             # 「我参与的」：column 留空，特殊类型 participated 走参与人表子查询
             'participatedBy': (None, 'participated'),
+            # 「我代提的」：created_by 即代理人，语义与 createdBy 相同但语义更清晰
+            'agentBy': (Ticket.created_by, 'text'),
+            # 「我是被代理人的」：column 留空，特殊类型 principal 走关系表子查询
+            'principalBy': (None, 'principal'),
+            # 代理关系状态：pending / acknowledged / declined
+            'proxyRelationStatus': (None, 'proxy_status'),
         }
+        # 注意：新增字段必须进白名单（不接受任意字段名），并在此处集中校验（见 _build_single_filter）。
 
         NUMBER_OPS = {'gt', 'lt', 'ge', 'le', 'eq', 'ne', 'is_null', 'not_null'}
         TEXT_OPS = {'contains', 'not_contains', 'eq', 'ne', 'is_null', 'not_null'}
@@ -695,6 +1013,26 @@ class TicketService:
             followed_ids = set(followed_rows.scalars().all())
             for ticket in tickets:
                 setattr(ticket, "is_followed", ticket.id in followed_ids)
+
+        # 批量回填「评论区参与人」：一次 IN 聚合（评论数 + 未读红点），避免 N+1。
+        # participant_service 是同步 Session 操作（与 read_receipt 同构），
+        # 这里丢进线程池执行，避免阻塞事件循环。
+        # 见 participant_service.fetch_participants_map（含排序与红点口径）。
+        if tickets:
+            participants_map = await run_in_threadpool(
+                participant_service.fetch_participants_map,
+                [t.id for t in tickets],
+                current_username,
+            )
+            for ticket in tickets:
+                setattr(ticket, "participants", participants_map.get(ticket.id, []))
+
+        # 批量回填「代提关系」：一次 IN 查询，避免 N+1（列表规模通常 ≤20）。
+        # 仅回填展示所需字段（谁代谁 + 状态），不暴露给非参与人由响应模型裁剪。
+        if tickets:
+            await TicketService._attach_proxy_relations(
+                db, tickets, user_map, current_username
+            )
 
         pages = (total + size - 1) // size
 
@@ -821,8 +1159,11 @@ class TicketService:
                 notify_users.append(ticket.created_by)
             if ticket.assigned_to:
                 notify_users.append(ticket.assigned_to)
-            if ticket.customer:
-                notify_users.append(ticket.customer)
+            # customer 收敛为纯展示「联系人」（可能是非注册用户），不再作为通知收件人；
+            # 代提改造后加入被代理人（仅已确认跟进者，pending 期间不打扰）。
+            principal_key = await TicketService._notify_principal_key(db, ticket.id)
+            if principal_key:
+                notify_users.append(principal_key)
             notify_users = list(set(notify_users))
             if operator_id:
                 operator_keys = set(identity_keys(operator_id))
@@ -1084,8 +1425,10 @@ class TicketService:
                 notify_users.append(ticket.created_by)
             if ticket.assigned_to:
                 notify_users.append(ticket.assigned_to)
-            if ticket.customer:
-                notify_users.append(ticket.customer)
+            # 同 update_ticket：customer 不再作为收件人，改收被代理人（仅已确认跟进者）
+            principal_key = await TicketService._notify_principal_key(db, ticket.id)
+            if principal_key:
+                notify_users.append(principal_key)
             notify_users = list(set(notify_users))
             if operator_id:
                 operator_keys = set(identity_keys(operator_id))
@@ -1161,6 +1504,18 @@ class TicketService:
     @staticmethod
     async def get_filtered_tickets(db: AsyncSession, current_user_name: str, page: int = 1, size: int = 10, token: Optional[str] = None) -> Dict[str, Any]:
         identity_keys_me = TicketService._assignee_match_values(current_user_name)
+        # 代提改造（决策 6）：resolved 分支的确认方由 customer 改为「提单人(created_by，即代理人)」，
+        # 并追加「我是被代理人」的子查询分支，否则被代理人在「待我处理」里看不到需要他确认关闭的单。
+        principal_task_ids = await TicketService._principal_task_ids(db, current_user_name)
+        resolved_actor_cond = (
+            Ticket.created_by.in_(identity_keys_me) if identity_keys_me
+            else Ticket.created_by == current_user_name
+        )
+        resolved_branches = [and_(Ticket.status == TicketStatus.RESOLVED, resolved_actor_cond)]
+        if principal_task_ids:
+            resolved_branches.append(
+                and_(Ticket.status == TicketStatus.RESOLVED, Ticket.id.in_(principal_task_ids))
+            )
         filter_condition = or_(
             and_(
                 Ticket.status == TicketStatus.NEW,
@@ -1170,10 +1525,7 @@ class TicketService:
                 Ticket.status.in_([TicketStatus.IN_PROGRESS, TicketStatus.PENDING]),
                 Ticket.assigned_to.in_(identity_keys_me) if identity_keys_me else Ticket.assigned_to == current_user_name
             ),
-            and_(
-                Ticket.status == TicketStatus.RESOLVED,
-                Ticket.customer.in_(identity_keys_me) if identity_keys_me else Ticket.customer == current_user_name
-            )
+            *resolved_branches
         )
 
         query = select(Ticket).where(filter_condition)
@@ -1210,98 +1562,7 @@ class TicketService:
             "pages": pages
         }
 
-    @staticmethod
-    async def get_ai_referee(title: str, comments: List[str], workload_map: Dict[str, int]) -> Dict[str, Any]:
-        url = "http://localhost:9081/api/ticketReferee"
-        data = {
-            "title": title,
-            "comments": comments,
-            "workload_map": workload_map
-        }
-        
-        try:
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    url,
-                    json=data,
-                    timeout=60.0
-                )
-                response.raise_for_status()
-                result = response.json()
-                return result
-        except Exception as e:
-            return {"code": 500, "message": f"AI服务调用失败: {str(e)}", "data": {}}
 
-    @staticmethod
-    async def assign_ticket_by_ai(db: AsyncSession, ticket: Ticket, token: Optional[str] = None) -> Dict[str, Any]:
-        try:
-            if ticket.assigned_to:
-                return {"code": 200, "message": "工单已有处理人", "data": {"assigned_to": ticket.assigned_to}}
-            
-            workload_query = await db.execute(
-                select(Ticket.assigned_to, func.count(Ticket.id))
-                .where(Ticket.status != TicketStatus.CLOSED)
-                .group_by(Ticket.assigned_to)
-            )
-            workload_result = workload_query.all()
-            
-            workload_map = {}
-            for user_id, count in workload_result:
-                if user_id:
-                    user_map = await TicketService._get_user_map(token)
-                    user_name = user_map.get(user_id, user_id)
-                    workload_map[user_name] = count
-            
-            comments = []
-            comment_query = await db.execute(
-                select(TicketComment.content)
-                .where(TicketComment.task_id == ticket.id)
-                .order_by(TicketComment.created_at.asc())
-                .limit(1)
-            )
-            comment_result = comment_query.scalar_one_or_none()
-            if comment_result:
-                comments.append(comment_result)
-            
-            ai_result = await TicketService.get_ai_referee(
-                title=ticket.title,
-                comments=comments,
-                workload_map=workload_map
-            )
-            
-            if ai_result.get("code") == 200 and ai_result.get("data", {}).get("name"):
-                ai_assigned_name = ai_result["data"]["name"]
-                user_map = await TicketService._get_user_map(token)
-                reverse_user_map = {v: k for k, v in user_map.items()}
-                ai_assigned_id = reverse_user_map.get(ai_assigned_name)
-                
-                if ai_assigned_id:
-                    # 派单只写 assigned_to，不改状态——工单保持「待处理」，由处理人「首次响应」后才进入「处理中」
-                    ticket.assigned_to = ai_assigned_id
-                    await db.commit()
-                    operator = user_map.get(ticket.created_by, ticket.created_by)
-                    await NotificationUtils.send_ticket_create_notification(
-                        ticket.id, ticket.title, ticket.project_name, operator, ticket.deadline_at, [ai_assigned_id], token)
-                    return {"code": 200, "message": "AI分配处理人成功", "data": {"assigned_to": ai_assigned_id, "assigned_to_name": ai_assigned_name}}
-            
-            return {"code": 400, "message": "AI分配处理人失败", "data": {}}
-        except Exception as e:
-            print(f"AI分配处理人失败: {str(e)}")
-            return {"code": 500, "message": f"AI分配处理人失败: {str(e)}", "data": {}}
-
-    @staticmethod
-    async def trigger_ai_assignment(ticket_id: int, token: Optional[str] = None) -> Dict[str, Any]:
-        try:
-            from app.core.database import AsyncSessionLocal
-            async with AsyncSessionLocal() as async_db:
-                ticket = await TicketService.get_ticket_by_id(async_db, ticket_id)
-                if not ticket:
-                    return {"code": 404, "message": "工单不存在", "data": {}}
-                
-                return await TicketService.assign_ticket_by_ai(async_db, ticket, token)
-        except Exception as e:
-            print(f"触发AI分配处理人失败: {str(e)}")
-            return {"code": 500, "message": f"触发AI分配处理人失败: {str(e)}", "data": {}}
 
     @staticmethod
     async def get_user_ticket_stats(db: AsyncSession, username: str, near_deadline_hours: int = 24) -> Dict[str, Any]:

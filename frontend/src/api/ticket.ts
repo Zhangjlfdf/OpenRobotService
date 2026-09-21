@@ -45,6 +45,13 @@ export interface CreateTicketParams {
   /** 附件列表：字符串为 object_path；dict 为 {path, object_path, filename} 结构（远程截图等）。
    *  与 tasks.attachments 列约定对齐——详情页读 path，AI 路径去重读 object_path。 */
   attachments?: Array<string | { path?: string; object_path?: string; filename?: string; [k: string]: unknown }>;
+  /** 代他人提单：被代理人 users.id（留空=普通自提单）。
+   *  后端会二次校验其为在职用户；成功后建立 pending 代提关系并通知对方。 */
+  on_behalf_of?: string;
+  /** 初始协商节点 ID（留空=后端按 ticket_type 自动取模板第一个） */
+  curr_step_id?: number;
+  /** 初始协商节点截止时间（ISO 字符串，留空=后端兜底 deadline_at 或 +7 天） */
+  curr_step_endtime?: string;
 }
 
 export interface CreatedTicket {
@@ -88,6 +95,72 @@ export const reDispatchTicket = (
     method: 'POST',
     body: JSON.stringify({ preferred_assignee: preferredAssignee, remark: remark || null }),
   });
+
+// ── 代他人提单（代理提单）：见 docs/PRODUCT/代他人提单（代理提单）功能设计方案.md ──
+
+/** 代理关系状态（与后端 3 态状态机对齐；无接手 / 无 revoke） */
+export type ProxyRelationStatus = 'pending' | 'acknowledged' | 'declined';
+
+/** 代提选人候选项：group 由后端显式下发，前端**不靠顺序猜** */
+export interface OnBehalfCandidate {
+  id: string;
+  username: string;
+  name?: string | null;
+  group: 'project' | 'all';
+}
+
+/** 代理关系（详情页横幅 / 列表胶囊用） */
+export interface ProxyRelation {
+  id: number;
+  task_id: number;
+  relation_status: ProxyRelationStatus;
+  source?: string | null;
+  remark?: string | null;
+  /** 当前登录用户视角，后端下发，前端不自行拼身份判定 */
+  is_agent: boolean;
+  is_principal: boolean;
+  agent_name?: string | null;
+  principal_name?: string | null;
+  notified_at?: string | null;
+  acked_at?: string | null;
+  declined_at?: string | null;
+  created_at?: string | null;
+}
+
+/** 代提选人候选：同项目在前、其他在职在后（分组标记由后端返回） */
+export const getOnBehalfCandidates = (params?: { project_id?: string; keyword?: string }) => {
+  const qs = new URLSearchParams();
+  if (params?.project_id) qs.set('project_id', params.project_id);
+  if (params?.keyword) qs.set('keyword', params.keyword);
+  const suffix = qs.toString() ? `?${qs.toString()}` : '';
+  return request(`/on-behalf-candidates${suffix}`, { method: 'GET' }) as Promise<OnBehalfCandidate[]>;
+};
+
+/** 「待我跟进」角标计数（被代理人、pending 且工单未终结） */
+export const getMyFollowupsCount = () =>
+  request('/my-followups/count', { method: 'GET' }) as Promise<{ count: number }>;
+
+/** 查询工单的代理关系（非参与人后端返回 403 或空数组） */
+export const getProxyRelations = (ticketId: number | string) =>
+  request(`/${Number(ticketId)}/proxy-relations`, { method: 'GET' }) as Promise<ProxyRelation[]>;
+
+/** 被代理人确认跟进（pending → acknowledged，获协办权） */
+export const ackProxyRelation = (ticketId: number | string, relationId: number) =>
+  request(`/${Number(ticketId)}/proxy-relations/${relationId}/ack`, {
+    method: 'POST',
+    body: JSON.stringify({}),
+  }) as Promise<ProxyRelation>;
+
+/** 被代理人拒绝（与我无关，需填原因；工单不中断，代理人兜底推进） */
+export const declineProxyRelation = (
+  ticketId: number | string,
+  relationId: number,
+  remark: string,
+) =>
+  request(`/${Number(ticketId)}/proxy-relations/${relationId}/decline`, {
+    method: 'POST',
+    body: JSON.stringify({ remark }),
+  }) as Promise<ProxyRelation>;
 
 // ── 二次派单感知增强（M2）：详情 redispatch 子对象类型 + 读取 ──
 export interface RedispatchCandidate {
@@ -194,6 +267,8 @@ export async function createTicket(params: CreateTicketParams): Promise<CreatedT
       metadata_info: params.metadata_info ?? null,
       tags: params.tags ?? null,
       attachments: params.attachments ?? null,
+      curr_step_id: params.curr_step_id ?? null,
+      curr_step_endtime: params.curr_step_endtime ?? null,
     }),
   });
 }
@@ -235,9 +310,99 @@ export const formatDuration = (seconds: number | null | undefined): string => {
   if (!seconds || seconds <= 0) return '';
   const s = Math.floor(seconds);
   if (s < 60) return `${s} 秒`;
-  const h = Math.floor(s / 3600);
+  const h = Math.floor((s / 3600));
   const m = Math.floor((s % 3600) / 60);
   const rest = s % 60;
   if (h > 0) return rest > 0 ? `${h} 小时 ${m} 分` : `${h} 小时 ${m} 分`;
   return rest > 0 ? `${m} 分 ${rest} 秒` : `${m} 分钟`;
 };
+
+// ── 工单关联（task_relations）类型与 API ──
+
+/** 关系类型（与后端 RelationType 枚举对齐） */
+export type RelationType = 'predecessor' | 'duplicate' | 'subtask';
+
+/** 关联工单概要（target/source 侧） */
+export interface RelationBrief {
+  id: number;
+  title: string;
+  status: string;
+  created_by_name?: string | null;
+  assigned_to_name?: string | null;
+}
+
+/** 工单关联响应 */
+export interface TaskRelation {
+  id: number;
+  source_task_id: number;
+  target_task_id: number;
+  relation_type: RelationType;
+  created_by?: string | null;
+  created_at: string;
+  target?: RelationBrief | null;
+  source?: RelationBrief | null;
+}
+
+/** 阻塞工单信息（状态变更 422 错误返回） */
+export interface BlockedTaskInfo {
+  task_id: number;
+  title: string;
+  status: string;
+  reason: 'predecessor' | 'subtask';
+}
+
+/** 422 阻塞错误体 */
+export interface BlockedErrorDetail {
+  code: 'blocked_by_related_tasks';
+  message: string;
+  blocked: BlockedTaskInfo[];
+}
+
+/** 获取工单所有关联（双向） */
+export const listRelations = (taskId: number | string) =>
+  request<TaskRelation[]>(`/${Number(taskId)}/relations`);
+
+/** 创建工单关联 */
+export const createRelation = (
+  taskId: number | string,
+  targetTaskId: number,
+  relationType: RelationType,
+) =>
+  request<TaskRelation>(`/${Number(taskId)}/relations`, {
+    method: 'POST',
+    body: JSON.stringify({ target_task_id: targetTaskId, relation_type: relationType }),
+  });
+
+/** 删除工单关联 */
+export const deleteRelation = (taskId: number | string, relationId: number) =>
+  request(`/${Number(taskId)}/relations/${relationId}`, { method: 'DELETE' });
+
+// ── 关系树（树形渲染用） ──
+
+/** 关系树节点 */
+export interface RelationTreeNode {
+  id: number;
+  title: string;
+  status: string;
+  created_by_name?: string | null;
+  assigned_to_name?: string | null;
+}
+
+/** 关系树边 */
+export interface RelationTreeEdge {
+  source: number;
+  target: number;
+  relation_type: RelationType;
+}
+
+/** 关系树响应 */
+export interface RelationTreeResponse {
+  root_id: number;       // 渲染根节点（subtask 树最顶层父工单）
+  current_id: number;     // 用户实际打开的工单
+  nodes: RelationTreeNode[];
+  edges: RelationTreeEdge[];
+}
+
+/** 获取工单完整关系树 */
+export const getRelationTree = (taskId: number | string, maxDepth = 8) =>
+  request<RelationTreeResponse>(`/${Number(taskId)}/relations/tree?max_depth=${maxDepth}`);

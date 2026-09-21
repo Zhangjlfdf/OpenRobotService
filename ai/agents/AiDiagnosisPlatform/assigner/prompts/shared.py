@@ -156,18 +156,39 @@ def ticket_type_person_guidance(ticket: TicketContext) -> str:
     current = {
         "problem": "本单是报障(problem)，按【故障现象】对照谁的责任模块能解决",
         "bug": "本单是缺陷(bug)，按【故障现象】对照谁的责任模块能解决",
-        "feature": "本单是需求(feature)，按【工单涉及的产品/项目】对照产品负责人或功能负责人",
+        "feature": "本单是需求(feature)，先按下方【仅需求单·产品/研发分流】判断阶段，再对照产品经理或对口研发",
         "support": "本单是咨询(support)，按【咨询涉及的产品/项目】对照产品负责人或功能负责人",
         "other": "本单类型是其它或未填，现象和产品都看，对得上责任模块的人优先",
     }.get(key, "本单类型未填，现象和产品都看，对得上责任模块的人优先")
     return (
         "先看工单类型，再用对应尺子选人（不要把所有工单都当故障）：\n"
         "  - 报障(problem)、缺陷(bug)：看【故障现象】，对照谁的责任模块能解决这类故障\n"
-        "  - 需求(feature)、咨询(support)：看【工单涉及的产品/项目】，"
-        "对照产品负责人或对应功能的负责人\n"
+        "  - 需求(feature)：看【工单涉及的产品/项目】，并按【仅需求单·产品/研发分流】选人\n"
+        "  - 咨询(support)：看【咨询涉及的产品/项目】，对照产品负责人或对应功能的负责人\n"
         "  - 其它(other)或未填：现象和产品都看，对得上的人优先\n"
         f"  → {current}\n"
         "若【工单类型】与标题/描述明显不符（例如标成需求但正文是报障），以正文为准重选尺子。"
+    )
+
+
+def feature_role_routing_guidance() -> str:
+    """需求单专属：产品澄清 vs 已对齐可实施（prompt 判断，非关键词硬规则）。
+
+    报障/缺陷/明显非需求时模型应忽略本段。Step3 画像与 Step6 仲裁共用。
+    """
+    return (
+        "【仅需求单·产品/研发分流】（仅当判定本单是需求时适用；"
+        "报障/缺陷/运维故障忽略本段，仍按现象对口研发）\n"
+        "先理解正文与重派备注，判断需求处于哪个阶段，再选人——靠语义理解，"
+        "不要只靠「需求」「产品」「研发」等字面硬套：\n"
+        "  1) 待产品澄清 / 看不清：要不要做、做成什么样、缺方案或验收、"
+        "仍像在和产品讨论范围 → 优先派职责卡片上的产品经理/产品负责人"
+        "（责任模块或职责含产品、产品设计、产品经理等），"
+        "不要猜一个功能研发硬派。\n"
+        "  2) 产品已对齐、可实施：已与产品讨论过或方案/验收清楚，"
+        "落到具体模块实现 → 派对口研发/功能负责人，不要再甩回产品「重新讨论」。\n"
+        "  3) 阶段仍模糊、名单里产品与研发都像能接 → 默认倾向产品经理做分流澄清。\n"
+        "有 [倾向接单人] / 用户明确点名时，仍优先尊重用户选择（与公共铁律一致）。"
     )
 
 
@@ -175,13 +196,70 @@ def person_anti_hallucination() -> str:
     """看人画像时的反幻觉：可以推断谁能接，但不能编造其职责。"""
     return (
         "【反幻觉】可以推断「这类故障/需求谁能接」，"
-        "但依据必须落在该人卡片上已写出的责任模块、职责上；"
+        "但依据必须落在该人卡片上已写出的责任模块、负责内容、职责上；"
         "禁止编造、脑补、补全其未写明的负责内容；"
         "禁止把别人的模块或职责安到此人头上。"
     )
 
 
-def engineer_brief_lines(eng, duty_max: int = 200) -> List[str]:
+def _scope_lookup(product: str, fname: str, keywords_map: dict, anchors_map: dict):
+    key = f"{product}-{fname}"
+    kws = keywords_map.get(key) or keywords_map.get(fname) or []
+    anc = anchors_map.get(key) or anchors_map.get(fname) or ""
+    return kws, anc
+
+
+def format_function_scope(fname: str, keywords=None, anchor: str = "") -> str:
+    """功能名 + 树上仍保存的关键词 / 一句话说明。与功能名重复的不写。"""
+    name = (fname or "").strip()
+    seen = {name}
+    extras = []
+    for raw in keywords or []:
+        kw = str(raw).strip()
+        if kw and kw not in seen:
+            seen.add(kw)
+            extras.append(kw)
+    anc = (anchor or "").strip()
+    if anc and anc not in seen:
+        extras.append(anc)
+    if not extras:
+        return name
+    return f"{name}（{'；'.join(extras)}）"
+
+
+def responsible_content_for(eng, keywords_map=None, anchors_map=None, max_chars: int = 400) -> str:
+    """把责任树 keywords / anchor 接到该人负责的功能后面。
+
+    不再作为独立召回支路；只丰富职责卡片上的「负责内容」。
+    """
+    if keywords_map is None or anchors_map is None:
+        from ai.agents.AiDiagnosisPlatform.assigner.settings import current_scope_maps
+        live_kws, live_anc = current_scope_maps()
+        if keywords_map is None:
+            keywords_map = live_kws
+        if anchors_map is None:
+            anchors_map = live_anc
+    parts = []
+    for product in (eng.responsibility_modules or {}):
+        for fname in eng.function_names_for_product(product):
+            kws, anc = _scope_lookup(product, fname, keywords_map or {}, anchors_map or {})
+            piece = format_function_scope(fname, kws, anc)
+            if piece == (fname or "").strip():
+                continue
+            parts.append(piece)
+    text = "；".join(p for p in parts if p)
+    if len(text) > max_chars:
+        return text[: max_chars - 1].rstrip() + "…"
+    return text
+
+
+def engineer_brief_lines(
+    eng,
+    duty_max: int = 200,
+    scope_max: int = 400,
+    keywords_map=None,
+    anchors_map=None,
+) -> List[str]:
     """L1（及需要看人画像的 Step）共用的工程师卡片。"""
     from ai.agents.AiDiagnosisPlatform.assigner.ranking.tags import llm_person_label
 
@@ -191,9 +269,18 @@ def engineer_brief_lines(eng, duty_max: int = 200) -> List[str]:
     if eng.company:
         bits.append(f"公司:{eng.company}")
     duty = (eng.duty_text or "").strip()
-    return [
+    scope = responsible_content_for(
+        eng,
+        keywords_map=keywords_map,
+        anchors_map=anchors_map,
+        max_chars=scope_max,
+    )
+    lines = [
         f"- {llm_person_label(eng=eng)}",
         "  " + " ".join(bits),
         f"  责任模块:{eng.modules_display() or '无'}",
-        f"  职责:{duty[:duty_max] if duty else '无'}",
     ]
+    if scope:
+        lines.append(f"  负责内容:{scope}")
+    lines.append(f"  职责:{duty[:duty_max] if duty else '无'}")
+    return lines

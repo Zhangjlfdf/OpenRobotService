@@ -300,4 +300,4 @@ git commit --amend -m "feat: 正确的提交信息"
 | 自动化测试方案 | `automation/docs/automation_strategy.md` |
 | 项目架构说明 | `docs/project_architecture.md` |
 | 本地部署指南 | `docs/PRODUCT/SETUP.md` |
-| 后端代码结构总览 | `backend/CODEBASE_OVERVIEW.md` |
+| 后端代码结构总览 | `docs/CODEBASE_OVERVIEW.md` |

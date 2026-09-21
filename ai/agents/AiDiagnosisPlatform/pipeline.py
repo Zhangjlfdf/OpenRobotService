@@ -687,6 +687,46 @@ _PROJECT_ASK_RE = re.compile(
 # 判「用户在答编号题」（还原块挂起时 LLM 按块把序号还原成项目名照抄）
 _PROJ_SEQ_RE = re.compile(r"^\s*(?:第)?\s*[0-9０-９一二三四五六七八九十]{1,3}\s*(?:个|号|项)?\s*$")
 
+_CN_NUM = {"一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6,
+           "七": 7, "八": 8, "九": 9, "十": 10}
+
+
+def _parse_seq_reply(query: str) -> Optional[int]:
+    """纯序号回应 → 序号 int；非纯序号 → None。
+    支持阿拉伯/中文数字 + 可选「第/个/号/项」修饰（「2」「第2个」「3号」）。"""
+    q = (query or "").strip()
+    if not _PROJ_SEQ_RE.match(q):
+        return None
+    core = re.sub(r"[第个号项\s]", "", q)
+    if core.isdigit():
+        return int(core)
+    for ch, n in _CN_NUM.items():
+        if core == ch:
+            return n
+    if len(core) == 2 and core[0] == "十":
+        return 10 + _CN_NUM.get(core[1], 0)
+    if len(core) == 2 and core[1] == "十":
+        return _CN_NUM.get(core[0], 0) * 10
+    return None
+
+
+def _resolve_seq_choice(query: str, candidates: List[Dict[str, str]]) -> tuple:
+    """答编号轮服务端定序还原（0916 task835 三连实锤后的机械兜底）。
+
+    返回 (handled, choice)：
+    - handled=False：本轮原话不是纯序号回应，交回 LLM 照抄/其他链路
+    - handled=True, choice=项目：有效序号，服务端定序成功（LLM 输出被覆盖）
+    - handled=True, choice=None：序号越界（如按钮 5 个用户回「7」）——项目
+      置空不预填，防两类实锤幻觉：①越界序号被 LLM 照抄成上下文项目
+      ②序号撞某项目 code 走精确匹配预填了列表外项目
+    """
+    seq = _parse_seq_reply(query)
+    if seq is None or not candidates:
+        return False, None
+    if 1 <= seq <= len(candidates):
+        return True, candidates[seq - 1]
+    return True, None
+
 
 def _strip_project_ask(text: str) -> str:
     """追问话术后验门：删除问项目的问句（按句切分，命中模式的句子整句删除）。
@@ -1305,9 +1345,12 @@ _PLANNER_TOOLS = [
                        "项目名、不要判断它对应哪个项目——对应关系由服务端校验）。"
                        "拿不准时也算疑似，调用（服务端会自行校验是否真匹配到项目，"
                        "匹配不上或歧义会自动忽略）。"
-                       "🔴 只认**本轮用户消息文字里**的称呼：本对话平台/服务号自身"
-                       "的名称、只在助手回复或历史上下文里出现过的名称，都不是项目"
-                       "提及，绝不调用。"
+                       "🔴 只认**本轮用户消息文字里**的称呼：只在助手回复或历史"
+                       "上下文里出现过的名称，不是用户主动提及，不调用。"
+                       "0916 放开：用户提到本平台相关称呼（「摇人吧」「摇人界面」等）"
+                       "也算项目提及，正常调用——服务号自身也是真实项目（摇人吧服务"
+                       "号），用户报平台问题/提需求时指的就是它；服务端子串唯一性"
+                       "校验兜底，不会收错。"
                        "用户明确指代**上一张工单**的项目（如「项目还是上次提单的项目」"
                        "「跟上个单一个项目」）时，project_name 填 \"last\"。纯设备"
                        "故障/操作咨询、完全没提任何公司/客户/产品/场地时，不用调。",
@@ -1360,9 +1403,8 @@ _PLANNER_SYSTEM = (
     "- 用户询问自己名下的项目清单（有哪些项目/参与了哪些项目/关联的项目），"
     "或询问项目整体/某个项目的进度、状态等管理情况 → "
     "list_user_projects（系统按登录身份查询，无需参数；结果自带标准边界话术，照着答）\n"
-    "- 用户消息里出现具体项目名/简称（如「本川项目」）→ mention_project"
-    "（记录跨轮记忆，与 route 并列输出；没提项目名就不调——平台/服务号自身的"
-    "名称不算项目提及）\n"
+    "- 用户消息里出现具体项目名/简称（如「本川项目」「摇人吧界面」）→ mention_project"
+    "（记录跨轮记忆，与 route 并列输出；没提项目名就不调）\n"
     "- 🔴 拿不准要不要查知识库、或消息包含任何具体故障/错误码/操作疑问 → 调用 search_kb"
     "（宁多勿漏，错误码含义必须查）\n\n"
     "route 每轮必调；只输出工具调用，不要输出任何解释文字。"
@@ -1722,11 +1764,15 @@ class AiDiagnosisPlatform:
             _prev_ref_block = (
                 "\n🔴 上一张工单的字段记录（刚提交）：" + (_pv_fields or "（无）")
                 + "\n上一单描述：" + (_pv_desc or "（无）")
-                + "\n仅当用户本轮明确指代上一单（如「车型还是上次提单的」「版本和上一单一样」）时，"
-                  "才可把上一单对应值解析为本单字段值写入 collected_info；"
-                  "用户没有指代时严禁把上一单任何内容带入本单；"
-                  "指代了但上一单没有该信息 → 追问具体值；"
-                  "🔴 禁止把「和上次一样」「还是上次的」这类指代原文当字段值记录。\n"
+                + "\n🔴 用户本轮指代上一单（如「车型还是上次提单的」「版本和上一单一样」"
+                  "「就是上次那个问题」）时的处理优先级最高：\n"
+                  "①立即从上面的记录里解析出对应值写入 collected_info——说法不同也算同一信息"
+                  "（如「车型/车辆/车」↔robot_id，「版本」↔schedule_version），"
+                  "并在回复里带出解析出的值向用户确认；\n"
+                  "②解析出的字段视为已回答，🚫 绝不再追问该字段、绝不让用户复述具体值；\n"
+                  "③指代的信息上一单记录里确实没有 → 才追问具体值；\n"
+                  "④用户没指代上一单时，严禁把上一单任何内容带入本单；\n"
+                  "🚫 绝不把「和上次一样」「还是上次的」这类指代原文当字段值记录。\n"
             )
         # 项目选择题还原块（0827 功能，0903 提升为三套 prompt 共用）：上一轮系统
         # 以编号题请用户选项目（题面列编号列表，0904 回退），
@@ -1794,6 +1840,10 @@ class AiDiagnosisPlatform:
                 f"不当场逼用户复述工单里的内容；系统会查到该工单内容放到对话上方的"
                 f"「用户引用的历史工单」块里 → 之后直接从该块提取缺失字段的值写入 "
                 f"collected_info，该块里确实没有的信息按规则3记'无'，不要再问用户。\n"
+                f"9. 用户主动补充的背景/现象（如「之前就有异响」「提单前就出现过这个问题」）："
+                f"即使不对应任何缺失字段，也要先**简短确认收到**（如「异响的情况记下了」），"
+                f"再继续问下一个缺失字段——这些背景会进入工单描述，"
+                f"🚫 严禁无视用户刚说的内容直接跳问别的。\n"
                 + _prev_ref_block +
                 f"⚠️ 已收集的字段不要再问。"
             )
@@ -4805,6 +4855,46 @@ class AiDiagnosisPlatform:
 
         record = upsert_task(ticket, created_by=created_by)
 
+        # 代他人提单（代理提单）：AI 转工单链路的代提关系落地。
+        # 此前 overrides.on_behalf_of 在 upsert_task 里被静默丢弃（该路径不经过
+        # tasks 服务 create_ticket），导致「弹窗勾了代提 → 列表/详情无标记、
+        # 被代理人收不到提醒」。此处补上，且失败**不静默**：回传前端明确提示。
+        proxy_relation = None
+        proxy_relation_error = ""
+        _on_behalf = str(ticket.get("on_behalf_of") or "").strip()
+        if _on_behalf:
+            try:
+                from ai.core.task_adapter import bind_proxy_relation
+                proxy_relation = bind_proxy_relation(record.id, _on_behalf, created_by)
+                if proxy_relation:
+                    logger.info(
+                        f"[confirm] 代提关系已建立: db_id={record.id} "
+                        f"agent={proxy_relation.get('agent_id')} "
+                        f"principal={proxy_relation.get('principal_id')} "
+                        f"created={proxy_relation.get('created')}"
+                    )
+                    try:
+                        from app.utils.notification_utils import NotificationUtils
+                        await NotificationUtils.send_proxy_relation_notification(
+                            ticket_id=record.id,
+                            title=ticket.get("title", "") or "",
+                            project_name=ticket.get("project", "") or "",
+                            agent_name=proxy_relation.get("agent_name") or created_by,
+                            principal_name=proxy_relation.get("principal_name") or "",
+                            action="created",
+                            user_names=[proxy_relation.get("principal_id")],
+                        )
+                    except Exception as _ne:
+                        # 通知失败不回滚关系（关系已在库，被代理人可从「待我跟进」看到）
+                        logger.warning(f"[confirm] 代提通知发送失败 db_id={record.id}: {_ne}")
+            except Exception as _pe:
+                proxy_relation_error = str(_pe)
+                logger.error(
+                    f"[confirm] 代提关系建立失败 db_id={record.id} "
+                    f"on_behalf_of={_on_behalf}: {_pe}",
+                    exc_info=True,
+                )
+
         agent_state.ticket_seq += 1
         _reset_state_after_submit(agent_state, memory, ticket, record.id)
         # 对话记录附件回改文件名（生成时拿不到工单 id）；mock 全栈测试无
@@ -4828,7 +4918,11 @@ class AiDiagnosisPlatform:
 
         logger.info(f"[confirm] 工单已提交: session={session_id}, db_id={record.id}")
         return {"code": 0, "data": {"ticket": ticket, "db_id": record.id,
-                                     "notice": "工单已生成并保存，等待自动派单。"}}
+                                     "notice": "工单已生成并保存，等待自动派单。",
+                                     # 代他人提单：关系结果随响应回传（失败时前端提示用户，
+                                     # 避免"勾了代提但没生效"再次静默）
+                                     "proxy_relation": proxy_relation,
+                                     "proxy_relation_error": proxy_relation_error}}
 
     async def collect_title(self, session_id: str) -> str:
         """等待该会话的后台标题任务落地并返回标题（SSE 生产者流结束后调用，
@@ -5727,6 +5821,25 @@ class AiDiagnosisPlatform:
         # _pf_hit_this_turn：本轮预填「新鲜命中」（choice/last/mention 提升任一），
         # 供 _pf_fresh 区分「刚答编号该弹窗」与「陈旧预填误触发」。
         _pf_hit_this_turn = False
+        # 🔴 答编号轮服务端定序（0916 task835 三连实锤）：候选挂起 + 用户纯序号
+        # 回应时序号语义唯一（按钮列表位置），机械映射服务端直接定——LLM 照抄
+        # 有两类实锤幻觉：越界「7」被抄成上下文项目（预填对话内项目）、序号撞
+        # 项目 code 走精确匹配预填列表外项目。有效序号强制覆盖 LLM 输出；越界
+        # 置空不预填（弹窗必选兜底），防「预填了不在按钮列表里的项目」。
+        if (state.project_candidates
+                and _parse_seq_reply(request.query) is not None):
+            _handled, _seq_choice = _resolve_seq_choice(
+                request.query, state.project_candidates)
+            if _handled:
+                if _seq_choice is not None:
+                    parsed["project_choice"] = _seq_choice.get("name") or ""
+                    logger.info(f"[stream] 答编号轮服务端定序: 序号命中 "
+                                f"{_seq_choice.get('name')!r}（覆盖 LLM 输出）")
+                else:
+                    parsed["project_choice"] = ""
+                    logger.warning(
+                        f"[stream] 答编号越界: 序号超出候选范围 "
+                        f"(1-{len(state.project_candidates)})，project_choice 置空")
         if str(parsed.get("project_choice") or "").strip():
             _choice_raw = str(parsed.get("project_choice")).strip()
             # 🔴 原话溯源门（0916 conv1325/task835 实锤）：预填已落地（答编号

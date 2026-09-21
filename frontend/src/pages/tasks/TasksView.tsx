@@ -6,10 +6,11 @@ import type { PointerEvent as ReactPointerEvent } from 'react';
 import { createPortal } from 'react-dom';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { navigateInWechat } from '@/shared/utils/wechatJsSdk';
-import { Navbar, Toast, Loading, Popup, Button, Textarea, Form, FormItem } from 'tdesign-mobile-react';
+import { Navbar, Toast, Loading, Popup, Button, Textarea, Form, FormItem, Switch } from 'tdesign-mobile-react';
 import ClearableInput from '@/shared/components/ClearableInput';
 import TitleEllipsis from '@/shared/components/TitleEllipsis';
 import AvatarImg from '@/shared/components/AvatarImg';
+import ParticipantStack, { type ParticipantItem } from '@/shared/components/ParticipantStack';
 import { createRequest } from '@/api/client';
 import API_CONFIG from '@/config/api';
 import { POLL_INTERVAL_MS } from '@/config/poll';
@@ -21,13 +22,17 @@ import { normalizeStatus, STATUS_DISPLAY_MAP, PRIORITY_DISPLAY_MAP, TICKET_TYPE_
 import { formatDateTime } from '@/shared/utils/url';
 // 相关性分类过滤条件：列表查询与分类角标计数共用（底部导航「待我处理」角标复用同一口径）
 import { buildRelevanceFilters, type TicketFilterCondition } from '@/shared/utils/ticketFilters';
-import { Search, ArrowRight, Calendar, SlidersHorizontal, ChevronDown, Star } from 'lucide-react';
+import { Search, Calendar, SlidersHorizontal, ChevronDown, Star } from 'lucide-react';
+import PersonArrow from '@/shared/components/PersonArrow';
 import { isSameUser } from '@/shared/utils/userIdentity';
 import { avatarUrl } from '@/api/profile';
 import { useHorizontalScroll } from '@/shared/hooks/useHorizontalScroll';
 import SubscriptionReminder from '@/shared/components/SubscriptionReminder';
 import { getMyProjects, type ProjectItem } from '@/api/projects';
-import { uploadCommentAttachment } from '@/api/ticket';
+import { uploadCommentAttachment, getMyFollowupsCount } from '@/api/ticket';
+import type { OnBehalfCandidate } from '@/api/ticket';
+import OnBehalfSelect from '@/shared/components/OnBehalfSelect';
+import ProjectSelect from '@/shared/components/ProjectSelect';
 import { toggleTaskFollow } from '@/api/taskFollow';
 
 /** 远程方式选项：默认空（无需填），可选 ToDesk / 向日葵 / 其他 */
@@ -44,7 +49,8 @@ interface Ticket {
   contact?: string; created_at: string; updated_at: string;
   created_by?: string; created_by_name?: string;
   assigned_to?: string; assigned_to_name?: string;
-  participants?: string[];
+  /** 评论区参与讨论人员（头像堆叠；后端已按评论数→评论时间降序排好，见 participant_service） */
+  participants?: ParticipantItem[];
   // 阶段性协商（用于「轮到我且未达成一致」标识）
   curr_step_id?: number | null;
   curr_step_name?: string | null;
@@ -52,6 +58,12 @@ interface Ticket {
   step_last_updated_by?: 'assigned' | 'creator' | null;
   // 当前登录用户是否已关注（卡片星标）
   is_followed?: boolean;
+  // ── 代他人提单（代理提单）：列表卡片关系胶囊 +「待你跟进」角标 ──
+  proxy_relation_status?: 'pending' | 'acknowledged' | 'declined' | null;
+  proxy_agent_name?: string | null;
+  proxy_principal_name?: string | null;
+  is_proxy_agent?: boolean;
+  is_principal?: boolean;
 }
 
 /** username / user_id → avatar_resource_id 的查找表；缺失时回退为首字母头像 */
@@ -264,7 +276,7 @@ const buildFilterParams = (filter: {
 // 头像统一灰底白字（无头像时）/ 圆形头像图片（有 avatar_resource_id 时），
 // 信息层级靠字号与字重区分（参考 macaron-minimal-ui 设计）。
 // memo 包装：轮询回包数据不变时（sameTicketItems 复用旧引用）跳过卡片重渲染。
-const TicketCard = memo(function TicketCard({ t, onOpen, avatarMap, currentUserId, currentUsername, onToggleFollow }: { t: Ticket; onOpen: (id: string) => void; avatarMap?: AvatarMap; currentUserId?: string; currentUsername?: string; onToggleFollow?: (id: string, follow: boolean) => void }) {
+const TicketCard = memo(function TicketCard({ t, onOpen, avatarMap, currentUserId, currentUsername, onToggleFollow, onLocateParticipant }: { t: Ticket; onOpen: (id: string) => void; avatarMap?: AvatarMap; currentUserId?: string; currentUsername?: string; onToggleFollow?: (id: string, follow: boolean) => void; onLocateParticipant?: (id: string, p: ParticipantItem) => void }) {
   const creator = t.created_by_name || t.created_by || '-';
   const assignee = t.assigned_to_name || t.assigned_to || '-';
   const participants = (t.participants || []).filter(Boolean);
@@ -276,9 +288,13 @@ const TicketCard = memo(function TicketCard({ t, onOpen, avatarMap, currentUserI
   // 身份比对与详情页同口径：created_by/assigned_to 可能存 user_id 或 username，需双重匹配。
   const isCreator = isSameUser(t.created_by, currentUserId, currentUsername);
   const isAssignee = isSameUser(t.assigned_to, currentUserId, currentUsername);
+  // 代他人提单：被代理人（已确认跟进）与代理人同侧，代表问题方（决策 7）。
+  // 视角标记优先后端下发字段（与详情页同口径），避免前端自拼判定在重名/id 混用时判错。
+  const isPrincipal = Boolean(t.is_principal) && t.proxy_relation_status === 'acknowledged';
+  const creatorSide = isCreator || isPrincipal;
   const lastStepBy = t.step_last_updated_by;
   const myTurn = (!lastStepBy && isAssignee)
-    || (lastStepBy === 'assigned' && isCreator)
+    || (lastStepBy === 'assigned' && creatorSide)
     || (lastStepBy === 'creator' && isAssignee);
   const stepPendingMyResponse = !!t.curr_step_id
     && !t.curr_step_agreed
@@ -286,7 +302,7 @@ const TicketCard = memo(function TicketCard({ t, onOpen, avatarMap, currentUserI
     && myTurn;
 
   return (
-    <div className="task-card2" onClick={() => onOpen(t.id)}>
+    <div data-testid={`task-card-${t.id}`} className="task-card2" onClick={() => onOpen(t.id)}>
       <div className="task-card2__head">
         <div className="task-card2__head-tags">
           <span className="task-card2__status-tag" data-status={(t.status || '').toLowerCase()}>
@@ -295,6 +311,16 @@ const TicketCard = memo(function TicketCard({ t, onOpen, avatarMap, currentUserI
           <span className="task-card2__priority" data-priority={(t.priority || '').toLowerCase()}>
             {PRIORITY_DISPLAY_MAP[t.priority] || t.priority || '中'}
           </span>
+          {/* 代他人提单：待我跟进（品牌色圆点角标，与底部导航角标同配色） */}
+          {t.is_principal && t.proxy_relation_status === 'pending' && (
+            <span
+              className="proxy-card-pill proxy-card-pill--pending"
+              title="他人代你提交的工单，待你确认跟进"
+            >
+              <span className="proxy-card-pill__dot" />
+              待你跟进
+            </span>
+          )}
           {stepPendingMyResponse && (
             <span
               title="阶段性协商轮到你操作，且双方尚未达成一致"
@@ -336,7 +362,7 @@ const TicketCard = memo(function TicketCard({ t, onOpen, avatarMap, currentUserI
         <TitleEllipsis text={t.title} lines={2} titleClassName="task-card2__title-inner" as="span" fontSize={18} lineHeight={1.35} />
       </div>
 
-      {/* 人员流转：发起人 →（参与人）→ 处理人 */}
+      {/* 人员流转：发起人 | 流线区（细线贯穿、参与人头像堆叠骑线居中） | 处理人 */}
       <div className="task-card2__people">
         <div className="task-card2__person" title={`发起人：${creator}`} aria-label={`发起人：${creator}`}>
           <AvatarImg
@@ -346,29 +372,27 @@ const TicketCard = memo(function TicketCard({ t, onOpen, avatarMap, currentUserI
             fallback={<span className="task-card2__avatar">{creator.slice(0, 1).toUpperCase()}</span>}
           />
           <span className="task-card2__person-name">{creator}</span>
+          {/* 关系胶囊：谁代谁提单（脱敏字段，非参与人后端不下发姓名，此处自然不渲染） */}
+          {t.is_proxy_agent && t.proxy_principal_name && (
+            <span className="proxy-card-pill proxy-card-pill--mini" title={`代 ${t.proxy_principal_name} 提交`}>
+              代 {t.proxy_principal_name}
+            </span>
+          )}
+          {t.is_principal && t.proxy_agent_name && (
+            <span className="proxy-card-pill proxy-card-pill--mini" title={`${t.proxy_agent_name} 代你提交`}>
+              {t.proxy_agent_name} 代提
+            </span>
+          )}
         </div>
-        {participants.length > 0 && (
-          <span className="task-card2__participants" title={`参与人：${participants.join('、')}`} aria-label={`参与人：${participants.join('、')}`}>
-            {participants.slice(0, 3).map((p, i) => {
-              const pid = avatarMap?.get(p);
-              return (
-                <AvatarImg
-                  key={`${p}-${i}`}
-                  className="task-card2__participant task-card2__participant--img"
-                  src={pid ? avatarUrl(pid) : null}
-                  alt={p}
-                  fallback={<span className="task-card2__participant">{p.slice(0, 1).toUpperCase()}</span>}
-                />
-              );
-            })}
-            {participants.length > 3 && (
-              <span className="task-card2__participant task-card2__participant--overflow">+{participants.length - 3}</span>
-            )}
-          </span>
-        )}
-        <span className="task-card2__person-arrow">
-          <ArrowRight size={14} strokeWidth={2} />
-        </span>
+        <div className={participants.length > 0 ? 'task-card2__flow task-card2__flow--stacked' : 'task-card2__flow'}>
+          {/* 线在前、堆叠在后：有堆叠时线退到底部作下划线，头像在线上方 */}
+          <PersonArrow />
+          <ParticipantStack
+            participants={participants}
+            avatarMap={avatarMap}
+            onLocate={onLocateParticipant ? (p) => onLocateParticipant(t.id, p) : undefined}
+          />
+        </div>
         <div className="task-card2__person task-card2__person--assignee" title={`处理人：${assignee}`} aria-label={`处理人：${assignee}`}>
           <span className="task-card2__person-name">{assignee}</span>
           <AvatarImg
@@ -742,6 +766,11 @@ export default function TasksView() {
     ticket_type: 'problem',
     remote_type: '',           // 远程方式：''（默认无需填）/ todesk / sunflower / other
   });
+  // 代他人提单（代理提单）：开关 + 被代理人 + 项目
+  // 项目用于把「同项目人员」排在选人列表前面（见 OnBehalfSelect / on-behalf-candidates 接口）
+  const [onBehalfEnabled, setOnBehalfEnabled] = useState(false);
+  const [onBehalfUser, setOnBehalfUser] = useState<OnBehalfCandidate | null>(null);
+  const [onBehalfProjectId, setOnBehalfProjectId] = useState('');
   // 远程方式截图（object_path 数组，上传后随建单一并落库）
   const [remoteShots, setRemoteShots] = useState<{ objectPath: string; fileName: string }[]>([]);
   const [uploadingShot, setUploadingShot] = useState(false);
@@ -752,6 +781,19 @@ export default function TasksView() {
 
   // 各分类（全部/项目相关/待我处理/与我相关）的工单条数，用于筛选条目的右上角角标
   const [relevanceCounts, setRelevanceCounts] = useState<Record<string, number>>({});
+  // 代他人提单：「待我跟进」数（我是被代理人且关系 pending）。
+  // 与 relevanceCounts 分开：它由专用接口直出，且决定「待我跟进」分类是否出现。
+  const [followupCount, setFollowupCount] = useState(0);
+
+  const fetchFollowupCount = useCallback(async () => {
+    if (!username && !userId) return;
+    try {
+      const { count } = await getMyFollowupsCount();
+      setFollowupCount(count || 0);
+    } catch {
+      // 静默失败：角标非关键路径，不打扰列表渲染
+    }
+  }, [username, userId]);
   const countsFetchingRef = useRef(false);
   const fetchCountsRef = useRef<() => Promise<void>>(async () => {});
 
@@ -985,6 +1027,15 @@ export default function TasksView() {
 
   const openDetail = useCallback((id: string) => { navigateInWechat(navigate, `/tasks/${id}`); }, [navigate]);
 
+  // 点列表卡片上的参与人头像 → 进详情页并定位到讨论区。
+  // 与详情页 DiscussionPanel.locateComment 同口径：URL 带 focus=discussion 落到讨论区，
+  // 带 commentId 时再做锚点定位 + is-flash 高亮（目标页读取并消费该参数）。
+  const openParticipantDiscussion = useCallback((id: string, p: ParticipantItem) => {
+    const qs = new URLSearchParams({ focus: 'discussion' });
+    if (p?.username) qs.set('author', p.username);
+    navigateInWechat(navigate, `/tasks/${id}?${qs.toString()}`);
+  }, [navigate]);
+
   // PC 微信下点工单是整页跳转（详情页/操作记录页均为懒加载 chunk），列表挂载即预取，
   // 缩短首次点击后的下载等待；普通浏览器 / SPA 路径不受影响。
   useEffect(() => {
@@ -1001,11 +1052,13 @@ export default function TasksView() {
       { value: 'mine', label: '待我处理' },
       { value: 'related', label: '与我相关' },
       { value: 'followed', label: '我关注的' },
+      // 代他人提单：他人代我提交、仍待我确认的单（pending）；有量时才出现，避免空分类占位
+      ...(followupCount > 0 ? [{ value: 'followup', label: '待我跟进' }] : []),
     ];
     return canViewAllTasks
       ? [{ value: 'global', label: '全部' }, ...base]
       : base;
-  }, [canViewAllTasks]);
+  }, [canViewAllTasks, followupCount]);
 
   // 拉取各分类角标条数：与列表共用同一套过滤口径（含搜索/状态/优先级/类型/项目/人员/时间范围），
   // 仅相关性维度按各分类切换——这样角标数 = 「切到该分类后列表会显示的总数」，与列表动态对齐。
@@ -1049,6 +1102,12 @@ export default function TasksView() {
 
   useEffect(() => { fetchRelevanceCounts(); }, [fetchRelevanceCounts]);
   useEffect(() => { if (tasksRefreshKey > 0) fetchRelevanceCounts(); }, [tasksRefreshKey]);
+
+  // 「待我跟进」计数：与分类角标同生命周期（首次 + 轮询 + 外部刷新触发）
+  const fetchFollowupCountRef = useRef(fetchFollowupCount);
+  fetchFollowupCountRef.current = fetchFollowupCount;
+  useEffect(() => { fetchFollowupCount(); }, [fetchFollowupCount]);
+  useEffect(() => { if (tasksRefreshKey > 0) fetchFollowupCount(); }, [tasksRefreshKey, fetchFollowupCount]);
 
   const statusOptions = Object.entries(STATUS_DISPLAY_MAP).map(([value, label]) => ({ value, label }));
 
@@ -1383,28 +1442,44 @@ export default function TasksView() {
       Toast({ message: '请输入工单描述', theme: 'warning' });
       return;
     }
+    // 代他人提单：开启开关但未选人时拦截（后端也会二次校验，这里避免白跑一次请求）
+    if (onBehalfEnabled && !onBehalfUser) {
+      Toast({ message: '请选择被代理人', theme: 'warning' });
+      return;
+    }
     setCreatingTask(true);
     try {
       // 远程方式写入 metadata_info（结构化，便于后续查询/展示），截图 object_path 数组写入 attachments
       const metadata_info = createForm.remote_type
         ? { remote_type: createForm.remote_type }
         : null;
-      const payload = {
+      const payload: Record<string, unknown> = {
         ...createForm,
         metadata_info,
         // 附件统一 dict 结构 {path, object_path, filename}，与 tasks.attachments 约定对齐
         // （path 供详情页下载，object_path 供 AI 路径去重）
         attachments: remoteShots.length > 0 ? remoteShots.map((s) => ({ path: s.objectPath, object_path: s.objectPath, filename: s.fileName })) : null,
+        // 代他人提单：以被代理人 users.id 提交，后端建立 pending 关系并通知对方。
+        // 注意 created_by 仍是我（代理人），关系全程不变，撤回权也只属于我。
+        on_behalf_of: onBehalfEnabled && onBehalfUser ? onBehalfUser.id : null,
       };
-      delete (payload as Record<string, unknown>).remote_type;
+      delete payload.remote_type;
       await request<Ticket>('/', {
         method: 'POST',
         body: JSON.stringify(payload),
       });
-      Toast({ message: '工单创建成功', theme: 'success' });
+      Toast({
+        message: onBehalfEnabled && onBehalfUser
+          ? `已代 ${onBehalfUser.name || onBehalfUser.username} 提交，对方将收到提醒`
+          : '工单创建成功',
+        theme: 'success',
+      });
       setShowCreateModal(false);
       setCreateForm({ title: '', description: '', priority: 'medium', ticket_type: 'problem', remote_type: '' });
       setRemoteShots([]);
+      setOnBehalfEnabled(false);
+      setOnBehalfUser(null);
+      setOnBehalfProjectId('');
       refreshTasks();
       setPage(1);
     } catch (err) {
@@ -1452,6 +1527,7 @@ export default function TasksView() {
             <div className="tasks-view__search-card">
               <Search size={16} strokeWidth={2} />
               <input
+                data-testid="tasks-search"
                 className="tasks-search"
                 placeholder="搜索工单（支持编号/标题）…"
                 value={searchInput}
@@ -1617,7 +1693,7 @@ export default function TasksView() {
             <div className="tasks-empty">暂无工单</div>
           ) : (
             tickets.map((t) => (
-              <TicketCard key={t.id} t={t} onOpen={openDetail} avatarMap={avatarMap} currentUserId={userId} currentUsername={username} onToggleFollow={handleToggleFollow} />
+              <TicketCard key={t.id} t={t} onOpen={openDetail} avatarMap={avatarMap} currentUserId={userId} currentUsername={username} onToggleFollow={handleToggleFollow} onLocateParticipant={openParticipantDiscussion} />
             ))
           )}
           <Pagination current={page} total={total} pageSize={pageSize} onChange={setPage} />
@@ -1880,6 +1956,52 @@ export default function TasksView() {
                 placeholder="请描述问题详情…"
                 rows={4}
               />
+            </FormItem>
+            {/* 代他人提单：现场人员不会用手机 / 腾不出手 / 电话报障时，由他人代提 */}
+            <FormItem label="为他人提单">
+              <div className="tasks-create-modal__behalf">
+                <div className="tasks-create-modal__behalf-row">
+                  <span className="tasks-create-modal__behalf-label">
+                    代他人提交工单
+                  </span>
+                  <Switch
+                    value={onBehalfEnabled}
+                    onChange={(v) => {
+                      const on = Boolean(v);
+                      setOnBehalfEnabled(on);
+                      if (!on) {
+                        setOnBehalfUser(null);
+                        setOnBehalfProjectId('');
+                      }
+                    }}
+                  />
+                </div>
+                {onBehalfEnabled && (
+                  <div className="tasks-create-modal__behalf-body">
+                    <p className="tasks-create-modal__behalf-tip">
+                      本单将以对方名义建立，对方会收到提醒并可确认跟进；撤回权仍归你。
+                    </p>
+                    {/* 项目用于把「同项目人员」排在选人列表前面（选填） */}
+                    <div className="tasks-create-modal__behalf-field">
+                      <span className="tasks-create-modal__behalf-field-label">项目</span>
+                      <ProjectSelect
+                        value={onBehalfProjectId}
+                        onChange={(v) => setOnBehalfProjectId(v ? String(v) : '')}
+                        placeholder="选择项目（用于优先展示同项目人员）"
+                      />
+                    </div>
+                    <div className="tasks-create-modal__behalf-field">
+                      <span className="tasks-create-modal__behalf-field-label">被代理人</span>
+                      <OnBehalfSelect
+                        value={onBehalfUser?.id}
+                        projectId={onBehalfProjectId}
+                        placeholder="请选择被代理人"
+                        onChange={(u) => setOnBehalfUser(u)}
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
             </FormItem>
             <FormItem label="远程方式">
               <select

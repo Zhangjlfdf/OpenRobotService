@@ -24,7 +24,7 @@
 
 from __future__ import annotations
 
-# ── 快路径用例（16 条）─────────────────────────────────────────
+# ── 快路径用例（零 LLM 回归基准）────────────────────────────────
 # 期望与 metric_planner._fast_path_parse 当前实现严格对齐，作为回归基准。
 
 # 搬运效率（collection_data 表）维度默认指标集
@@ -122,6 +122,25 @@ FAST_PATH_CASES: list[dict] = [
         "metric_keys": ["project.completed_count"],
         "time_type": "this_month",
         "time_explicit": True,
+        "action": "summary",
+        "scope_type": "global",
+    },
+    {
+        # 回归：「哪些项目」类问法 → 项目明细清单（名称/状态等逐项展示），
+        # 不再落兜底只给项目个数与状态分布
+        "question": "现在有哪些项目",
+        "metric_keys": ["project.items"],
+        "time_type": "recent_days",
+        "time_explicit": False,
+        "action": "summary",
+        "scope_type": "global",
+    },
+    {
+        # 回归：「项目列表/清单」类问法 → 项目明细清单
+        "question": "项目列表",
+        "metric_keys": ["project.items"],
+        "time_type": "recent_days",
+        "time_explicit": False,
         "action": "summary",
         "scope_type": "global",
     },
@@ -236,6 +255,25 @@ FAST_PATH_CASES: list[dict] = [
         "scope_type": "global",
     },
     {
+        # 月份词「9月份」→ custom（当月 1 号至月末）显式时间；
+        # 「多少项目」→ 项目维度兜底指标（settlement_period 月份过滤的入口）
+        "question": "9月份有多少项目",
+        "metric_keys": ["project.total", "project.active_count", "project.by_status"],
+        "time_type": "custom",
+        "time_explicit": True,
+        "action": "summary",
+        "scope_type": "global",
+    },
+    {
+        # 时长表达「近3个月」不误入月份词（负向前瞻排除）→ 默认 recent_days 非显式
+        "question": "近3个月有多少项目",
+        "metric_keys": ["project.total", "project.active_count", "project.by_status"],
+        "time_type": "recent_days",
+        "time_explicit": False,
+        "action": "summary",
+        "scope_type": "global",
+    },
+    {
         # 转投：含「搬运」的无数据问法 → 全局无数据项目清单（不触发单项目澄清）
         "question": "近7天哪些项目的搬运效率为空",
         "metric_keys": ["project.no_data_items"],
@@ -263,9 +301,91 @@ FAST_PATH_CASES: list[dict] = [
         "action": "summary",
         "scope_type": "global",
     },
+    # 项目信息维度（project_info_node/value/history/mark 四张表）
+    {
+        # 回归：「项目信息」优先命中 project_info 维度，不被「项目」规则抢先
+        "question": "项目信息填写率怎么样",
+        "metric_keys": ["project_info.fill_rate", "project_info.items"],
+        "time_type": "recent_days",
+        "time_explicit": False,
+        "action": "summary",
+        "scope_type": "global",
+    },
+    {
+        "question": "近7天项目信息变更情况",
+        "metric_keys": [
+            "project_info.change_count",
+            "project_info.change_by_day",
+            "project_info.change_by_type",
+        ],
+        "time_type": "recent_days",
+        "time_explicit": True,
+        "action": "summary",
+        "scope_type": "global",
+    },
+    {
+        # 趋势动作补丁：已含 change_by_day 时不重复追加
+        "question": "项目信息变更趋势",
+        "metric_keys": [
+            "project_info.change_count",
+            "project_info.change_by_day",
+            "project_info.change_by_type",
+        ],
+        "time_type": "recent_days",
+        "time_explicit": False,
+        "action": "trend",
+        "scope_type": "global",
+    },
+    {
+        # 「变更」子规则在「类型分布」之前命中；distribution 补丁不重复追加
+        "question": "本周项目信息变更类型分布",
+        "metric_keys": [
+            "project_info.change_count",
+            "project_info.change_by_day",
+            "project_info.change_by_type",
+        ],
+        "time_type": "this_week",
+        "time_explicit": True,
+        "action": "distribution",
+        "scope_type": "global",
+    },
+    {
+        # 兜底规则 + distribution 补丁追加 by_value_type/change_by_type
+        "question": "项目信息字段分布",
+        "metric_keys": [
+            "project_info.node_total",
+            "project_info.global_node_count",
+            "project_info.custom_node_count",
+            "project_info.fill_rate",
+            "project_info.items",
+            "project_info.by_value_type",
+            "project_info.change_by_type",
+        ],
+        "time_type": "recent_days",
+        "time_explicit": False,
+        "action": "distribution",
+        "scope_type": "global",
+    },
+    {
+        "question": "哪些节点被关注最多",
+        "metric_keys": ["project_info.top_marked_nodes"],
+        "time_type": "recent_days",
+        "time_explicit": False,
+        "action": "summary",
+        "scope_type": "global",
+    },
+    {
+        # 按值内容提问：「哪些字段填了值」→ 已填字段值明细
+        "question": "项目信息有哪些字段填了值",
+        "metric_keys": ["project_info.value_items", "project_info.items"],
+        "time_type": "recent_days",
+        "time_explicit": False,
+        "action": "summary",
+        "scope_type": "global",
+    },
 ]
 
-# ── LLM 慢路径用例（6 条）───────────────────────────────────────
+# ── LLM 慢路径用例（真实 LLM）───────────────────────────────────
 # 口语化/语义模糊，快路径无精确模板；用 expect_contains 宽松标注关键指标。
 
 SLOW_PATH_CASES: list[dict] = [
@@ -296,9 +416,14 @@ SLOW_PATH_CASES: list[dict] = [
         "expect_contains": ["project.items"],
         "time_explicit": True,
     },
+    {
+        # 按值内容提问（具体字段名，快路径无模板）→ 已填字段值明细
+        "question": "SSH端口填的内容是什么",
+        "expect_contains": ["project_info.value_items"],
+    },
 ]
 
-# ── 澄清用例（6 条）────────────────────────────────────────────
+# ── 澄清用例───────────────────────────────────────────────────
 # 解析出指标但缺必要字段（如时间范围），期望 missing_fields 非空。
 
 CLARIFY_CASES: list[dict] = [
@@ -351,9 +476,19 @@ CLARIFY_CASES: list[dict] = [
         "metric_keys": ["project.no_data_items"],
         "missing": ["time_range"],
     },
+    {
+        # 变更指标要求时间范围（无时间词）→ 澄清时间
+        "question": "项目信息变更情况",
+        "metric_keys": [
+            "project_info.change_count",
+            "project_info.change_by_day",
+            "project_info.change_by_type",
+        ],
+        "missing": ["time_range"],
+    },
 ]
 
-# ── 多轮澄清用例（5 条）────────────────────────────────────────
+# ── 多轮澄清用例────────────────────────────────────────────────
 # rounds: [(问题, 期望 mode, 期望 missing), ...]
 # 最后一轮的 plan 必须合并出前几轮已确认的字段。
 
@@ -438,6 +573,23 @@ MULTI_ROUND_CASES: list[dict] = [
             "time_explicit": False,
             "action": "summary",
             "scope_type": "single_project",
+        },
+    },
+    {
+        "name": "项目信息变更缺时间 → 补充近7天",
+        "rounds": [
+            ("项目信息变更情况", "clarify", ["time_range"]),
+            ("近7天", "analysis", []),
+        ],
+        "final": {
+            "metric_keys": [
+                "project_info.change_count",
+                "project_info.change_by_day",
+                "project_info.change_by_type",
+            ],
+            "time_type": "recent_days",
+            "time_explicit": True,
+            "action": "summary",
         },
     },
 ]

@@ -14,13 +14,13 @@ S1 正向：指代「车型还是上次提单的车型」→ collected_info 解�
         绝不落「上次/一样/还是」指代原文
 S2 负向：全程不提上一单 → 新单草稿不含上一单的 3号车
 """
-import asyncio, io, logging, os, sys
+import asyncio, io, json, logging, os, sys
 
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s",
                     stream=sys.stderr)
 
-_PROJ = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_PROJ = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 sys.path.insert(0, _PROJ)
 
 from dotenv import load_dotenv
@@ -81,7 +81,12 @@ async def main():
 
     agent = AgentCls()
     await agent._ensure_clients()
-    await agent._retriever.retrieve_domain_dual("预热", "team", top_k=1)
+    try:
+        await agent._retriever.retrieve_domain_dual("预热", "team", top_k=1)
+    except Exception as e:
+        # 本地 qdrant 指针可能指向服务器集合（dar_qdrant 指针坑）——收集轮走
+        # skip_retrieval 不依赖检索，预热失败不阻断本脚本
+        print(f"  ⚠️ 检索预热失败（收集轮 skip_retrieval 不受影响）: {e}")
 
     # ── S1 正向：指代解析 ──
     print("\nS1 车型还是上次提单的车型")
@@ -117,6 +122,39 @@ async def main():
     check("S2 新单草稿已生成", bool(draft), "未生成草稿")
     check("S2 草稿含本单车辆 7号车", "7号" in desc, desc[:120])
     check("S2 草稿未串入上一单 3号车", "3号车" not in desc, desc[:120])
+
+    # ── S3 收集轮问「上一个工单后来怎么样了」：跨单询问不得污染字段、不得丢收集态 ──
+    print("\nS3 收集轮问上一单后续")
+    sid3 = "verify_prev_followup"
+    await setup(agent, sid3, ["车辆编号", "报错详情"])
+    stages, reply = await run_turn(agent, sid3, "上一个工单后来怎么样了")
+    print(f"    stages={stages}")
+    print(f"    reply={reply[:150]}")
+    memory3 = await agent._memory_manager.get_memory(sid3)
+    st3 = memory3.metadata.get("agent_state", {})
+    ci3 = st3.get("collected_info") or {}
+    bad_vals = [v for v in ci3.values()
+                if any(w in str(v) for w in ("怎么样", "后续", "恢复"))]
+    check("S3 收集状态保留（未被当成新话题丢掉）",
+          bool(st3.get("ticket_collecting")), str(st3.get("ticket_collecting")))
+    check("S3 字段未被垃圾值污染", not bad_vals, str(ci3))
+    check("S3 回复与上一单相关（未答非所问）",
+          any(w in reply for w in ("上一单", "上次", "恢复", "配置", "工单")),
+          reply[:120])
+
+    # ── S4 收集轮给「上一单之前就存在」的背景信息：应记入本单，不得被上一单规则吞掉 ──
+    print("\nS4 收集轮提供本单背景（提单前就有的现象）")
+    sid4 = "verify_prev_background"
+    await setup(agent, sid4, ["车辆编号", "报错详情"])
+    stages, reply = await run_turn(agent, sid4, "7号车。提这个单之前那台车就偶尔有异响，这次直接动不了了")
+    print(f"    stages={stages}")
+    print(f"    reply={reply[:150]}")
+    memory4 = await agent._memory_manager.get_memory(sid4)
+    st4 = memory4.metadata.get("agent_state", {})
+    ci4 = json.dumps(st4.get("collected_info") or {}, ensure_ascii=False)
+    check("S4 车辆编号已收集", "7号" in ci4, ci4[:120])
+    check("S4 异响背景未丢（进了字段或被追问）",
+          ("异响" in ci4) or ("异响" in reply), f"ci={ci4[:100]} reply={reply[:80]}")
 
     print(f"\n═══ 结果：{len(PASS)} 通过 / {len(FAIL)} 失败 ═══")
     if FAIL:

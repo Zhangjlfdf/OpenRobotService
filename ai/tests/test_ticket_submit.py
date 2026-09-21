@@ -7,7 +7,7 @@ import json
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 
-from ai.agents.AiDiagnosisPlatform.pipeline import AgentState
+from ai.agents.AiDiagnosisPlatform.pipeline import AgentState, AiDiagnosisPlatform
 
 
 # ================================================================
@@ -613,6 +613,9 @@ async def platform_real_confirm(platform, monkeypatch):
 
     fake_ta = types.ModuleType("ai.core.task_adapter")
     fake_ta.upsert_task = lambda ticket, created_by="": _FakeRec()
+    # 代他人提单：默认桩（未勾选代提的用例不会走到；勾选的用例可覆盖此属性注入
+    # 成功/失败行为）。假模块注入后，confirm_submit 内的局部 import 拿到的是桩。
+    fake_ta.bind_proxy_relation = lambda task_id, on_behalf_of, created_by="": {}
     monkeypatch.setitem(sys.modules, "ai.core.task_adapter", fake_ta)
 
     async def _noop(*args, **kwargs):
@@ -623,6 +626,7 @@ async def platform_real_confirm(platform, monkeypatch):
 
     monkeypatch.setattr(platform, "_attach_chat_snapshot", _noop)
     monkeypatch.setattr(platform, "_resolve_project", _no_resolve)
+    platform._fake_task_adapter = fake_ta  # 供代提用例注入 bind_proxy_relation 行为
 
     from ai.agents.AiDiagnosisPlatform.pipeline import AiDiagnosisPlatform
     monkeypatch.setattr(
@@ -1270,6 +1274,42 @@ class TestTicketBoundaryPrefill:
         assert "南京本川项目（编号: NJBC01）" in s
 
 
+class TestResolveSeqChoice:
+    """答编号轮服务端定序（0916 task835 三连实锤：越界序号幻觉还原/code 撞号）"""
+
+    CANDS = [
+        {"name": "吃饭项目", "code": "011255555"},
+        {"name": "摇人吧服务号", "code": "Leo_test"},
+        {"name": "辽宁盘锦金龙鱼软包堆垛项目", "code": "53"},
+    ]
+
+    from ai.agents.AiDiagnosisPlatform.pipeline import _resolve_seq_choice
+
+    S = staticmethod(_resolve_seq_choice)
+    P = staticmethod(AiDiagnosisPlatform._parse_seq_reply) if hasattr(AiDiagnosisPlatform, "_parse_seq_reply") else None
+
+    def test_valid_seq_resolves(self):
+        handled, choice = self.S("2", self.CANDS)
+        assert handled and choice == {"name": "摇人吧服务号", "code": "Leo_test"}
+
+    def test_seq_variants(self):
+        for q in ("第2个", "2号", " 二 ", "2"):
+            handled, choice = self.S(q, self.CANDS)
+            assert handled and choice["name"] == "摇人吧服务号", q
+
+    def test_out_of_range_empty_choice(self):
+        """越界序号「7」→ handled + choice=None（不预填列表外项目——task835 情况2/3 回归）"""
+        handled, choice = self.S("7", self.CANDS)
+        assert handled and choice is None
+
+    def test_non_seq_not_handled(self):
+        """非纯序号（自由文字）→ 不接管，交回 LLM 照抄链路"""
+        handled, _ = self.S("就选摇人吧服务号", self.CANDS)
+        assert handled is False
+        handled, _ = self.S("2号库那边", self.CANDS)
+        assert handled is False
+
+
 class TestImageInfoBlock:
     """收集轮图片资料块（0916）：sanitize 屏蔽对话流图片描述的同时，
     单独注入「VLM 识别资料块」——用户发图补充信息（车编号/任务编号在
@@ -1326,6 +1366,139 @@ class TestImageInfoBlock:
         ])
         s = platform._build_diagnosis_prompt(state, fake_mem, "")
         assert "用户已上传的图片" not in s
+
+
+# ================================================================
+# 代他人提单（代理提单）× AI 转工单
+# ================================================================
+
+class TestProxyRelationOnConfirm:
+    """AI 转工单入口的代提关系落地（0909 反馈：弹窗勾了代提但全链路无痕）。
+
+    此前 overrides.on_behalf_of 在本链路被静默丢弃（该路径不经过 tasks 服务
+    create_ticket，直写 tasks 表）→ 关系表无记录 → 列表/详情无标记、
+    被代理人收不到提醒。修复后：成功建关系 + 通知；失败**不静默**
+    （工单仍提交成功，错误回传前端提示用户）。
+    """
+
+    @staticmethod
+    def _stub_notification(monkeypatch):
+        """用假模块替换 app.utils.notification_utils，隔离微信下发与 DB 依赖。"""
+        import sys
+        import types
+
+        fake = types.ModuleType("app.utils.notification_utils")
+        calls = []
+
+        class _FakeNotif:
+            @staticmethod
+            async def send_proxy_relation_notification(**kwargs):
+                calls.append(kwargs)
+                return {"code": 200}
+
+        fake.NotificationUtils = _FakeNotif
+        monkeypatch.setitem(sys.modules, "app.utils.notification_utils", fake)
+        return calls
+
+    @staticmethod
+    async def _draft(platform, state):
+        """按按钮路径跑出合法草稿（prepare_ticket 走 mock LLM）。"""
+        from ai.agents.AiDiagnosisPlatform.pipeline import _save_agent_state
+        memory = await platform._memory_manager.get_memory(state.session_id)
+        _save_agent_state(memory, state)
+        await platform._memory_manager.save_memory(memory)
+        await platform.prepare_ticket(state.session_id)
+        memory = await platform._memory_manager.get_memory(state.session_id)
+        return memory.metadata.get("ticket_draft")
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_on_behalf_binds_relation_and_notifies(
+            self, platform_real_confirm, make_state, monkeypatch):
+        """勾了代提 + 解析成功 → 建关系、通知被代理人、响应带 proxy_relation"""
+        platform = platform_real_confirm
+        calls = self._stub_notification(monkeypatch)
+        bound = {}
+
+        def _fake_bind(task_id, on_behalf_of, created_by=""):
+            bound.update(task_id=task_id, on_behalf_of=on_behalf_of, created_by=created_by)
+            return {
+                "relation_id": 7, "agent_id": "u_agent", "agent_name": "张三",
+                "principal_id": "u_principal", "principal_name": "李四", "created": True,
+            }
+
+        platform._fake_task_adapter.bind_proxy_relation = _fake_bind
+
+        state = make_state(phase="idle", problem_summary="机器人报错",
+                           collected_info={"project": "华大"})
+        assert await self._draft(platform, state), "prepare 应生成草稿"
+
+        result = await platform.confirm_submit(
+            state.session_id,
+            overrides={"project": "华大制造基地", "on_behalf_of": "u_principal"},
+            created_by="tester",
+        )
+
+        assert result["code"] == 0
+        assert bound["on_behalf_of"] == "u_principal"
+        assert bound["created_by"] == "tester"
+        assert result["data"]["proxy_relation"]["principal_name"] == "李四"
+        assert result["data"]["proxy_relation_error"] == ""
+        assert calls and calls[0]["action"] == "created"
+        assert calls[0]["user_names"] == ["u_principal"]
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_on_behalf_failure_surfaces_error_not_silent(
+            self, platform_real_confirm, make_state, monkeypatch):
+        """代提建关系失败 → 工单仍提交成功，但错误回传（前端提示用户，绝不静默）"""
+        platform = platform_real_confirm
+        calls = self._stub_notification(monkeypatch)
+
+        def _boom(task_id, on_behalf_of, created_by=""):
+            raise ValueError("被代理人不存在，代提未生效")
+
+        platform._fake_task_adapter.bind_proxy_relation = _boom
+
+        state = make_state(phase="idle", problem_summary="机器人报错",
+                           collected_info={"project": "华大"})
+        assert await self._draft(platform, state), "prepare 应生成草稿"
+
+        result = await platform.confirm_submit(
+            state.session_id,
+            overrides={"project": "华大制造基地", "on_behalf_of": "u_missing"},
+            created_by="tester",
+        )
+
+        assert result["code"] == 0, "代提失败不应回滚工单"
+        assert result["data"]["proxy_relation"] is None
+        assert "被代理人不存在" in result["data"]["proxy_relation_error"]
+        assert calls == [], "关系未建立时不应发通知"
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_without_on_behalf_no_relation_no_notice(
+            self, platform_real_confirm, make_state, monkeypatch):
+        """未勾代提（普通自提单）→ 无关系、无通知、无错误（存量行为不变）"""
+        platform = platform_real_confirm
+        calls = self._stub_notification(monkeypatch)
+        platform._fake_task_adapter.bind_proxy_relation = lambda *a, **kw: pytest.fail(
+            "未勾选代提时不应触碰关系表")
+
+        state = make_state(phase="idle", problem_summary="机器人报错",
+                           collected_info={"project": "华大"})
+        assert await self._draft(platform, state), "prepare 应生成草稿"
+
+        result = await platform.confirm_submit(
+            state.session_id,
+            overrides={"project": "华大制造基地"},
+            created_by="tester",
+        )
+
+        assert result["code"] == 0
+        assert result["data"]["proxy_relation"] is None
+        assert result["data"]["proxy_relation_error"] == ""
+        assert calls == []
 
 
 # ================================================================

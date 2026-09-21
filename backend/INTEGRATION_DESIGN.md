@@ -2,7 +2,7 @@
 
 > 状态：**设计稿**（待评审 → 实施）
 > 日期：2026-07-14
-> 关联：[ARCHITECTURE.md](./ARCHITECTURE.md)（总体架构 / USP 接缝）、[CODEBASE_OVERVIEW.md](./CODEBASE_OVERVIEW.md)（代码现状）
+> 关联：[ARCHITECTURE.md](../docs/PRODUCT/ARCHITECTURE.md)（总体架构 / USP 接缝）、[CODEBASE_OVERVIEW.md](../docs/CODEBASE_OVERVIEW.md)（代码现状）
 > 背景：当前「系统任务」模块尚未成熟，临时接入**禅道（Zentao）**作为外部任务源；未来本系统会开发平替禅道的原生功能，禅道最终可能**移除**。因此接入须**插件化、对核心零侵入**。
 
 ---
@@ -449,8 +449,8 @@ ZENTAO_PROJECT_IDS=[1,2,3]            # 复用 candao_dev 的 parse_project_ids
 **Phase 4 · 外部与文档**
 - [ ] Airflow DAG（HTTP 触发）
 - [ ] `.env.example` 增配
-- [ ] 更新 [ARCHITECTURE.md](./ARCHITECTURE.md)：USP 接缝一节扩为「外部任务源（可插拔）」
-- [ ] 更新 [CODEBASE_OVERVIEW.md](./CODEBASE_OVERVIEW.md)：新增 `app/integrations/`
+- [ ] 更新 [ARCHITECTURE.md](../docs/PRODUCT/ARCHITECTURE.md)：USP 接缝一节扩为「外部任务源（可插拔）」
+- [ ] 更新 [CODEBASE_OVERVIEW.md](../docs/CODEBASE_OVERVIEW.md)：新增 `app/integrations/`
 
 ---
 

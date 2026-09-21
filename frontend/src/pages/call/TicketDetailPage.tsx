@@ -2,7 +2,7 @@
 // 数据源：tasks 服务 GET /api/tasks/{dbId}?load_comments=true（DB id 唯一定位，AI 诊断数据从 metadata_info 提取）；操作：催办 / 上报（任务服务通知）
 // 路由 /app/call/ticket/:id 中的 :id 形如 db_<数字id>（Task.id）；session_id 直链仅作旧链接兼容
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
-import { useParams, useNavigate, useLocation } from 'react-router-dom';
+import { useParams, useNavigate, useLocation, useSearchParams } from 'react-router-dom';
 import { Navbar, Button, Toast, Loading, Tag, Popup, Textarea, DialogPlugin, Form, FormItem } from 'tdesign-mobile-react';
 import AppButton from '@/shared/components/AppButton';
 import { DatePicker } from 'antd';
@@ -11,10 +11,11 @@ import ClearableInput from '@/shared/components/ClearableInput';
 import TitleEllipsis from '@/shared/components/TitleEllipsis';
 import { setupWechatShare } from '@/shared/utils/wechatJsSdk';
 import { WECHAT_CONFIG } from '@/config/wechat';
-import { ArrowRight, Folder, UserRound, Clock, AlarmClock, Download, FileImage, FileText, FileSpreadsheet, FileCode, FileArchive, Paperclip, Bell, Upload, Undo2, Pencil } from 'lucide-react';
+import { Folder, UserRound, Clock, AlarmClock, Download, FileImage, FileText, FileSpreadsheet, FileCode, FileArchive, Paperclip, Bell, Upload, Undo2, Pencil } from 'lucide-react';
+import PersonArrow from '@/shared/components/PersonArrow';
 import { getMyProjects, getProjectMembers, type ProjectItem, type ProjectMember } from '@/api/projects';
 import { qaGetTicket, fetchWithAuth } from '@/api/ai';
-import { cancelTicket, urgeTicket, reportTicket, uploadCommentAttachment } from '@/api/ticket';
+import { cancelTicket, urgeTicket, reportTicket, uploadCommentAttachment, getProxyRelations, type ProxyRelation } from '@/api/ticket';
 import {
   isTerminalTicketStatus,
   canUrgeTicket,
@@ -31,6 +32,7 @@ import DiscussionPanel from '@/shared/components/DiscussionPanel';
 import TicketDynamicsCard from '@/shared/components/TicketDynamicsCard';
 import StepNegotiationCard from '@/shared/components/StepNegotiationCard';
 import SpecDocCard from '@/shared/components/SpecDocCard';
+import ProxyRelationBanner from '@/shared/components/ProxyRelationBanner';
 import { useStepNegotiation } from '@/shared/hooks/useStepNegotiation';
 import { useResolveTicket } from '@/shared/hooks/useResolveTicket';
 import UserSelect from '@/shared/components/UserSelect';
@@ -169,6 +171,11 @@ export default function TicketDetailPage() {
   const { id: sessionId = '' } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const location = useLocation();
+  // 从历史工单列表点参与人头像跳进来时的讨论区定位参数
+  const [searchParams] = useSearchParams();
+  const focusDiscussion = searchParams.get('focus') === 'discussion';
+  const focusCommentId = searchParams.get('commentId');
+  const focusAuthor = searchParams.get('author');
   const request = createRequest(API_CONFIG.TASKS.BASE_URL, '工单服务');
   const { username, userId, name, isAdmin } = useAuthStore();
 
@@ -189,6 +196,9 @@ export default function TicketDetailPage() {
   const [allUsers, setAllUsers] = useState<ProjectMember[]>([]);
   // @U老师 AI 讨论中标记
   const [askingAI, setAskingAI] = useState(false);
+  // 代他人提单（代理提单）：关系横幅数据。走独立接口（非参与人 403 → 置空不渲染），
+  // 与系统任务详情页同一组件同一口径，避免两处详情页体验分叉。
+  const [proxyRelation, setProxyRelation] = useState<ProxyRelation | null>(null);
 
   // 竞态保护：fetchDetail 是异步多段 await，切换工单（sessionId 变化）时上一个工单的请求可能仍在飞行中，
   // 其响应若晚于新工单返回，会 setTicket 覆盖新工单、或用 setTicket((prev)=>...) 把旧工单字段合并进新工单，
@@ -256,6 +266,10 @@ export default function TicketDetailPage() {
           attachments: ((taskDetail as unknown as { attachments?: unknown[] }).attachments as Array<Record<string, unknown>> | undefined) ?? [],
         });
         setAiSummary(typeof taskDetail.metadata_info?.ai_summary === 'string' ? taskDetail.metadata_info.ai_summary : '');
+        // 代他人提单（代理提单）：关系数据独立拉取（失败不阻断详情渲染，仅横幅缺失）
+        getProxyRelations(dbId)
+          .then((list) => { if (!isStale()) setProxyRelation(list?.[0] || null); })
+          .catch(() => { if (!isStale()) setProxyRelation(null); });
         return;
       }
       const res = await qaGetTicket(sessionId);
@@ -655,11 +669,21 @@ export default function TicketDetailPage() {
           return { ...prev, comments: updatedComments };
         });
       } catch { /* 保存用户消息失败不阻塞 AI 调用 */ }
-      // 2. 调 AI 讨论
+      // 2. 调 AI 讨论（引用某条后再 @U老师：把被引评论单独带上，避免淹没在最近 10 条里）
       const recentComments = (ticket.comments || []).slice(-10).map((c) => ({
         author: c.created_by_name || c.created_by || '?',
         content: c.content,
       }));
+      const quotedSrc = options?.replyTo != null
+        ? (ticket.comments || []).find((c) => String(c.id) === String(options.replyTo))
+        : undefined;
+      const quotedComment = quotedSrc
+        ? {
+            id: quotedSrc.id,
+            author: quotedSrc.created_by_name || quotedSrc.created_by || '?',
+            content: quotedSrc.content,
+          }
+        : undefined;
       const res = await fetchWithAuth(`${API_CONFIG.AI.BASE_URL}/task/discuss`, {
         method: 'POST',
         body: JSON.stringify({
@@ -667,7 +691,11 @@ export default function TicketDetailPage() {
           // 去掉文本中任意位置的 @U老师 标记（可能有空格/重复），保留整段话作为 query，
           // 兼容"先说话、句尾@U老师"的场景（否则 @U老师 在尾部时 query 会带残留或丢失）
           query: userMsg.replace(/\s*@U老师\s*/g, ' ').trim(),
-          context: { recent_comments: recentComments },
+          context: {
+            recent_comments: recentComments,
+            ...(quotedComment ? { quoted_comment: quotedComment } : {}),
+            ...(options?.replyTo != null ? { reply_to: options.replyTo } : {}),
+          },
         }),
       });
       const data = await res.json();
@@ -829,6 +857,19 @@ export default function TicketDetailPage() {
             </Tag>
             <span className="detail-card__id">{ticket.ticket_id || ''}</span>
           </div>
+          {/* 代他人提单（代理提单）：关系横幅（代理人「你代 X 提交」/ 被代理人
+              「X 代你提交」+ 确认跟进 / 与我无关）。非参与人后端 403 → 不渲染。 */}
+          {proxyRelation && (
+            <ProxyRelationBanner
+              ticketId={ticket.ticket_id || ticket.id || ''}
+              relation={proxyRelation}
+              onChanged={(updated) => {
+                setProxyRelation(updated);
+                // 关系变更影响可操作项（pending 只读 → acknowledged 获协办权），刷新详情
+                fetchDetail(true);
+              }}
+            />
+          )}
           <h2 className="detail-card__title"><TitleEllipsis text={ticket.title || '(无标题)'} lines={3} titleClassName="detail-card__title-inner" as="span" fontSize={19} lineHeight={1.3} /></h2>
           {/* 元信息网格（设计稿 04：2×2 MetaItem，lucide 图标 + 标签 + 值） */}
           <div className="detail-card__info-grid">
@@ -880,7 +921,9 @@ export default function TicketDetailPage() {
                   <span className="task-card2__person-name">{ticket.created_by_name || ticket.created_by || '-'}</span>
                 </span>
               </div>
-              <span className="task-card2__person-arrow"><ArrowRight size={16} strokeWidth={2} /></span>
+              <div className="task-card2__flow">
+                <PersonArrow />
+              </div>
               {isDispatching ? (
                 <div className="task-card2__person task-card2__person--assignee" title="U老师 正在派单，稍候自动更新" aria-label="U老师 正在派单，稍候自动更新">
                   <span className="task-card2__avatar task-card2__avatar--assignee task-card2__avatar--dispatching"><i className="dispatch-pulse" /></span>
@@ -1072,6 +1115,8 @@ export default function TicketDetailPage() {
           mentionAllUsers={allUsers}
           taskId={ticket?.ticket_id}
           onTaskUpdated={handleWsTaskUpdated}
+          focusCommentId={focusDiscussion ? focusCommentId : null}
+          focusAuthor={focusDiscussion ? focusAuthor : null}
         />
 
         {/* 操作：与历史工单列表页完全一致 —— 终态（已解决/已取消/已关闭）整组不显示；

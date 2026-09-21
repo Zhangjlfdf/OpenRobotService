@@ -6,7 +6,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Loading, Toast, Button, Popup, DialogPlugin } from 'tdesign-mobile-react';
 import AppButton from '@/shared/components/AppButton';
-import { Search, ArrowRight } from 'lucide-react';
+import { Search } from 'lucide-react';
 import { qaListTickets, type AiTicketBrief } from '@/api/ai';
 import { urgeTicket, reportTicket, cancelTicket, reDispatchTicket, fetchRedispatch } from '@/api/ticket';
 import type { RedispatchCandidate } from '@/api/ticket';
@@ -18,6 +18,8 @@ import { useAuthStore } from '@/stores/auth';
 import PullToRefresh from '@/shared/components/PullToRefresh';
 import UserSelect from '@/shared/components/UserSelect';
 import TitleEllipsis from '@/shared/components/TitleEllipsis';
+import ParticipantStack, { type ParticipantItem } from '@/shared/components/ParticipantStack';
+import PersonArrow from '@/shared/components/PersonArrow';
 import { formatDateTime } from '@/shared/utils/url';
 import type { UserItem } from '@/api/users';
 
@@ -66,6 +68,11 @@ const STATUS_META: Record<string, { label: string; color: string; bg: string }> 
 
 export default function HistoryTickets({ showHeader = true }: { showHeader?: boolean }) {
   const navigate = useNavigate();
+  // 点参与人头像 → 进详情页并定位到讨论区（DiscussionPanel.locateComment 同口径）
+  const openParticipantDiscussion = useCallback((taskId: number | string, authorUsername: string) => {
+    const qs = new URLSearchParams({ focus: 'discussion', author: authorUsername });
+    navigate(`/call/ticket/db_${taskId}?${qs.toString()}`);
+  }, [navigate]);
   const tasksRefreshKey = useWorkbenchStore((s) => s.tasksRefreshKey);
   const refreshTasks = useWorkbenchStore((s) => s.refreshTasks);
   const username = useAuthStore((s) => s.username);
@@ -401,14 +408,34 @@ export default function HistoryTickets({ showHeader = true }: { showHeader?: boo
                   <span className="history-row__tip-text">{t.redispatch_tip}</span>
                 </div>
               )}
-              {/* 人员流转（设计稿：头像 blue-3 + 姓名 | ArrowRight blue-3 居中 | 姓名 + 头像 blue-2）。
+              {/* 人员流转（设计稿：发起人头像+姓名 | 流线区——细线贯穿、参与人头像堆叠骑线居中、箭头头部收于右端 | 处理人）。
                   派单中（status=new 且处理人未写入，AI 派单 Worker 60s 轮询中）：显示「派单中」呼吸动效 */}
               <div className="task-card2__people">
                 <div className="task-card2__person task-card2__person--creator" title={`发起人：${t.created_by_name || t.created_by || '-'}`} aria-label={`发起人：${t.created_by_name || t.created_by || '-'}`}>
                   <span className="task-card2__avatar">{(t.created_by_name || t.created_by || '?').slice(0, 1).toUpperCase()}</span>
                   <span className="task-card2__person-name">{t.created_by_name || t.created_by || '-'}</span>
+                  {/* 代他人提单（代理提单）：谁代谁提交。
+                      视角标记由后端按 token 判定（is_proxy_agent / is_principal），
+                      姓名对非参与人不下发，此处自然不渲染。 */}
+                  {t.is_proxy_agent && t.proxy_principal_name && (
+                    <span className="proxy-card-pill proxy-card-pill--mini" title={`代 ${t.proxy_principal_name} 提交`}>
+                      代 {t.proxy_principal_name}
+                    </span>
+                  )}
+                  {t.is_principal && t.proxy_agent_name && (
+                    <span className="proxy-card-pill proxy-card-pill--mini" title={`${t.proxy_agent_name} 代你提交`}>
+                      {t.proxy_agent_name} 代提
+                    </span>
+                  )}
                 </div>
-                <span className="task-card2__person-arrow"><ArrowRight size={16} strokeWidth={2} /></span>
+                <div className={(t.participants || []).length > 0 ? 'task-card2__flow task-card2__flow--stacked' : 'task-card2__flow'}>
+                  {/* 线在前、堆叠在后：有堆叠时线退到底部作下划线，头像在线上方 */}
+                  <PersonArrow />
+                  <ParticipantStack
+                    participants={(t.participants || []) as ParticipantItem[]}
+                    onLocate={(p) => { if (p?.username) openParticipantDiscussion(t.id, p.username); }}
+                  />
+                </div>
                 {(t.status === 'new' && !t.assigned_to && !t.assigned_to_name) ? (
                   <div className="task-card2__person task-card2__person--assignee" title="U老师 正在派单" aria-label="U老师 正在派单">
                     <span className="task-card2__avatar task-card2__avatar--assignee task-card2__avatar--dispatching"><i className="dispatch-pulse" /></span>
@@ -428,6 +455,16 @@ export default function HistoryTickets({ showHeader = true }: { showHeader?: boo
                     <span className="history-row__status" style={{ color: 'var(--blue-2)', background: 'var(--secondary)' }}>{statusMeta.label}</span>
                   )}
                   {t.priority && <span className="history-row__priority-tag">{t.priority}</span>}
+                  {/* 代他人提单：他人代我提交、仍待我确认的单（品牌色圆点角标） */}
+                  {t.is_principal && t.proxy_relation_status === 'pending' && (
+                    <span
+                      className="proxy-card-pill proxy-card-pill--pending"
+                      title="他人代你提交的工单，待你确认跟进"
+                    >
+                      <span className="proxy-card-pill__dot" />
+                      待你跟进
+                    </span>
+                  )}
                 </div>
                 {/* 操作按钮：已解决/已取消/已关闭（终态）整组不显示；
                     待处理/已挂起可催办、撤回；处理中仅可上报；不可用按钮禁用 */}

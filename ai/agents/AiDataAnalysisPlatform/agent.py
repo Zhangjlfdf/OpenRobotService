@@ -18,7 +18,13 @@ from .llm_client import LLMClient
 from .logging_config import get_logger
 from .metric_planner import AnalysisPlanner, PlanConversationCache
 from .metric_registry import TimeRangeType, resolve_time_range
-from .prompts import build_chat_prompt, build_system_prompt
+from .prompts import (
+    build_agentic_system_prompt,
+    build_chat_prompt,
+    build_chat_system_prompt,
+    build_history_summary_prompt,
+    build_suggest_questions_prompt,
+)
 from .report_generator import ReportGenerator, ReportDataCollector
 from .report_schemas import ReportPeriod
 from .schemas import (
@@ -32,8 +38,33 @@ from .schemas import (
     MetricCard,
     ScopeSpec,
 )
+from .tools import build_agentic_tools, execute_tool
 
 logger = get_logger("Agent")
+
+# Agentic 工具调用最大轮数（防 LLM 反复调工具死循环）
+_MAX_AGENTIC_TOOL_ROUNDS = 3
+
+# 会话历史压缩：超过该条数时把最旧轮次 LLM 摘要为一条（防旧细节干扰/省 token）
+_HISTORY_COMPRESS_THRESHOLD = 8
+_HISTORY_KEEP_RECENT = 4
+
+
+def _parse_suggest_json(text: str) -> list:
+    """从 LLM 输出中稳健提取 JSON 数组（容忍代码块标记/前后缀文字）。"""
+    try:
+        data = json.loads(text.strip())
+        return data if isinstance(data, list) else []
+    except json.JSONDecodeError:
+        pass
+    m = re.search(r"\[[\s\S]*\]", text)
+    if not m:
+        return []
+    try:
+        data = json.loads(m.group(0))
+        return data if isinstance(data, list) else []
+    except json.JSONDecodeError:
+        return []
 
 # 统计范围类型 → 中文（喂 LLM 的上下文去技术化用）
 _SCOPE_TYPE_CN = {
@@ -271,8 +302,10 @@ class DataAnalysisAgent:
                 conversation_id=conversation_id,
             )
 
-        # 3) 普通聊天
-        return await self._chat_reply(question, context)
+        # 3) 普通聊天（带会话记忆）
+        # 首问无会话 ID 时自动生成并回传，后续轮次 AI 服务端自动注入历史
+        conversation_id = conversation_id or uuid4().hex
+        return await self._chat_reply(question, context, conversation_id)
 
     # ── 指标对话主流程（阶段 2）─────────────────────────────
 
@@ -285,6 +318,8 @@ class DataAnalysisAgent:
         conversation_id: str | None,
     ) -> ChatResponse:
         """指标对话主流程：问题 → plan → 澄清/采集 → 分析 → 回答。"""
+        # 会话 ID 保证存在（供 clarify 回传与后续轮次记忆）
+        conversation_id = conversation_id or uuid4().hex
         previous_plan = self._plan_cache.get(conversation_id)
         plan = await self._planner.parse(question, context, previous_plan)
 
@@ -296,7 +331,7 @@ class DataAnalysisAgent:
 
         # 无法解析出指标且无显式范围 → 回落普通聊天
         if not plan.metric_keys and plan.scope.type == "global":
-            return await self._chat_reply(question, context)
+            return await self._chat_reply(question, context, conversation_id)
 
         if missing:
             # 缓存 plan，等用户下一轮补充
@@ -322,7 +357,9 @@ class DataAnalysisAgent:
 
         # plan 完整 → 按指标采集并分析
         try:
-            result, charts, cards = await self._analyze_by_plan(plan, question, context)
+            result, charts, cards = await self._analyze_by_plan(
+                plan, question, context, conversation_id
+            )
         except Exception:
             logger.exception("按计划分析失败")
             raise
@@ -449,9 +486,258 @@ class DataAnalysisAgent:
                 yield event
             return
 
-        # 3) 普通聊天（流式）
+        # 3) 普通聊天（流式，带会话记忆）
+        # 首问无会话 ID 时自动生成并随 meta 事件回传，后续轮次 AI 服务端自动注入历史
+        conversation_id = conversation_id or uuid4().hex
         async for event in self._chat_reply_stream(question, context, conversation_id):
             yield event
+
+    # ── Agentic 自由对话（LLM 主导 + 工具调用，阶段 2）──────────
+
+    async def agentic_chat_stream(
+        self,
+        question: str,
+        context: str | None = None,
+        data: str | None = None,
+        data_source: DataSource = DataSource.JSON,
+        analysis_type: AnalysisType = AnalysisType.GENERAL,
+        project_code: str | None = None,
+        user_id: str | None = None,
+        conversation_id: str | None = None,
+    ) -> AsyncIterator[dict]:
+        """Agentic 流式对话：LLM 主导，自主决定是否调用工具查询指标。
+
+        与 ``chat_stream`` 同 SSE 事件协议（meta → delta* → done）。
+        无工具能力（LLM 客户端不支持）或流程异常时自动降级到既有流程。
+
+        Args:
+            同 ``chat_stream``（不含 period/date）；data 存在时旁路到原分析流程。
+        """
+        has_data = data is not None and bool(data.strip())
+        # 1) 带 data → 保持原有分析问答（零回归）
+        if has_data:
+            async for event in self.chat_stream(
+                question=question, context=context, data=data,
+                data_source=data_source, analysis_type=analysis_type,
+                project_code=project_code, user_id=user_id,
+                conversation_id=conversation_id,
+            ):
+                yield event
+            return
+
+        conversation_id = conversation_id or uuid4().hex
+
+        # LLM 客户端不支持工具调用（旧服务/测试 Mock）→ 降级既有流程
+        if not hasattr(self._llm, "chat_with_tools"):
+            logger.info("LLM 客户端不支持工具调用，agentic 降级 chat_stream")
+            async for event in self.chat_stream(
+                question=question, context=context,
+                project_code=project_code, user_id=user_id,
+                conversation_id=conversation_id,
+            ):
+                yield event
+            return
+
+        try:
+            async for event in self._agentic_flow(
+                question=question, context=context,
+                project_code=project_code, user_id=user_id,
+                conversation_id=conversation_id,
+            ):
+                yield event
+        except Exception:
+            logger.exception("agentic 流程失败，降级普通聊天")
+            async for event in self._chat_reply_stream(
+                question, context, conversation_id
+            ):
+                yield event
+
+    async def _agentic_flow(
+        self,
+        question: str,
+        context: str | None,
+        project_code: str | None,
+        user_id: str | None,
+        conversation_id: str,
+    ) -> AsyncIterator[dict]:
+        """ReAct 循环：LLM 决策（是否调工具）↔ 工具执行 → 自由组织回答。
+
+        messages 由 agent 全程维护（system + 历史 + 工具往返），经
+        ``chat_with_tools(messages=...)`` 直连 AI 服务；最终问答对显式
+        落库会话记忆（中间工具轮不落库，防历史污染）。
+        """
+        # 1. 会话历史（多轮记忆）：AI 服务端 Redis → messages 历史段
+        history_msgs: list[dict] = []
+        if hasattr(self._llm, "fetch_history"):
+            history_msgs = await self._llm.fetch_history(conversation_id)
+        history_msgs = await self._compress_history(history_msgs)
+
+        # 2. 初始 messages：system + 历史 + 用户问题
+        messages: list[dict] = [
+            {"role": "system", "content": build_agentic_system_prompt()}
+        ]
+        messages.extend(history_msgs)
+        user_text = question
+        if context:
+            user_text = f"## 页面上下文\n{context}\n\n## 用户问题\n{question}"
+        if project_code:
+            user_text += f"\n（当前页面项目代码：{project_code}，查询该项目数据时优先使用）"
+        messages.append({"role": "user", "content": user_text})
+
+        tools = build_agentic_tools()
+        charts_out: list = []
+        cards_out: list = []
+        reasoning_parts: list[str] = []
+        used_tool = False
+        final_answer = ""
+        # 展示元信息：项目名大标题与数据日期（工具结果随 meta 下发给前端）
+        scope_title_out: str | None = None
+        date_range_out: str | None = None
+
+        # 3. ReAct 循环（最多 _MAX_AGENTIC_TOOL_ROUNDS 轮工具调用）
+        for _round in range(_MAX_AGENTIC_TOOL_ROUNDS + 1):
+            # system 已置于 messages[0]；此处 system_prompt 传空（messages 模式下忽略）
+            resp = await self._llm.chat_with_tools(
+                "", user_text, tools,
+                messages=messages,
+                session_id=conversation_id,
+                temperature=0.3,
+                save_memory=False,  # 中间轮一律不落库，最终问答对由第 4 步显式保存
+            )
+            content = (resp.get("content") or "").strip()
+            tool_calls = resp.get("tool_calls") or []
+            if resp.get("reasoning"):
+                reasoning_parts.append(resp["reasoning"])
+            if not tool_calls:
+                final_answer = content
+                break
+
+            # 有工具调用：归一化 call id，回填 assistant(tool_calls) 与 tool 结果
+            used_tool = True
+            call_ids = [
+                tc.get("id") or f"call_{i}" for i, tc in enumerate(tool_calls)
+            ]
+            assistant_msg: dict = {"role": "assistant", "content": content or ""}
+            assistant_msg["tool_calls"] = [
+                {
+                    "id": call_ids[i],
+                    "type": "function",
+                    "function": {
+                        "name": tc.get("name", ""),
+                        "arguments": json.dumps(
+                            tc.get("arguments") or {}, ensure_ascii=False
+                        ),
+                    },
+                }
+                for i, tc in enumerate(tool_calls)
+            ]
+            messages.append(assistant_msg)
+            for i, tc in enumerate(tool_calls):
+                try:
+                    result = await execute_tool(
+                        tc.get("name", ""), tc.get("arguments") or {},
+                        self, user_id,
+                    )
+                except Exception:
+                    logger.exception(
+                        "agentic 工具执行失败 name=%s", tc.get("name")
+                    )
+                    result = {"text": "工具执行失败，请换一种问法或稍后重试。"}
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": call_ids[i],
+                    "content": result.get("text") or "",
+                })
+                charts_out.extend(result.get("charts") or [])
+                cards_out.extend(result.get("cards") or [])
+                if result.get("scope_title"):
+                    scope_title_out = result["scope_title"]
+                if result.get("date_range"):
+                    date_range_out = result["date_range"]
+        else:
+            # 循环耗尽仍无最终答案（连续多轮全是工具调用）
+            final_answer = final_answer or (
+                "抱歉，这个问题有些复杂，请换个方式描述，"
+                "或明确要查询的指标与时间范围。"
+            )
+
+        # 4. 最终问答对显式落库会话记忆（一次交互只记一轮，中间工具轮不记）
+        if final_answer.strip() and hasattr(self._llm, "add_turn"):
+            await self._llm.add_turn(conversation_id, "user", question)
+            await self._llm.add_turn(conversation_id, "assistant", final_answer)
+
+        # 5. 追问建议（低成本 LLM 调用，失败静默不阻塞主流程）
+        suggestions: list[str] = []
+        if final_answer.strip():
+            suggestions = await self._generate_suggest_questions(question, final_answer)
+
+        # 6. SSE 下发：reasoning（思考过程，可选）→ meta → delta* → done
+        mode = "analysis" if used_tool else "chat"
+        reasoning = (reasoning_parts[0] or "").strip() if reasoning_parts else ""
+        if reasoning:
+            yield {"type": "reasoning", "content": reasoning}
+        yield {
+            "type": "meta", "mode": mode, "plan": None,
+            "charts": charts_out or None,
+            "cards": cards_out or None,
+            "suggestions": None,
+            "scope_title": scope_title_out,
+            "date_range": date_range_out,
+            "conversation_id": conversation_id,
+        }
+        # 最终答案按块下发（整段答案已生成，逐块输出保持前端流式观感）
+        for i in range(0, len(final_answer), 24):
+            yield {"type": "delta", "content": final_answer[i:i + 24]}
+        yield {
+            "type": "done", "conversation_id": conversation_id, "mode": mode,
+            "suggest_questions": suggestions or None,
+        }
+
+    async def _compress_history(self, history_msgs: list[dict]) -> list[dict]:
+        """长会话历史压缩：超过阈值时把最旧轮次 LLM 摘要为一条 system 消息。
+
+        保留最近 ``_HISTORY_KEEP_RECENT`` 条（多轮指代依赖），最旧部分压缩成
+        一段摘要（查询过的指标/项目/口径/结论），防旧细节干扰且省 token。
+        无 LLM 能力或摘要失败时静默返回原历史。
+        """
+        if len(history_msgs) <= _HISTORY_COMPRESS_THRESHOLD:
+            return history_msgs
+        if not hasattr(self._llm, "chat"):
+            return history_msgs
+        old = history_msgs[:-_HISTORY_KEEP_RECENT]
+        history_text = "\n".join(
+            f"{'用户' if m.get('role') == 'user' else '助手'}：{(m.get('content') or '')[:200]}"
+            for m in old
+        )
+        try:
+            summary, _ = await self._llm.chat(
+                build_history_summary_prompt(), history_text,
+                max_tokens=300, temperature=0.3,
+            )
+            summary = (summary or "").strip()
+            if summary:
+                return [
+                    {"role": "system", "content": f"[更早对话摘要] {summary}"}
+                ] + history_msgs[-_HISTORY_KEEP_RECENT:]
+        except Exception:
+            logger.warning("历史摘要失败，保留原始历史")
+        return history_msgs
+
+    async def _generate_suggest_questions(self, question: str, answer: str) -> list[str]:
+        """生成 2~3 个追问建议（done 事件附带），无 LLM 能力或失败时静默返回空列表。"""
+        if not hasattr(self._llm, "chat") or not answer.strip():
+            return []
+        user_prompt = f"用户问题：{question}\n助手回答：{answer[:800]}"
+        try:
+            content, _ = await self._llm.chat(
+                build_suggest_questions_prompt(), user_prompt,
+                max_tokens=200, temperature=0.7,
+            )
+            items = _parse_suggest_json(content or "")
+            return [s.strip() for s in items if isinstance(s, str) and s.strip()][:3]
+        except Exception:
+            logger.warning("追问建议生成失败，跳过")
+            return []
 
     async def _chat_metric_flow_stream(
         self,
@@ -466,6 +752,8 @@ class DataAnalysisAgent:
         与 ``_chat_metric_flow`` 同逻辑，区别是图表/卡片随 meta 事件先行下发，
         回答文本经 delta 事件逐块输出。
         """
+        # 会话 ID 保证存在（供 clarify 回传与后续轮次记忆）
+        conversation_id = conversation_id or uuid4().hex
         previous_plan = self._plan_cache.get(conversation_id)
         plan = await self._planner.parse(question, context, previous_plan)
 
@@ -525,7 +813,8 @@ class DataAnalysisAgent:
             project_ids=self._resolve_plan_project_ids(plan)
         )
         collected = collector.collect_by_plan(
-            plan.metric_keys, start, end, label
+            plan.metric_keys, start, end, label,
+            explicit_time=plan.time_range.explicit,
         )
         charts, cards = build_charts(plan.metric_keys, collected)
         collected_data = json.dumps(
@@ -543,6 +832,10 @@ class DataAnalysisAgent:
             f"统计周期：{label}；"
             f"统计范围：{scope_cn}。"
             f"回答中提及项目时请使用项目完整名称。"
+            f"系统已为各指标生成图表/卡片展示，回答请图+文字结合："
+            f"图表展示数据，文字部分解读趋势走向、分布结构、对比差异与关键洞察，"
+            f"不要大段罗列与图表重复的数字。"
+            f"回答仅基于本次采集的数据，历史对话仅供参考。"
         )
         merged_context = (
             f"{context}\n\n{collected_context}" if context else collected_context
@@ -550,12 +843,37 @@ class DataAnalysisAgent:
 
         self._plan_cache.delete(conversation_id)
 
+        # 展示元信息：项目名大标题（single_project 优先取数据库项目全名，
+        # 缺失时回退 plan 中的项目名/编号，避免显示「指定项目（编号）」）与数据日期
+        if plan.scope.type == "single_project":
+            db_name = None
+            if plan.scope.project_code:
+                try:
+                    from .project_matcher import get_project_name
+
+                    db_name = get_project_name(plan.scope.project_code)
+                except Exception:
+                    logger.warning(
+                        "单项目名查库失败 code=%s", plan.scope.project_code
+                    )
+            scope_title = (
+                db_name
+                or plan.scope.project_name
+                or plan.scope.project_code
+                or scope_cn
+            )
+        else:
+            scope_title = scope_cn
+        date_range_str = str(collected.get("date_range") or label)
+
         # 图表/卡片/口径先行下发，回答文本流式追加
         yield {
             "type": "meta", "mode": "analysis", "plan": plan.model_dump(),
             "charts": [c.model_dump() for c in charts],
             "cards": [c.model_dump() for c in cards],
             "suggestions": None,
+            "scope_title": scope_title,
+            "date_range": date_range_str,
             "conversation_id": conversation_id,
         }
         async for chunk in self._analyzer.analyze_stream(
@@ -564,15 +882,20 @@ class DataAnalysisAgent:
             analysis_type=AnalysisType.CUSTOM,
             question=question,
             context=merged_context,
+            session_id=conversation_id,
         ):
             yield {"type": "delta", "content": chunk}
         yield {"type": "done", "conversation_id": conversation_id, "mode": "analysis"}
 
     async def _chat_reply_stream(
-        self, question: str, context: str | None, conversation_id: str | None
+        self, question: str, context: str | None, conversation_id: str
     ) -> AsyncIterator[dict]:
-        """普通聊天回复（流式）。"""
-        system_prompt = build_system_prompt(AnalysisType.CUSTOM)
+        """普通聊天回复（流式，带会话记忆）。
+
+        使用自由对话人设（与数据分析人设分离），并以 conversation_id
+        作为 AI 服务端 session_id，复用历史对话实现多轮记忆。
+        """
+        system_prompt = build_chat_system_prompt()
         user_prompt = build_chat_prompt(question, context)
 
         yield {
@@ -580,14 +903,24 @@ class DataAnalysisAgent:
             "charts": None, "cards": None, "suggestions": None,
             "conversation_id": conversation_id,
         }
-        async for chunk in self._llm.chat_stream(system_prompt, user_prompt):
+        async for chunk in self._llm.chat_stream(
+            system_prompt, user_prompt, session_id=conversation_id
+        ):
             yield {"type": "delta", "content": chunk}
         yield {"type": "done", "conversation_id": conversation_id, "mode": "chat"}
 
     async def _analyze_by_plan(
-        self, plan: AnalysisPlan, question: str, context: str | None
+        self,
+        plan: AnalysisPlan,
+        question: str,
+        context: str | None,
+        conversation_id: str | None,
     ) -> tuple[AnalysisResult, list[ChartSpec], list[MetricCard]]:
         """按 AnalysisPlan 采集数据并调用分析引擎。
+
+        Args:
+            conversation_id: 会话 ID；透传给分析引擎作为 session_id，
+                注入会话历史（多轮追问可承上文）；None 时无状态分析。
 
         Returns:
             (分析结果, 图表列表, 指标卡片列表)；图表/卡片由采集结果直接生成。
@@ -614,7 +947,8 @@ class DataAnalysisAgent:
             project_ids=self._resolve_plan_project_ids(plan)
         )
         collected = collector.collect_by_plan(
-            plan.metric_keys, start, end, label
+            plan.metric_keys, start, end, label,
+            explicit_time=plan.time_range.explicit,
         )
         # 图表/卡片由采集结果直接生成；喂 LLM 的数据转为中文 key（根除字段名泄漏）
         charts, cards = build_charts(plan.metric_keys, collected)
@@ -633,6 +967,10 @@ class DataAnalysisAgent:
             f"统计周期：{label}；"
             f"统计范围：{scope_cn}。"
             f"回答中提及项目时请使用项目完整名称。"
+            f"系统已为各指标生成图表/卡片展示，回答请图+文字结合："
+            f"图表展示数据，文字部分解读趋势走向、分布结构、对比差异与关键洞察，"
+            f"不要大段罗列与图表重复的数字。"
+            f"回答仅基于本次采集的数据，历史对话仅供参考。"
         )
         merged_context = (
             f"{context}\n\n{collected_context}" if context else collected_context
@@ -644,6 +982,7 @@ class DataAnalysisAgent:
             analysis_type=AnalysisType.CUSTOM,
             question=question,
             context=merged_context,
+            session_id=conversation_id,
         )
         return result, charts, cards
 
@@ -729,19 +1068,26 @@ class DataAnalysisAgent:
         return [c.name for c in picks]
 
     async def _chat_reply(
-        self, question: str, context: str | None
+        self, question: str, context: str | None, conversation_id: str
     ) -> ChatResponse:
-        """普通聊天回复。"""
-        system_prompt = build_system_prompt(AnalysisType.CUSTOM)
+        """普通聊天回复（带会话记忆）。
+
+        使用自由对话人设（与数据分析人设分离），并以 conversation_id
+        作为 AI 服务端 session_id，复用历史对话实现多轮记忆。
+        """
+        system_prompt = build_chat_system_prompt()
         user_prompt = build_chat_prompt(question, context)
 
-        answer, usage = await self._llm.chat(system_prompt, user_prompt)
+        answer, usage = await self._llm.chat(
+            system_prompt, user_prompt, session_id=conversation_id
+        )
 
         return ChatResponse(
             answer=answer,
             mode="chat",
             model=self._llm.model_name,
             usage=usage,
+            conversation_id=conversation_id,
         )
 
     @staticmethod

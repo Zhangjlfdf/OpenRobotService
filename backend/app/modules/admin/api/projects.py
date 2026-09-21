@@ -5,19 +5,35 @@ MIGRATION.md 阶段 3：从 `app/modules/das/api/projects.py` 搬迁而来，
 """
 from fastapi import APIRouter, Depends, Query, HTTPException, Request
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional, Dict, List, Any
 from app.modules.admin.schemas_das.request_models import ProjectCreate, ProjectUpdate, ProjectResponse
-from app.modules.admin.services.project_service import project_service
+from app.modules.admin.services.project_service import project_service, ProjectConflictError, NO_TASK_EXECUTION_STATS
 from app.modules.admin.services.risk_service import risk_service
+from app.modules.admin.services import project_ai_summary_service
+from app.modules.admin.services.task_dashboard_service import task_dashboard_service
 from app.modules.admin.services.permission_service import PermissionService
 from app.modules.admin.utils_das.config import security, DEBUG_MODE
-from app.core.database import db_manager
+from app.core.database import db_manager, get_async_db as get_db
 from app.modules.admin.api.auth import require_permission
 import logging
 
 logger = logging.getLogger("admin")
 
 project_router = APIRouter(prefix="/projects", tags=["admin-projects"])
+
+
+async def _attach_ticket_counts(db: AsyncSession, projects: List[Dict[str, Any]]) -> None:
+    """给项目列表补上 ticket_count（tasks 表按 project_id 批量统计，口径同仪表盘「总工单数」）。
+
+    项目进度管理页每张项目卡右上角展示该项目的工单数；一条 GROUP BY 覆盖整页项目，
+    不做逐项目查询。
+    """
+    counts = await task_dashboard_service.get_ticket_counts_by_project(
+        db, [str(project["id"]) for project in projects]
+    )
+    for project in projects:
+        project["ticket_count"] = counts.get(str(project["id"]), 0)
 
 
 @project_router.get("/", summary="获取项目列表")
@@ -29,17 +45,21 @@ async def get_projects(
     execution_status: Optional[str] = Query(None, description="按执行状态过滤"),
     contact_person_id: Optional[str] = Query(None, description="按对接人ID过滤"),
     include_analysis: bool = Query(True, description="是否包含分析信息"),
+    db: AsyncSession = Depends(get_db),
     credentials: Optional = Depends(security if not DEBUG_MODE else lambda: None)
 ) -> List[ProjectResponse]:
     projects = []
-    
+
     if keyword:
         projects = project_service.search_projects(keyword)
     elif status or execution_status or contact_person_id:
         projects = project_service.filter_projects(status, execution_status, contact_person_id)
     else:
         projects = project_service.get_projects(skip, limit)
-    
+
+    # 项目卡右上角工单数：与 include_analysis 无关，始终附带
+    await _attach_ticket_counts(db, projects)
+
     if not include_analysis:
         return projects
     
@@ -48,13 +68,14 @@ async def get_projects(
     if project_codes:
         detailed_risks = risk_service.get_detailed_open_risks_by_project_codes(project_codes)
         # 批量预取任务指标与切手动次数（此前在循环内逐项目查询，N 个项目为 3N 条 SQL；
-        # 切手动次数现随任务指标一起取自 collection_data，见 get_task_execution_metrics_7d_batch）
-        metrics_7d = project_service.get_task_execution_metrics_7d_batch(project_codes)
+        # 切手动次数现随任务指标一起取自 collection_data，
+        # 见 get_task_execution_metrics_latest_batch——取各项目已导入的最新一天数据）
+        metrics_latest = project_service.get_task_execution_metrics_latest_batch(project_codes)
 
         for project in projects:
             project_code = project["project_code"]
             project_risks = detailed_risks.get(project_code, [])
-            metric = metrics_7d.get(project_code)
+            metric = metrics_latest.get(project_code)
 
             project["risks"] = 0
 
@@ -68,7 +89,7 @@ async def get_projects(
             risk_summary = []
             
             project["task_execution_status"] = metric["status"] if metric else "无数据"
-            project["task_execution_stats"] = metric["stats"] if metric else {"total_tasks": 0, "finished_tasks": 0, "completion_rate": None, "manual_switch_count": None}
+            project["task_execution_stats"] = metric["stats"] if metric else NO_TASK_EXECUTION_STATS
             project["latest_manual_switch_count"] = metric["stats"].get("manual_switch_count") if metric else None
 
             for category, risks in custom_categories.items():
@@ -99,6 +120,7 @@ async def get_projects(
 async def get_my_projects(
     request: Request,
     include_analysis: bool = Query(True, description="是否包含分析信息"),
+    db: AsyncSession = Depends(get_db),
     credentials: Optional = Depends(security if not DEBUG_MODE else lambda: None)
 ) -> List[ProjectResponse]:
     from app.core.security import decode_token
@@ -135,7 +157,10 @@ async def get_my_projects(
         project = project_service.get_project(project_id)
         if project:
             projects.append(project)
-    
+
+    # 项目卡右上角工单数：与 include_analysis 无关，始终附带（口径同 GET /projects/）
+    await _attach_ticket_counts(db, projects)
+
     if not include_analysis:
         return projects
     
@@ -144,12 +169,12 @@ async def get_my_projects(
     if project_codes:
         detailed_risks = risk_service.get_detailed_open_risks_by_project_codes(project_codes)
         # 批量预取任务指标与切手动次数（与 GET /projects/ 同口径，避免循环内 3N 条 SQL）
-        metrics_7d = project_service.get_task_execution_metrics_7d_batch(project_codes)
+        metrics_latest = project_service.get_task_execution_metrics_latest_batch(project_codes)
 
         for project in projects:
             project_code = project["project_code"]
             project_risks = detailed_risks.get(project_code, [])
-            metric = metrics_7d.get(project_code)
+            metric = metrics_latest.get(project_code)
 
             project["risks"] = 0
             
@@ -163,7 +188,7 @@ async def get_my_projects(
             risk_summary = []
             
             project["task_execution_status"] = metric["status"] if metric else "无数据"
-            project["task_execution_stats"] = metric["stats"] if metric else {"total_tasks": 0, "finished_tasks": 0, "completion_rate": None, "manual_switch_count": None}
+            project["task_execution_stats"] = metric["stats"] if metric else NO_TASK_EXECUTION_STATS
             project["latest_manual_switch_count"] = metric["stats"].get("manual_switch_count") if metric else None
 
             for category, risks in custom_categories.items():
@@ -309,6 +334,27 @@ async def get_project(
         project["risk_list"] = "无"
     
     return project
+
+
+@project_router.post("/{project_id}/ai-summary", summary="生成 AI 项目摘要")
+async def generate_project_ai_summary(
+    project_id: str,
+    credentials: Optional = Depends(security if not DEBUG_MODE else lambda: None)
+) -> Dict[str, Any]:
+    """读取项目基础字段 +「项目信息管理」整棵信息树，大模型总结后写回 ext_info.overview.ai_summary。
+
+    大模型与「文件导入（AI 识别）」同一个（backend/.env 的 LLM_API_KEY，默认 DeepSeek flash，
+    接口走 app/core/llm_client.py 的 LLMClient）。响应返回 summary 与更新后的 ext_info。
+    """
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    try:
+        return await project_ai_summary_service.generate_for_project(project)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
 
 
 @project_router.get("/{project_id}/members", response_model=List[Dict[str, Any]], summary="获取项目已关联人员")
@@ -517,7 +563,11 @@ async def update_project(
 
     update_dict = {k: v for k, v in update_data.model_dump().items() if v is not None}
 
-    project = project_service.update_project(project_id, update_dict)
+    try:
+        project = project_service.update_project(project_id, update_dict)
+    except ProjectConflictError as e:
+        # 乐观锁冲突：他人已先更新该项目，前端应刷新后重试
+        raise HTTPException(status_code=409, detail=str(e))
     if not project:
         raise HTTPException(status_code=404, detail="项目不存在")
     return project

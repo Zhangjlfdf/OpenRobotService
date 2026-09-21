@@ -10,6 +10,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from automation.config.paths import AUTOMATION_ROOT
+
 
 # ANSI color codes
 _COLORS = {
@@ -69,6 +71,8 @@ class RotatingFileHandler(logging.handlers.RotatingFileHandler):
     def __init__(self, file_path: str, max_bytes: int = 10 * 1024 * 1024,
                  backup_count: int = 5, fmt: str = 'json'):
         path = Path(file_path)
+        if not path.is_absolute():
+            path = AUTOMATION_ROOT / path
         path.parent.mkdir(parents=True, exist_ok=True)
         super().__init__(str(path), maxBytes=max_bytes, backupCount=backup_count,
                          encoding='utf-8')
@@ -88,8 +92,8 @@ class AllureLogHandler(logging.Handler):
 
     def __init__(self, level: int = logging.WARNING):
         super().__init__(level=level)
-        self._local = threading.local()
-        self._local.records = []
+        self._records: list[str] = []
+        self._lock = threading.Lock()
         self._allure_available = self._check_allure()
 
     @staticmethod
@@ -103,20 +107,22 @@ class AllureLogHandler(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
         if not self._allure_available:
             return
-        self._local.records.append(self.format(record))
+        with self._lock:
+            self._records.append(self.format(record))
 
     def flush(self) -> None:
-        if not self._allure_available or not self._local.records:
+        if not self._allure_available:
+            return
+        with self._lock:
+            records = self._records
+            self._records = []
+        if not records:
             return
         try:
             import allure
-            records = self._local.records
-            if records:
-                log_text = '\n'.join(records)
-                allure.attach(log_text, name='framework_log',
-                              attachment_type=allure.attachment_type.TEXT)
+            log_text = '\n'.join(records)
+            allure.attach(log_text, name='framework_log',
+                          attachment_type=allure.attachment_type.TEXT)
         except Exception:
             pass
-        finally:
-            self._local.records = []
 

@@ -100,30 +100,149 @@ class ProjectDelivery(Base):
     id = Column(String(64), primary_key=True, comment="项目ID/代码，与code一致")
     code = Column(String(64), unique=True, nullable=False, comment="项目代码")
     name = Column(String(128), nullable=False, comment="项目名称")
+
     system_id = Column(String(50), nullable=True, comment="系统ID")
-    description = Column(String(1000), nullable=True, comment="项目描述")
+    description = Column(Text, nullable=True, comment="项目描述")
     contact_person = Column(String(50), nullable=True, comment="对接人")
-    contact_person_id = Column(String(20), nullable=True, comment="对接人ID")
+    contact_person_id = Column(String(64), nullable=True, comment="对接人ID（与 users.id 同长度）")
+    project_contact = Column(String(50), nullable=True, comment="对接人")
     status = Column(String(20), nullable=False, default="active", comment="状态")
     expected_trend = Column(String(20), nullable=True, comment="预计走向")
     issues = Column(Integer, nullable=False, default=0, comment="问题数")
     risks = Column(Integer, nullable=False, default=0, comment="风险数")
     personnel_plan = Column(String(50), nullable=True, comment="人员计划")
-    risk_list = Column(String(500), nullable=True, comment="风险清单")
+    risk_list = Column(Text, nullable=True, comment="风险清单")
     deployment_date = Column(String(20), nullable=True, comment="部署时间")
     deployment_version = Column(String(50), nullable=True, comment="部署版本")
     recent_delivery_date = Column(String(20), nullable=True, comment="近期交付时间")
-    recent_delivery_content = Column(String(500), nullable=True, comment="近期交付内容")
+    recent_delivery_content = Column(Text, nullable=True, comment="近期交付内容")
     final_delivery_date = Column(String(20), nullable=True, comment="最终交付时间")
-    project_summary = Column(String(1000), nullable=True, comment="项目总结")
+    project_summary = Column(Text, nullable=True, comment="项目总结")
     task_execution_status = Column(String(50), nullable=True, comment="任务执行情况")
-    field_links = Column(String(1000), nullable=True, comment="字段链接(JSON格式)")
+    field_links = Column(Text, nullable=True, comment="字段链接(JSON格式)")
     category_basis = Column(String(20), nullable=False, default="重要紧急", comment="分类依据")
+    # 项目扩展信息（递归嵌套 JSON），结构由服务层约定
+    ext_info = Column(JSON, nullable=True, comment="项目扩展信息(递归嵌套 JSON)")
+    # 乐观锁版本号（backend update_project 维护，AI 侧仅读取）
+    version = Column(Integer, nullable=False, default=1, comment="乐观锁版本号")
+
+    project_type = Column(String(20), nullable=True, comment="项目类型（企业微信项目类型字段原值）")
+    stage_notes = Column(Text, nullable=True, comment="生命周期各阶段补充说明(JSON格式，键为阶段名)")
+    risk_carrying_type = Column(String(20), nullable=True, comment="风险承接类型")
+    special_attention = Column(Text, nullable=True, comment="特别关注说明")
+    risk_task_description = Column(Text, nullable=True, comment="风险和任务描述")
+    management_strategy = Column(Text, nullable=True, comment="项目管理策略")
+    project_documents = Column(Text, nullable=True, comment="项目文档(JSON格式，[{name,resource_id,url}])")
+    sales = Column(String(50), nullable=True, comment="销售")
+    pre_sales = Column(String(50), nullable=True, comment="售前")
+    project_manager = Column(String(50), nullable=True, comment="项目经理")
+    project_manager_id = Column(String(64), nullable=True, comment="项目经理ID（与 users.id 同长度，用于关联角色）")
+    field_engineer = Column(String(50), nullable=True, comment="实施工程师")
+
+    internal_code = Column(String(50), nullable=True, comment="内部编号")
+    project_region = Column(String(30), nullable=True, comment="项目区域/地点")
+    total_vehicle_count = Column(Integer, nullable=True, comment="总车数")
+    controller_vendor = Column(String(30), nullable=True, comment="控制器选择")
+    system_integration = Column(Text, nullable=True, comment="系统/外设对接(JSON数组)")
+    server_deployment_status = Column(String(30), nullable=True, comment="服务器部署")
+    settlement_period = Column(String(20), nullable=True, comment="业绩核算期（手工填写，常见YYYYMM如202608，兼容YYYY-MM）")
+    undertake_status = Column(String(10), nullable=False, default="是", comment="是否承接（是/待定；「否」不入库）")
 
     __table_args__ = (
         Index("idx_project_code", "code", unique=True),
         Index("idx_project_status", "status"),
+        Index("idx_project_settlement_period", "settlement_period"),
+        Index("idx_project_undertake_status", "undertake_status"),
     )
+
+
+class ProjectInfoNode(Base):
+    """项目信息树节点定义（仅查询，字段对齐 backend/app/models/delivery.py ProjectInfoNode）。
+
+    双用途：project_id IS NULL = 全局模板节点（所有项目共享同一份字段定义）；
+    project_id = A = 项目 A 的增补自定义节点（仅 A 可见）。
+    节点只描述结构（叫什么、什么类型），不存值——项目实际数据在
+    project_info_value，靠 (project_id, node_id) 关联。
+    """
+    __tablename__ = "project_info_node"
+
+    id = Column(String(64), primary_key=True, comment="节点永久身份(UUID)，改名/挪位不换")
+    project_id = Column(String(64), nullable=True, comment="NULL=全局模板节点；非 NULL=该项目专属的增补节点")
+    parent_id = Column(String(64), nullable=True, comment="父节点ID, NULL=根节点")
+    node_key = Column(String(191), nullable=False, comment="程序用稳定标识(如 base.customer_info)，建立后不可改")
+    node_name = Column(String(255), nullable=False, comment="节点显示名")
+    node_type = Column(String(16), nullable=False, default="field", comment="节点类型: root/group/field")
+    value_type = Column(String(32), nullable=False, default="text", comment="值类型: text/number/boolean/date/select/multi_select/person/attachment/json")
+    sort_order = Column(Integer, nullable=False, default=0, comment="同级排序(升序)")
+    required = Column(Boolean, nullable=False, default=False, comment="是否必填")
+    allow_custom = Column(Boolean, nullable=False, default=False, comment="是否允许在其下增补项目自定义子节点")
+    config = Column(JSON, nullable=True, comment="节点配置: 下拉选项、单位、占位提示等")
+    status = Column(String(16), nullable=False, default="active", comment="状态: active/disabled（停用保留历史与值，仅隐去）")
+    created_by = Column(String(64), nullable=True, comment="创建人登录名（全局节点为管理员）")
+    created_at = Column(String(30), nullable=False, comment="创建时间")
+    updated_by = Column(String(64), nullable=True, comment="最近修改人登录名")
+    updated_at = Column(String(30), nullable=False, comment="更新时间")
+
+
+class ProjectInfoValue(Base):
+    """项目信息值表（仅查询，字段对齐 backend/app/models/delivery.py ProjectInfoValue）。
+
+    某个项目的某个节点的当前值：UNIQUE(project_id, node_id)，一个项目对一个节点
+    只有一份当前值。不预创建空值——没填过的节点这里就没有行，查询时 LEFT JOIN。
+    value_json 存原生 JSON，具体形状由节点的 value_type 决定。
+    """
+    __tablename__ = "project_info_value"
+
+    id = Column(String(64), primary_key=True, comment="记录UUID")
+    project_id = Column(String(64), nullable=False, comment="值所属项目ID")
+    node_id = Column(String(64), nullable=False, comment="对应的节点ID（全局节点或本项目增补节点）")
+    value_json = Column(JSON, nullable=True, comment="节点值(原生JSON: 字符串/数字/数组/对象)")
+    created_at = Column(String(30), nullable=False, comment="创建时间")
+    updated_at = Column(String(30), nullable=False, comment="更新时间")
+    updated_by = Column(String(64), nullable=True, comment="最近修改人登录名")
+
+
+class ProjectInfoValueHistory(Base):
+    """项目信息值变更历史（仅查询，字段对齐 backend/app/models/delivery.py ProjectInfoValueHistory）。
+
+    每一行是「谁在什么时候把哪个节点的值从什么改成了什么」。
+    old_value / new_value 与 value_json 同尺度；node_key/node_name/node_type
+    是写入时的快照，节点改名/停用后历史仍可追溯。
+    operation_type 覆盖值变动 create/update/delete 与结构变动
+    node_create/node_move/node_rename 两类操作。
+    """
+    __tablename__ = "project_info_value_history"
+
+    id = Column(String(64), primary_key=True, comment="记录UUID（时间有序，可当水位比较）")
+    project_id = Column(String(64), nullable=False, comment="所属项目ID（历史按项目隔离，必填）")
+    node_id = Column(String(64), nullable=True, comment="被操作的节点ID；整树级操作为 NULL")
+    parent_id = Column(String(64), nullable=True, comment="上级节点ID")
+    node_key = Column(String(191), nullable=False, default="", comment="写入时的节点标识快照")
+    node_name = Column(String(255), nullable=False, default="", comment="写入时的节点名称快照")
+    node_type = Column(String(16), nullable=True, comment="写入时的节点类型快照")
+    old_value = Column(JSON, nullable=True, comment="变更前的值（原生JSON）")
+    new_value = Column(JSON, nullable=True, comment="变更后的值（原生JSON）")
+    operation_type = Column(String(16), nullable=False, comment="操作类型: create/update/delete/node_create/node_move/node_rename")
+    changed_by = Column(String(64), nullable=True, comment="操作人登录名")
+    changed_by_name = Column(String(64), nullable=True, comment="操作人显示名")
+    change_reason = Column(Text, nullable=True, comment="变更原因（预留）")
+    detail = Column(Text, nullable=True, comment="具体变动的人话描述")
+    changed_at = Column(String(30), nullable=False, comment="操作时间")
+
+
+class ProjectInfoNodeMark(Base):
+    """项目信息树节点「关注」标注（仅查询，字段对齐 backend/app/models/delivery.py ProjectInfoNodeMark）。
+
+    每人一份关注列表：主键 (node_id, operator)，同一节点可被多人各存一行。
+    project_id 注明关注发生在哪个项目维度。
+    """
+    __tablename__ = "project_info_node_mark"
+
+    node_id = Column(String(64), primary_key=True, comment="被关注的节点ID")
+    operator = Column(String(64), primary_key=True, comment="关注人登录名（关注列表按人隔离）")
+    project_id = Column(String(64), nullable=False, comment="所属项目ID")
+    operator_name = Column(String(64), nullable=True, comment="关注人显示名")
+    created_at = Column(String(30), nullable=False, comment="关注时间")
 
 
 class Risk(Base):
@@ -222,3 +341,31 @@ class Message(Base):
     sequence = Column(Integer, nullable=False, default=0, comment="消息序号")
     created_at = Column(DateTime, server_default=func.now(), comment="创建时间")
     metadata_ = Column(Text, nullable=True, comment="元数据")
+
+
+class TaskParticipant(Base):
+    """任务参与人表（只读，字段对齐 backend/app/models/task.py TaskParticipant）。
+
+    历史工单列表卡片「评论区参与人头像堆叠」的数据源；评论成功后由后端同事务幂等
+    upsert 写入（见 backend 评论端点）。AI 侧仅查询，不写入。
+    """
+    __tablename__ = "task_participants"
+
+    id = Column(BigInteger, primary_key=True, index=True, comment="参与记录ID")
+    task_id = Column(BigInteger, nullable=False, index=True, comment="任务ID")
+    username = Column(String(50), nullable=False, index=True, comment="参与人username")
+    created_at = Column(DateTime, comment="首次参与时间")
+    last_active_at = Column(DateTime, comment="最近一次参与时间")
+
+
+class TaskCommentRead(Base):
+    """评论已读游标表（只读，字段对齐 backend/app/models/task.py TaskCommentRead）。
+
+    红点判定口径：存在「作者不是我、且 comment_id > 我的游标」的评论 ⇒ 该作者头像亮红点。
+    """
+    __tablename__ = "task_comment_read"
+
+    id = Column(BigInteger, primary_key=True, index=True)
+    task_id = Column(BigInteger, nullable=False, index=True, comment="任务ID")
+    username = Column(String(50), nullable=False, index=True, comment="用户username")
+    last_read_comment_id = Column(BigInteger, nullable=True, comment="已读到的最后一条评论ID")

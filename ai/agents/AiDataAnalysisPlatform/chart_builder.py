@@ -28,6 +28,7 @@ FIELD_LABEL_MAP: dict[str, str] = {
     "project": "项目",
     "risk": "风险",
     "collection": "搬运效率",
+    "project_info": "项目信息",
     "total": "总数",
     "new_count": "新增数",
     "resolved_count": "已解决数",
@@ -45,6 +46,15 @@ FIELD_LABEL_MAP: dict[str, str] = {
     "new_by_day": "每日新增",
     "overdue_list": "逾期明细",
     "items": "明细列表",
+    # 标量指标顺带生成的按天序列（标量配趋势图，图+文字展示）
+    "new_count_by_day": "每日新增数",
+    "resolved_count_by_day": "每日已解决数",
+    "closed_count_by_day": "每日已关闭数",
+    # 明细列表顺带生成的分布（LIST 指标配分布图，图+文字展示）
+    "items_dist": "明细分布",
+    # 项目明细按状态分组（组内截断），「哪些项目」类问法喂 LLM 的分组结构
+    "items_by_status": "项目分组明细",
+    "items_count": "项目明细总数",
     # collection_data 窗口内按天聚合（日期 → 每日汇总），多日趋势图数据源
     "by_day": "每日汇总",
     # 无数据项目（project 表与 collection_data 上报对比）
@@ -63,10 +73,24 @@ FIELD_LABEL_MAP: dict[str, str] = {
     "avg_manual_switch_count": "平均切手动次数",
     "manual_intervention_rate": "人工干预率",
     "robot_group_compare": "各组数据对比",
+    # 项目信息（project_info_node/value/history/mark 四张表）
+    "node_total": "节点总数",
+    "global_node_count": "全局模板节点数",
+    "custom_node_count": "项目自定义节点数",
+    "by_value_type": "值类型分布",
+    "fill_rate": "填写率",
+    "filled_node_count": "已填字段数",
+    "fillable_node_count": "可填字段数",
+    "change_count": "变更次数",
+    "change_by_day": "每日变更",
+    "change_count_by_day": "每日变更次数",
+    "change_by_type": "变更类型分布",
+    "top_marked_nodes": "关注排行",
+    "value_items": "已填字段值明细",
 }
 
 # 百分比类指标字段（value 为 0~100 的数值，卡片展示时带 % 单位）
-_PERCENT_FIELDS: frozenset[str] = frozenset({"resolve_rate", "manual_intervention_rate"})
+_PERCENT_FIELDS: frozenset[str] = frozenset({"resolve_rate", "manual_intervention_rate", "fill_rate"})
 
 # 小数值标量字段：卡片展示保留小数（str(int()) 会截断有效工作时长等小时数）
 _DECIMAL_FIELDS: frozenset[str] = frozenset({
@@ -129,23 +153,28 @@ def build_charts(
         dim_data = collected.get(metric.dimension.value) or {}
         field = key.split(".", 1)[1]
 
-        # 搬运效率标量指标：时间范围跨多天时附加每日趋势折线图
-        # （数据来自维度级 by_day 聚合，不依赖单值 field 是否在顶层）
-        trend = dim_data.get("by_day") if isinstance(dim_data, dict) else None
-        if (
-            metric.output_type == MetricOutputType.SCALAR
-            and metric.dimension == MetricDimension.COLLECTION
-            and isinstance(trend, dict)
-        ):
-            series = {
-                day: summary.get(field)
-                for day, summary in trend.items()
-                if isinstance(summary, dict) and summary.get(field) is not None
-            }
-            if len(series) >= 2:
-                trend_chart = _build_trend_chart(f"{metric.label}趋势", series)
-                if trend_chart is not None:
-                    charts.append(trend_chart)
+        # 标量指标附加每日趋势折线图（图+文字展示）：
+        # - collection 维度：维度级 by_day 聚合（day → 汇总 dict）
+        # - 其他维度（ticket/risk）：采集器顺带生成的 {field}_by_day（day → 数值）
+        trend_source: dict | None = None
+        if metric.output_type == MetricOutputType.SCALAR and isinstance(dim_data, dict):
+            by_day = dim_data.get("by_day")
+            if metric.dimension == MetricDimension.COLLECTION and isinstance(by_day, dict):
+                trend_source = {
+                    day: summary.get(field)
+                    for day, summary in by_day.items()
+                    if isinstance(summary, dict) and summary.get(field) is not None
+                }
+            else:
+                per_field = dim_data.get(f"{field}_by_day")
+                if isinstance(per_field, dict):
+                    trend_source = {
+                        day: v for day, v in per_field.items() if v is not None
+                    }
+        if trend_source and len(trend_source) >= 2:
+            trend_chart = _build_trend_chart(f"{metric.label}趋势", trend_source)
+            if trend_chart is not None:
+                charts.append(trend_chart)
 
         if field not in dim_data:
             continue
@@ -159,7 +188,12 @@ def build_charts(
             trend_chart = _build_trend_chart(metric.label, value)
             if trend_chart is not None:
                 charts.append(trend_chart)
-        # LIST（明细）不配图，交给 LLM 用文字表格呈现
+        elif metric.output_type == MetricOutputType.LIST:
+            # LIST（明细）：采集器顺带生成 items_dist（按状态/等级等分布）时配分布图，
+            # 明细内容本身仍交给 LLM 用文字呈现（图+文字）
+            dist = dim_data.get("items_dist") if isinstance(dim_data, dict) else None
+            if isinstance(dist, dict) and dist:
+                charts.append(_build_distribution_chart(f"{metric.label}分布", dist))
 
     return charts, cards
 

@@ -29,6 +29,11 @@ from app.models.delivery import (
     ProjectLicense,
     ProjectTransportEfficiency,
     ProjectTransportEfficiencyRobot,
+    ProjectInfoNode,
+    ProjectInfoNodeMark,
+    ProjectInfoValue,
+    ProjectInfoValueHistory,
+    ProjectBlockingConfig,
 )
 
 # 任务（承工单语义升格）
@@ -40,10 +45,20 @@ from app.models.task import (
     TaskType,
     TaskUserMapping,
     TaskStep,
+    TaskRelation,
+    RelationType,
+    SystemConfig,
 )
 
 # 任务派单日志（二次派单感知增强）
 from app.models.task_dispatch_log import TaskDispatchLog
+
+# 代他人提单（代理提单）关系
+from app.models.task_proxy_relation import (
+    TaskProxyRelation,
+    ProxyRelationStatus,
+    ProxyRelationSource,
+)
 
 # 会话 / 消息
 from app.models.conversation import (
@@ -80,6 +95,9 @@ from app.models.module_tree import ModuleTree
 from app.models.module_tree_edit import ModuleTreeEdit
 from app.models.module_tree_node import ModuleTreeNode
 
+# 界面图鉴（标准截图 + 难懂区域标注）
+from app.models.ui_atlas import UiAtlasCard
+
 # 用户信息（JSON 快照）
 from app.models.user_info import UserInfo
 
@@ -96,10 +114,18 @@ __all__ = [
     "RealtimeData", "HistoryData", "CollectionData",
     "Risk", "ProjectDailyReport", "ProjectLicense",
     "ProjectTransportEfficiency", "ProjectTransportEfficiencyRobot",
+    "ProjectInfoNode",
+    "ProjectInfoNodeMark",
+    "ProjectInfoValue",
+    "ProjectInfoValueHistory",
+    "ProjectBlockingConfig",
     # task
     "Task", "TaskComment", "TaskStatus", "TaskPriority", "TaskType", "TaskUserMapping", "TaskStep",
+    "TaskRelation", "RelationType", "SystemConfig",
     # task dispatch log
     "TaskDispatchLog",
+    # task proxy relation
+    "TaskProxyRelation", "ProxyRelationStatus", "ProxyRelationSource",
     # conversation
     "Conversation", "Message", "SceneType", "MessageRole", "MessageType",
     # dataqa
@@ -112,6 +138,8 @@ __all__ = [
     "Company", "Department",
     # module tree
     "ModuleTree", "ModuleTreeEdit", "ModuleTreeNode",
+    # ui atlas
+    "UiAtlasCard",
     # user info
     "UserInfo",
     # user statistics

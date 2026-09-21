@@ -25,6 +25,7 @@
 
 from __future__ import annotations
 
+import calendar
 import json
 import re
 from datetime import date
@@ -100,6 +101,25 @@ def _extract_time(
         day_iso = _to_iso(single.group(1), single.group(2))
         label = f"{single.group(1)}月{single.group(2)}号"
         return "custom", True, 7, day_iso, day_iso, label
+
+    # 月份词「9月份」「9月」→ 该月 1 号至月末（custom）；
+    # 负向前瞻排除「3个月」「近三个月」这类时长表达；
+    # 项目维度的时间口径（settlement_period 月份过滤）依赖此解析。
+    month_word = re.search(r"(?<!\d)(\d{1,2})\s*月(?:份)?(?!个)", text)
+    if month_word:
+        try:
+            m_val = int(month_word.group(1))
+            if 1 <= m_val <= 12:
+                year = today.year
+                # 未来月份回退一年（与绝对日期同口径）
+                if (year, m_val) > (today.year, today.month):
+                    year -= 1
+                last_day = calendar.monthrange(year, m_val)[1]
+                start_iso = f"{year:04d}-{m_val:02d}-01"
+                end_iso = f"{year:04d}-{m_val:02d}-{last_day:02d}"
+                return "custom", True, last_day, start_iso, end_iso, f"{m_val}月份"
+        except ValueError:
+            pass
 
     for pattern, time_type in _TIME_PATTERNS:
         m = pattern.search(text)
@@ -207,6 +227,38 @@ _DIMENSION_RULES: list[tuple[re.Pattern, str, list[tuple[re.Pattern | None, list
         ],
     ),
     (
+        # 项目信息维度（project_info_node/value/history/mark 四张表）：
+        # 放在「项目」规则之前，保证「项目信息填写率」「字段变更」等信息类
+        # 问法优先命中，不被项目维度的「项目」词抢先。
+        re.compile(r"(项目信息|信息填写|填写率|完整率|字段|节点|星标|变更记录|信息变更)"),
+        "project_info",
+        [
+            (re.compile(r"(填写率|填写情况|完整率|完整度)"), [
+                "project_info.fill_rate",
+                "project_info.items",
+            ]),
+            (re.compile(r"(变更|修改|改动|历史|更新)"), [
+                "project_info.change_count",
+                "project_info.change_by_day",
+                "project_info.change_by_type",
+            ]),
+            (re.compile(r"(关注|星标)"), ["project_info.top_marked_nodes"]),
+            (re.compile(r"(值类型|类型分布)"), ["project_info.by_value_type"]),
+            # 「哪些项目的XX是多少」「XX字段填了什么」→ 已填字段值明细
+            (re.compile(r"(哪些|什么|是多少|值|内容)"), [
+                "project_info.value_items",
+                "project_info.items",
+            ]),
+            (None, [
+                "project_info.node_total",
+                "project_info.global_node_count",
+                "project_info.custom_node_count",
+                "project_info.fill_rate",
+                "project_info.items",
+            ]),
+        ],
+    ),
+    (
         re.compile(r"项目"),
         "project",
         [
@@ -217,6 +269,10 @@ _DIMENSION_RULES: list[tuple[re.Pattern, str, list[tuple[re.Pattern | None, list
             # （同样支持「没有搬运数据」等夹入维度词的问法）
             (re.compile(r"((?:没有|无|没)(?:搬运效率|搬运|机器人|任务|效率){0,2}数据|未上报|没有上报|未采集|没有采集)"),
              ["project.no_data_items"]),
+            # 「哪些项目」「有什么项目」「项目列表/清单/明细」→ 项目明细清单
+            # （名称/状态等逐项展示；放在 no_data 之后，保证「哪些项目没有
+            # 数据」仍优先命中无数据清单）
+            (re.compile(r"(哪些|有什么|什么|列表|清单|明细)"), ["project.items"]),
             (None, ["project.total", "project.active_count", "project.by_status"]),
         ],
     ),
@@ -330,6 +386,14 @@ def _fast_path_parse(
                 and not any(k.startswith("project.by_") for k in metric_keys):
             metric_keys.append("project.by_status")
 
+    if metric_keys and action == "trend" and matched_dim == "project_info" \
+            and "project_info.change_by_day" not in metric_keys:
+        metric_keys.append("project_info.change_by_day")
+    if metric_keys and action == "distribution" and matched_dim == "project_info" \
+            and not any(k.startswith("project_info.by_") for k in metric_keys) \
+            and "project_info.change_by_type" not in metric_keys:
+        metric_keys.extend(["project_info.by_value_type", "project_info.change_by_type"])
+
     # 完全无命中（无维度、无时间、无动作）→ None 交给 LLM
     # 项目补充回答（supplement）即使无指标/时间也须保留：否则澄清轮回复
     # 「XX项目」会被误判为无命中而走 LLM 慢路径，导致反复要求确认项目
@@ -436,8 +500,8 @@ def _plan_from_llm_json(obj: dict, question: str) -> AnalysisPlan:
 
 _CLARIFY_TEMPLATES: dict[str, tuple[str, list[str]]] = {
     "metric_keys": (
-        "您想了解哪方面的数据指标？我目前支持工单、风险、项目、搬运效率四个维度的统计。",
-        ["工单解决率", "逾期工单", "风险等级分布", "项目进展", "搬运效率"],
+        "您想了解哪方面的数据指标？我目前支持工单、风险、项目、搬运效率、项目信息五个维度的统计。",
+        ["工单解决率", "逾期工单", "风险等级分布", "项目进展", "搬运效率", "项目信息填写率"],
     ),
     "time_range": (
         "请补充统计的时间范围。",

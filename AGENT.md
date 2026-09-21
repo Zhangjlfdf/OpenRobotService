@@ -11,11 +11,12 @@
 在编辑任何代码前，按以下顺序加载上下文：
 
 1. **`docs/project_architecture.md`** — 项目架构、模块划分、技术栈
-2. **`automation/AGENTS.md`** — 自动化测试框架 Agent（框架结构、命令、报告）
-3. **`automation/docs/automation_strategy.md`** — 自动化测试方案总览
-4. **`automation/docs/testing/testing_guidelines.md`** — 测试开发规范（命名、断言、夹具等）
-5. **`docs/business_rules.md`** — 业务约束、状态机、权限规则
-6. **`docs/PRD.md`** — 产品需求文档（功能点规格、验收标准）
+2. **`docs/CODEBASE_OVERVIEW.md`** — 代码现状总览（唯一权威，含表结构口径）
+3. **`automation/AGENTS.md`** — 自动化测试框架 Agent（框架结构、命令、报告）
+4. **`automation/docs/automation_strategy.md`** — 自动化测试方案总览
+5. **`automation/docs/testing/testing_guidelines.md`** — 测试开发规范（命名、断言、夹具等）
+6. **`docs/business_rules.md`** — 业务约束、状态机、权限规则
+7. **`docs/PRD.md`** — 产品需求文档（功能点规格、验收标准）
 
 ---
 
@@ -81,7 +82,7 @@ cd frontend && npm run test
 | 新增故障排查经验 | `docs/troubleshooting.md` |
 | 新增业务规则 | `docs/business_rules.md` |
 | 新增测试命令 | `automation/AGENTS.md` |
-| 更新 Excel 用例清单 | 运行 python automation/scripts/cli-generate-report.py 刷新 |
+| 调整模块划分 / 数据表结构 | `docs/CODEBASE_OVERVIEW.md`、`docs/database-erd.md` |
 | 本文流程变更 | `AGENT.md` |
 
 ---
@@ -98,9 +99,13 @@ cd frontend && npm run test
 | `automation/docs/testing/code-review-checklist.md` | 代码 Review 清单 |
 | **业务文档** | |
 | `docs/project_architecture.md` | 项目架构说明 |
+| `docs/CODEBASE_OVERVIEW.md` | 代码现状总览（唯一权威） |
+| `docs/database-erd.md` | 数据库 ERD（表结构唯一权威） |
 | `docs/business_rules.md` | 业务规则 |
 | `docs/troubleshooting.md` | 常见问题排查 |
 | `docs/PRD.md` | 产品需求文档 |
-| `backend/CODEBASE_OVERVIEW.md` | 后端代码结构总览 |
+| `docs/PRODUCT/PRODUCT.md` | 产品形态设计 |
+| `docs/PRODUCT/ARCHITECTURE.md` | 架构设计 |
+| `docs/PRODUCT/SETUP.md` | 本地搭建与部署 |
 | `backend/INTEGRATION_DESIGN.md` | 外部任务源集成设计 |
 | `CONTRIBUTING.md` | 贡献指南 |

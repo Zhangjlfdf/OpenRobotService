@@ -202,7 +202,14 @@ class LlmRecall:
         from ai.agents.AiDiagnosisPlatform.assigner.prompts.step3 import build_l1
         if top_k is not None:
             top_min = top_max = max(1, int(top_k))
-        return build_l1(ticket, engineers, top_min=top_min, top_max=top_max)
+        return build_l1(
+            ticket,
+            engineers,
+            top_min=top_min,
+            top_max=top_max,
+            keywords_map=getattr(self._config, "module_keywords", None),
+            anchors_map=getattr(self._config, "module_anchor_texts", None),
+        )
 
     def _parse(
         self, response: str, engineers: List[EngineerProfile],

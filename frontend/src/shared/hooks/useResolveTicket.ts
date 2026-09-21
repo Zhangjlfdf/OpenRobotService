@@ -1,7 +1,8 @@
 import { useMemo, useRef, useState } from 'react';
 import { Toast } from 'tdesign-mobile-react';
-import { createRequest } from '@/api/client';
+import { createRequest, ApiError } from '@/api/client';
 import API_CONFIG from '@/config/api';
+import type { BlockedErrorDetail } from '@/api/ticket';
 
 /** 结束工单弹窗展示所需的最小工单信息 */
 export interface ResolveTicketInfo {
@@ -14,12 +15,14 @@ export interface ResolveTicketInfo {
  * 结束工单（确认完成）逻辑 hook：系统任务详情页与历史工单详情页复用。
  * 封装：解决方式弹窗状态、AI 生成解决方式（POST /{id}/resolution-summary）、轮询回读、
  * 确认完成（PATCH /{id}/status → resolved）。afterResolve 用于确认完成后触发全局列表刷新。
+ * onBlocked 用于处理 422 阻塞校验失败时的回调（展示阻塞详情）。
  */
 export function useResolveTicket(
   taskId: string | number,
   detail: ResolveTicketInfo | null,
   refreshDetail: () => Promise<void>,
   afterResolve?: () => void,
+  onBlocked?: (detail: BlockedErrorDetail) => void,
 ) {
   const request = useMemo(() => createRequest(API_CONFIG.TASKS.BASE_URL, '工单服务'), []);
 
@@ -218,6 +221,15 @@ export function useResolveTicket(
       setResolutionText('');
       Toast({ message: '工单已处理完成', theme: 'success' });
     } catch (err) {
+      // 422 阻塞校验失败
+      if (err instanceof ApiError && err.statusCode === 422) {
+        const body = (err.errorBody as { detail?: BlockedErrorDetail })?.detail;
+        if (body?.code === 'blocked_by_related_tasks') {
+          onBlocked?.(body);
+          Toast({ message: `被 ${body.blocked.length} 个工单阻塞`, theme: 'error' });
+          return;
+        }
+      }
       Toast({ message: `处理完成失败: ${err instanceof Error ? err.message : ''}`, theme: 'error' });
     } finally {
       setResolutionSubmitting(false);
