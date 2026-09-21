@@ -261,6 +261,7 @@ label.f{display:flex;flex-direction:column;gap:5px;font-size:12px;color:var(--in
 .be-未覆盖.badge-src-man{background:#fee2e2;color:#b91c1c}
 .be-直接提单.badge-src-man,.be-建议转单.badge-src-man{background:#ffedd5;color:#c2410c}
 .be-寒暄.badge-src-man{background:#f1f5f9;color:#64748b}
+.be-猜你想问.badge-src-man{background:#fef3c7;color:#b45309}
 .repbar .rep-body b{color:#ffd43b}
 /* ── 流程向导 ── */
 .wiz{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
@@ -1832,7 +1833,7 @@ const FL = [
   {id:"undetermined", name:"未判定", kind:"gray", sub:1},
 ];
 const FLC = {main:"#3d76c4", cut:"#d97706", ok:"#2e9e5b", bad:"#d9534f", gray:"#98a2b3"};
-const LABELS = ["直答正确","未直答","未覆盖","直接提单","寒暄"];
+const LABELS = ["直答正确","未直答","未覆盖","直接提单","建议转单","寒暄","猜你想问"];
 let fData = null, fCur = {layer:"", rows:[], idx:-1};
 
 function fImgBase(){
@@ -1896,7 +1897,9 @@ function renderWeekCard(){
   const w = fData.week;
   const el = $("#weekcard");
   if(!w){ el.style.display = "none"; return; }
-  const prog = w.new_total ? Math.round(w.judged / w.new_total * 100) : 0;
+  // 0920：走查进度=可标注段（qa 四层已判定+未标注）的已判定占比——
+  // tester/寒暄/猜你想问/提单层无需人工标签，不再计入分母（全标完也到不了 100 的坑）
+  const prog = w.progress ?? (w.labelable ? Math.round(w.judged / w.labelable * 100) : 0);
   el.className = "weekcard";
   el.style.display = "";
   el.innerHTML = `
@@ -1911,7 +1914,9 @@ function renderWeekCard(){
       <div class="wk-item"><div class="n" style="color:var(--ok)">${w.answered}</div><div class="l">直答正确</div></div>
       <div class="wk-item"><div class="n" style="color:#d9534f">${w.unanswered}</div><div class="l">未直答</div></div>
       <div class="wk-item"><div class="n" style="color:#d9534f">${w.uncovered}</div><div class="l">未覆盖</div></div>
-      <div class="wk-item"><div class="n">${prog}%</div><div class="l">走查进度（判定占比）</div></div>
+      <div class="wk-item"><div class="n">${w.pending ?? 0}</div><div class="l">待标注</div></div>
+      <div class="wk-item"><div class="n">${w.sug_mix ?? 0}</div><div class="l">含推荐混合</div></div>
+      <div class="wk-item"><div class="n">${prog}%</div><div class="l">走查进度（可标注段已判定占比）</div></div>
     </div>`;
 }
 
@@ -1964,9 +1969,7 @@ function renderFunnel(){
                 ["undetermined","未判定",L.undetermined]])}
      </div>`,
     `<div class="fn-rate">直答率 <b>${L.direct_rate ?? "—"}%</b>
-      <span>= ${L.answered} ÷ ${L.qa}（全量·AI预标兜底）</span>
-      &nbsp;｜&nbsp;人工已标口径 <b style="font-size:19px;color:var(--ink2)">${L.manual_rate ?? "—"}%</b>
-      <span>（${L.manual_judged} 段，= 周报 L2 口径，走查补标后两数趋同）</span></div>`,
+      <span>= ${L.answered} ÷ ${L.qa}（真实咨询已判定，人工标签优先·AI预标兜底）</span></div>`,
   ].join("");
   $("#funnelbar").querySelectorAll("[data-l]").forEach(el=>{
     el.onclick = ()=> loadSegs(el.dataset.l);

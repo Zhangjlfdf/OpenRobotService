@@ -189,6 +189,21 @@ def main():
                            "at": m["created_at"], "task_ids": [], "files": files}
                 elif m["role"] == "ASSISTANT" and cur is not None:
                     text = m["content"] or ""
+                    # 项目选择题候选（0907 按钮版题面无编号列表）：候选列表在消息
+                    # metadata_.project_choices（前端持久化、服务端题面不落）——此前
+                    # 导出不带该列，标注记录里「用户回 3」无从对照（0920 走查反馈）。
+                    # 渲染成一行候选文本并入消息体：标注/走查/L1L3 prompt 同步可见
+                    choices = parse_meta(m.get("metadata_")).get("project_choices")
+                    if isinstance(choices, list) and choices:
+                        try:
+                            line = " ".join(
+                                f"{int(c.get('index'))}.{str(c.get('name') or '').strip()}"
+                                for c in choices
+                                if isinstance(c, dict) and str(c.get("name") or "").strip())
+                        except Exception:
+                            line = ""
+                        if line:
+                            text = f"{text}\n[候选] {line}"
                     act = _ticket_action(text)
                     seg = {"text": text, "at": m["created_at"]}
                     if act:
