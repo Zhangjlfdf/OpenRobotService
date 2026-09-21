@@ -21,6 +21,7 @@ import {
   removeInfoNode,
   saveHistorySeen,
   setInfoNodeValue,
+  SUBTREE_HISTORY_LIMIT,
   subtreeNodeIds,
   toggleInfoNodeMark,
   unseenHistoryChain,
@@ -331,9 +332,16 @@ describe('编辑历史（操作记录读接口 + 本机已读水位）', () => {
     vi.mocked(fetchInfoNodeChangeSummaryApi).mockResolvedValue({ n1: 'h1' });
 
     const records = await loadInfoNodeChanges('P1', 'n1');
-    expect(fetchInfoNodeChangesApi).toHaveBeenCalledWith('P1', 'n1');
+    expect(fetchInfoNodeChangesApi).toHaveBeenCalledWith('P1', 'n1', {});
     expect(records[0].operator_name).toBe('张三');
     expect(records[0].detail).toBe('把内容从「空」改为「中力」');
+
+    // 一级标签：连整棵子树的记录一起取，条数上限也放宽（后端上限 500）
+    await loadInfoNodeChanges('P1', 'r1', { includeDescendants: true, limit: SUBTREE_HISTORY_LIMIT });
+    expect(fetchInfoNodeChangesApi).toHaveBeenLastCalledWith('P1', 'r1', {
+      includeDescendants: true,
+      limit: SUBTREE_HISTORY_LIMIT,
+    });
 
     await expect(loadHistoryLatest('P1')).resolves.toEqual({ n1: 'h1' });
     expect(fetchInfoNodeChangeSummaryApi).toHaveBeenCalledWith('P1');

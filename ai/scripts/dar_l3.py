@@ -52,7 +52,12 @@ from datetime import datetime as _dt
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", line_buffering=True)
 _PROJ = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, _PROJ)
+_HERE = os.path.dirname(os.path.abspath(__file__))
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
 os.chdir(_PROJ)
+
+import dar_segs  # noqa: E402  段首统一口径：bounds 优先 + 老窗口续聊追加（0920）
 
 from dotenv import load_dotenv
 
@@ -111,6 +116,7 @@ def build_exam(all_mode=False):
     man = ({} if not os.path.exists(MANUAL)
            else json.load(open(MANUAL, encoding="utf-8")))
     bounds, labels = man.get("bounds") or {}, man.get("labels") or {}
+    frozen = man.get("frozen_len") or {}
     legacy = {"直答错误": "未直答", "直答不完整": "未直答", "转工单正确": "建议转单"}
     exam = []
     for c in convs:
@@ -126,17 +132,20 @@ def build_exam(all_mode=False):
             # 段根与标注工具前端一致（0909 实锤两套不同源：标注工具按 topic 变化
             # 分组、旧代码用 t 布尔翻转——已标会话预标 astart 对不上=全 miss）。
             # 有人工边界用人工（已标会话对齐人工标签），否则 topic 变化切段。
+            # 段首统一展开（0920）：末段已判定时老窗口续聊追加新段——新段独立预标，
+            # 不再顶着旧段判定混进考卷/预标行
             if cid in bounds:
-                manual = sorted({0, *(int(x) for x in bounds[cid]
-                                      if 0 <= int(x) < len(c["rounds"]))})
+                manual = dar_segs.effective_starts(
+                    c["rounds"], cid, bounds, labels, frozen_len=frozen)
             else:
                 manual = sorted({0, *(i for i in range(1, len(c["rounds"]))
                                       if cls[i]["topic"] != cls[i - 1]["topic"])})
         else:
             if cid not in bounds or c["is_tester"]:
                 continue
-            manual = sorted({0, *(int(x) for x in bounds[cid]
-                                  if 0 <= int(x) < len(c["rounds"]))})
+            # 校准模式同口径展开：追加出的无标签段在下方 lab 过滤处自然跳过
+            manual = dar_segs.effective_starts(
+                c["rounds"], cid, bounds, labels, frozen_len=frozen)
         rounds = c["rounds"]
         lab_map = {int(k): legacy.get(v, v) for k, v in
                    (labels.get(cid) or {}).items() if str(k).isdigit()}

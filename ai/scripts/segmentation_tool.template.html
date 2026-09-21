@@ -72,6 +72,12 @@
   .round details summary { cursor: pointer; font-size: 12px; color: #2563eb; user-select: none; }
   .round .a { margin-top: 4px; white-space: pre-wrap; word-break: break-word; font-size: 13.5px;
               max-height: 300px; overflow-y: auto; }
+  .round .imgs { margin-top: 4px; display: flex; flex-wrap: wrap; gap: 6px; }
+  .round .imgs img { max-width: 240px; max-height: 180px; border-radius: 6px;
+                     border: 1px solid #e2e8f0; background: #f8fafc; cursor: zoom-in; }
+  .round .imgs img:active { max-width: 90vw; max-height: 70vh; }
+  .round .imgs .imgbig { font-size: 12px; color: #2563eb; cursor: pointer;
+                         border: 1px dashed #93c5fd; border-radius: 6px; padding: 4px 8px; }
   .cut { height: 18px; margin: 6px -12px -6px; position: relative; cursor: grab; }
   .cut::before { content: ""; position: absolute; left: 0; right: 0; top: 8px; height: 0;
                  border-top: 2.5px dashed #f97316; }
@@ -434,6 +440,26 @@ function renderFlow() {
         <span>${fmtT(r.at)}</span></div>
         <div class="u"></div>`;
       rd.querySelector(".u").textContent = r.q || "(空)";
+      if (r.fs && r.fs.length) {
+        // 附件原图（0920）：走查页同源直链；大图/gif 占位点击加载，点图放大
+        const im = document.createElement("div");
+        im.className = "imgs";
+        im.innerHTML = r.fs.map(f => {
+          const u = esc(f.p || "");
+          return (f.s > 3145728 || /\.gif$/i.test(u))
+            ? `<span class="imgbig" data-p="${u}">🖼️ ${(f.s / 1048576).toFixed(1)}MB · 点击加载</span>`
+            : `<img loading="lazy" src="${u}" alt="${esc(f.n || "附件")}" onerror="this.replaceWith('(图片加载失败)')">`;
+        }).join("");
+        im.querySelectorAll(".imgbig").forEach(el => {
+          el.onclick = () => {
+            const img = document.createElement("img");
+            img.src = el.dataset.p;
+            img.style.maxWidth = "100%";
+            el.replaceWith(img);
+          };
+        });
+        rd.appendChild(im);
+      }
       if (r.a) {
         const det = document.createElement("details");
         det.innerHTML = `<summary>AI 回答</summary><div class="a"></div>`;

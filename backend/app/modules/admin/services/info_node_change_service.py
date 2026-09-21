@@ -14,6 +14,9 @@ node_key / node_name / node_type 是写入时的快照——节点被改名或�
   - 删除记录挂在被删节点的**上级节点**上——节点删掉后自身记录查不到，
     用户要求「删除节点在其上级节点显示删除记录」；
   - 整树级操作 node_id 为 NULL，一条记录说明整树发生了什么。
+  - 一级标签（根节点）的历史是**整棵子树**的：list_for_subtree 按子树里的全部节点 id 取，
+    再加上「parent_id 落在子树里且 operation_type=delete」的记录——
+    被删掉的子孙节点自己已不在节点表里，只看 node_id 会漏掉它们的删除记录。
 
 **写入与业务同事务**（SKILL 第 8.1 节）：调用方在同一个 Session 里 add 记录再统一 commit，
 任何一步失败一起回滚，不会出现「值改了但没记」或「记了但值没改」。
@@ -24,12 +27,13 @@ node_key / node_name / node_type 是写入时的快照——节点被改名或�
 import time
 import uuid
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 from sqlalchemy import and_, func, or_
 
 from app.core.db import SessionLocal  # 共享引擎（pool_pre_ping/pool_recycle），见 app/core/db.py
-from app.modules.admin.models_das.models import ProjectInfoValueHistory
+from app.modules.admin.models_das.models import ProjectInfoNode, ProjectInfoValueHistory
+from app.models.delivery import PROJECT_INFO_NODE_ACTIVE
 
 # 值变动
 ACTION_CREATE = "create"
@@ -282,6 +286,34 @@ def _to_dict(row: ProjectInfoValueHistory) -> Dict[str, Any]:
     }
 
 
+def subtree_node_ids(rows: Iterable[Any], root_id: str) -> List[str]:
+    """子树节点 id（含 root_id 自己），按树的先序（父在前、同级保持入参顺序）。
+
+    rows 只需要 id / parent_id 两个属性（ORM 行、SimpleNamespace、dict 都行）。
+    同级顺序取决于调用方的排序——list_for_subtree 传的是按 sort_order 排好的行，
+    与 get_tree 组装出的顺序一致，前端据此把记录分组才不会串位置。
+
+    root_id 即便当前不在 rows 里（节点已被删）也照样返回，
+    这样「查看一个已删节点的历史」与 list_for_node 的表现一致。
+    """
+    children: Dict[Optional[str], List[str]] = {}
+    for row in rows:
+        children.setdefault(
+            row["parent_id"] if isinstance(row, dict) else row.parent_id, []
+        ).append(row["id"] if isinstance(row, dict) else row.id)
+    ordered: List[str] = []
+    seen = set()
+    stack = [root_id]
+    while stack:
+        node_id = stack.pop()
+        if node_id in seen:  # 脏数据成环时兜底，不至于死循环
+            continue
+        seen.add(node_id)
+        ordered.append(node_id)
+        stack.extend(reversed(children.get(node_id, [])))
+    return ordered
+
+
 class InfoNodeChangeService:
     """历史记录的读写（写入走 add_history，与业务同事务）。"""
 
@@ -303,6 +335,43 @@ class InfoNodeChangeService:
                 ProjectInfoValueHistory.id.desc(),
             ).limit(limit).all()
             return [_to_dict(row) for row in rows]
+        finally:
+            db.close()
+
+    def list_for_subtree(self, project_id: str, node_id: str, limit: int = 200) -> List[Dict]:
+        """某节点**及其全部子孙**的历史（最新在前）：一级标签的「修改记录」用。
+
+        取两条并集（与 list_for_node 同口径，只是把「直接子节点」放大成「子树里的所有节点」）：
+          node_id 落在子树里的记录，加上 parent_id 落在子树里且 operation_type=delete 的记录。
+        后一条是必需的：删除是**整棵子树一条记录**挂在被删节点的上级上，被删的子孙
+        已不在节点表里，光看 node_id 会把它们的删除记录整片漏掉。
+
+        节点范围按读树的同一把尺子取（启用中的全局节点 ∪ 本项目增补节点），
+        否则前端看不到的节点会在这里冒出记录。节点已被删（不在节点表里）时，
+        子树只有它自己，退化成「看这个已删节点的记录」——与 list_for_node 一致。
+        """
+        db = SessionLocal()
+        try:
+            rows = db.query(ProjectInfoNode.id, ProjectInfoNode.parent_id).filter(
+                ProjectInfoNode.status == PROJECT_INFO_NODE_ACTIVE,
+                (ProjectInfoNode.project_id.is_(None))
+                | (ProjectInfoNode.project_id == project_id),
+            ).order_by(ProjectInfoNode.sort_order).all()
+            ids = subtree_node_ids(rows, node_id)
+            records = db.query(ProjectInfoValueHistory).filter(
+                ProjectInfoValueHistory.project_id == project_id,
+                or_(
+                    ProjectInfoValueHistory.node_id.in_(ids),
+                    and_(
+                        ProjectInfoValueHistory.parent_id.in_(ids),
+                        ProjectInfoValueHistory.operation_type == ACTION_DELETE,
+                    ),
+                ),
+            ).order_by(
+                ProjectInfoValueHistory.changed_at.desc(),
+                ProjectInfoValueHistory.id.desc(),
+            ).limit(limit).all()
+            return [_to_dict(row) for row in records]
         finally:
             db.close()
 

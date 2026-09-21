@@ -46,17 +46,36 @@ info_nodes:
   - title: 基础信息
     sort_order: 0
     children:
-      - title: 客户信息
+      # 项目编号 / 订单号 / 时间信息汇总：2026-09-21 新增（迁移 <新 id>，老库走那条迁移）。
+      # 项目编号与台账「项目编号」列同名，同步时直接落到这里（不再是定位列）。
+      - title: 项目编号
         sort_order: 0
-      - title: 订单信息
+      - title: 订单号
         sort_order: 1
+      - title: 时间信息汇总
+        sort_order: 2
+        children:
+          - title: 项目创建时间
+            sort_order: 0
+          - title: 业绩核算期
+            sort_order: 1
+          - title: 初次接触时间
+            sort_order: 2
+          - title: 预计AGV下线时间
+            sort_order: 3
+          - title: 预计进场时间
+            sort_order: 4
+      - title: 客户信息
+        sort_order: 3
+      - title: 订单信息
+        sort_order: 4
         children:
           - title: ERP
             sort_order: 0
       - title: 评审信息
-        sort_order: 2
+        sort_order: 5
       - title: 项目区域/地点
-        sort_order: 3
+        sort_order: 6
         children:
           # 原图：区域选项 → 大陆(China Mainland) → 省份 / 地区
           # 前端联动：区域选项选「大陆」时显示 省份/地区，选其它区域时显示 具体国家，
@@ -80,7 +99,7 @@ info_nodes:
             sort_order: 3
       # 原图注明「对接权用户开放新增」
       - title: 项目类型
-        sort_order: 4
+        sort_order: 7
         content_type: select
         options:
           - 受关注项目
@@ -92,7 +111,7 @@ info_nodes:
           - 试用项目
           - 内部/测试项目
       - title: 进厂要求
-        sort_order: 5
+        sort_order: 8
         children:
           - title: 着装
             sort_order: 0
@@ -102,19 +121,24 @@ info_nodes:
   - title: 硬件
     sort_order: 1
     children:
+      # 「车辆」2026-09-21 改名为「车型信息」（同一个节点，node_key 仍是 hardware.vehicle，
+      # 老库走迁移 <新 id> 只改 node_name、id 不变），并新增「总车数」——台账里「总车数」
+      # 一列与它同名，同步时直接落进来。
       # 车型1/车型2 在播种后由迁移 9d2f4a6b8c01 改成下拉（选项=AGV 车型目录，
       # 现为 66 款，见迁移 4a7c2e9d1b53）。
       # 目录不在本文件里抄一份——模板页有「填入车型目录」按钮，改选项去那里改。
-      - title: 车辆
+      - title: 车型信息
         sort_order: 0
         children:
-          - title: 车型1
+          - title: 总车数
             sort_order: 0
+          - title: 车型1
+            sort_order: 1
             children:
               - title: 数量
                 sort_order: 0
           - title: 车型2
-            sort_order: 1
+            sort_order: 2
             children:
               - title: 数量
                 sort_order: 0
@@ -166,6 +190,9 @@ info_nodes:
                 sort_order: 0
           - title: 通用配置
             sort_order: 1
+          # 2026-09-21 新增：放在既有两项之后，老库走迁移 <新 id>
+          - title: 版本号
+            sort_order: 2
       - title: license
         sort_order: 1
         children:

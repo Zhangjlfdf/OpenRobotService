@@ -9009,6 +9009,12 @@ html, body, #root {
 .mac-info__edit, .mac-info__collapse, .mac-info__iconbtn { padding: 6px; line-height: 0; border-radius: 9px; }
 .mac-info__edit { display: inline-flex; align-items: center; gap: 4px; padding: 5px 9px; font-size: 12px; line-height: 1.2; }
 .mac-info__act { display: inline-flex; align-items: center; gap: 4px; padding: 5px 9px; font-size: 11.5px; line-height: 1.2; }
+/* —— 编辑页卡头动作多（同步/详情模板/文件导入/新标签 + 展开折叠）：430px 卡内只有 364px，
+   六个按钮单行要 384px，放不下时标题会被压成一字一行、最后一个按钮被切掉。
+   加了 --wrap 的卡头允许整块动作区落到标题下面，动作区自己再右对齐换行；标题始终单行（副标题也能整句显示）。 */
+.mac-info__head--wrap { flex-wrap: wrap; row-gap: 6px; }
+.mac-info__head--wrap .mac-info__title-wrap { flex: 1 1 auto; }
+.mac-info__head--wrap .mac-info__actions { flex: 1 1 auto; min-width: 0; flex-wrap: wrap; justify-content: flex-end; }
 
 /* —— 显示内容标签池（浏览卡） —— */
 .mac-info__poolhead { display: flex; align-items: center; justify-content: space-between; margin-top: 14px; }
@@ -9207,6 +9213,18 @@ html, body, #root {
 .mac-history__when { margin-left: auto; white-space: nowrap; }
 .mac-history__what { margin: 5px 0 0; font-size: 12.5px; line-height: 1.6; color: var(--mac-fg); overflow-wrap: anywhere; }
 
+/* 一级标签的「修改记录」：整棵子树的变动按节点分组，Markdown 渲染（排版对照 .mac-ai__md 的紧凑版） */
+.mac-history__md { margin-top: 10px; max-height: 58vh; overflow-y: auto; font-size: 12.5px; line-height: 1.65; color: var(--mac-fg); overflow-wrap: anywhere; }
+.mac-history__md > :first-child { margin-top: 0; }
+.mac-history__md > :last-child { margin-bottom: 0; }
+.mac-history__md h1 { margin: 0 0 4px; font-size: 14px; font-weight: 700; }
+.mac-history__md h2 { margin: 14px 0 4px; font-size: 12px; font-weight: 700; color: var(--mac-blue-1); }
+.mac-history__md p { margin: 0 0 6px; font-size: 11.5px; color: var(--mac-muted-fg); }
+.mac-history__md ul { margin: 0; padding-left: 16px; }
+.mac-history__md li { margin: 0 0 4px; }
+.mac-history__md li::marker { color: var(--mac-blue-2); }
+.mac-history__md strong { font-weight: 600; color: var(--mac-muted-fg); }
+
 /* —— 项目动态（关注节点变动）：节点名 + 最新一条变动内容，不带时间与人员 —— */
 .mac-activity__head { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; color: var(--mac-fg); }
 .mac-activity__head svg { color: var(--mac-blue-2); }
@@ -9324,6 +9342,8 @@ html, body, #root {
 .mac-import__old { color: var(--mac-muted-fg); }
 .mac-import__new { color: var(--mac-blue-1); }
 .mac-import__note { font-size: 10.5px; line-height: 1.5; color: var(--mac-muted-fg); overflow-wrap: anywhere; }
+/* 台账同步的「为什么没匹配上」说明（如同名下拉装不下这个值）：同排版，暖色提示要留意 */
+.mac-import__note--warn { color: #ad6800; }
 .mac-import__actions { display: flex; gap: 10px; margin-top: 16px; }
 .mac-import__actions .mac-btn { flex: 1; }
 
@@ -9385,3 +9405,48 @@ html, body, #root {
 .mac-tpl__preview-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 7px 2px; border-bottom: 1px solid var(--mac-border); }
 .mac-tpl__preview-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; color: var(--mac-fg); }
 .mac-tpl__preview-stat { flex-shrink: 0; font-size: 11px; color: var(--mac-muted-fg); }
+
+/* —— 工单关联策略配置页（TaskPolicyPage）—— */
+.task-policy-wrap { padding: 14px 14px 30px; }
+.task-policy-loading, .task-policy-empty { padding: 40px 0; text-align: center; color: var(--mac-muted-fg); font-size: 13px; }
+.task-policy-group { margin-bottom: 20px; }
+.task-policy-group__title { margin: 0; font-size: 14px; font-weight: 700; color: var(--mac-fg); }
+.task-policy-group__desc { margin: 4px 0 10px; font-size: 12px; line-height: 1.6; color: var(--mac-muted-fg); }
+
+.task-policy-row {
+  display: flex; align-items: center; gap: 12px; width: 100%;
+  margin-top: 8px; padding: 12px 14px; border: 1px solid var(--mac-border);
+  border-radius: 12px; background: #fff; box-shadow: var(--mac-shadow-soft);
+  cursor: pointer; text-align: left; font: inherit; color: inherit;
+  transition: opacity 0.15s, box-shadow 0.15s;
+}
+.task-policy-row:active { opacity: 0.85; }
+.task-policy-row:disabled { opacity: 0.6; cursor: not-allowed; }
+/* 不同色相——红（阻塞）/蓝（子工单）/紫（同步） */
+.task-policy-row--red { border-left: 3px solid #ef4444; }
+.task-policy-row--blue { border-left: 3px solid #3697c3; }
+.task-policy-row--purple { border-left: 3px solid #a855f7; }
+.task-policy-row--gray { border-left: 3px solid #9ca3af; }
+
+.task-policy-row__body { flex: 1; min-width: 0; }
+.task-policy-row__title { font-size: 13.5px; font-weight: 600; color: var(--mac-fg); }
+.task-policy-row__desc { margin-top: 3px; font-size: 11.5px; line-height: 1.55; color: var(--mac-muted-fg); }
+.task-policy-row__hint { margin-top: 5px; font-size: 10.5px; color: var(--mac-blue-1); }
+
+/* 开关：iOS 风格，左灰右蓝 */
+.task-policy-row__switch {
+  position: relative; flex-shrink: 0; width: 44px; height: 24px;
+  border-radius: 999px; background: #d1d5db; transition: background 0.2s;
+}
+.task-policy-row__switch.on { background: #3697c3; }
+.task-policy-row__switch.loading { opacity: 0.7; }
+.task-policy-row__thumb {
+  position: absolute; top: 2px; left: 2px; width: 20px; height: 20px;
+  border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,0.15);
+  transition: transform 0.2s;
+}
+.task-policy-row__switch.on .task-policy-row__thumb { transform: translateX(20px); }
+
+.task-policy-footer { margin-top: 16px; padding: 10px 12px; border-radius: 10px; background: var(--mac-secondary); font-size: 11px; line-height: 1.65; color: var(--mac-muted-fg); }
+
+.admin-no-perm { padding: 60px 20px; text-align: center; color: var(--mac-muted-fg); font-size: 14px; }

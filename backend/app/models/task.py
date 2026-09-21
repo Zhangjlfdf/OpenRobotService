@@ -430,3 +430,22 @@ class TaskRelation(Base):
 
     def __repr__(self):
         return f"<TaskRelation(id={self.id}, {self.source_task_id}->{self.target_task_id}, type={self.relation_type})>"
+
+
+class SystemConfig(Base):
+    """系统级配置键值对（工单关联规则等可在线配置项）。
+
+    表名 system_config。key 全局唯一，value 统一存字符串（bool 用 "0"/"1"）。
+    通过 task_policy_service 封装读写 + Redis 缓存热读。
+    """
+    __tablename__ = "system_config"
+
+    id = Column(BigInteger, primary_key=True, index=True)
+    config_key = Column(String(100), nullable=False, unique=True, index=True, comment="配置键")
+    config_value = Column(String(500), nullable=False, comment="配置值（字符串，bool 用 0/1）")
+    description = Column(String(255), nullable=True, comment="配置说明")
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(),
+                        nullable=False, comment="更新时间")
+
+    def __repr__(self):
+        return f"<SystemConfig(key={self.config_key}, value={self.config_value})>"

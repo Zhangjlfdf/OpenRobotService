@@ -188,7 +188,22 @@ export const qaPrepareTicket = (sessionId: string) =>
 export const qaConfirmTicket = (sessionId: string, overrides: Partial<TicketDraft>) =>
   aiPost<{
     code: number;
-    data?: { ticket: TicketDraft; db_id: number; notice: string };
+    data?: {
+      ticket: TicketDraft;
+      db_id: number;
+      notice: string;
+      /** 代他人提单：关系建立结果（未勾选代提时为 null） */
+      proxy_relation?: {
+        relation_id: number;
+        agent_id: string;
+        agent_name?: string | null;
+        principal_id: string;
+        principal_name?: string | null;
+        created: boolean;
+      } | null;
+      /** 代他人提单：关系建立失败原因（非空时前端必须提示，工单本身已提交成功） */
+      proxy_relation_error?: string;
+    };
     message?: string;
     missing_fields?: string[];
   }>('/qa/ticket/confirm', { session_id: sessionId, overrides, username: useAuthStore.getState().username });
@@ -245,6 +260,13 @@ export interface AiTicketBrief {
   source?: string;
   // 二次派单感知增强（M3）：派单结果提醒一句话摘要（无提醒为 null/undefined）
   redispatch_tip?: string | null;
+  // 代他人提单（代理提单）：关系状态 + 当前用户视角标记 + 参与人姓名。
+  // 视角标记由后端按 token 身份判定（前端不自行拼判定）；姓名对非参与人为 null。
+  proxy_relation_status?: 'pending' | 'acknowledged' | 'declined' | null;
+  is_proxy_agent?: boolean;
+  is_principal?: boolean;
+  proxy_agent_name?: string | null;
+  proxy_principal_name?: string | null;
   // 评论区参与讨论人员（头像堆叠；已按评论数→评论时间降序，含未读红点标记）
   participants?: Array<{
     username: string;

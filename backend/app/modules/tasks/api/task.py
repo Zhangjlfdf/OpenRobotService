@@ -47,6 +47,7 @@ from app.core.ticket_roles import (
 )
 from app.modules.tasks.services.operation_log_service import OperationLogService, get_role_prefix
 from app.models.task import OperationType, TaskStep, TaskFollower, TaskParticipant, Task, TaskRelation
+from app.modules.tasks.services.task_policy_service import get_all_policies
 from app.modules.tasks.api.ws import (
     ws_broadcast_comment,
     ws_broadcast_comment_deleted,
@@ -778,6 +779,18 @@ async def get_task(
             logger.warning(f"任务未找到: task_id={task_id}")
             raise HTTPException(status_code=404, detail="任务未找到")
         logger.info(f"获取任务详情成功: task_id={task_id}, load_comments={load_comments}")
+
+        # 代他人提单（代理提单）：详情接口回填代理关系字段（口径与列表一致：
+        # 视角标记按 token 身份判定，姓名仅参与人可见）——
+        # 作为详情页「关系横幅」独立接口的兜底，也让代理关系在全链路可审计。
+        try:
+            from app.core.security import decode_token as _decode_token
+            _payload = _decode_token(token) if token else None
+            _me_username = (_payload or {}).get("sub")
+            _user_map = await TicketService._get_user_map(token)
+            await TicketService._attach_proxy_relations(db, [ticket], _user_map, _me_username)
+        except Exception as proxy_err:
+            logger.warning(f"代理关系回填失败 task_id={task_id}: {proxy_err}")
         
         # 记录查看操作日志（带5分钟去重）
         if token:
@@ -1895,8 +1908,14 @@ async def update_task_status(
                 raise HTTPException(status_code=400, detail="结束工单必须填写解决方式")
             resolution_summary = rs
 
+        # ── 预加载工单关联策略（阻塞检查 + 重复同步共用一次读取） ──
+        try:
+            policies = await get_all_policies(db)
+        except Exception:
+            policies = None  # 自动退化为默认值
+
         # ── 前置/子任务阻塞校验 ──
-        blocked = await _check_relation_block(db, task_id, ticket.status, status_enum)
+        blocked = await _check_relation_block(db, task_id, ticket.status, status_enum, policies=policies)
         if blocked:
             raise HTTPException(
                 status_code=422,
@@ -1936,6 +1955,28 @@ async def update_task_status(
             username, token,
         )
 
+        # ── 重复工单状态同步（受 policies.duplicate_status_sync_enabled 开关控制） ──
+        try:
+            synced_cnt = await _sync_duplicate_status(
+                db=db,
+                source_task_id=task_id,
+                new_status=status_enum,
+                actor_name=username,
+                policies=policies,
+                token=token,
+                resolution_summary=resolution_summary,
+            )
+            if synced_cnt > 0:
+                await _add_system_comment(
+                    db, task_id,
+                    f"已自动同步 {synced_cnt} 个重复工单的状态",
+                    username, token,
+                )
+        except Exception as sync_err:
+            # 同步失败不阻塞主流程：记录日志即可
+            import logging as _logging
+            _logging.getLogger(__name__).warning("重复工单状态同步失败: %s", sync_err)
+
         # _add_system_comment 的 commit 会使 updated_ticket 的 comments 关系过期，
         # 需重新查询以避免 FastAPI 序列化时触发异步外的懒加载（MissingGreenlet）
         return await _reload_ticket_with_comments(db, task_id)
@@ -1961,17 +2002,30 @@ async def get_task_steps(
     task_id: int,
     db: AsyncSession = Depends(get_db),
     current_user: Dict[str, Any] = Depends(get_current_active_user_from_token),
+    ticket_type: Optional[str] = Query(None, alias="type", description="指定工单类型（可选）。传入时优先按此值查模板；不传则取 task_id 对应工单的 ticket_type"),
 ):
     """读取 task_steps 模板（按工单 task_type 过滤，sequence 升序）。
 
     前端「工单阶段性处理」区域据此生成当前节点描述（如 1/3 进度）。
+    子任务创建弹窗在用户切换工单类型时，也传 type=xxx 按新类型重拉阶段列表。
     """
-    ticket = await TicketService.get_ticket_by_id(db, task_id)
-    if not ticket:
-        raise HTTPException(status_code=404, detail="任务未找到")
+    from app.models.task import TaskType
+    # 优先使用前端显式传入的 type；否则按 task_id 反查父工单的 ticket_type
+    effective_type: Optional[str] = None
+    if ticket_type:
+        try:
+            TaskType(ticket_type.strip())  # 校验合法性
+            effective_type = ticket_type.strip()
+        except ValueError:
+            effective_type = None
+    if effective_type is None:
+        ticket = await TicketService.get_ticket_by_id(db, task_id)
+        if not ticket:
+            raise HTTPException(status_code=404, detail="任务未找到")
+        effective_type = ticket.task_type
     result = await db.execute(
         select(TaskStep)
-        .where(TaskStep.task_type == ticket.task_type)
+        .where(TaskStep.task_type == effective_type)
         .order_by(TaskStep.sequence.asc())
     )
     rows = result.unique().scalars().all()
@@ -3456,22 +3510,39 @@ async def _check_relation_block(
     task_id: int,
     current_status: TicketStatus,
     target_status: TicketStatus,
+    policies: Optional[Dict[str, Any]] = None,
 ) -> List[BlockedTaskInfo]:
-    """检查工单状态变更是否被前置工单或子任务阻塞。
+    """检查工单状态变更是否被前置工单或子任务阻塞（受 system_config 动态开关控制）。
 
-    阻塞规则：
+    阻塞规则（默认值，可由管理员页面在线开关）：
       - in_progress → resolved：所有 predecessor 前置工单需已完成（resolved/closed）
-      - resolved → closed：上述前置校验 + 所有 subtask 子工单需已完成（resolved/closed/canceled）
+      - resolved → closed：上述前置校验 + subtask 子工单需已完成（resolved/closed/canceled）
+
+    policies: 可选，预加载的策略字典（避免每次查 DB）。若为 None 会自动从 system_config 读取。
 
     返回空列表表示无阻塞；返回 BlockedTaskInfo 列表表示被阻塞的工单清单。
     """
     blocked: List[BlockedTaskInfo] = []
-    transition = f"{current_status.value if hasattr(current_status, 'value') else str(current_status)}" \
-                 f"→{target_status.value if hasattr(target_status, 'value') else str(target_status)}"
 
-    # 前置校验：resolved 和 closed 目标状态都需检查
-    if target_status in (TicketStatus.RESOLVED, TicketStatus.CLOSED):
-        # 查询所有 predecessor 关系（source=当前工单, target=前置工单）
+    # 延迟读取配置
+    if policies is None:
+        try:
+            policies = await get_all_policies(db)
+        except Exception:
+            # 配置读取失败时，退化为保守策略（默认全部开启阻塞）
+            policies = {
+                "block_predecessor_on_resolved": True,
+                "block_predecessor_on_closed": True,
+                "block_subtask_on_resolved": False,
+                "block_subtask_on_closed": False,
+            }
+
+    # ── 前置工单阻塞 ──
+    need_predecessor_check = (
+        (target_status == TicketStatus.RESOLVED and policies.get("block_predecessor_on_resolved", True))
+        or (target_status == TicketStatus.CLOSED and policies.get("block_predecessor_on_closed", True))
+    )
+    if need_predecessor_check:
         result = await db.execute(
             select(TaskRelation, Task).join(Task, Task.id == TaskRelation.target_task_id)
             .where(
@@ -3489,8 +3560,12 @@ async def _check_relation_block(
                     reason='predecessor',
                 ))
 
-    # 子任务校验：仅 closed 目标状态
-    if target_status == TicketStatus.CLOSED:
+    # ── 子工单阻塞（默认关闭：弱关联不阻塞任何状态流转） ──
+    need_subtask_check = (
+        (target_status == TicketStatus.RESOLVED and policies.get("block_subtask_on_resolved", False))
+        or (target_status == TicketStatus.CLOSED and policies.get("block_subtask_on_closed", False))
+    )
+    if need_subtask_check:
         result = await db.execute(
             select(TaskRelation, Task).join(Task, Task.id == TaskRelation.target_task_id)
             .where(
@@ -3509,6 +3584,112 @@ async def _check_relation_block(
                 ))
 
     return blocked
+
+
+async def _sync_duplicate_status(
+    db: AsyncSession,
+    source_task_id: int,
+    new_status: TicketStatus,
+    actor_name: str,
+    policies: Optional[Dict[str, Any]] = None,
+    token: str = "",
+    resolution_summary: Optional[str] = None,
+) -> int:
+    """将 source_task 的状态同步给所有 DUPLICATE 关联网单（一跳）。
+
+    只有当 policies.duplicate_status_sync_enabled = true 时才执行。
+    使用 session-level skip_sync 上下文变量防止 A→B→A 循环。
+    每个被同步的工单都会写入操作日志 + 系统评论，并广播 WS。
+    RESOLVED 状态会携带 resolution_summary（优先用传入值，否则用默认提示）。
+
+    返回被同步的工单数。
+    """
+    if policies is None:
+        try:
+            policies = await get_all_policies(db)
+        except Exception:
+            return 0
+
+    if not policies.get("duplicate_status_sync_enabled", False):
+        return 0
+
+    # ── 单次 SQL 查询：只取与 source_task_id 有 DUPLICATE 关系的一跳 ──
+    from sqlalchemy import or_, and_
+    stmt = (
+        select(TaskRelation, Task)
+        .join(
+            Task,
+            or_(
+                and_(TaskRelation.source_task_id == source_task_id, Task.id == TaskRelation.target_task_id),
+                and_(TaskRelation.target_task_id == source_task_id, Task.id == TaskRelation.source_task_id),
+            ),
+        )
+        .where(
+            TaskRelation.relation_type == RelationType.DUPLICATE,
+            or_(
+                TaskRelation.source_task_id == source_task_id,
+                TaskRelation.target_task_id == source_task_id,
+            ),
+        )
+    )
+    result = await db.execute(stmt)
+
+    targets: Dict[int, Task] = {}
+    for rel, t in result.unique().all():
+        if t and t.id != source_task_id:
+            targets[t.id] = t
+
+    if not targets:
+        return 0
+
+    new_status_val = new_status.value if hasattr(new_status, 'value') else str(new_status)
+
+    synced_count = 0
+    for tid, target_task in targets.items():
+        if target_task.status == new_status:
+            continue
+
+        old_status_val = target_task.status.value if hasattr(target_task.status, 'value') else str(target_task.status)
+
+        # 直接 ORM 更新状态——跳过 update_task_status 的额外校验（管理员显式开启的策略）
+        target_task.status = new_status
+        synced_count += 1
+
+        # 写操作日志
+        await OperationLogService.log(
+            db=db,
+            task_id=tid,
+            op_type=OperationType.STATUS_CHANGE,
+            operator=actor_name,
+            operator_name=actor_name,
+            to_status=new_status_val,
+            detail={
+                "from": old_status_val,
+                "to": new_status_val,
+                "synced_from": source_task_id,
+                "sync_type": "duplicate",
+            },
+            description=f"{actor_name} 将工单状态变更为「{STATUS_LABEL.get(new_status_val, new_status_val)}」（重复工单同步）",
+        )
+
+        # 加系统评论（让被同步工单的讨论区也留痕）
+        await _add_system_comment(
+            db, tid,
+            f"状态变更为「{STATUS_LABEL.get(new_status_val, new_status_val)}」——来自工单 #{source_task_id} 的重复同步",
+            actor_name, token,
+        )
+
+    if synced_count > 0:
+        await db.commit()
+
+        # 广播 WS
+        for tid in list(targets.keys()):
+            try:
+                await ws_broadcast_task_updated(tid)
+            except Exception:
+                pass
+
+    return synced_count
 
 
 async def _has_cycle(db: AsyncSession, source_id: int, target_id: int) -> bool:

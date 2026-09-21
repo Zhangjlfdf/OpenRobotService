@@ -1764,11 +1764,15 @@ class AiDiagnosisPlatform:
             _prev_ref_block = (
                 "\n🔴 上一张工单的字段记录（刚提交）：" + (_pv_fields or "（无）")
                 + "\n上一单描述：" + (_pv_desc or "（无）")
-                + "\n仅当用户本轮明确指代上一单（如「车型还是上次提单的」「版本和上一单一样」）时，"
-                  "才可把上一单对应值解析为本单字段值写入 collected_info；"
-                  "用户没有指代时严禁把上一单任何内容带入本单；"
-                  "指代了但上一单没有该信息 → 追问具体值；"
-                  "🔴 禁止把「和上次一样」「还是上次的」这类指代原文当字段值记录。\n"
+                + "\n🔴 用户本轮指代上一单（如「车型还是上次提单的」「版本和上一单一样」"
+                  "「就是上次那个问题」）时的处理优先级最高：\n"
+                  "①立即从上面的记录里解析出对应值写入 collected_info——说法不同也算同一信息"
+                  "（如「车型/车辆/车」↔robot_id，「版本」↔schedule_version），"
+                  "并在回复里带出解析出的值向用户确认；\n"
+                  "②解析出的字段视为已回答，🚫 绝不再追问该字段、绝不让用户复述具体值；\n"
+                  "③指代的信息上一单记录里确实没有 → 才追问具体值；\n"
+                  "④用户没指代上一单时，严禁把上一单任何内容带入本单；\n"
+                  "🚫 绝不把「和上次一样」「还是上次的」这类指代原文当字段值记录。\n"
             )
         # 项目选择题还原块（0827 功能，0903 提升为三套 prompt 共用）：上一轮系统
         # 以编号题请用户选项目（题面列编号列表，0904 回退），
@@ -1836,6 +1840,10 @@ class AiDiagnosisPlatform:
                 f"不当场逼用户复述工单里的内容；系统会查到该工单内容放到对话上方的"
                 f"「用户引用的历史工单」块里 → 之后直接从该块提取缺失字段的值写入 "
                 f"collected_info，该块里确实没有的信息按规则3记'无'，不要再问用户。\n"
+                f"9. 用户主动补充的背景/现象（如「之前就有异响」「提单前就出现过这个问题」）："
+                f"即使不对应任何缺失字段，也要先**简短确认收到**（如「异响的情况记下了」），"
+                f"再继续问下一个缺失字段——这些背景会进入工单描述，"
+                f"🚫 严禁无视用户刚说的内容直接跳问别的。\n"
                 + _prev_ref_block +
                 f"⚠️ 已收集的字段不要再问。"
             )
@@ -4847,6 +4855,46 @@ class AiDiagnosisPlatform:
 
         record = upsert_task(ticket, created_by=created_by)
 
+        # 代他人提单（代理提单）：AI 转工单链路的代提关系落地。
+        # 此前 overrides.on_behalf_of 在 upsert_task 里被静默丢弃（该路径不经过
+        # tasks 服务 create_ticket），导致「弹窗勾了代提 → 列表/详情无标记、
+        # 被代理人收不到提醒」。此处补上，且失败**不静默**：回传前端明确提示。
+        proxy_relation = None
+        proxy_relation_error = ""
+        _on_behalf = str(ticket.get("on_behalf_of") or "").strip()
+        if _on_behalf:
+            try:
+                from ai.core.task_adapter import bind_proxy_relation
+                proxy_relation = bind_proxy_relation(record.id, _on_behalf, created_by)
+                if proxy_relation:
+                    logger.info(
+                        f"[confirm] 代提关系已建立: db_id={record.id} "
+                        f"agent={proxy_relation.get('agent_id')} "
+                        f"principal={proxy_relation.get('principal_id')} "
+                        f"created={proxy_relation.get('created')}"
+                    )
+                    try:
+                        from app.utils.notification_utils import NotificationUtils
+                        await NotificationUtils.send_proxy_relation_notification(
+                            ticket_id=record.id,
+                            title=ticket.get("title", "") or "",
+                            project_name=ticket.get("project", "") or "",
+                            agent_name=proxy_relation.get("agent_name") or created_by,
+                            principal_name=proxy_relation.get("principal_name") or "",
+                            action="created",
+                            user_names=[proxy_relation.get("principal_id")],
+                        )
+                    except Exception as _ne:
+                        # 通知失败不回滚关系（关系已在库，被代理人可从「待我跟进」看到）
+                        logger.warning(f"[confirm] 代提通知发送失败 db_id={record.id}: {_ne}")
+            except Exception as _pe:
+                proxy_relation_error = str(_pe)
+                logger.error(
+                    f"[confirm] 代提关系建立失败 db_id={record.id} "
+                    f"on_behalf_of={_on_behalf}: {_pe}",
+                    exc_info=True,
+                )
+
         agent_state.ticket_seq += 1
         _reset_state_after_submit(agent_state, memory, ticket, record.id)
         # 对话记录附件回改文件名（生成时拿不到工单 id）；mock 全栈测试无
@@ -4870,7 +4918,11 @@ class AiDiagnosisPlatform:
 
         logger.info(f"[confirm] 工单已提交: session={session_id}, db_id={record.id}")
         return {"code": 0, "data": {"ticket": ticket, "db_id": record.id,
-                                     "notice": "工单已生成并保存，等待自动派单。"}}
+                                     "notice": "工单已生成并保存，等待自动派单。",
+                                     # 代他人提单：关系结果随响应回传（失败时前端提示用户，
+                                     # 避免"勾了代提但没生效"再次静默）
+                                     "proxy_relation": proxy_relation,
+                                     "proxy_relation_error": proxy_relation_error}}
 
     async def collect_title(self, session_id: str) -> str:
         """等待该会话的后台标题任务落地并返回标题（SSE 生产者流结束后调用，

@@ -1399,21 +1399,40 @@ async def list_all_tickets(
     try:
         from ai.core.task_adapter import task_to_dict
         from app.models.task import Task, TaskStatus, TaskType
+        from app.models.task_proxy_relation import TaskProxyRelation
         from app.core.db import SessionLocal
+        from app.core.user_identity import identity_keys
         from app.services.user_service import UserService
-        from sqlalchemy import desc, func
+        from sqlalchemy import desc, func, or_
 
         # username → 展示名（与任务服务 /api/tasks 一致的解析口径）
         user_map = UserService.get_user_map()
 
+        # 当前用户可比身份键（username / users.id 双认）：归属过滤 + 代提视角判定共用
+        _me_keys = identity_keys(username) if username else []
+
         db = SessionLocal()
         try:
-            q = db.query(Task).filter(Task.source.in_(["ai", "manual"]))
-            # 按创建者过滤（非 admin 只看自己的）
-            if username:
-                from app.core.user_identity import identity_keys
-                keys = identity_keys(username)
-                q = q.filter(Task.created_by.in_(keys) if keys else Task.created_by == username)
+            # 归属过滤（非 admin 只看与自己相关的）：我创建的 OR 我是被代理人的。
+            # 后者由代他人提单的关系表派生（口径同 tasks 服务列表的 principalBy），
+            # 否则被代理人看不到「他人代我提」的单、无法进入待确认流程。
+            _principal_task_ids: List[int] = []
+            if username and _me_keys:
+                _principal_task_ids = [
+                    row[0] for row in db.query(TaskProxyRelation.task_id).filter(
+                        TaskProxyRelation.principal_id.in_(_me_keys)
+                    ).all() if row[0]
+                ]
+
+            def _apply_owner_filter(query):
+                if not username:
+                    return query
+                own = Task.created_by.in_(_me_keys) if _me_keys else Task.created_by == username
+                if not _principal_task_ids:
+                    return query.filter(own)
+                return query.filter(or_(own, Task.id.in_(_principal_task_ids)))
+
+            q = _apply_owner_filter(db.query(Task).filter(Task.source.in_(["ai", "manual"])))
             # status/type 字符串 → 枚举；非法值（如旧值 dispatched）降级为不过滤
             if status:
                 try:
@@ -1443,11 +1462,9 @@ async def list_all_tickets(
                         pass
             # 各状态数量分布（口径：source + username，不含 status/type/keyword/exclude 等筛选），
             # 复用本接口一并返回，供前端各状态 Tab 计数与 badge 使用，无需额外统计接口
-            stat_q = db.query(Task.status, func.count(Task.id)).filter(Task.source.in_(["ai", "manual"]))
-            if username:
-                from app.core.user_identity import identity_keys
-                keys = identity_keys(username)
-                stat_q = stat_q.filter(Task.created_by.in_(keys) if keys else Task.created_by == username)
+            stat_q = _apply_owner_filter(
+                db.query(Task.status, func.count(Task.id)).filter(Task.source.in_(["ai", "manual"]))
+            )
             by_status = {s.value: 0 for s in TaskStatus}
             for st, cnt in stat_q.group_by(Task.status).all():
                 key = st.value if isinstance(st, TaskStatus) else st
@@ -1461,6 +1478,17 @@ async def list_all_tickets(
             # 二次派单感知增强（M3）：批量取各工单最新一条派单日志 → redispatch_tip（避免 N+1）
             from app.models.task_dispatch_log import TaskDispatchLog
             _ids = [r.id for r in rows]
+
+            # 代他人提单（代理关系）：批量回填，单次 IN 查询避免 N+1。
+            # 视角标记按当前登录用户判定；姓名仅对参与人下发（脱敏口径与
+            # tasks 服务 TicketService._attach_proxy_relations 一致）。
+            rel_map: Dict[int, TaskProxyRelation] = {}
+            if _ids:
+                for _rel in db.query(TaskProxyRelation).filter(
+                    TaskProxyRelation.task_id.in_(_ids)
+                ).all():
+                    rel_map.setdefault(_rel.task_id, _rel)
+
             tip_map: Dict[int, Optional[str]] = {}
             if _ids:
                 _log_rows = db.query(TaskDispatchLog).filter(
@@ -1487,6 +1515,17 @@ async def list_all_tickets(
                 d = task_to_dict(r)
                 created_by = r.created_by or ""
                 assigned_to = r.assigned_to or ""
+                # 代他人提单：本单关系 + 当前用户视角标记（前端据此渲染「代 XX」胶囊 /
+                # 「待你跟进」角标，不再自行拼身份判定——重名/id 混用易判错）
+                _rel = rel_map.get(r.id)
+                _is_agent = bool(_rel and _me_keys and _rel.agent_id in _me_keys)
+                _is_principal = bool(_rel and _me_keys and _rel.principal_id in _me_keys)
+                _is_participant = bool(
+                    _rel and _me_keys and (
+                        _is_agent or _is_principal
+                        or created_by in _me_keys or assigned_to in _me_keys
+                    )
+                )
                 items.append({
                     "id": d["id"], "session_id": d["session_id"], "ticket_ai_id": d["ticket_ai_id"],
                     "title": d["title"], "description": d["description"], "type": d["type"],
@@ -1509,6 +1548,17 @@ async def list_all_tickets(
                     # 评论区参与人头像堆叠（发起人 | 堆叠 | 处理人），
                     # 复用后端同一聚合服务，保证两个列表口径一致（含红点 has_unread）。
                     "participants": participants_map.get(r.id, []),
+                    # 代他人提单（代理提单）：关系状态 + 视角标记 + 参与人姓名。
+                    # 姓名对非参与人下发 None（避免通过列表探测他人代理关系）。
+                    "proxy_relation_status": _rel.relation_status if _rel else None,
+                    "is_proxy_agent": _is_agent,
+                    "is_principal": _is_principal,
+                    "proxy_agent_name": (
+                        user_map.get(_rel.agent_id) or _rel.agent_username or _rel.agent_id
+                    ) if _is_participant else None,
+                    "proxy_principal_name": (
+                        user_map.get(_rel.principal_id) or _rel.principal_username or _rel.principal_id
+                    ) if _is_participant else None,
                 })
             return {"code": 0, "data": {"total": total, "skip": skip, "limit": limit, "items": items,
                                         "by_status": by_status, "active_total": active_total}}

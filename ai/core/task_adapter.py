@@ -337,6 +337,93 @@ def upsert_task(ticket: dict, created_by: str = "") -> Task:
         db.close()
 
 
+def bind_proxy_relation(task_id: int, on_behalf_of: str, created_by: str = "") -> dict:
+    """AI 转工单入口的代提关系落地（pending）—— 补齐 on_behalf_of 断链。
+
+    背景：AI 转工单走 `upsert_task` 直写 tasks 表，不经过
+    `backend/app/modules/tasks/services/ticket_service.py` 的 `create_ticket`，
+    此前 ``overrides.on_behalf_of`` 在这里被静默丢弃 → `task_proxy_relation`
+    无记录 → 列表/详情看不到「代 XX」标记、被代理人收不到提醒。
+    本函数与 `create_ticket` 的 `_resolve_principal` + `create_relation` 同口径。
+
+    校验（不通过抛 ValueError，由调用方记录并回传前端，**不静默**）：
+      - 被代理人必须是注册在职用户（微信模板消息依赖 openid，停用用户收不到）
+      - 不能为本人代提（无意义，直接提交即可）
+
+    幂等：同工单已有关系时复用既有记录（关系一对一、创建时确定、全程不变）。
+
+    Returns:
+        ``{"relation_id", "agent_id", "agent_name", "principal_id",
+        "principal_name", "created"}``；``on_behalf_of`` 为空时返回 ``{}``。
+    """
+    raw = (on_behalf_of or "").strip()
+    if not raw:
+        return {}
+
+    from app.core.user_identity import same_identity, to_user_id, to_username
+    from app.models.identity import UserDB
+    from app.models.task_proxy_relation import (
+        ProxyRelationSource,
+        ProxyRelationStatus,
+        TaskProxyRelation,
+    )
+    from app.services.user_service import UserService
+
+    agent_id = to_user_id(created_by) or created_by or ""
+    db = SessionLocal()
+    try:
+        user = (
+            db.query(UserDB)
+            .filter((UserDB.id == raw) | (UserDB.username == raw))
+            .first()
+        )
+        if not user:
+            raise ValueError("被代理人不存在，代提未生效")
+        if (getattr(user, "status", "") or "").lower() != "active":
+            raise ValueError("被代理人已停用，无法代提（将收不到提醒）")
+        principal_id = (user.id or "").strip()
+        if not principal_id:
+            raise ValueError("被代理人身份异常，代提未生效")
+        if agent_id and same_identity(agent_id, principal_id):
+            raise ValueError("请勿为本人代提，直接提交即可")
+
+        existing = (
+            db.query(TaskProxyRelation)
+            .filter(TaskProxyRelation.task_id == task_id)
+            .first()
+        )
+        if existing:
+            rel, created = existing, False
+        else:
+            rel = TaskProxyRelation(
+                task_id=task_id,
+                agent_id=agent_id,
+                agent_username=to_username(agent_id),
+                principal_id=principal_id,
+                principal_username=to_username(principal_id),
+                relation_status=ProxyRelationStatus.PENDING,
+                source=ProxyRelationSource.MANUAL,
+            )
+            db.add(rel)
+            db.commit()
+            db.refresh(rel)
+            created = True
+
+        user_map = UserService.get_user_map() or {}
+        return {
+            "relation_id": rel.id,
+            "agent_id": rel.agent_id,
+            "agent_name": user_map.get(rel.agent_id) or rel.agent_username or rel.agent_id,
+            "principal_id": rel.principal_id,
+            "principal_name": (
+                user_map.get(rel.principal_id) or rel.principal_username or rel.principal_id
+            ),
+            "created": created,
+        }
+    finally:
+        db.close()
+
+
 def rename_chat_record_attachments(task_id: int) -> bool:
     """入库后把对话记录附件 filename 改为「工单{task_id}对话记录.{ext}」。
     附件生成于入库前（拿不到工单 id），filename 先用日期占位（对话记录_YYYYMMDD.md）
