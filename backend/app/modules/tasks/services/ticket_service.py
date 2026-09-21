@@ -21,6 +21,8 @@ from app.services.user_service import user_service
 from app.core.user_identity import identity_keys, to_user_id, to_username
 from app.modules.tasks import participant_service
 
+logger = logging.getLogger(__name__)
+
 
 # ──────────────────────────────────────────────────────────────
 # AI 服务 Assigner Worker 集成：Redis Pub/Sub
@@ -43,7 +45,6 @@ async def _publish_new_ticket_to_assigner(task_id: int) -> None:
     assigned_to 保持 NULL、status=NEW，靠 Assigner Worker 的定时 MySQL
     扫描兜底（通常分钟级，而非 24H）。
     """
-    _log = logging.getLogger(__name__)
     try:
         import redis.asyncio as redis_async
         url = f"redis://{settings.REDIS_HOST}:{settings.REDIS_PORT}/{settings.REDIS_DB}"
@@ -54,12 +55,12 @@ async def _publish_new_ticket_to_assigner(task_id: int) -> None:
         try:
             await client.ping()
             await client.publish(_ASSIGNER_PUBSUB_CHANNEL, str(task_id))
-            _log.info(f"已发布新工单到 Assigner Worker: ticket_id={task_id}")
+            logger.info(f"已发布新工单到 Assigner Worker: ticket_id={task_id}")
         finally:
             await client.close()
     except Exception as e:
         # 降级：不阻塞 create_ticket 返回，Worker 定时扫描兜底
-        _log.warning(f"发布到 Assigner Worker 失败 ticket_id={task_id}: {e}")
+        logger.warning(f"发布到 Assigner Worker 失败 ticket_id={task_id}: {e}")
 
 
 def convert_to_shanghai_time(dt: Optional[datetime]) -> Optional[datetime]:
