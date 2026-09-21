@@ -1969,9 +1969,7 @@ function renderFunnel(){
                 ["undetermined","未判定",L.undetermined]])}
      </div>`,
     `<div class="fn-rate">直答率 <b>${L.direct_rate ?? "—"}%</b>
-      <span>= ${L.answered} ÷ ${L.qa}（全量·AI预标兜底）</span>
-      &nbsp;｜&nbsp;人工已标口径 <b style="font-size:19px;color:var(--ink2)">${L.manual_rate ?? "—"}%</b>
-      <span>（${L.manual_judged} 段，= 周报 L2 口径，走查补标后两数趋同）</span></div>`,
+      <span>= ${L.answered} ÷ ${L.qa}（真实咨询已判定，人工标签优先·AI预标兜底）</span></div>`,
   ].join("");
   $("#funnelbar").querySelectorAll("[data-l]").forEach(el=>{
     el.onclick = ()=> loadSegs(el.dataset.l);
