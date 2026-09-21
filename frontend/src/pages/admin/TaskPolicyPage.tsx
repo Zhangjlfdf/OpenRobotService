@@ -91,7 +91,8 @@ export default function TaskPolicyPage() {
     try {
       await request('/task-policy', {
         method: 'PATCH',
-        body: { [key]: nextValue },
+        body: JSON.stringify({ [key]: nextValue }),
+        headers: { 'Content-Type': 'application/json' },
       });
       Toast({
         message: `已${nextValue ? '开启' : '关闭'}：${POLICY_LABELS[key]?.title ?? key}`,
