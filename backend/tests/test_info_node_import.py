@@ -723,17 +723,43 @@ def test_match_fill_overwrite_unmatched():
 
 def test_match_fuzzy_threshold_and_identical_skip():
     flat = flatten_tree(_tree())
-    # 「尺寸」少一个字：规范化后相似度 ≈0.94 ≥ 0.9 → 命中
+    # 「尺寸」少一个字：规范化后相似度 ≈0.94 ≥ 0.75 → 命中
     fuzzy = match_items(flat, [_item("通道与托盘间距尺", "3 米")])
     assert [row["node_id"] for row in fuzzy["fill"]] == ["n2"]
 
-    # 相差过多的标题不得命中（相似度低于阈值）
+    # 0.75～0.9 之间：老阈值（0.9）够不着，现在（0.75 + 包含关系）能认
+    # 「公网ip地址」包含「公网ip」= 2×5/12 ≈ 0.83
+    mid = match_items(flat, [_item("公网IP地址", "10.0.0.2")])
+    assert [row["node_id"] for row in mid["overwrite"]] == ["n1"]
+    assert mid["overwrite"][0]["value"] == "10.0.0.2"
+
+    # 低于 0.75 的仍不得命中（「通道尺寸」vs「通道与托盘间距尺寸」≈ 0.62）
     far = match_items(flat, [_item("通道尺寸", "3 米")])
     assert far["fill"] == [] and len(far["unmatched"]) == 1
 
     # 与现有内容一致 → 不产生任何变更
     same = match_items(flat, [_item("公网ip", "10.0.0.1")])
     assert same == {"fill": [], "overwrite": [], "unmatched": []}
+
+
+def test_title_fallback_075_requires_containment():
+    """0.75～0.9 这一档只认「增删字」：换一个字的近似不算（台账 是否承接 ↛ 是否对接）。"""
+    flat = flatten_tree([{
+        "id": "r", "title": "业务系统", "content_type": "text", "value": None, "sort_order": 0,
+        "children": [{
+            "id": "d1", "title": "是否对接", "content_type": "select", "sort_order": 0,
+            "value": json.dumps({"selected": "", "options": ["是", "否"]}, ensure_ascii=False),
+            "children": [],
+        }],
+    }])
+    # 「是否承接」vs「是否对接」相似度恰好 0.75，但不是包含关系 → 不认
+    # （认了就会把台账「是否承接」列的值填进「数字孪生 / 是否对接」，全量 297 个项目里 156 个中招）
+    bad = match_items(flat, [_item("是否承接", "是")])
+    assert bad["fill"] == [] and len(bad["unmatched"]) == 1
+
+    # 同一档里，差的是几个字的增删（包含关系）→ 认：「是否对接方式」→「是否对接」= 0.8
+    ok = match_items(flat, [_item("是否对接方式", "是")])
+    assert [row["node_id"] for row in ok["fill"]] == ["d1"]
 
 
 def test_match_select_requires_valid_option():

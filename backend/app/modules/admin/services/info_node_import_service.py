@@ -9,9 +9,10 @@ DeepSeek flash，即 settings.LLM_MODEL_NAME）抽取「信息条目」，再与
   2. overwrite —— 识别到且节点已有不同内容 → 勾选后覆盖（前端显示 原内容 → 新内容）；
   3. unmatched —— 与文件有关但系统没有对应节点 → 勾选后作为新节点创建（附建议归属）。
 
-匹配规则（与需求一致）：条目与节点标题「精确一致，或相似度 ≥ 0.9（满分 1）」（difflib
-序列相似度，规范化空白/标点后比较）；匹配到的下拉节点还要求识别值命中其可选项（精确、
-与选项高度相似 ≥ 0.9，车型另有型号写法/中文全称的放宽），装不下就不算数。
+匹配规则：条目与节点标题「精确一致，或相似度 ≥ 0.9（满分 1）」；降到 0.75 的那一档只认
+「包含关系」——两个标题差的是几个字的增删（ERP模块 → ERP）而不是换了字（是否承接 ↛
+是否对接，见 TITLE_FALLBACK_THRESHOLD）。匹配到的下拉节点还要求识别值命中其可选项
+（精确、与选项高度相似 ≥ 0.9，车型另有型号写法/中文全称的放宽），装不下就不算数。
 条目最后没落到任何节点上时，先拿识别内容去比「建议归属附近」那些空下拉的可选项——
 能对上一个选项就在下拉里选它，而不是新建一个与下拉各说各话的节点（下拉本来就是「选出来
 的值」）。大模型返回的 nodeTitle 只是提示，最终匹配以后端确定性算法为准。
@@ -38,7 +39,13 @@ ALLOWED_EXTENSIONS = TEXT_EXTENSIONS | {".docx", ".xlsx"}
 MAX_FILE_BYTES = 10 * 1024 * 1024  # 上传文件上限 10MB
 MAX_TEXT_CHARS = 100_000           # 送大模型的正文上限（超出截断）
 MAX_SHEET_ROWS = 2000              # Excel 每个工作表最多读取行数
-SIMILARITY_THRESHOLD = 0.9         # 节点名相似度阈值（满分 1，与需求一致）
+SIMILARITY_THRESHOLD = 0.9         # 下拉选项的相似度阈值（值↔选项、车型中文全称、附近下拉的标题闸门）
+TITLE_FALLBACK_THRESHOLD = 0.75    # 条目标题 → 节点标题的「模糊兜底」下限：精确匹配没命中才走这一层。
+                                   # 2026-09-21 由 0.9 降到 0.75，但这一档只认「包含关系」（两个标题
+                                   # 差的是几个字的增删，不是换了字）——中文换一个字常常就是另一件事：
+                                   # 「是否承接」vs「是否对接」相似度恰好 0.75，不收闸门会把台账 156 个
+                                   # 项目的承接与否填进「数字孪生 / 是否对接」。≥0.9 那一档不看包含关系。
+                                   # 选项层仍是 SIMILARITY_THRESHOLD：值写进哪个下拉比标题认哪个节点要严。
 NAME_MISMATCH_THRESHOLD = 0.6      # 项目名一致性阈值：低于该相似度且互不包含 → 判定不一致（提醒可能导错文件）
 MAX_NODE_DEPTH = 4                 # 信息树最大层级（与前端 PROJECT_INFO_MAX_DEPTH 一致）
 NEARBY_DROPDOWN_DEPTH = 2          # 「建议归属附近」的下拉候选范围：归属节点起往下两级
@@ -652,9 +659,9 @@ def snap_select_value(value: str, options: List[str]) -> Optional[str]:
     从严到宽三层：
       1. 精确比（忽略大小写、空白与常见标点）；
       2. 车型放宽（仅当可选项本身就是车型型号，见 _vehicle_option_hits）；
-      3. 高度相似：与某个选项的序列相似度 ≥ 0.9 —— 与节点标题匹配同一个阈值，够「非常像」
-         才认。普通下拉（项目类型等）只走到这一层：「试点项目一期」vs「试点项目」只有 0.8，
-         仍按未匹配，不会把内容吸到不相干的选项上。
+      3. 高度相似：与某个选项的序列相似度 ≥ 0.9（SIMILARITY_THRESHOLD，比标题兜底的 0.75 严），
+         够「非常像」才认。普通下拉（项目类型等）只走到这一层：「试点项目一期」vs「试点项目」
+         只有 0.8，仍按未匹配，不会把内容吸到不相干的选项上。
     一个值里认出多个不同车型时返回 None —— 宁可让用户手动归属，也不要蒙一个。
     """
     exact = next((option for option in options if _norm(option) == _norm(value)), None)
@@ -806,18 +813,27 @@ def match_items(flat: List[Dict], items: List[Dict[str, Optional[str]]]) -> Dict
                 match = _prefer_value_holder(by_title[key_norm], parent_hint, value)
                 break
 
-        # 2) 相似度兜底：与可填节点标题做序列相似度，达到阈值（0.9）才认
+        # 2) 模糊兜底：与可填节点标题做序列相似度，分两档收（见 TITLE_FALLBACK_THRESHOLD）：
+        #    ≥ 0.9 照旧认；0.75～0.9 只认「一个标题包含另一个」——两个标题差的是几个字的
+        #    增删（「ERP模块」→「ERP」、「公网IP地址」→「公网ip」），而不是换了字。
+        #    中文字头里换一个字常常就是另一件事：「是否承接」vs「是否对接」相似度恰好 0.75，
+        #    2026-09-21 实测会把台账 156 个项目的承接与否填进「数字孪生 / 是否对接」。
         if match is None:
             best: Optional[Dict] = None
             best_score = 0.0
+            best_contained = False
+            texts = [_norm(title)]
+            if node_title:
+                texts.append(_norm(node_title))
             for leaf in leaves:
                 leaf_norm = _norm(leaf["title"])
-                score = _ratio(_norm(title), leaf_norm)
-                if node_title:
-                    score = max(score, _ratio(_norm(node_title), leaf_norm))
-                if score > best_score:
-                    best, best_score = leaf, score
-            if best is not None and best_score >= SIMILARITY_THRESHOLD:
+                for text in texts:
+                    score = _ratio(text, leaf_norm)
+                    if score > best_score:
+                        best, best_score = leaf, score
+                        best_contained = text in leaf_norm or leaf_norm in text
+            if best is not None and (best_score >= SIMILARITY_THRESHOLD
+                                     or (best_score >= TITLE_FALLBACK_THRESHOLD and best_contained)):
                 match = best
 
         # 3) 匹配到下拉节点：识别值必须命中可选项（车型型号再放宽一层），否则按未匹配处理
