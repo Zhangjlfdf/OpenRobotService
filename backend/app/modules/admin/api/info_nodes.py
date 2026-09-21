@@ -7,7 +7,9 @@
   结构类写接口 = 改「这个项目的树」：`POST /projects/{id}`（增补节点）、
   `POST /projects/{id}/import`（文件导入落库的整树导入）、`PUT /nodes/{id}`、
   `PATCH /nodes/{id}/move`、`DELETE /nodes/{id}`、`POST /projects/{id}/parse-file`、
-  `GET /projects/{id}/ledger-sync`（企业微信台账同步预览，读整棵树 + 读本地台账镜像）
+  `GET /projects/{id}/ledger-sync`（企业微信台账同步预览，读整棵树 + 读本地台账镜像）、
+  `POST /projects/{id}/clear-values`（一键清空本项目已填的值，改的是数据但一次抹掉全项目，
+  与结构类同门槛）
   → **该项目下的人**（user_project_roles 里该项目有任一角色）都能改，admin 直通
   （`require_project_member`）。节点级路由的项目不在路径上，按节点反查归属项目
   （`_require_node_project_member`）。只靠前端藏按钮是拦不住的（接口可直连），
@@ -333,6 +335,30 @@ def import_info_tree(project_id: str, data: InfoNodeImport,
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return {"imported": count}
+
+
+@info_node_router.post("/projects/{project_id}/clear-values",
+                       summary="一键清空项目已填信息（项目成员）")
+def clear_project_info_values(project_id: str,
+                              current_user: Dict[str, Any] = Depends(require_project_member),
+                              actor: Dict[str, Optional[str]] = Depends(get_request_actor_optional)):
+    """把本项目**所有已填的内容**清空（「信息节点」页的「一键清空」），返回清掉的字段数。
+
+    只清值：节点与结构（含增补节点）、下拉选项定义、关注标注、编辑历史都保留。
+    逐条记入编辑历史（operation_type=delete、change_reason=一键清空），谁清的、清了多少可查。
+
+    门槛比「填一个节点的值」高一档（require_project_member）：值写入是登录即可，
+    而这里一次抹掉所有人填的东西——与「整树导入」「删节点」同性质，拦在闸门上而不是
+    只藏前端按钮。错误约定：403=不是该项目的人，404=项目不存在。
+    """
+    try:
+        return info_node_service.clear_values(
+            project_id,
+            operator=actor.get("username") or current_user.get("username"),
+            operator_name=actor.get("name") or current_user.get("name"),
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
 
 
 # ── 编辑历史（节点操作记录） ──────────────────────────

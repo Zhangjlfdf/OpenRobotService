@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import {
+  clearInfoNodeValues,
   computeInfoCompleteness,
   countInfoValues,
   createInfoNode,
@@ -473,6 +474,23 @@ describe('本地纯函数', () => {
     const completeness = computeInfoCompleteness(base);
     expect(completeness.get('a')).toEqual({ total: 1, empty: 1, incomplete: true }); // a → b → c，末级只有 C 且未填写
     expect(completeness.get('d')).toEqual({ total: 1, empty: 1, incomplete: true });
+  });
+
+  it('clearInfoNodeValues 清掉各类值，节点与下拉选项都还在', () => {
+    const tree: ProjectInfoNode[] = [
+      { ...base[0], value: '中力' },                                             // 文字：清成空串
+      { ...base[1], content_type: 'select', value: { selected: '试点项目', options: ['试点项目', 'PK项目'] } },
+      { ...base[2], content_type: 'file', value: { name: 'a.pdf', resource_id: '7', size: 100 } },
+      { ...base[3], value: '' },                                                 // 本来就没填：原样返回
+    ];
+    const next = clearInfoNodeValues(tree);
+
+    expect(next.map((node) => node.id)).toEqual(['a', 'b', 'c', 'd']);            // 节点一个不少
+    expect(next[0].value).toBe('');
+    expect(next[1].value).toEqual({ selected: '', options: ['试点项目', 'PK项目'] });  // 选项属于字段定义，不能清
+    expect(next[2].value).toBeNull();
+    expect(next[3]).toBe(tree[3]);                                              // 空值节点没被重建
+    expect(tree[0].value).toBe('中力');                                          // 不改原数组（乐观更新后再回滚得回来）
   });
 });
 
