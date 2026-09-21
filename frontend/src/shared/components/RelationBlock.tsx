@@ -9,9 +9,13 @@
  */
 import React, { useState, useEffect, useMemo, useCallback, useRef, useLayoutEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Tag, Popup, Dialog, Form, FormItem, Input, Button } from 'tdesign-mobile-react';
+import { Tag, Popup, Dialog, Input, Button } from 'tdesign-mobile-react';
+import { DatePicker } from 'antd';
+import dayjs from 'dayjs';
 import { Link2, Plus, AlertTriangle, Copy } from 'lucide-react';
 import AppButton from '@/shared/components/AppButton';
+import UserSelect from '@/shared/components/UserSelect';
+import type { UserItem } from '@/api/users';
 import { createRequest } from '@/api/client';
 import API_CONFIG from '@/config/api';
 import {
@@ -24,7 +28,9 @@ import {
   type BlockedErrorDetail,
   type RelationTreeNode,
   type RelationTreeResponse,
+  type TicketType,
 } from '@/api/ticket';
+import { PRIORITY_DISPLAY_MAP, TICKET_TYPE_DISPLAY_MAP } from '@/shared/constants/ticket';
 
 const request = createRequest(API_CONFIG.TASKS.BASE_URL, '工单服务');
 
@@ -39,6 +45,15 @@ const RELATION_TYPE_DESC: Record<RelationType, string> = {
   duplicate: '标记为重复工单，不阻塞流转',
   subtask: '父工单关闭前需所有子任务已完成',
 };
+
+/** 处理阶段截止时间快捷选项（天）：与 ChatPanel 确认工单弹窗保持一致 */
+const STEP_QUICK_OPTIONS: { value: number; label: string }[] = [
+  { value: 1, label: '1天' },
+  { value: 3, label: '3天' },
+  { value: 5, label: '5天' },
+  { value: 7, label: '7天' },
+  { value: 14, label: '14天' },
+];
 
 /** 未完成判定 */
 function isUnfinished(status: string, type: RelationType): boolean {
@@ -786,12 +801,18 @@ export interface RelationBlockProps {
   projectName?: string;
   projectId?: string;
   customer?: string;
+  /** 父工单 ticket_type — 子任务继承 */
+  ticketType?: string;
+  /** 父工单 priority — 子任务默认继承 */
+  parentPriority?: string;
+  /** 父工单 deadline_at (ISO) — 子任务默认继承 */
+  parentDeadlineAt?: string | null;
   canOperate: boolean;
   blockedError?: BlockedErrorDetail | null;
 }
 
 export default function RelationBlock({
-  taskId, projectName, projectId, customer, canOperate, blockedError,
+  taskId, projectName, projectId, customer, ticketType, parentPriority, parentDeadlineAt, canOperate, blockedError,
 }: RelationBlockProps) {
   const navigate = useNavigate();
 
@@ -821,6 +842,18 @@ export default function RelationBlock({
   }, [showDropdown, searchResults.length, searching, emptyHint]);
   const [creatingSubtaskTitle, setCreatingSubtaskTitle] = useState('');
   const [creatingSubtaskDesc, setCreatingSubtaskDesc] = useState('');
+  /** 子工单类型，默认继承父工单，可改 */
+  const [creatingSubtaskTicketType, setCreatingSubtaskTicketType] = useState<string>(ticketType || 'problem');
+  const [creatingSubtaskPriority, setCreatingSubtaskPriority] = useState<string>(parentPriority || 'medium');
+  /** 指定处理人（选填）：选了直接派，没选走 AI 派单 */
+  const [creatingSubtaskAssignee, setCreatingSubtaskAssignee] = useState<UserItem | null>(null);
+  /** 整体截止时间（deadline_at，继承父工单，独立于阶段截止时间） */
+  const [creatingSubtaskDeadline, setCreatingSubtaskDeadline] = useState<string | null>(parentDeadlineAt ?? null);
+  /** 阶段截止时间（curr_step_endtime，独立管理，默认 +7 天） */
+  const [creatingSubtaskStepEndtime, setCreatingSubtaskStepEndtime] = useState<string>(dayjs().add(7, 'day').second(0).millisecond(0).toISOString());
+  const [subtaskStepTemplate, setSubtaskStepTemplate] = useState<Array<{ id: number; step_name: string; sequence: number }>>([]);
+  const [creatingSubtaskStepId, setCreatingSubtaskStepId] = useState<number | null>(null);
+  const [stepsLoading, setStepsLoading] = useState(false);
   const [creatingSubtaskLoading, setCreatingSubtaskLoading] = useState(false);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [showCanvas, setShowCanvas] = useState(false);
@@ -856,6 +889,53 @@ export default function RelationBlock({
     const l = computeLayout(tree, new Set(tree.nodes.filter(n => !h.hiddenIds.has(String(n.id))).map(n => String(n.id))));
     return { maps: m, hiddenInfo: h, layout: l };
   }, [tree, collapsed]);
+
+  // 按工单类型拉 TaskStep 模板：
+  //   GET /api/tasks/{taskId}/steps?type={ticketType}
+  //   后端 /steps 接口已支持可选 type 查询参数，传入时优先按该 type 查，
+  //   不传 type 则按 taskId 反查父工单 ticket_type（旧行为，向下兼容）。
+  const loadSubtaskSteps = useCallback(async (type: string) => {
+    if (!type) return;
+    setStepsLoading(true);
+    try {
+      const res = await request<{ code: number; data: { steps: Array<{ id: number; step_name: string; sequence: number }> } }>(`/${taskId}/steps?type=${encodeURIComponent(type)}`);
+      const steps = (res?.data?.steps || []).slice().sort((a, b) => a.sequence - b.sequence);
+      setSubtaskStepTemplate(steps);
+      setCreatingSubtaskStepId(steps.length > 0 ? steps[0].id : null);
+    } catch {
+      setSubtaskStepTemplate([]);
+      setCreatingSubtaskStepId(null);
+    } finally {
+      setStepsLoading(false);
+    }
+  }, [taskId]);
+
+  // 子任务弹窗打开时：重置表单默认值 + 拉当前 ticketType 的 TaskStep 模板
+  useEffect(() => {
+    if (!showCreateSubtask) return;
+    // 每次打开都从父工单默认值重置（避免上次编辑残留）
+    setCreatingSubtaskTitle('');
+    setCreatingSubtaskDesc('');
+    setCreatingSubtaskTicketType(ticketType || 'problem');
+    setCreatingSubtaskPriority(parentPriority || 'medium');
+    setCreatingSubtaskAssignee(null);
+    setCreatingSubtaskDeadline(parentDeadlineAt ?? null);
+    setCreatingSubtaskStepEndtime(dayjs().add(7, 'day').second(0).millisecond(0).toISOString());
+    setCreatingSubtaskStepId(null);
+  }, [showCreateSubtask, ticketType, parentPriority, parentDeadlineAt]);
+
+  // ticketType 变更（首次打开重置 or 用户手动切换）→ 重拉该类型的处理阶段
+  useEffect(() => {
+    if (!showCreateSubtask) return;
+    void loadSubtaskSteps(creatingSubtaskTicketType);
+  }, [showCreateSubtask, creatingSubtaskTicketType, loadSubtaskSteps]);
+
+  /** 阶段截止时间 dayjs 值，供 antd DatePicker 使用 */
+  const subtaskStepEndtimeValue = useMemo(() => {
+    if (!creatingSubtaskStepEndtime) return null;
+    const d = dayjs(creatingSubtaskStepEndtime);
+    return d.isValid() ? d : null;
+  }, [creatingSubtaskStepEndtime]);
 
   const handleDeleteRelation = async (relationId: number) => {
     Dialog.confirm!({
@@ -938,14 +1018,26 @@ export default function RelationBlock({
 
   const handleCreateSubtask = async () => {
     if (!creatingSubtaskTitle.trim()) {
-      Dialog.alert!({ content: '请填写子任务标题' }); return;
+      Dialog.alert!({ content: '请填写标题' }); return;
+    }
+    if (!creatingSubtaskStepId) {
+      Dialog.alert!({ content: '请选择处理阶段' }); return;
+    }
+    if (!creatingSubtaskStepEndtime) {
+      Dialog.alert!({ content: '请选择当前阶段截止时间' }); return;
     }
     setCreatingSubtaskLoading(true);
     try {
       const newTicket = await createTicket({
         title: creatingSubtaskTitle.trim(),
         description: creatingSubtaskDesc.trim() || '（自动创建子任务）',
-        ticket_type: 'problem', priority: 'medium',
+        ticket_type: (creatingSubtaskTicketType || ticketType || 'problem') as TicketType,
+        priority: (creatingSubtaskPriority as any) || 'medium',
+        // 指定处理人：选了直接派给此人；没选则不传 → 后端创建 status=NEW → AI 派单 Worker 重新派单
+        assigned_to: creatingSubtaskAssignee?.id ?? undefined,
+        deadline_at: creatingSubtaskDeadline || undefined,
+        curr_step_id: creatingSubtaskStepId,
+        curr_step_endtime: creatingSubtaskStepEndtime,
         project_name: projectName, project_id: projectId, customer: customer,
       });
       try {
@@ -955,7 +1047,8 @@ export default function RelationBlock({
           content: `子任务已创建（#${newTicket.id}），但自动关联失败：${relErr?.detail || relErr?.message || ''}。请手动关联。`,
         });
       }
-      setShowCreateSubtask(false); setCreatingSubtaskTitle(''); setCreatingSubtaskDesc('');
+      // 关闭弹窗，reset 交给 useEffect 下次打开时处理
+      setShowCreateSubtask(false);
       loadData();
     } catch (e: any) {
       Dialog.alert!({ content: `创建子任务失败: ${e?.detail || e?.message || ''}` });
@@ -1380,27 +1473,138 @@ export default function RelationBlock({
         </div>
       </Popup>
 
-      {/* 创建子任务弹窗 */}
+      {/* 创建子任务弹窗（参考 ChatPanel 确认工单弹窗样式，ticket-confirm__* CSS 类复用全局样式） */}
       <Popup visible={showCreateSubtask} onVisibleChange={(v) => setShowCreateSubtask(v)} placement="bottom"
-        style={{ maxHeight: '80vh', borderRadius: '16px 16px 0 0' }}>
-        <div style={{ padding: 16 }}>
-          <h3 style={{ margin: '0 0 16px', fontSize: 16, fontWeight: 600 }}>创建子任务</h3>
-          <Form>
-            <FormItem label="子任务标题" rules={[{ required: true, message: '请输入子任务标题' }]}>
-              <Input value={creatingSubtaskTitle} onChange={(v) => setCreatingSubtaskTitle(String(v))} placeholder="请输入子任务标题" clearable />
-            </FormItem>
-            <FormItem label="子任务描述">
-              <Input value={creatingSubtaskDesc} onChange={(v) => setCreatingSubtaskDesc(String(v))} placeholder="请输入描述（选填）" clearable />
-            </FormItem>
-          </Form>
-          <div style={{ fontSize: 12, color: 'var(--muted-foreground)', marginBottom: 12 }}>
-            子任务将继承父工单的项目/客户信息
+        style={{ maxHeight: '90vh', borderRadius: '16px 16px 0 0' }} showOverlay>
+        <div className="ticket-confirm">
+          <h4 className="ticket-confirm__title">创建子任务</h4>
+          <div className="ticket-confirm__body">
+            {/* 继承信息提示：项目 / 客户自动继承；工单类型默认继承但可手动切换 */}
+            <div className="ticket-confirm__banner ticket-confirm__banner--info" style={{ marginBottom: 4 }}>
+              子任务将继承父工单的项目、客户信息；工单类型默认继承，可按需切换
+            </div>
+
+            <label className="ticket-confirm__label">工单类型</label>
+            <select
+              className="ticket-confirm__select"
+              value={creatingSubtaskTicketType}
+              onChange={(e) => setCreatingSubtaskTicketType(e.target.value)}
+            >
+              {Object.entries(TICKET_TYPE_DISPLAY_MAP).map(([value, label]) => (
+                <option key={value} value={value}>{label}</option>
+              ))}
+            </select>
+
+            <label className="ticket-confirm__label">标题 <span style={{ color: 'var(--destructive)' }}>*</span></label>
+            <input
+              className="ticket-confirm__input"
+              value={creatingSubtaskTitle}
+              onChange={(e) => setCreatingSubtaskTitle(e.target.value)}
+              placeholder="简洁描述要做什么"
+              maxLength={120}
+            />
+
+            <label className="ticket-confirm__label">描述</label>
+            <textarea
+              className="ticket-confirm__textarea"
+              value={creatingSubtaskDesc}
+              onChange={(e) => setCreatingSubtaskDesc(e.target.value)}
+              placeholder="具体要做的事、验收标准（选填）"
+              rows={3}
+              maxLength={1000}
+            />
+
+            <label className="ticket-confirm__label">优先级</label>
+            <select
+              className="ticket-confirm__select"
+              value={creatingSubtaskPriority}
+              onChange={(e) => setCreatingSubtaskPriority(e.target.value)}
+            >
+              {Object.entries(PRIORITY_DISPLAY_MAP).map(([value, label]) => (
+                <option key={value} value={value}>{label}</option>
+              ))}
+            </select>
+
+            {/* 指定处理人（选填）：选了直接派给此人；没选走 AI 派单 Worker 重新派单 */}
+            <label className="ticket-confirm__label">
+              指定处理人 <span style={{ color: 'var(--muted-foreground)', fontSize: 12 }}>（选填，不选则 AI 自动派单）</span>
+            </label>
+            <UserSelect
+              value={creatingSubtaskAssignee?.id ?? null}
+              onChange={setCreatingSubtaskAssignee}
+              placeholder="点击选择处理人（留空走 AI 派单）"
+              title="选择处理人"
+            />
+
+            {/* 处理阶段：始终显示，加载中显示占位 */}
+            <label className="ticket-confirm__label">处理阶段 <span style={{ color: 'var(--destructive)' }}>*</span></label>
+            <select
+              className="ticket-confirm__select"
+              value={creatingSubtaskStepId ?? ''}
+              onChange={(e) => setCreatingSubtaskStepId(e.target.value ? Number(e.target.value) : null)}
+            >
+              {stepsLoading && <option value="">加载中…</option>}
+              {!stepsLoading && subtaskStepTemplate.length === 0 && <option value="">该类型暂无阶段模板</option>}
+              {subtaskStepTemplate.map((s) => (
+                <option key={s.id} value={s.id}>{s.step_name}</option>
+              ))}
+            </select>
+
+            {/* 当前阶段截止时间：快捷按钮 + antd DatePicker，精确到分钟 */}
+            <label className="ticket-confirm__label">当前阶段截止时间 <span style={{ color: 'var(--destructive)' }}>*</span></label>
+            <div className="ticket-confirm__quick-options">
+              {STEP_QUICK_OPTIONS.map((o) => {
+                const active = subtaskStepEndtimeValue
+                  && subtaskStepEndtimeValue.isSame(dayjs().add(o.value, 'day'), 'minute');
+                return (
+                  <button
+                    key={o.value}
+                    type="button"
+                    className={`ticket-confirm__quick-option${active ? ' ticket-confirm__quick-option--active' : ''}`}
+                    onClick={() => setCreatingSubtaskStepEndtime(dayjs().add(o.value, 'day').second(0).millisecond(0).toISOString())}
+                  >
+                    {o.label}
+                  </button>
+                );
+              })}
+            </div>
+            <DatePicker
+              style={{ width: '100%' }}
+              placeholder="点击选择"
+              format="YYYY-MM-DD HH:mm"
+              showTime={{ format: 'HH:mm', showNow: true }}
+              showNow
+              placement="topLeft"
+              getPopupContainer={(trigger) => trigger.parentElement || document.body}
+              value={subtaskStepEndtimeValue}
+              onChange={(d: dayjs.Dayjs | null) => setCreatingSubtaskStepEndtime(d ? d.second(0).millisecond(0).toISOString() : '')}
+              styles={{ popup: { root: { zIndex: 12000 } } }}
+            />
+
+            {/* 整体截止时间（deadline_at，选填，继承父工单） */}
+            <label className="ticket-confirm__label">整体截止时间 <span style={{ color: 'var(--muted-foreground)', fontSize: 12 }}>（选填，默认继承父工单）</span></label>
+            <input
+              type="datetime-local"
+              className="ticket-confirm__input"
+              value={creatingSubtaskDeadline
+                ? dayjs(creatingSubtaskDeadline).format('YYYY-MM-DDTHH:mm')
+                : ''}
+              onChange={(e) => setCreatingSubtaskDeadline(e.target.value ? dayjs(e.target.value).toISOString() : null)}
+            />
           </div>
-          <Button block theme="primary" size="large" loading={creatingSubtaskLoading}
-            onClick={handleCreateSubtask}>
-            创建并关联
-          </Button>
-          <div style={{ height: 20 }} />
+          <div className="ticket-confirm__btns">
+            <button
+              type="button"
+              className="ticket-confirm__btn ticket-confirm__btn--cancel"
+              onClick={() => setShowCreateSubtask(false)}
+            >取消</button>
+            <button
+              type="button"
+              className="ticket-confirm__btn ticket-confirm__btn--confirm"
+              onClick={handleCreateSubtask}
+              disabled={creatingSubtaskLoading}
+            >{creatingSubtaskLoading ? '创建中…' : '确认创建'}</button>
+          </div>
         </div>
       </Popup>
     </div>

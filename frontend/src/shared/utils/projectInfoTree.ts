@@ -284,9 +284,17 @@ export async function importInfoTree(projectId: string, input: unknown): Promise
 
 // —— 编辑历史（节点操作记录）：后端全量落库，「已读水位」存本机（每个人各自的未读状态） ——
 
-/** 某节点的编辑历史：自身操作 + 其直接子节点的删除记录（最新在前） */
-export async function loadInfoNodeChanges(projectId: string, nodeId: string): Promise<ApiInfoNodeChange[]> {
-  return fetchInfoNodeChangesApi(projectId, nodeId);
+/** 一级标签的「修改记录」要覆盖整棵子树，条数上限比单节点高（后端上限 500） */
+export const SUBTREE_HISTORY_LIMIT = 200;
+
+/** 某节点的编辑历史：自身操作 + 其直接子节点的删除记录（最新在前）。
+ *  includeDescendants=true（一级标签）时连整棵子树的记录一起取，见 historyMarkdown。 */
+export async function loadInfoNodeChanges(
+  projectId: string,
+  nodeId: string,
+  options: { includeDescendants?: boolean; limit?: number } = {},
+): Promise<ApiInfoNodeChange[]> {
+  return fetchInfoNodeChangesApi(projectId, nodeId, options);
 }
 
 /** 各节点最新记录的 id {节点id: 记录id}（删除记录计入其上级节点） */

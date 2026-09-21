@@ -457,7 +457,7 @@ describe('ProjectInfoEdit（信息树编辑页）', () => {
     expect(screen.queryByLabelText('在数量下增补信息')).toBeNull();
   });
 
-  it('历史弹层展示后端的操作记录：人员 / 变动 / 时间；子节点删除记录挂在父节点下', async () => {
+  it('一级标签的历史：拉整棵子树的记录，按节点分组渲染成 Markdown', async () => {
     vi.mocked(fetchInfoNodeChangesApi).mockResolvedValue([
       change({
         id: 'h1',
@@ -466,30 +466,49 @@ describe('ProjectInfoEdit（信息树编辑页）', () => {
         detail: '把标题从「基础」改为「基础信息」',
         created_at: '2026-09-14 11:00:00',
       }),
-      // 子节点「客户信息」被删：记录在父节点「基础信息」的历史里
+      // 子节点的变动：一级标签的「修改记录」里按「父 / 子」路径单列一节
       change({
         id: 'h2',
         node_id: 'c1',
         parent_id: 'r1',
         node_title: '客户信息',
-        action: 'delete',
         operator_name: '李四',
-        detail: '删除节点「客户信息」',
+        detail: '把内容从「空」改为「中力」',
         created_at: '2026-09-14 10:30:00',
+      }),
+      // 已从树里删掉的子节点：标题用记录里的名称快照
+      change({
+        id: 'h3',
+        node_id: 'gone',
+        parent_id: 'r1',
+        node_title: '旧地址',
+        action: 'delete',
+        operator_name: '王五',
+        detail: '删除节点「旧地址」',
+        created_at: '2026-09-14 10:00:00',
       }),
     ]);
     renderEdit();
 
     fireEvent.click(await screen.findByLabelText('查看基础信息的编辑历史'));
 
-    expect(fetchInfoNodeChangesApi).toHaveBeenCalledWith('P1', 'r1');
-    expect(await screen.findByText('张三')).toBeTruthy();
-    expect(screen.getByText('把标题从「基础」改为「基础信息」')).toBeTruthy();
-    expect(screen.getByText('2026-09-14 11:00:00')).toBeTruthy();
-    // 删除记录连同操作人与时间一起显示在父节点下
-    expect(screen.getByText('删除')).toBeTruthy();
-    expect(screen.getByText('删除节点「客户信息」')).toBeTruthy();
-    expect(screen.getByText('李四')).toBeTruthy();
+    // 根节点取的是整棵子树（比单节点多 include），子节点自己那份历史不受影响
+    expect(fetchInfoNodeChangesApi).toHaveBeenCalledWith('P1', 'r1', { includeDescendants: true, limit: 200 });
+    // 渲染成文档而不是原样吐 md 源码：标题是 h1，节点分组是 h2（路径当小标题）
+    const title = await screen.findByText('基础信息 · 修改记录');
+    expect(title.tagName).toBe('H1');
+    expect(Array.from(document.querySelectorAll('.mac-history__md h2')).map((el) => el.textContent)).toEqual([
+      '基础信息',
+      '基础信息 / 客户信息',
+      '已删除 · 旧地址',
+    ]);
+    expect(screen.getByText(/共 3 条记录 · 涉及 3 个节点/)).toBeTruthy();
+    // 每条记录：时间 / 操作人 / 动作 / 变动
+    expect(Array.from(document.querySelectorAll('.mac-history__md li')).map((el) => el.textContent)).toEqual([
+      '2026-09-14 11:00:00 张三 · 修改：把标题从「基础」改为「基础信息」',
+      '2026-09-14 10:30:00 李四 · 修改：把内容从「空」改为「中力」',
+      '2026-09-14 10:00:00 王五 · 删除：删除节点「旧地址」',
+    ]);
   });
 
   it('识别不到操作人时回退成「未知用户」，没有 detail 时按节点标题兜底', async () => {
@@ -497,8 +516,7 @@ describe('ProjectInfoEdit（信息树编辑页）', () => {
     renderEdit();
     fireEvent.click(await screen.findByLabelText('查看基础信息的编辑历史'));
 
-    expect(await screen.findByText('未知用户')).toBeTruthy();
-    expect(screen.getByText('新增节点「基础信息」')).toBeTruthy();
+    expect(await screen.findByText(/未知用户 · 新增：新增节点「基础信息」/)).toBeTruthy();
   });
 
   it('该节点有新记录时历史按钮出小红点，打开看过之后消失（已读水位存本机）', async () => {
@@ -514,7 +532,7 @@ describe('ProjectInfoEdit（信息树编辑页）', () => {
     expect(screen.getByLabelText('查看客户信息的编辑历史').querySelector('.mac-info-row__op-dot')).toBeNull();
 
     fireEvent.click(historyBtn);
-    expect(await screen.findByText('张三')).toBeTruthy();
+    expect(await screen.findByText(/张三 · 修改：把内容从「空」改为「中力」/)).toBeTruthy();
 
     await waitFor(() => {
       expect(screen.getByLabelText('查看基础信息的编辑历史').querySelector('.mac-info-row__op-dot')).toBeNull();
@@ -592,6 +610,8 @@ describe('ProjectInfoEdit（信息树编辑页）', () => {
     expect(screen.getByLabelText('查看基础信息的编辑历史').querySelector('.mac-info-row__op-dot')).toBeTruthy();
 
     fireEvent.click(childBtn);
+    // 子节点仍是「只看自己」的逐条列表，不带子树口径
+    expect(fetchInfoNodeChangesApi).toHaveBeenCalledWith('P1', 'c1', {});
     expect(await screen.findByText('把内容从「空」改为「中力」')).toBeTruthy();
 
     await waitFor(() => {

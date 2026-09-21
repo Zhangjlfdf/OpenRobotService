@@ -9,7 +9,7 @@ from sqlalchemy.orm.attributes import set_committed_value
 from starlette.concurrency import run_in_threadpool
 
 from app.modules.tasks.models.ticket import Ticket, TicketComment, TicketStatus, TicketPriority, TicketType
-from app.models.task import TaskFollower, TaskParticipant
+from app.models.task import TaskFollower, TaskParticipant, TaskStep
 from app.models.task_proxy_relation import TaskProxyRelation, ProxyRelationStatus
 from app.models.identity import UserDB
 from app.modules.tasks.schemas.ticket import TicketCreate, TicketUpdate, TicketCommentCreate, TicketCommentUpdate, TicketQueryParams, TicketFilterRequest, QuotedComment
@@ -343,6 +343,44 @@ class TicketService:
             )
             db.add(db_ticket)
             await db.flush()
+
+            # 初始化协商节点
+            # 优先级：前端显式传入的 curr_step_id → 后端按 ticket_type 自动取 TaskStep 模板第一个节点
+            step_id = ticket_data.curr_step_id if ticket_data.curr_step_id is not None else db_ticket.curr_step_id
+            if step_id is None:
+                step_result = await db.execute(
+                    select(TaskStep)
+                    .where(TaskStep.task_type == ticket_data.ticket_type)
+                    .order_by(TaskStep.sequence.asc())
+                    .limit(1)
+                )
+                step_row = step_result.unique().scalar_one_or_none()
+                step_id = step_row.id if step_row else None
+                step_name = step_row.step_name if step_row else None
+            else:
+                # 前端传了 curr_step_id → 反查 step_name 补全
+                step_result = await db.execute(select(TaskStep).where(TaskStep.id == int(step_id)))
+                step_row = step_result.unique().scalar_one_or_none()
+                step_name = step_row.step_name if step_row else None
+                if step_row and step_row.task_type != ticket_data.ticket_type:
+                    # step 模板不属于该 ticket_type → 忽略，让下面兜底取第一个
+                    step_id = None
+                    step_name = None
+
+            if step_id is not None:
+                db_ticket.curr_step_id = int(step_id)
+                db_ticket.curr_step_name = step_name or ''
+                # 节点结束时间：前端显式传的 curr_step_endtime > deadline_at > +7 天兜底
+                if ticket_data.curr_step_endtime is not None:
+                    db_ticket.curr_step_endtime = ticket_data.curr_step_endtime
+                elif db_ticket.curr_step_endtime is None:
+                    db_ticket.curr_step_endtime = (
+                        db_ticket.deadline_at
+                        or datetime.now(timezone.utc) + timedelta(days=7)
+                    )
+                # 若前端没传 deadline_at，用节点结束时间反填
+                if db_ticket.deadline_at is None:
+                    db_ticket.deadline_at = db_ticket.curr_step_endtime
 
             ticket_id = db_ticket.id
 

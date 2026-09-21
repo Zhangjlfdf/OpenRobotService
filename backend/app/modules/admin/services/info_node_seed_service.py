@@ -13,7 +13,9 @@ alembic 迁移 7c1e9a4b2d38 从 default.yaml 播一次。测试环境是另一�
 播种形态必须与迁移链的终态一致，否则新库会缺后续迁移的效果：
   - 车型1/车型2 是下拉，选项 = 代码里的车型目录（VEHICLE_MODEL_CODES，不在 yaml 里抄）
     —— 迁移 9d2f4a6b8c01 / 4a7c2e9d1b53；
-  - 所有节点 allow_custom=True —— 迁移 5b8e3f2a9c47。
+  - 所有节点 allow_custom=True —— 迁移 5b8e3f2a9c47；
+  - 基础信息下多了 项目编号/订单号/时间信息汇总，硬件下多了 总车数，版本下多了 版本号，
+    「车辆」已改名「车型信息」—— 迁移 6f2c8a1d9b47。
 
 旧结构的 project_info_node 表（列不同）会让查询直接报错、由调用方记日志跳过——
 宁可整个不播，也不要往旧表里塞半套数据。
@@ -37,6 +39,14 @@ logger = logging.getLogger(__name__)
 TITLE_KEY_MAP = {
     # 基础信息
     '基础信息': 'base',
+    '基础信息/项目编号': 'base.project_code',
+    '基础信息/订单号': 'base.order_no',
+    '基础信息/时间信息汇总': 'base.time_summary',
+    '基础信息/时间信息汇总/项目创建时间': 'base.time_summary.created_at',
+    '基础信息/时间信息汇总/业绩核算期': 'base.time_summary.settlement_period',
+    '基础信息/时间信息汇总/初次接触时间': 'base.time_summary.first_contact',
+    '基础信息/时间信息汇总/预计AGV下线时间': 'base.time_summary.agv_offline_date',
+    '基础信息/时间信息汇总/预计进场时间': 'base.time_summary.entry_date',
     '基础信息/客户信息': 'base.customer_info',
     '基础信息/订单信息': 'base.order',
     '基础信息/订单信息/ERP': 'base.order.erp',
@@ -52,12 +62,15 @@ TITLE_KEY_MAP = {
     '基础信息/进厂要求/预约信息': 'base.entry_requirement.reservation',
 
     # 硬件
+    # 「车辆」改名「车型信息」（2026-09-21）：只改 node_name，node_key 与 id 都不动
+    # —— 老库走迁移 6f2c8a1d9b47，id 的来源见 _ID_PATH_ALIASES。
     '硬件': 'hardware',
-    '硬件/车辆': 'hardware.vehicle',
-    '硬件/车辆/车型1': 'hardware.vehicle.model_1',
-    '硬件/车辆/车型1/数量': 'hardware.vehicle.model_1.quantity',
-    '硬件/车辆/车型2': 'hardware.vehicle.model_2',
-    '硬件/车辆/车型2/数量': 'hardware.vehicle.model_2.quantity',
+    '硬件/车型信息': 'hardware.vehicle',
+    '硬件/车型信息/总车数': 'hardware.vehicle.total_count',
+    '硬件/车型信息/车型1': 'hardware.vehicle.model_1',
+    '硬件/车型信息/车型1/数量': 'hardware.vehicle.model_1.quantity',
+    '硬件/车型信息/车型2': 'hardware.vehicle.model_2',
+    '硬件/车型信息/车型2/数量': 'hardware.vehicle.model_2.quantity',
     '硬件/载具类型': 'hardware.carrier_type',
 
     # 车端软件
@@ -73,6 +86,7 @@ TITLE_KEY_MAP = {
     '调度软件/版本/子模块': 'dispatch_software.version.submodule',
     '调度软件/版本/子模块/调度配置': 'dispatch_software.version.submodule.dispatch_config',
     '调度软件/版本/通用配置': 'dispatch_software.version.common_config',
+    '调度软件/版本/版本号': 'dispatch_software.version.number',
     '调度软件/license': 'dispatch_software.license',
     '调度软件/license/到期时间': 'dispatch_software.license.expire_at',
     '调度软件/license/续期记录': 'dispatch_software.license.renewal_records',
@@ -195,6 +209,16 @@ VALUE_TYPE_MAP = {
 # default.yaml 有意不抄目录（见该文件里车辆段的注释），这里按同样口径现挂。
 _VEHICLE_MODEL_KEYS = ('hardware.vehicle.model_1', 'hardware.vehicle.model_2')
 
+# 改过名的节点：现路径 → 推 id 用的老路径（2026-09-21「车辆」→「车型信息」及它的后代）。
+# 改名只动 node_name，node_key 与 id 都不动，跨环境才对得上；新库播种与老库迁移结果一致。
+_ID_PATH_ALIASES = {
+    '硬件/车型信息': '硬件/车辆',
+    '硬件/车型信息/车型1': '硬件/车辆/车型1',
+    '硬件/车型信息/车型1/数量': '硬件/车辆/车型1/数量',
+    '硬件/车型信息/车型2': '硬件/车辆/车型2',
+    '硬件/车型信息/车型2/数量': '硬件/车辆/车型2/数量',
+}
+
 
 def _now_str() -> str:
     """与 delivery.py / info_node_service 一致，用字符串存时间戳。"""
@@ -202,8 +226,14 @@ def _now_str() -> str:
 
 
 def _seed_node_id(path_key: str) -> str:
-    """标题路径 → 确定性 UUIDv5（与迁移同源）：同一份 yaml 在任何环境同一批 id。"""
-    return str(uuid.uuid5(uuid.NAMESPACE_URL, 'ors://project-info-node/' + path_key))
+    """标题路径 → 确定性 UUIDv5（与迁移同源）：同一份 yaml 在任何环境同一批 id。
+
+    id 一旦播下去就被项目值/历史行引用着，**改名不能改 id**，所以改过名的路径仍按
+    改名前的那串推 id（见 _ID_PATH_ALIASES）—— 老库那几行（迁移只改 node_name）
+    与新库播出来的才是同一个 id。
+    """
+    source = _ID_PATH_ALIASES.get(path_key, path_key)
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, 'ors://project-info-node/' + source))
 
 
 def _flatten_nodes(nodes: List[Dict],

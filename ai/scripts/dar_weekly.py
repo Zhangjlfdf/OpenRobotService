@@ -49,6 +49,11 @@ from datetime import datetime as _dt, timedelta as _td
 
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 HERE = os.path.dirname(os.path.abspath(__file__))
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
+
+import dar_segs  # noqa: E402  段首统一口径：bounds 优先 + 老窗口续聊追加（0920）
+
 DATA_ROOT = r"C:/Users/PAJ26020/Desktop/export_dar"
 SSH_HOST = "usp-a@125.122.97.107"
 SSH_PORT = "8802"
@@ -73,10 +78,12 @@ MANUAL = os.path.join(DATA, "manual_segmentation.json")
 SPLIT = os.path.join(OUT, "conversations_split.jsonl")
 
 # 四表导出列（与 dar_prepare.load 的读取字段对齐；列名=服务器库实际列名）
+# messages.metadata_：项目选择题候选（前端持久化 project_choices）——
+# 0907 按钮版题面无列表，不带此列则标注记录里「用户回 3」无从对照（0920 走查反馈）
 EXPORT_TABLES = {
     "users": "id,username,name",
     "conversations": "id,user_id,title,created_at,service_ticket_id,metadata_",
-    "messages": "id,conversation_id,role,message_type,sequence,created_at,content,file_urls",
+    "messages": "id,conversation_id,role,message_type,sequence,created_at,content,file_urls,metadata_",
     "tasks": ("id,title,task_type,status,created_by,project_name,source,"
               "external_id,created_at,metadata_info"),
 }
@@ -244,8 +251,10 @@ def _same_denominator_compare(judge_rows):
         if not c or not cl or len(cl) != len(c["rounds"]) or c.get("is_tester"):
             continue
         rounds = c["rounds"]
-        manual = sorted({0, *(int(x) for x in (bounds.get(cid) or [])
-                              if 0 <= int(x) < len(rounds))})
+        # 段首统一展开（0920）：末段已判定时老窗口续聊追加新段——
+        # 工单时间窗/时段归属不再把标注后的新提问算进旧判定段
+        manual = dar_segs.effective_starts(
+            rounds, cid, bounds, labels, frozen_len=man.get("frozen_len") or {})
         tasks = [pts(t.get("at")) for t in c.get("tasks") or []]
         for tid, s0 in enumerate(manual):
             lab = legacy.get(lm.get(str(s0)), lm.get(str(s0)))
@@ -669,12 +678,27 @@ def step_report():
         if tot:
             rep["pre_agree_labeled"] = f"{hit}/{tot} = {hit / tot * 100:.0f}%"
 
-    # 人工标注进度
+    # 人工标注进度（0920：段数按统一口径展开——老窗口续聊追加的新段计入分母，
+    # 与漏斗/标注工具一致；无 split 时退回 bounds 原始段数）
     if os.path.exists(MANUAL):
         man = json.load(open(MANUAL, encoding="utf-8"))
         labels = man.get("labels") or {}
         bounds = man.get("bounds") or {}
-        n_seg = sum(len(v) for v in bounds.values())
+        frozen = man.get("frozen_len") or {}
+        n_rounds = {}
+        if os.path.exists(SPLIT):
+            for line in open(SPLIT, encoding="utf-8"):
+                if line.strip():
+                    c = json.loads(line)
+                    n_rounds[str(c["conversation_id"])] = c.get("rounds") or []
+        n_seg = 0
+        for cid, b in bounds.items():
+            rounds = n_rounds.get(str(cid))
+            if rounds:
+                n_seg += len(dar_segs.effective_starts(
+                    rounds, cid, bounds, labels, frozen_len=frozen))
+            else:
+                n_seg += len(b)
         n_lab = sum(1 for v in labels.values() for x in v.values()
                     if x and x != "未标")
         rep["manual_progress"] = f"{n_lab}/{n_seg} 段已标"
@@ -896,7 +920,10 @@ STEPS = {
                           ("--bounds-only",)),
     "l1r": lambda: step_l1_replay(),
     "retrieval": lambda: step("retrieval", "dar_retrieval_check.py"),
-    "l3": lambda: step("l3 预标", "dar_l3.py", ("--all",)),
+    # l3 预标完成后链式重生成标注版工具（0920：只跑 l3 不跑 tool，磁盘上还是
+    # tool0 的切分版 html，「打开标注工具」打开的是切分页面——用户踩实）
+    "l3": lambda: (step("l3 预标", "dar_l3.py", ("--all",)),
+                   step("tool", "build_segmentation_tool.py")),
     "tool": lambda: step("tool", "build_segmentation_tool.py"),
     "report": lambda: step_report(),
 }

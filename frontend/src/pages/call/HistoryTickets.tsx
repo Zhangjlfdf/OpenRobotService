@@ -414,6 +414,19 @@ export default function HistoryTickets({ showHeader = true }: { showHeader?: boo
                 <div className="task-card2__person task-card2__person--creator" title={`发起人：${t.created_by_name || t.created_by || '-'}`} aria-label={`发起人：${t.created_by_name || t.created_by || '-'}`}>
                   <span className="task-card2__avatar">{(t.created_by_name || t.created_by || '?').slice(0, 1).toUpperCase()}</span>
                   <span className="task-card2__person-name">{t.created_by_name || t.created_by || '-'}</span>
+                  {/* 代他人提单（代理提单）：谁代谁提交。
+                      视角标记由后端按 token 判定（is_proxy_agent / is_principal），
+                      姓名对非参与人不下发，此处自然不渲染。 */}
+                  {t.is_proxy_agent && t.proxy_principal_name && (
+                    <span className="proxy-card-pill proxy-card-pill--mini" title={`代 ${t.proxy_principal_name} 提交`}>
+                      代 {t.proxy_principal_name}
+                    </span>
+                  )}
+                  {t.is_principal && t.proxy_agent_name && (
+                    <span className="proxy-card-pill proxy-card-pill--mini" title={`${t.proxy_agent_name} 代你提交`}>
+                      {t.proxy_agent_name} 代提
+                    </span>
+                  )}
                 </div>
                 <div className={(t.participants || []).length > 0 ? 'task-card2__flow task-card2__flow--stacked' : 'task-card2__flow'}>
                   {/* 线在前、堆叠在后：有堆叠时线退到底部作下划线，头像在线上方 */}
@@ -442,6 +455,16 @@ export default function HistoryTickets({ showHeader = true }: { showHeader?: boo
                     <span className="history-row__status" style={{ color: 'var(--blue-2)', background: 'var(--secondary)' }}>{statusMeta.label}</span>
                   )}
                   {t.priority && <span className="history-row__priority-tag">{t.priority}</span>}
+                  {/* 代他人提单：他人代我提交、仍待我确认的单（品牌色圆点角标） */}
+                  {t.is_principal && t.proxy_relation_status === 'pending' && (
+                    <span
+                      className="proxy-card-pill proxy-card-pill--pending"
+                      title="他人代你提交的工单，待你确认跟进"
+                    >
+                      <span className="proxy-card-pill__dot" />
+                      待你跟进
+                    </span>
+                  )}
                 </div>
                 {/* 操作按钮：已解决/已取消/已关闭（终态）整组不显示；
                     待处理/已挂起可催办、撤回；处理中仅可上报；不可用按钮禁用 */}

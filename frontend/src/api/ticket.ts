@@ -48,6 +48,10 @@ export interface CreateTicketParams {
   /** 代他人提单：被代理人 users.id（留空=普通自提单）。
    *  后端会二次校验其为在职用户；成功后建立 pending 代提关系并通知对方。 */
   on_behalf_of?: string;
+  /** 初始协商节点 ID（留空=后端按 ticket_type 自动取模板第一个） */
+  curr_step_id?: number;
+  /** 初始协商节点截止时间（ISO 字符串，留空=后端兜底 deadline_at 或 +7 天） */
+  curr_step_endtime?: string;
 }
 
 export interface CreatedTicket {
@@ -263,6 +267,8 @@ export async function createTicket(params: CreateTicketParams): Promise<CreatedT
       metadata_info: params.metadata_info ?? null,
       tags: params.tags ?? null,
       attachments: params.attachments ?? null,
+      curr_step_id: params.curr_step_id ?? null,
+      curr_step_endtime: params.curr_step_endtime ?? null,
     }),
   });
 }

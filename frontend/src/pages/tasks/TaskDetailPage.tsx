@@ -1434,6 +1434,9 @@ export default function TaskDetailPage() {
             projectName={detail.project_name}
             projectId={detail.project_id}
             customer={detail.customer}
+            ticketType={detail.ticket_type}
+            parentPriority={detail.priority}
+            parentDeadlineAt={detail.deadline_at ?? null}
             canOperate={hasPermission('backend:tasks:operate')}
             blockedError={blockedError}
           />
