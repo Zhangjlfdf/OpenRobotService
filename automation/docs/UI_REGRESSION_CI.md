@@ -68,7 +68,7 @@ backend、automation AI 和 MySQL 不分别建立三条 SSH 会话，而是在�
 -> 安装 Python、Node、Playwright
 -> 写入 SSH private key
 -> 输出公钥指纹并预检全部 SSH 转发
--> 检查 backend、AI health 和数据库端口
+-> 检查 backend、AI health 和数据库端口（单阶段最多重试 3 次）
 -> 构建前端
 -> pytest 启动一次 SSH 多端口转发
 -> 执行 UI 场景 + Smoke
@@ -77,6 +77,27 @@ backend、automation AI 和 MySQL 不分别建立三条 SSH 会话，而是在�
 -> 上传 artifact
 -> test commit 评论摘要
 ```
+
+### 6.1 预检重试
+
+健康检查通过本地 SSH 转发执行，单阶段配置：
+
+```text
+HTTP timeout: 30 秒
+attempts: 3
+retry delay: 2 秒
+trust_env: false
+```
+
+每次尝试都会打印阶段和次数：
+
+```text
+Backend health: attempt 1/3
+Automation AI health: attempt 1/3
+Database forward: attempt 1/3
+```
+
+这样可以吸收 GitHub runner 到测试环境之间的瞬时抖动，同时保留最后一次错误。
 
 ## 7. 报告
 

@@ -293,8 +293,8 @@ new -> in_progress -> resolved -> closed
 只读阅读：
 
 - `automation/docs/business-flows/call-qa-to-ticket-close.md`
-- `automation/docs/design-business-chain-execution-layer.md`
-- `automation/docs/design-ui-automation-selectors.md`
+- `automation/docs/archive/design-business-chain-execution-layer.md`
+- `automation/docs/archive/design-ui-automation-selectors.md`
 - `automation/tests/business_chain/test_call_to_ticket_close.py`
 - `automation/tests/real/test_ticket_lifecycle_real.py`
 - `automation/tests/ui/test_login_smoke.py`

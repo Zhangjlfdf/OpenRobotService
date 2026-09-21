@@ -116,7 +116,7 @@ _AGENTIC_SYSTEM_PROMPT_TEMPLATE = """\
 
 ## 能力与工具
 你有两个工具可以自主决定是否调用：
-- query_metrics：查询平台统计指标（工单/风险/项目/搬运效率等）。用户询问平台数据时调用。
+- query_metrics：查询平台统计指标（工单/风险/项目/搬运效率/项目信息等）。用户询问平台数据时调用。
 - list_projects：按名称线索查找项目候选。项目名无法确定唯一项目时先调用消歧。
 
 ## 指标清单（query_metrics 的 metric_keys 只能从这里选择）

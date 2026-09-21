@@ -428,6 +428,68 @@ class InfoNodeService:
             return
         raise PermissionError("该节点属于其它项目，不能写入本项目")
 
+    # ── 一键清空（本项目所有已填的值） ─────────────────────
+
+    def clear_values(self, project_id: str, operator: Optional[str] = None,
+                     operator_name: Optional[str] = None) -> Dict[str, int]:
+        """清空本项目**所有已填的内容**，返回 {"cleared": 清掉的字段数}。
+
+        只清值，不动结构：节点（全局字段 + 本项目增补节点）、下拉的选项定义、
+        「关注」标注、编辑历史全部保留——清空的是数据，不是这棵树。附件同样只解除
+        挂载（资源库里的文件本体不在这里删）。
+
+        逐条记历史（operation_type=delete、change_reason=一键清空）：一次抹掉全项目
+        的填写内容是重操作，谁在什么时候清的要能查。本来就没填的节点（没值行，
+        或值行是空的）跳过不记，免得历史里刷出一串「清空了内容（原为「空」）」。
+        空值行一并删掉：ProjectInfoValue 的口径是「不预创建空值」，清完就该回到 0 行。
+
+        错误约定（接口层映射）：LookupError → 404。
+        """
+        db = SessionLocal()
+        try:
+            if db.query(Project.id).filter(Project.id == project_id).first() is None:
+                raise LookupError("项目不存在")
+
+            rows = db.query(ProjectInfoValue).filter(
+                ProjectInfoValue.project_id == project_id,
+            ).all()
+            node_ids = [row.node_id for row in rows]
+            nodes: Dict[str, ProjectInfoNode] = {}
+            if node_ids:
+                nodes = {
+                    node.id: node for node in db.query(ProjectInfoNode).filter(
+                        ProjectInfoNode.id.in_(node_ids),
+                    ).all()
+                }
+
+            now = _now_str()
+            cleared = 0
+            for row in rows:
+                node = nodes.get(row.node_id)
+                if node is not None and not _is_blank_value(row.value_json):
+                    cleared += 1
+                    detail = history_log.build_value_detail(
+                        node.value_type, row.value_json, None, history_log.ACTION_DELETE,
+                    )
+                    if detail:
+                        history_log.add_history(
+                            db, project_id=project_id,
+                            operation_type=history_log.ACTION_DELETE,
+                            detail=detail,
+                            node_id=node.id, parent_id=node.parent_id,
+                            node_key=node.node_key, node_name=node.node_name,
+                            node_type=node.node_type,
+                            old_value=row.value_json, new_value=None,
+                            changed_by=operator, changed_by_name=operator_name,
+                            change_reason="一键清空", changed_at=now,
+                        )
+                db.delete(row)
+
+            db.commit()
+            return {"cleared": cleared}
+        finally:
+            db.close()
+
     # ── 项目增补节点（普通用户的「增补信息」路径） ──────────
 
     def add_custom_node(self, project_id: str, parent_id: Optional[str],
@@ -847,3 +909,12 @@ def _is_same_value(old, new) -> bool:
             return None
         return value
     return _norm(old) == _norm(new)
+
+
+def _is_blank_value(value) -> bool:
+    """值算不算「空」（一键清空据此跳过本来就没填的节点，不写空转的历史）。
+
+    与 _is_same_value 同一口径（None / 空串 / 空数组），另把空对象也算进来——
+    附件被摘掉后会留下 {}。
+    """
+    return (not value) if isinstance(value, dict) else _is_same_value(value, None)

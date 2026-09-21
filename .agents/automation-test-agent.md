@@ -5,8 +5,8 @@
 
 - **完整规范(权威)**:`automation/AGENTS.md`
 - **工作流入口 skill**:`.agents/skills/automation-testing/SKILL.md`
-- **AI 生成流水线设计**:`automation/docs/ci-ai-test-pipeline.md`
-- **测试策略/规范**:根 `automation/docs/automation_strategy.md`、`automation/docs/testing/testing_guidelines.md`
+- **AI 生成流水线设计**:`automation/docs/archive/ci-ai-test-pipeline.md`（历史归档）
+- **测试策略/规范**:`automation/docs/automation_strategy.md`、`automation/docs/testing/testing_guidelines.md`
 - **修改边界**:`.claude/SKILLS/代码修改约束/AI代码修改边界Skill.md`
 
 ## 核心速查(引用权威处)

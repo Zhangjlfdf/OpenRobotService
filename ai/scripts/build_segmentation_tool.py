@@ -21,13 +21,23 @@ import glob
 import io
 import json
 import os
+import re
 import sys
 from datetime import datetime, timedelta
 
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
+
+import dar_segs  # noqa: E402  段首统一口径：bounds 优先 + 老窗口续聊追加（0920）
+
 ENV = os.environ.get("DAR_ENV", "test")
+# 附件图片直链前缀（与 dar_studio seg_page 同源：prod=生产站点、test=测试站点）
+SITE_BASE = ("https://usp.ep-zl.com/p" if ENV == "prod"
+             else "http://125.122.97.107/t")
+IMG_BASE = SITE_BASE + "/api/call/files/"
 OUT = rf"C:/Users/PAJ26020/Desktop/export_dar/{ENV}/processed"
 SPLIT = os.path.join(OUT, "conversations_split.jsonl")
 CLS = os.path.join(OUT, "conversations_classified.jsonl")
@@ -93,19 +103,68 @@ def main():
     convs = [json.loads(l) for l in open(SPLIT, encoding="utf-8")]
     cls_all = {j["conversation_id"]: j["cls"] for j in
                (json.loads(l) for l in open(CLS, encoding="utf-8"))}
-    man = {}
+    man_bounds, man_labels, man_frozen = {}, {}, {}
     if os.path.exists(MANUAL):
-        man = json.load(open(MANUAL, encoding="utf-8")).get("bounds") or {}
+        _man = json.load(open(MANUAL, encoding="utf-8"))
+        man_bounds = _man.get("bounds") or {}
+        man_labels = _man.get("labels") or {}
+        man_frozen = _man.get("frozen_len") or {}
     pre = {} if args.bounds_only else load_pre()
     if args.bounds_only:
         print("切题轮：不注入预标/检索（先人工定边界，判定在边界定稿后跑）")
+    # 标注轮会话筛选（0920）：与漏斗「未标注」同口径——只列含待标注段的会话，
+    # 不再全量塞 7/8 月已判定的老会话淹没用。待标注段=无人工标签∧无 L3 预标
+    # ∧段内有咨询（非寒暄）∧段内问题不在「猜你想问」推荐池（元筛选层，旁支）
+    suggested_pool = set()
+    if not args.bounds_only:
+        sug_p = os.path.join(os.path.dirname(os.path.dirname(HERE)),
+                             "frontend", "src", "shared", "data", "suggestedQuestions.ts")
+        try:
+            suggested_pool = {m.group(1).strip()
+                              for m in re.finditer(r"'([^']+)'", open(sug_p, encoding="utf-8").read())}
+        except OSError:
+            print("猜你想问池缺失（suggestedQuestions.ts），元筛选跳过")
+
+    def _has_pending_seg(cid, rounds, cls):
+        """该会话是否含待标注段（漏斗 unprocessed 的会话级判据，bounds/预标同口径）。"""
+        if cid in man_bounds:
+            starts = dar_segs.effective_starts(rounds, cid, man_bounds, man_labels,
+                                               pre_starts={int(x) for x in (pre.get(cid) or {})
+                                                           if str(x).isdigit() or isinstance(x, int)},
+                                               frozen_len=man_frozen)
+        else:
+            starts = [0] + [i for i in range(1, len(cls))
+                            if cls[i].get("topic", 0) != cls[i - 1].get("topic", 0)]
+        for tid, s in enumerate(starts):
+            e = starts[tid + 1] if tid + 1 < len(starts) else len(rounds)
+            if (man_labels.get(cid) or {}).get(str(s)):
+                continue
+            if s in {int(x) for x in (pre.get(cid) or {})
+                     if str(x).isdigit() or isinstance(x, int)}:
+                continue
+            # 0920 口径（与漏斗 _seg_rows 同）：段内须有「提问且 AI 有回答」的
+            # 回合——纯寒暄、AI 未回答/回答全空的服务异常段都不可标注
+            if not any(cls[i].get("q") and any(a.strip() for a in (rounds[i].get("a") or []))
+                       for i in range(s, e)):
+                continue
+            # 猜你想问：仅段内**全部**咨询回合都命中推荐池才判 suggested——
+            # 多轮段碰巧含一条推荐问题不再整段旁支（混合段不过滤，用户拍板）
+            consult = [(rounds[i].get("q") or "").strip() for i in range(s, e)
+                       if cls[i].get("q") and (rounds[i].get("q") or "").strip()]
+            if consult and all(q in suggested_pool for q in consult):
+                continue
+            return True
+        return False
 
     out = []
-    n_man = n_llm_multi = n_noise = 0
+    n_man = n_llm_multi = n_noise = n_done = 0
     for c in convs:
         rounds = c["rounds"]
-        if len(rounds) < 2:
-            continue  # 单回合无切分余地
+        # 切题轮：单回合无切分余地，跳过；标注轮保留——单问单答也要打标签，
+        # 否则漏斗「未标注」里的一问一答会话在工具里永远看不到（0920 走查实锤：
+        # 漏斗十多个未标注=14 个单回合会话，工具里一个都没有）
+        if args.bounds_only and len(rounds) < 2:
+            continue
         cid = str(c["conversation_id"])
         cls = cls_all.get(cid)
         if not cls or len(cls) != len(rounds):
@@ -114,6 +173,11 @@ def main():
         # （带工单的保留——纯提单会话是「直接提单」标的标的；指标层本就跳过无咨询段）
         if not any(k["q"] for k in cls) and not (c.get("tasks") or []):
             n_noise += 1
+            continue
+        # 标注轮：无待标注段的会话不进列表（已全部判定，07/08 月老会话的来源）；
+        # tester 会话同漏斗口径排除（元筛选层，7/8 月测试流量的大头）
+        if not args.bounds_only and (c.get("is_tester") or not _has_pending_seg(cid, rounds, cls)):
+            n_done += 1
             continue
         if len({k.get("topic", 0) for k in cls}) >= 2:
             n_llm_multi += 1
@@ -130,13 +194,25 @@ def main():
                 "t": cls[i].get("topic", 0),
                 "tk": any(rt <= tt <= rt + WINDOW.total_seconds() * 1000
                           for tt in task_ts),
+                # 附件原图（0920：走查页有图、标注工具没有——看图标注是硬需求）。
+                # 直链=站点前缀+object_path（与 dar_studio._img_html 同源），大图/gif
+                # 不自动加载，模板里占位点击
+                "fs": [{"p": IMG_BASE + (f.get("object_path") or ""),
+                        "n": f.get("filename") or "", "s": int(f.get("size") or 0)}
+                       for f in (r.get("files") or [])],
             })
-        # 人工边界覆盖初始切分：没导出过边界的会话仍按 LLM topic 展示
-        b = man.get(cid)
+        # 人工边界覆盖初始切分：没导出过边界的会话仍按 LLM topic 展示。
+        # 段首统一展开（0920）：末段已判定时老窗口续聊追加新段——走查工具里
+        # 能看到并保存追加段首，否则每次保存会把漏斗里的追加段洗回去。
+        # 预标段首（label 模式）作为「末段已判定」的判定锚，与漏斗同口径。
+        b = man_bounds.get(cid)
         if b:
             n_man += 1
-            starts = sorted({0, *(int(x) for x in b
-                                  if 0 <= int(x) < len(rounds))})
+            starts = dar_segs.effective_starts(
+                rounds, cid, man_bounds, man_labels,
+                pre_starts={int(x) for x in (pre.get(cid) or {})
+                            if str(x).isdigit() or isinstance(x, int)},
+                frozen_len=man_frozen)
             si = 0
             for i in range(len(rj)):
                 if si + 1 < len(starts) and i >= starts[si + 1]:
@@ -156,17 +232,21 @@ def main():
 
     tpl = open(TPL, encoding="utf-8").read()
     # </ 转义：JSON 内嵌 <script> 时，内容里出现 </script> 会提前截断脚本（JS 字符串里 \/ 合法）
-    payload = json.dumps({"convs": out, "env": ENV,
+    payload = json.dumps({"convs": out, "env": ENV, "site": SITE_BASE,
                           "mode": "bounds" if args.bounds_only else "label"},
                          ensure_ascii=False).replace("</", "<\\/")
     html = tpl.replace("__DATA__", payload)
-    path = os.path.join(OUT, "segmentation_tool.html")
+    # 切题版（--bounds-only）写独立文件：与标注版互不覆写（0920 实锤：l3 后
+    # 重跑 tool0 会把标注版工具冲回切分页）。「打开标注工具」永远指向标注版
+    path = os.path.join(OUT, "segmentation_tool_bounds.html" if args.bounds_only
+                        else "segmentation_tool.html")
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(html)
     print(f"生成 {path}")
     print(f"会话 {len(out)} 个（≥2 回合），回合 {sum(len(c['rounds']) for c in out)}"
-          + (f"，滤掉纯寒暄（无咨询无工单）{n_noise} 个" if n_noise else ""))
-    if man:
+          + (f"，滤掉纯寒暄（无咨询无工单）{n_noise} 个" if n_noise else "")
+          + (f"，滤掉已全部判定的 {n_done} 个（标注轮只列有待标注段的会话）" if n_done else ""))
+    if man_bounds:
         print(f"人工边界嵌入 {n_man} 个已切会话（初始切分=人工边界），LLM 切出多话题的 {n_llm_multi} 个")
     else:
         print(f"LLM 切出多话题的 {n_llm_multi} 个")

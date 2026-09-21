@@ -17,7 +17,6 @@ import { RouterProvider, createBrowserRouter, Navigate, Outlet, useRouteError, u
 import { AuthGuard } from '@/shared/utils/authGuard';
 import { RAW_BASE } from '@/config/api';
 import 'tdesign-mobile-react/es/style/index.css';
-import '@xyflow/react/dist/style.css';
 import '@/shared/styles/global.css';
 
 // 初始化认证状态
@@ -121,6 +120,7 @@ const OperationLogsPage = lazyImport(() => import('@/pages/tasks/OperationLogsPa
 const Dashboard = lazyImport(() => import('@/pages/admin/Dashboard'));
 const AdminEntries = lazyImport(() => import('@/pages/admin/AdminEntries'));
 const DispatchDev = lazyImport(() => import('@/pages/admin/DispatchDev'));
+const TaskPolicyPage = lazyImport(() => import('@/pages/admin/TaskPolicyPage'));
 const AdminLayout = lazyImport(() => import('@/shared/components/AdminLayout'));
 
 // 仪表盘下钻明细
@@ -232,6 +232,7 @@ const router = createBrowserRouter([
                   { path: 'data-import', element: <DataImport /> },
                   { path: 'operation-logs', element: <OperationLogs /> },
                   { path: 'dispatch-dev', element: <DispatchDev /> },
+                  { path: 'task-policy', element: <TaskPolicyPage /> },
                   // { path: 'progress', element: <ProgressBoard /> },       // 已并入 ProjectProgress
                   // { path: 'personnel', element: <PersonnelBoard /> },     // 已从导航移除
                   { path: 'project-edit/:id?', element: <ProjectEdit /> },

@@ -7,7 +7,9 @@
      （确定性 UUIDv5，所以能拿已知 id 钉住跨环境一致性）；
   3. 车型1/车型2 是下拉 + 车型目录选项（迁移 9d2f4a6b8c01 / 4a7c2e9d1b53 的终态），
      所有节点 allow_custom=True（迁移 5b8e3f2a9c47 的终态）；
-  4. ensure_global_info_nodes 只在空库播种，已有全局节点时一行都不动。
+  4. ensure_global_info_nodes 只在空库播种，已有全局节点时一行都不动；
+  5. 改名只改 node_name（id 按老路径推，见 _ID_PATH_ALIASES），新增节点各就各位
+     —— 迁移 6f2c8a1d9b47 的终态。
 
 运行方式（反射 runner；**必须先 import app.core.db**——conftest 会把 create_engine
 换成 MagicMock，若任由 admin 包在之后懒加载 app.core.db，event.listen 会对
@@ -36,10 +38,12 @@ from app.modules.admin.services.info_node_seed_service import (
 
 
 # 开发库（helpdesk）里这两行的 id：新环境必须播出一模一样的 id。
+# 「车辆」已改名「车型信息」（迁移 6f2c8a1d9b47 只改 node_name）—— id 不变，
+# 所以这里按**现路径**取，期望的还是老库那两串。
 _DEV_DB_IDS = {
     '基础信息': '2a3eb416-8bfc-5f3b-82d7-1b53597cdba4',
-    '硬件/车辆/车型1': '12d26a80-0f98-5179-b6f8-cf64b15909d2',
-    '硬件/车辆/车型2/数量': '7406af90-9fc8-5ec6-90f9-3015183fc1d0',
+    '硬件/车型信息/车型1': '12d26a80-0f98-5179-b6f8-cf64b15909d2',
+    '硬件/车型信息/车型2/数量': '7406af90-9fc8-5ec6-90f9-3015183fc1d0',
 }
 
 
@@ -91,6 +95,62 @@ def test_seed_ids_match_dev_db():
     """确定性 id：同一份 default.yaml 在任何环境播出同一批 id。"""
     for path_key, expected in _DEV_DB_IDS.items():
         assert _seed_node_id(path_key) == expected
+
+
+def test_renamed_path_keeps_legacy_id():
+    """改名不改 id：现路径与老路径推出同一串（老库那几行的 id 就是按老路径播的）。"""
+    assert _seed_node_id('硬件/车型信息') == _seed_node_id('硬件/车辆')
+    assert _seed_node_id('硬件/车型信息/车型1/数量') == _seed_node_id('硬件/车辆/车型1/数量')
+    # 没改过名的路径不受影响：别名表只对登记过的路径生效
+    assert _seed_node_id('硬件/载具类型') != _seed_node_id('硬件/车型信息')
+
+
+def test_new_nodes_in_place():
+    """2026-09-21 新增/改名的节点：位置、类型与同级排序（迁移 6f2c8a1d9b47 的终态）。"""
+    rows = _by_key(build_seed_rows())
+    parent_of = {key: row.parent_id for key, row in rows.items()}
+
+    # 基础信息：新三条在前，原来的从 客户信息 起整体后移
+    assert parent_of['base.project_code'] == rows['base'].id
+    assert parent_of['base.order_no'] == rows['base'].id
+    assert parent_of['base.time_summary'] == rows['base'].id
+    assert parent_of['base.time_summary.created_at'] == rows['base.time_summary'].id
+    assert parent_of['base.time_summary.entry_date'] == rows['base.time_summary'].id
+    assert rows['base.project_code'].node_type == 'field'
+    assert rows['base.time_summary'].node_type == 'group'
+    base_order = [row.node_key for row in sorted(
+        (row for row in rows.values() if row.parent_id == rows['base'].id),
+        key=lambda row: row.sort_order,
+    )]
+    assert base_order[:4] == ['base.project_code', 'base.order_no', 'base.time_summary', 'base.customer_info']
+    assert rows['base.time_summary.created_at'].sort_order == 10
+    assert rows['base.time_summary.agv_offline_date'].sort_order == 40
+
+    # 硬件：车辆（现名「车型信息」）下首个子节点是总车数，车型1/车型2 顺次后移
+    vehicle_children = sorted(
+        (row for row in rows.values() if row.parent_id == rows['hardware.vehicle'].id),
+        key=lambda row: row.sort_order,
+    )
+    assert [row.node_key for row in vehicle_children] == [
+        'hardware.vehicle.total_count',
+        'hardware.vehicle.model_1',
+        'hardware.vehicle.model_2',
+    ]
+    assert rows['hardware.vehicle'].node_name == '车型信息'
+    assert rows['hardware.vehicle.total_count'].node_type == 'field'
+    assert rows['hardware.vehicle.total_count'].value_type == 'text'
+
+    # 调度软件/版本：版本号排在既有两项之后
+    version_children = sorted(
+        (row for row in rows.values() if row.parent_id == rows['dispatch_software.version'].id),
+        key=lambda row: row.sort_order,
+    )
+    assert [row.node_key for row in version_children] == [
+        'dispatch_software.version.submodule',
+        'dispatch_software.version.common_config',
+        'dispatch_software.version.number',
+    ]
+    assert rows['dispatch_software.version.number'].sort_order == 30
 
 
 def test_vehicle_nodes_are_select_with_catalog():

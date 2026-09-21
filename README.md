@@ -41,7 +41,7 @@
 
 它不仅是工单系统，更覆盖**项目交付管理**（项目 / 风险 / 日报 / 授权）与**机器人运行数据**（由 USP 调度平台上传的故障与任务统计），并由 **AI 沿"需求 / 供给 / 管理"三种视角全流程深度参与**，配合**专业知识库（RAG）**持续提升响应效率与处理质量。
 
-完整产品形态见 [docs/PRODUCT.md](./docs/PRODUCT.md)，技术架构见 [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md)。
+完整产品形态见 [docs/PRODUCT/PRODUCT.md](./docs/PRODUCT/PRODUCT.md)，技术架构见 [docs/PRODUCT/ARCHITECTURE.md](./docs/PRODUCT/ARCHITECTURE.md)，代码现状总览见 [docs/CODEBASE_OVERVIEW.md](./docs/CODEBASE_OVERVIEW.md)。
 
 ### 核心业务流程
 
@@ -141,7 +141,7 @@ OpenRobotService/
 
 ### 快速开始
 
-详细步骤见 [docs/SETUP.md](./docs/SETUP.md)。简要：
+详细步骤见 [docs/PRODUCT/SETUP.md](./docs/PRODUCT/SETUP.md)。简要：
 
 ```bash
 # 1. 后端
@@ -176,10 +176,14 @@ npm run test:coverage # 测试覆盖率
 
 ### 文档
 
-- [产品形态设计](./docs/PRODUCT.md)
-- [架构设计](./docs/ARCHITECTURE.md)
-- [本地搭建与部署](./docs/SETUP.md)
-- [微信服务号配置](./docs/WECHAT.md)
+- [产品形态设计](./docs/PRODUCT/PRODUCT.md)
+- [架构设计](./docs/PRODUCT/ARCHITECTURE.md)
+- [本地搭建与部署](./docs/PRODUCT/SETUP.md)
+- [微信服务号配置](./docs/PRODUCT/WECHAT.md)
+- [代码现状总览](./docs/CODEBASE_OVERVIEW.md)
+- [数据库 ERD](./docs/database-erd.md)
+- [业务规则](./docs/business_rules.md)
+- [故障排查](./docs/troubleshooting.md)
 
 ---
 

@@ -13,6 +13,8 @@
 //   所以这里除了藏按钮，saveValue 也必须走值写入接口（否则普通用户一保存就 403）。
 //
 // 每行的「历史」看该节点的操作记录（时间 / 人员 / 变动；子节点被删除时记录在父节点下）。
+// 一级标签的「历史」是**整棵子树**的变动汇总，按节点分组渲染成 Markdown 文档
+// （shared/utils/historyMarkdown.ts，字符串由前端拼、react-markdown 渲染）；子节点仍是逐条列表。
 // 有本机没看过的新记录时历史按钮右上角出小红点：保存成功后立即出，点开该节点历史才消失；
 // 该节点所在的一级节点（根节点）同时出点，作为「这个一级标签下有未看过的变动」的汇总。
 // 已读水位按「项目 + 登录用户」存本机（localStorage，见 shared/utils/projectInfoTree.ts）。
@@ -22,16 +24,21 @@
 // 操作记录由后端在每个写接口里随业务同事务落库（backend .../services/info_node_change_service.py），前端只读。
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { BackTop, Input, Navbar, Popup, Toast } from 'tdesign-mobile-react';
 import { createRequest } from '@/api/client';
 import API_CONFIG from '@/config/api';
 import { useAuthStore, PERM_PROJECT_INFO_TEMPLATE } from '@/stores/auth';
 import ProjectInfoFileImport from './ProjectInfoFileImport';
+import ProjectInfoLedgerSync from './ProjectInfoLedgerSync';
 import {
   MacChevronDown, MacChevronRight, MacChevronsDownUp, MacChevronsUpDown, MacDownload, MacFileText,
-  MacGripVertical, MacHistory, MacImage, MacMoreHorizontal, MacPencil, MacPlus, MacScrollText, MacTrash2, MacUpload,
+  MacGripVertical, MacHistory, MacImage, MacMoreHorizontal, MacPencil, MacPlus, MacRefreshCw, MacScrollText,
+  MacTrash2, MacUpload,
 } from '@/shared/components/macaronIcons';
 import {
+  clearInfoNodeValues,
   computeInfoCompleteness,
   createInfoNode,
   deleteInfoNode,
@@ -49,6 +56,7 @@ import {
   saveCollapsedIds,
   saveHistorySeen,
   setInfoNodeValue,
+  SUBTREE_HISTORY_LIMIT,
   subtreeNodeIds,
   unseenHistoryChain,
   unseenHistoryNodes,
@@ -59,7 +67,8 @@ import {
   type ProjectInfoNode,
   type ProjectInfoSelectValue,
 } from '@/shared/utils/projectInfoTree';
-import type { ApiInfoNodeChange } from '@/api/infoNodes';
+import { buildHistoryMarkdown, HISTORY_ACTION_NAMES } from '@/shared/utils/historyMarkdown';
+import { clearProjectInfoValuesApi, type ApiInfoNodeChange } from '@/api/infoNodes';
 
 type DropMode = 'child' | 'before';
 const CONTENT_TYPE_NAMES: Record<ProjectInfoContentType, string> = {
@@ -70,15 +79,6 @@ const CONTENT_TYPE_NAMES: Record<ProjectInfoContentType, string> = {
 };
 /** 增补信息可选的内容形式（增补只加末级字段，不做下拉/附件以外的东西） */
 const CUSTOM_NODE_TYPES: ProjectInfoContentType[] = ['text', 'select', 'image', 'file'];
-/** 操作记录的类型标签（与后端 action 一一对应） */
-const HISTORY_ACTION_NAMES: Record<string, string> = {
-  create: '新增',
-  update: '修改',
-  move: '移动',
-  delete: '删除',
-  import: '导入',
-  sync: '模板同步',
-};
 
 /** 接口错误 → 提示文案（各写操作共用） */
 const errMsg = (err: unknown) => (err instanceof Error && err.message ? err.message : '请稍后重试');
@@ -106,6 +106,13 @@ export default function ProjectInfoEdit() {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
   const [fileImportOpen, setFileImportOpen] = useState(false);
+  const [ledgerSyncOpen, setLedgerSyncOpen] = useState(false);
+  /** 「一键清空」的确认弹层：一次清掉全项目已填内容，必须先确认再发请求 */
+  const [clearAllOpen, setClearAllOpen] = useState(false);
+  /** 树的「代次」：整棵树被换成后端那份（清空 / 重读回滚）时自增，给 .mac-info__tree 当 key。
+   *  文本输入框是非受控的（defaultValue），不换 key 的话 DOM 里还留着旧文字——
+   *  用户看着像「没清掉」，而且一失焦就把旧值又存回去了。 */
+  const [treeEpoch, setTreeEpoch] = useState(0);
   const [collapsedIds, setCollapsedIds] = useState<Set<string>>(() => loadCollapsedIds(id));
   const [editingId, setEditingId] = useState<string | null>(null);
   const [menuNode, setMenuNode] = useState<ProjectInfoNode | null>(null);
@@ -143,6 +150,7 @@ export default function ProjectInfoEdit() {
     setLoadError(false);
     try {
       setNodes(await loadInfoNodes(id));
+      setTreeEpoch((n) => n + 1);
     } catch {
       setLoadError(true);
     } finally {
@@ -189,15 +197,19 @@ export default function ProjectInfoEdit() {
 
   // 写入后端：先本地乐观更新（界面即时反馈），成功后提示；失败时提示原因并整树重读回滚。
   // 保存成功即重算历史元信息，本次改动对应的节点立刻带上小红点（还没点开过）。
+  // successMsg 也可以是个函数：拿接口的返回值拼提示（一键清空要报「清掉了多少项」）。
   const applyMutation = async (
     optimistic: ProjectInfoNode[],
     action: () => Promise<unknown>,
-    successMsg: string,
+    successMsg: string | ((result: unknown) => string),
   ) => {
     setNodes(optimistic);
     try {
-      await action();
-      Toast({ message: successMsg, theme: 'success' });
+      const result = await action();
+      Toast({
+        message: typeof successMsg === 'function' ? successMsg(result) : successMsg,
+        theme: 'success',
+      });
       void syncHistoryMeta();
     } catch (err) {
       Toast({ message: `保存失败：${errMsg(err)}`, theme: 'error' });
@@ -208,14 +220,21 @@ export default function ProjectInfoEdit() {
   // 打开某节点的编辑历史。点开即已读，而且**整棵子树一起读**：
   // 红点是「这一片有你没看过的变动」，从更新的节点一路点到一级标签，看到的都是同一片变动，
   // 所以点开链上任一处的历史，这一串小红点就该一起消失。
+  //
+  // 一级标签（根节点）看的是**整棵子树**的变动，以 Markdown 汇总展示（见 historyMarkdown）：
+  // 它自己是「这一片的汇总」，只列它一行的记录看不出这一级到底改过什么。
+  // 子节点保持原来的逐条列表——那是具体某一项的明细。
   const openHistory = async (node: ProjectInfoNode) => {
     setHistoryNode(node);
     setHistoryChanges([]);
     setHistoryError(false);
     setHistoryLoading(true);
     historyRequestRef.current = node.id;
+    const isRoot = node.parent_id === null;
     try {
-      const records = await loadInfoNodeChanges(id, node.id);
+      const records = await loadInfoNodeChanges(id, node.id, isRoot
+        ? { includeDescendants: true, limit: SUBTREE_HISTORY_LIMIT }
+        : {});
       if (historyRequestRef.current !== node.id) return; // 期间切到了别的节点，丢弃本次结果
       setHistoryChanges(records);
       // 水位推进：子树里每个节点都记成它的最新记录 id（summary 里那份；缺了就用本节点的记录兜底）
@@ -317,6 +336,18 @@ export default function ProjectInfoEdit() {
       '节点及其子节点已删除',
     );
     setDeleteNode(null);
+  };
+
+  // 一键清空：只清本项目已填的**内容**（节点与结构保留），逐条记入编辑历史。
+  // 前端先把整棵树的显示值清成空（乐观），后端返回真正清掉的字段数。
+  const confirmClearAll = () => {
+    setClearAllOpen(false);
+    setTreeEpoch((n) => n + 1);          // 让输入框们重新挂载，界面上真的变空
+    void applyMutation(
+      clearInfoNodeValues(nodes),
+      () => clearProjectInfoValuesApi(id),
+      (result) => `已清空 ${Number(result) || 0} 项已填内容`,
+    );
   };
 
   const uploadNodeFile = async (node: ProjectInfoNode, file: File) => {
@@ -490,6 +521,14 @@ export default function ProjectInfoEdit() {
     [nodes, unseenHistoryIds],
   );
 
+  // 一级标签的历史是整棵子树的汇总，渲染成 md 文档（子节点仍是上面的逐条列表）
+  const historyMarkdown = useMemo(
+    () => (historyNode && historyNode.parent_id === null
+      ? buildHistoryMarkdown(historyNode, historyChanges, nodes, { limit: SUBTREE_HISTORY_LIMIT })
+      : ''),
+    [historyNode, historyChanges, nodes],
+  );
+
   const rowProps = {
     byParent, collapsedIds, editingId, draggingId, dropTarget, uploadingNodeId,
     historyDotIds, canEdit: canEditTree,
@@ -519,7 +558,7 @@ export default function ProjectInfoEdit() {
       <Navbar title="编辑项目信息" leftArrow onLeftClick={() => navigate(-1)} fixed />
       <div style={{ padding: 16, paddingTop: 64 }}>
         <section className="mac-card mac-card--pad">
-          <div className="mac-info__head">
+          <div className="mac-info__head mac-info__head--wrap">
             <div className="mac-info__title-wrap">
               <h3 className="mac-info__title">信息节点</h3>
               <p className="mac-info__subtitle">
@@ -527,8 +566,30 @@ export default function ProjectInfoEdit() {
               </p>
             </div>
             <div className="mac-info__actions">
-              <button type="button" className="mac-btn mac-btn--ghost mac-info__iconbtn" onClick={expandAll} title="全部展开" aria-label="全部展开"><MacChevronsUpDown size={15} /></button>
-              <button type="button" className="mac-btn mac-btn--ghost mac-info__iconbtn" onClick={collapseAll} title="全部折叠" aria-label="全部折叠"><MacChevronsDownUp size={15} /></button>
+              {/* 台账同步：读本地库里的企业微信台账镜像，与信息节点比对后逐条确认（矛盾→覆盖 / 缺少→新建）。
+                  与「文件导入」同门槛：要读整棵树，只有能改本项目信息树的人看得到。 */}
+              {canEditTree && (
+                <button
+                  type="button"
+                  className="mac-btn mac-btn--outline mac-info__act"
+                  title="与项目台账同步本项目的信息节点"
+                  onClick={() => setLedgerSyncOpen(true)}
+                >
+                  <MacRefreshCw size={13} />同步
+                </button>
+              )}
+              {/* 一键清空：把本项目已填的内容全部清掉（节点与结构保留）。比填一个值重得多，
+                  与「同步」同门槛（能改这棵树的人），且必须先过确认弹层。 */}
+              {canEditTree && (
+                <button
+                  type="button"
+                  className="mac-btn mac-btn--outline mac-info__act"
+                  title="清空本项目所有已填的信息（节点与结构保留）"
+                  onClick={() => setClearAllOpen(true)}
+                >
+                  <MacTrash2 size={13} />一键清空
+                </button>
+              )}
               {canEditTemplate && (
                 <button
                   type="button"
@@ -551,6 +612,9 @@ export default function ProjectInfoEdit() {
                   <MacPlus size={13} />新标签
                 </button>
               )}
+              {/* 展开/折叠是纯视图按钮（图标态），放到最右，前面留给「改数据」的动作 */}
+              <button type="button" className="mac-btn mac-btn--ghost mac-info__iconbtn" onClick={expandAll} title="全部展开" aria-label="全部展开"><MacChevronsUpDown size={15} /></button>
+              <button type="button" className="mac-btn mac-btn--ghost mac-info__iconbtn" onClick={collapseAll} title="全部折叠" aria-label="全部折叠"><MacChevronsDownUp size={15} /></button>
             </div>
           </div>
 
@@ -572,7 +636,7 @@ export default function ProjectInfoEdit() {
               </div>
             </div>
           ) : (
-            <div className="mac-info__tree">
+            <div className="mac-info__tree" key={treeEpoch}>
               {roots.map((root) => (
                 <InfoRow key={root.id} {...rowProps} node={root} depth={1} missingCount={completeness.get(root.id)?.empty} />
               ))}
@@ -629,6 +693,22 @@ export default function ProjectInfoEdit() {
         </div>
       </Popup>
 
+      {/* 一键清空确认（清的是全项目已填的内容，与删除节点一样属重操作，二次确认后才发请求） */}
+      <Popup visible={clearAllOpen} onClose={() => setClearAllOpen(false)} placement="bottom" showOverlay>
+        <div className="mac-sheet">
+          <h4 className="mac-sheet__title">一键清空</h4>
+          <p className="mac-info__confirm">
+            清空本项目所有已填的内容？节点与结构（含增补节点）保留，下拉选项、关注标注、
+            编辑历史也不受影响；每次清空都记一条编辑历史，可查是谁清的。
+            已上传的附件只解除挂载，文件本体仍在资源库里。
+          </p>
+          <div className="mac-info__confirm-actions">
+            <button type="button" className="mac-btn mac-btn--outline" onClick={() => setClearAllOpen(false)}>取消</button>
+            <button type="button" className="mac-btn mac-info__danger" onClick={confirmClearAll}>清空</button>
+          </div>
+        </div>
+      </Popup>
+
       {/* 增补信息：普通用户在某个允许增补的节点下挂一个新字段（只影响本项目，不动全局模板） */}
       <Popup visible={!!customParent} onClose={() => setCustomParent(null)} placement="bottom" showOverlay>
         <div className="mac-sheet">
@@ -664,10 +744,23 @@ export default function ProjectInfoEdit() {
         onApplied={() => { void reload(); void syncHistoryMeta(); }}
       />
 
+      {/* 台账同步：企业微信台账的本地镜像 → 本项目信息节点（打开即拉预览 → 勾选确认 → 逐节点落库） */}
+      <ProjectInfoLedgerSync
+        visible={ledgerSyncOpen}
+        onClose={() => setLedgerSyncOpen(false)}
+        projectId={id}
+        nodes={nodes}
+        canEditTree={canEditTree}
+        onApplied={() => { void reload(); void syncHistoryMeta(); }}
+      />
+
       {/* 编辑历史：后端真实操作记录（时间/人员/节点/具体变动）；打开即标记已读（小红点消失） */}
       <Popup visible={!!historyNode} onClose={() => setHistoryNode(null)} placement="bottom" showOverlay>
         <div className="mac-sheet">
-          <h4 className="mac-sheet__title">编辑历史{historyNode ? ` · ${historyNode.title}` : ''}</h4>
+          <h4 className="mac-sheet__title">
+            编辑历史{historyNode ? ` · ${historyNode.title}` : ''}
+            {historyNode?.parent_id === null ? '（含子节点）' : ''}
+          </h4>
           {historyLoading ? (
             <div className="mac-info__state">正在加载编辑历史…</div>
           ) : historyError ? (
@@ -686,7 +779,16 @@ export default function ProjectInfoEdit() {
           ) : historyChanges.length === 0 ? (
             <div className="mac-info__state">
               暂无编辑记录
-              <div className="mac-info__state-sub">该节点的新增、修改、移动会记录在这里；子节点被删除时，删除记录显示在本节点下</div>
+              <div className="mac-info__state-sub">
+                {historyNode?.parent_id === null
+                  ? '这一级标签下（含所有子节点）的新增、修改、移动、删除都会汇总在这里'
+                  : '该节点的新增、修改、移动会记录在这里；子节点被删除时，删除记录显示在本节点下'}
+              </div>
+            </div>
+          ) : historyMarkdown ? (
+            /* 一级标签：整棵子树的变动按节点分组，用 react-markdown 渲染（真解析，动态文本已在生成时转义） */
+            <div className="mac-history__md">
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{historyMarkdown}</ReactMarkdown>
             </div>
           ) : (
             <ul className="mac-history">

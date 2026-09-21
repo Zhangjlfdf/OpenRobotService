@@ -1,6 +1,7 @@
 // 项目进度管理 —— 聚合项目列表 + 风险状态，侧重视觉化项目进度
 // 样式参考 macaron projects.index 页：双指标卡 + 卡片搜索框 + surface-card 项目卡
 // （阶段标签 + 进度条 + 四格小指标），保留长按删除与看板筛选下钻。
+// 卡片右上角展示该项目工单数（后端 ticket_count，来自 /projects/ 与 /projects/me）。
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { Toast, Loading, Popup, Dialog } from 'tdesign-mobile-react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
@@ -31,6 +32,7 @@ interface ProjectItem {
   risks: number;
   project_summary: string;
   task_execution_status: string;
+  ticket_count?: number | null; // 该项目工单数（tasks 表，口径同仪表盘「总工单数」）
   task_execution_stats?: TaskExecutionStats | null;
   latest_manual_switch_count?: number | null;
   settlement_period?: string | null; // 业绩核算期，手工填写常见 YYYYMM（如 202608），兼容 YYYY-MM，来自企业微信同步
@@ -246,7 +248,14 @@ export default function ProjectProgress() {
               onMouseUp={cancelLongPress}
               onMouseLeave={cancelLongPress}
             >
-              <div className="mac-proj-card__title">{p.name}</div>
+              {/* 标题行：项目名左对齐，右上角是该项目的工单数（后端 ticket_count，口径同仪表盘「总工单数」） */}
+              <div className="mac-proj-card__head">
+                <div className="mac-proj-card__title">{p.name}</div>
+                <span className="mac-proj-card__tickets">
+                  <span className="mac-proj-card__tickets-num">{p.ticket_count ?? '-'}</span>
+                  工单
+                </span>
+              </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 }}>
                 <span className="mac-chip mac-chip--tag mac-chip--blue">{p.status}</span>
                 <span style={{ fontSize: 11.5, color: 'var(--mac-muted-fg)' }}>

@@ -3,17 +3,20 @@
 直接查询 app.models.task.Task（系统任务表 tasks），与 AI 服务 tickets 表统计
 （见 app/modules/admin/api/tickets.py）是不同数据源，不可混用。
 """
-from typing import Dict, Any, List, Optional
+import logging
+import time
+from typing import Dict, Any, List, Optional, Set
 from datetime import datetime, timedelta
 from collections import Counter
 
-from sqlalchemy import select, func, and_, case, distinct, text
+from sqlalchemy import select, func, and_, or_, case, distinct, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.concurrency import run_in_threadpool
 
 from app.models.task import Task, TaskStatus, TaskOperationLog, OperationType
-from app.core.user_identity import same_identity
 from app.services.user_service import user_service
+
+logger = logging.getLogger(__name__)
 
 # 前端仪表盘状态 key -> 后端 TaskStatus 枚举值。
 # "paused"/"cancelled" 复用 PENDING/CANCELED（对齐 zentao/mapper.py 的 pause/cancel 映射）。
@@ -97,6 +100,31 @@ class TaskDashboardService:
             "resolved_rate": resolved_rate,
             "by_status": by_status,
         }
+
+    @staticmethod
+    async def get_ticket_counts_by_project(
+        db: AsyncSession,
+        project_ids: List[str],
+    ) -> Dict[str, int]:
+        """按项目批量统计工单数（项目进度管理页项目卡右上角展示用）。
+
+        口径与 get_ticket_summary 的 total 一致：监控中的六种状态之和。
+        一条 GROUP BY 取全部项目，返回 {project_id: 工单数}；
+        没有工单的项目不出现在结果里（调用方按 0 兜底）。
+        """
+        if not project_ids:
+            return {}
+
+        query = (
+            select(Task.project_id, func.count(Task.id))
+            .where(
+                Task.project_id.in_(project_ids),
+                Task.status.in_([FRONTEND_STATUS_MAP[key] for key in MONITORED_STATUS_KEYS]),
+            )
+            .group_by(Task.project_id)
+        )
+        rows = (await db.execute(query)).all()
+        return {project_id: count for project_id, count in rows}
 
     @staticmethod
     async def get_tickets_by_status(
@@ -271,48 +299,99 @@ class TaskDashboardService:
 
         未指派处理人 / 处理人从未点开过的工单不参与分桶（不计入 responded），
         只计入 total，避免「没点开」被误读为「响应极慢」。
+
+        性能设计：SQL 只负责取数——VIEW 日志 JOIN 工单表一次带出
+        assigned_to / created_at，不做 MIN/GROUP BY 聚合、不用巨型 task_id IN
+        列表；每单最早一次查看、处理人匹配、耗时计算与分桶全部在 Python 侧
+        完成，避免 MySQL 对大 IN + GROUP BY 走临时表/filesort。
         """
         if project_ids is not None and len(project_ids) == 0:
             return {"total": 0, "responded": 0, "by_bucket": []}
 
-        # 1) 范围内工单：id / 处理人 / 创建时间
-        task_query = select(Task.id, Task.assigned_to, Task.created_at)
+        # 1) 范围内工单总数（仅 COUNT，不拉全量工单行）
+        t0 = time.monotonic()
+        total_query = select(func.count(Task.id))
         if project_ids is not None:
-            task_query = task_query.where(Task.project_id.in_(project_ids))
-        task_rows = (await db.execute(task_query)).all()
-        total = len(task_rows)
+            total_query = total_query.where(Task.project_id.in_(project_ids))
+        total = (await db.execute(total_query)).scalar() or 0
+        logger.info(
+            "[dashboard response-time] COUNT 工单总数=%s 耗时 %.0fms (scope=%s)",
+            total,
+            (time.monotonic() - t0) * 1000,
+            "all" if project_ids is None else f"{len(project_ids)}个项目",
+        )
         if total == 0:
             return {"total": 0, "responded": 0, "by_bucket": []}
 
-        assignee_map = {row[0]: row[1] for row in task_rows}
-        created_map = {row[0]: row[2] for row in task_rows}
-
-        # 2) 这些工单的 VIEW 日志：每个 (task_id, operator) 取最早一次查看
+        # 2) VIEW 日志原始行：JOIN 工单表补齐处理人与创建时间，纯取数不聚合
+        t1 = time.monotonic()
         view_query = (
             select(
                 TaskOperationLog.task_id,
                 TaskOperationLog.operator,
-                func.min(TaskOperationLog.created_at),
+                TaskOperationLog.created_at,
+                Task.assigned_to,
+                Task.created_at,
             )
-            .where(
-                TaskOperationLog.operation_type == OperationType.VIEW,
-                TaskOperationLog.task_id.in_(list(assignee_map.keys())),
-            )
-            .group_by(TaskOperationLog.task_id, TaskOperationLog.operator)
+            .join(Task, Task.id == TaskOperationLog.task_id)
+            .where(TaskOperationLog.operation_type == OperationType.VIEW)
         )
+        if project_ids is not None:
+            view_query = view_query.where(Task.project_id.in_(project_ids))
         view_rows = (await db.execute(view_query)).all()
+        logger.info(
+            "[dashboard response-time] JOIN 取 VIEW 日志 %d 行 耗时 %.0fms",
+            len(view_rows),
+            (time.monotonic() - t1) * 1000,
+        )
 
-        # 3) 只保留处理人的查看，取每单最早一条，计算差值并分桶
+        # 2b) 预建操作人/处理人身份映射：一次批量查 users 表拿 id/username，
+        #     热循环不再逐行调 same_identity（该函数字符串不等时会同步查库 2 次，
+        #     曾导致 5870 行日志 Python 计算耗时 35s+）
+        t1b = time.monotonic()
+        operators = {row[1] for row in view_rows if row[1]}
+        assignees = {row[3] for row in view_rows if row[3]}
+        identity_values = operators | assignees
+        identity_map: Dict[str, Set[str]] = {}
+        if identity_values:
+            from app.models.identity import UserDB
+            values = list(identity_values)
+            user_rows = (
+                await db.execute(
+                    select(UserDB.id, UserDB.username).where(
+                        or_(UserDB.username.in_(values), UserDB.id.in_(values))
+                    )
+                )
+            ).all()
+            key_sets: Dict[str, Set[str]] = {}
+            for uid, uname in user_rows:
+                keys = {uid, uname}
+                key_sets[uid] = keys
+                key_sets[uname] = keys
+            for v in values:
+                identity_map[v] = key_sets.get(v, {v})
+        logger.info(
+            "[dashboard response-time] 批量取用户身份 %d 个值耗时 %.0fms",
+            len(identity_values),
+            (time.monotonic() - t1b) * 1000,
+        )
+
+        # 3) Python 侧计算：只保留处理人本人的查看，取每单最早一条
+        t2 = time.monotonic()
         first_view: Dict[int, datetime] = {}
-        for task_id, operator, viewed_at in view_rows:
+        created_map: Dict[int, datetime] = {}
+        for task_id, operator, viewed_at, assignee, task_created in view_rows:
             if viewed_at is None:
                 continue
-            assignee = assignee_map.get(task_id)
-            if not assignee or not same_identity(operator, assignee):
+            if not assignee:
+                continue
+            # 身份互认（id/username 均认），与 same_identity 同语义但纯内存比较
+            if not (identity_map.get(operator, {operator}) & identity_map.get(assignee, {assignee})):
                 continue  # 创建人/他人查看不算接单人响应
             cur = first_view.get(task_id)
             if cur is None or viewed_at < cur:
                 first_view[task_id] = viewed_at
+                created_map[task_id] = task_created
 
         bucket_counts: Dict[str, int] = {key: 0 for key in TaskDashboardService.RESPONSE_BUCKETS}
         for task_id, viewed_at in first_view.items():
@@ -329,6 +408,11 @@ class TaskDashboardService:
             {"key": key, "label": label, "count": bucket_counts[key]}
             for key, (_lo, _hi, label) in TaskDashboardService.RESPONSE_BUCKETS.items()
         ]
+        logger.info(
+            "[dashboard response-time] Python 计算/分桶耗时 %.0fms, responded=%d",
+            (time.monotonic() - t2) * 1000,
+            len(first_view),
+        )
 
         return {
             "total": total,

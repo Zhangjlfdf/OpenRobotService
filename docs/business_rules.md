@@ -1,7 +1,7 @@
 # 业务规则
 
 > 本文记录 OpenRobotService 项目的核心业务规则、约束和决策，供测试开发和代码编写时参考。
-> 与代码相关的业务逻辑见 `backend/CODEBASE_OVERVIEW.md`，产品需求见 `docs/PRD.md`。
+> 与代码相关的业务逻辑见 `docs/CODEBASE_OVERVIEW.md`，产品需求见 `docs/PRD.md`。
 
 ---
 
@@ -165,6 +165,6 @@
 | 产品需求文档（PRD） | `docs/PRD.md` |
 | 架构设计蓝图 | `docs/PRODUCT/ARCHITECTURE.md` |
 | 外部任务源集成设计 | `backend/INTEGRATION_DESIGN.md` |
-| 后端代码结构总览 | `backend/CODEBASE_OVERVIEW.md` |
+| 后端代码结构总览 | `docs/CODEBASE_OVERVIEW.md` |
 | 测试开发规范 | `automation/docs/testing/testing_guidelines.md` |
 | 自动化测试方案 | `automation/docs/automation_strategy.md` |

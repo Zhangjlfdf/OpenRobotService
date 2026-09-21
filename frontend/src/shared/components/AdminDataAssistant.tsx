@@ -69,13 +69,14 @@ interface AdaMessage {
   suggestQuestions?: string[];
 }
 
-/** 空态推荐问题（覆盖四大维度常用问法） */
+/** 空态推荐问题（覆盖五大维度常用问法） */
 const CHIP_QUESTIONS = [
   '本周工单处理情况',
   '近7天哪些项目的搬运效率为空',
+  '项目信息填写率怎么样',
 ];
 
-/** 指标 key → 中文标签映射（与后端 metric_registry.py 对齐，38 个指标） */
+/** 指标 key → 中文标签映射（与后端 metric_registry.py 对齐，49 个指标） */
 const METRIC_LABEL_MAP: Record<string, string> = {
   'ticket.total': '工单总数',
   'ticket.new_count': '新增工单数',
@@ -115,6 +116,17 @@ const METRIC_LABEL_MAP: Record<string, string> = {
   'collection.manual_intervention_rate': '人工干预率',
   'collection.robot_group_compare': '各组数据对比',
   'collection.items': '采集数据明细',
+  'project_info.node_total': '信息节点总数',
+  'project_info.global_node_count': '全局模板节点数',
+  'project_info.custom_node_count': '项目自定义节点数',
+  'project_info.by_value_type': '字段值类型分布',
+  'project_info.fill_rate': '信息填写率',
+  'project_info.change_count': '信息变更次数',
+  'project_info.change_by_day': '信息变更趋势',
+  'project_info.change_by_type': '变更类型分布',
+  'project_info.top_marked_nodes': '被关注最多的节点',
+  'project_info.value_items': '已填字段值明细',
+  'project_info.items': '项目信息完整度明细',
 };
 
 /** 指标 key 转中文标签；未注册的 key 直接返回原值 */
@@ -132,7 +144,7 @@ const TIME_RANGE_LABELS: Record<string, string> = {
   custom: '自定义',
 };
 
-const WELCOME_TEXT = `你好，我是**后台数据助手** 👋 工单、项目、风险和搬运效率都可以问我，例如：`;
+const WELCOME_TEXT = `你好，我是**后台数据助手** 👋 工单、项目、风险、搬运效率和项目信息都可以问我，例如：`;
 
 /** 「问数据」按钮可见性权限码（后台管理-权限管理里维护，按角色勾选授予） */
 const DATA_ASSISTANT_PERMISSION = 'frontend:dataqa:view';

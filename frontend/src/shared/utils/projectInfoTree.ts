@@ -284,9 +284,17 @@ export async function importInfoTree(projectId: string, input: unknown): Promise
 
 // —— 编辑历史（节点操作记录）：后端全量落库，「已读水位」存本机（每个人各自的未读状态） ——
 
-/** 某节点的编辑历史：自身操作 + 其直接子节点的删除记录（最新在前） */
-export async function loadInfoNodeChanges(projectId: string, nodeId: string): Promise<ApiInfoNodeChange[]> {
-  return fetchInfoNodeChangesApi(projectId, nodeId);
+/** 一级标签的「修改记录」要覆盖整棵子树，条数上限比单节点高（后端上限 500） */
+export const SUBTREE_HISTORY_LIMIT = 200;
+
+/** 某节点的编辑历史：自身操作 + 其直接子节点的删除记录（最新在前）。
+ *  includeDescendants=true（一级标签）时连整棵子树的记录一起取，见 historyMarkdown。 */
+export async function loadInfoNodeChanges(
+  projectId: string,
+  nodeId: string,
+  options: { includeDescendants?: boolean; limit?: number } = {},
+): Promise<ApiInfoNodeChange[]> {
+  return fetchInfoNodeChangesApi(projectId, nodeId, options);
 }
 
 /** 各节点最新记录的 id {节点id: 记录id}（删除记录计入其上级节点） */
@@ -483,6 +491,24 @@ export function patchInfoNode(
     'title' | 'content_type' | 'value' | 'parent_id' | 'sort_order' | 'options' | 'titleOptions'>>,
 ): ProjectInfoNode[] {
   return nodes.map((node) => (node.id === id ? { ...node, ...updates } : node));
+}
+
+/**
+ * 一键清空（乐观更新）：把所有节点的值换成「空」，节点本身原样留着。
+ * 下拉清掉选中项、**保留选项**（选项属于字段定义，清了就没得选了）；
+ * 附件置 null（文件本体在资源库里不动，只是不再挂在这个节点上）；其余置空串。
+ */
+export function clearInfoNodeValues(nodes: ProjectInfoNode[]): ProjectInfoNode[] {
+  return nodes.map((node) => (hasFieldValue(node) ? { ...node, value: emptyValueOf(node) } : node));
+}
+
+function emptyValueOf(node: ProjectInfoNode): ProjectInfoSelectValue | ProjectInfoFileValue | string | null {
+  if (node.content_type === 'select') {
+    const current = node.value as ProjectInfoSelectValue | null;
+    return { selected: '', options: current?.options ?? [] };
+  }
+  if (node.content_type === 'file' || node.content_type === 'image') return null;
+  return '';
 }
 
 /** 删除节点及其全部后代节点 */

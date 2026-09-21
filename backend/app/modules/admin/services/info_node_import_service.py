@@ -9,9 +9,10 @@ DeepSeek flash，即 settings.LLM_MODEL_NAME）抽取「信息条目」，再与
   2. overwrite —— 识别到且节点已有不同内容 → 勾选后覆盖（前端显示 原内容 → 新内容）；
   3. unmatched —— 与文件有关但系统没有对应节点 → 勾选后作为新节点创建（附建议归属）。
 
-匹配规则（与需求一致）：条目与节点标题「精确一致，或相似度 ≥ 0.9（满分 1）」（difflib
-序列相似度，规范化空白/标点后比较）；匹配到的下拉节点还要求识别值命中其可选项（精确、
-与选项高度相似 ≥ 0.9，车型另有型号写法/中文全称的放宽），装不下就不算数。
+匹配规则：条目与节点标题「精确一致，或相似度 ≥ 0.9（满分 1）」；降到 0.75 的那一档只认
+「包含关系」——两个标题差的是几个字的增删（ERP模块 → ERP）而不是换了字（是否承接 ↛
+是否对接，见 TITLE_FALLBACK_THRESHOLD）。匹配到的下拉节点还要求识别值命中其可选项
+（精确、与选项高度相似 ≥ 0.9，车型另有型号写法/中文全称的放宽），装不下就不算数。
 条目最后没落到任何节点上时，先拿识别内容去比「建议归属附近」那些空下拉的可选项——
 能对上一个选项就在下拉里选它，而不是新建一个与下拉各说各话的节点（下拉本来就是「选出来
 的值」）。大模型返回的 nodeTitle 只是提示，最终匹配以后端确定性算法为准。
@@ -38,7 +39,13 @@ ALLOWED_EXTENSIONS = TEXT_EXTENSIONS | {".docx", ".xlsx"}
 MAX_FILE_BYTES = 10 * 1024 * 1024  # 上传文件上限 10MB
 MAX_TEXT_CHARS = 100_000           # 送大模型的正文上限（超出截断）
 MAX_SHEET_ROWS = 2000              # Excel 每个工作表最多读取行数
-SIMILARITY_THRESHOLD = 0.9         # 节点名相似度阈值（满分 1，与需求一致）
+SIMILARITY_THRESHOLD = 0.9         # 下拉选项的相似度阈值（值↔选项、车型中文全称、附近下拉的标题闸门）
+TITLE_FALLBACK_THRESHOLD = 0.75    # 条目标题 → 节点标题的「模糊兜底」下限：精确匹配没命中才走这一层。
+                                   # 2026-09-21 由 0.9 降到 0.75，但这一档只认「包含关系」（两个标题
+                                   # 差的是几个字的增删，不是换了字）——中文换一个字常常就是另一件事：
+                                   # 「是否承接」vs「是否对接」相似度恰好 0.75，不收闸门会把台账 156 个
+                                   # 项目的承接与否填进「数字孪生 / 是否对接」。≥0.9 那一档不看包含关系。
+                                   # 选项层仍是 SIMILARITY_THRESHOLD：值写进哪个下拉比标题认哪个节点要严。
 NAME_MISMATCH_THRESHOLD = 0.6      # 项目名一致性阈值：低于该相似度且互不包含 → 判定不一致（提醒可能导错文件）
 MAX_NODE_DEPTH = 4                 # 信息树最大层级（与前端 PROJECT_INFO_MAX_DEPTH 一致）
 NEARBY_DROPDOWN_DEPTH = 2          # 「建议归属附近」的下拉候选范围：归属节点起往下两级
@@ -46,6 +53,13 @@ LLM_TEMPERATURE = 0.2              # 抽取任务用低温度，减少发散
 LLM_TIMEOUT_SECONDS = 120.0
 
 SYSTEM_PROMPT = "你是项目信息整理助手，只输出 JSON，不输出任何解释文字或 Markdown 代码块。"
+
+# 节点路径的层级分隔符（提示词、预览、前端展示同一口径）
+PATH_SEPARATOR = " / "
+
+# 「车型1」「车型 2」这类车型槽位（与前端 optionCatalog 的 VEHICLE_MODEL_TITLE 同口径）。
+# 别放宽成 startswith("车型")——模板里的车型分组就叫「车型信息」，那样会把分组本身当成槽位。
+_VEHICLE_SLOT_TITLE = re.compile(r"^车型\s*\d*$")
 
 # AGV 车型目录（66 款）——信息树里存在车辆/车型节点时注入提示词，规范车型写法。
 # 型号清单与前端 frontend/src/shared/utils/vehicleModels.ts 的 VEHICLE_MODEL_CODES
@@ -333,7 +347,7 @@ def flatten_tree(roots: List[Dict]) -> List[Dict]:
                 "value": item.get("value"),
                 "options": _select_state(item)[1] if item.get("content_type") == "select" else [],
                 "depth": depth,
-                "path": " / ".join(path_titles),
+                "path": PATH_SEPARATOR.join(path_titles),
                 "path_titles": path_titles,
                 "has_children": bool(item.get("children")),
             })
@@ -363,21 +377,37 @@ def build_node_catalog(flat: List[Dict]) -> str:
 
 
 def find_vehicle_parent_path(flat: List[Dict]) -> Optional[str]:
-    """车型信息的建议归属路径：优先取「车型N」节点的父级（车辆），否则取「车辆」节点本身。
+    """车型信息的建议归属路径（模板里是「硬件 / 车型信息」）。
 
-    返回 None 表示信息树里没有车辆/车型节点（提示词不注入车型清单）。
+    车型槽位（车型1/车型2…）的父级优先——槽位在哪个分组下，分组就是归属路径；
+    树里只有分组、没铺槽位时退一步取分组节点本身（标题含「车辆」，或叫「车型信息」
+    这类以「车型」开头的分组名）。
+    返回 None 表示信息树里没有车型节点（提示词不注入车型清单）。
     """
     by_id = {n["id"]: n for n in flat}
     fallback: Optional[str] = None
     for node in flat:
         title = (node.get("title") or "").strip()
-        if title.startswith("车型"):
+        if _VEHICLE_SLOT_TITLE.match(title):
             parent = by_id.get(node.get("parent_id"))
             if parent is not None:
                 return parent["path"]
-        elif "车辆" in title and fallback is None:
+        elif ("车辆" in title or title.startswith("车型")) and fallback is None:
             fallback = node["path"]
     return fallback
+
+
+def find_vehicle_total_count_path(flat: List[Dict],
+                                  vehicle_parent_path: Optional[str]) -> Optional[str]:
+    """车型分组下「总车数」节点的路径；树里没这个节点就返回 None。
+
+    台账/文件里的「总车数」是整车台数，与车型1/车型2 各自的「数量」是两回事，
+    提示词要分开交代（见 build_import_prompt 的车型块）。
+    """
+    if not vehicle_parent_path:
+        return None
+    expected = f"{vehicle_parent_path}{PATH_SEPARATOR}总车数"
+    return next((node["path"] for node in flat if node["path"] == expected), None)
 
 
 def build_vehicle_model_catalog() -> str:
@@ -393,14 +423,18 @@ def build_import_prompt(
     file_text: str,
     project_name: str = "",
     vehicle_parent_path: Optional[str] = None,
+    vehicle_total_count_path: Optional[str] = None,
 ) -> str:
     """文件识别提示词：约束大模型只抽真实信息、按 0.9 把握匹配节点、固定 JSON 输出。
 
     同时把「本次导入的目标项目名称」告知大模型，并要求它回传「文件里自己写的项目名称」
     （projectName），供后端比对、提醒用户可能导错了文件。
-    信息树里有车辆/车型节点时（vehicle_parent_path 非空）额外注入 AGV 车型清单，
+    信息树里有车型节点时（vehicle_parent_path 非空）额外注入 AGV 车型清单，
     让车型落到「车型N」下拉框的值上（与模板页「填入车型目录」同一份目录），
     数量随同一条的 quantity 字段给出，由 match_items 填进该车型下的「数量」子节点。
+    车型分组下还有「总车数」节点时（vehicle_total_count_path 非空）另加一条规则：
+    整车总台数填那个节点，别和各车型自己的「数量」混起来（也不许把各车型加起来充当总数）。
+    其余新增节点（项目编号/订单号/时间信息汇总/版本号…）都在节点清单里，按通用匹配规则走。
     """
     target = project_name or "（未提供）"
     rules = """1. 只抽取文件里明确写到的信息，禁止编造、外推或用常识补全；文件里没写的节点不要出现在结果里。
@@ -417,6 +451,11 @@ def build_import_prompt(
    - 车型型号写进**车型节点的值**，不是写进标题：该车型若对应清单里「{vehicle_parent_path}」下某个「车型N」节点（内容类型 select），把 nodeTitle 填成该节点标题、value 填**清单里的车型型号**（文件写法不同时用清单写法，如「XC1051」，旧型号 XS1161 一律写 XS1201）；
    - 该车型的数量放进同一条的 quantity 字段（如「6 台」），后端会填到该车型节点下的「数量」子节点；文件没写数量就填 null。不要再单独输出「数量」条目；
    - 清单里的「车型N」节点数不够（车型比节点多）时，多出来的车型 nodeTitle 填 null、suggestedParentPath 填「{vehicle_parent_path}」，title 填清单里的车型型号，quantity 照填。"""
+        if vehicle_total_count_path:
+            rules += f"""
+9. 整车总台数（文件里写明的「总车数 / 整车数量 / 全场共 X 台」这类**总数**）单独一条：nodeTitle 填「总车数」、value 填文件里的台数原文、quantity 填 null。
+   - 这条与第 8 条各车型的 quantity 是两回事，别互相顶替；文件只给了各车型明细、没写总数时不要输出这条（**禁止**把各车型数量加起来当总数）。
+   - 反过来文件只写了总数、没有分车型明细时，就只输出这一条，不要硬凑车型。"""
         vehicle_block = f"""
 下面是 AGV 车型清单（「型号（中文全称）」，没带名称的型号只有型号本身），用于规范车型信息的写法：
 <<<车型清单
@@ -620,9 +659,9 @@ def snap_select_value(value: str, options: List[str]) -> Optional[str]:
     从严到宽三层：
       1. 精确比（忽略大小写、空白与常见标点）；
       2. 车型放宽（仅当可选项本身就是车型型号，见 _vehicle_option_hits）；
-      3. 高度相似：与某个选项的序列相似度 ≥ 0.9 —— 与节点标题匹配同一个阈值，够「非常像」
-         才认。普通下拉（项目类型等）只走到这一层：「试点项目一期」vs「试点项目」只有 0.8，
-         仍按未匹配，不会把内容吸到不相干的选项上。
+      3. 高度相似：与某个选项的序列相似度 ≥ 0.9（SIMILARITY_THRESHOLD，比标题兜底的 0.75 严），
+         够「非常像」才认。普通下拉（项目类型等）只走到这一层：「试点项目一期」vs「试点项目」
+         只有 0.8，仍按未匹配，不会把内容吸到不相干的选项上。
     一个值里认出多个不同车型时返回 None —— 宁可让用户手动归属，也不要蒙一个。
     """
     exact = next((option for option in options if _norm(option) == _norm(value)), None)
@@ -774,18 +813,27 @@ def match_items(flat: List[Dict], items: List[Dict[str, Optional[str]]]) -> Dict
                 match = _prefer_value_holder(by_title[key_norm], parent_hint, value)
                 break
 
-        # 2) 相似度兜底：与可填节点标题做序列相似度，达到阈值（0.9）才认
+        # 2) 模糊兜底：与可填节点标题做序列相似度，分两档收（见 TITLE_FALLBACK_THRESHOLD）：
+        #    ≥ 0.9 照旧认；0.75～0.9 只认「一个标题包含另一个」——两个标题差的是几个字的
+        #    增删（「ERP模块」→「ERP」、「公网IP地址」→「公网ip」），而不是换了字。
+        #    中文字头里换一个字常常就是另一件事：「是否承接」vs「是否对接」相似度恰好 0.75，
+        #    2026-09-21 实测会把台账 156 个项目的承接与否填进「数字孪生 / 是否对接」。
         if match is None:
             best: Optional[Dict] = None
             best_score = 0.0
+            best_contained = False
+            texts = [_norm(title)]
+            if node_title:
+                texts.append(_norm(node_title))
             for leaf in leaves:
                 leaf_norm = _norm(leaf["title"])
-                score = _ratio(_norm(title), leaf_norm)
-                if node_title:
-                    score = max(score, _ratio(_norm(node_title), leaf_norm))
-                if score > best_score:
-                    best, best_score = leaf, score
-            if best is not None and best_score >= SIMILARITY_THRESHOLD:
+                for text in texts:
+                    score = _ratio(text, leaf_norm)
+                    if score > best_score:
+                        best, best_score = leaf, score
+                        best_contained = text in leaf_norm or leaf_norm in text
+            if best is not None and (best_score >= SIMILARITY_THRESHOLD
+                                     or (best_score >= TITLE_FALLBACK_THRESHOLD and best_contained)):
                 match = best
 
         # 3) 匹配到下拉节点：识别值必须命中可选项（车型型号再放宽一层），否则按未匹配处理
@@ -932,9 +980,12 @@ async def analyze_import_file(project_id: str, filename: str, data: bytes) -> Di
 
     project_name = _get_project_name(project_id)
     flat = flatten_tree(roots)
-    # 信息树有车辆/车型节点时注入 AGV 车型清单，让车型信息的 title 直接用车型型号
+    # 信息树有车型节点时注入 AGV 车型清单，让车型信息的 title 直接用车型型号；
+    # 车型分组下还有「总车数」时（模板默认有）另行交代它和各车型「数量」的区别
     vehicle_parent = find_vehicle_parent_path(flat)
-    prompt = build_import_prompt(build_node_catalog(flat), text, project_name, vehicle_parent)
+    vehicle_total_count = find_vehicle_total_count_path(flat, vehicle_parent)
+    prompt = build_import_prompt(build_node_catalog(flat), text, project_name,
+                                 vehicle_parent, vehicle_total_count)
     content = await _call_llm(prompt)
     parsed = parse_llm_payload(content)
     items = parsed["items"]

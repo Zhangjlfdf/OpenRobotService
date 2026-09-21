@@ -15,6 +15,7 @@
 - 传 project_ids（即使为空）：仅统计指定项目内的数据
 """
 import asyncio
+import logging
 import re
 import time
 
@@ -31,6 +32,8 @@ from app.modules.admin.services.project_service import project_service
 from app.modules.admin.services.risk_service import risk_service
 
 dashboard_router = APIRouter(prefix="/dashboard", tags=["admin-dashboard"])
+
+logger = logging.getLogger(__name__)
 
 PROJECT_STAGE_MAP = {
     "pre_sales": ["售前方案"],
@@ -454,9 +457,32 @@ async def _run_summary_all_query(fn, pid_list):
     """在独立 AsyncSession 中执行仪表盘子查询，供 asyncio.gather 并发。
 
     SQLAlchemy 的 AsyncSession 不允许并发使用，因此每个子查询各开一个会话。
+    同时记录子查询耗时，便于定位首屏慢在哪个统计上（调试日志）。
     """
+    start = time.monotonic()
     async with AsyncSessionLocal() as session:
-        return await fn(session, pid_list)
+        result = await fn(session, pid_list)
+    elapsed_ms = (time.monotonic() - start) * 1000
+    logger.info(
+        "[dashboard summary-all] 子查询 %s 耗时 %.0fms (scope=%s)",
+        getattr(fn, "__name__", str(fn)),
+        elapsed_ms,
+        "all" if pid_list is None else f"{len(pid_list)}个项目",
+    )
+    return result
+
+
+def _run_summary_all_sync_timed(pid_list):
+    """线程池执行项目同步统计（月度/紧急度/项目简表），并记录耗时。"""
+    start = time.monotonic()
+    result = _compute_summary_all_sync_parts(pid_list)
+    elapsed_ms = (time.monotonic() - start) * 1000
+    logger.info(
+        "[dashboard summary-all] 同步部分 _compute_summary_all_sync_parts 耗时 %.0fms (scope=%s)",
+        elapsed_ms,
+        "all" if pid_list is None else f"{len(pid_list)}个项目",
+    )
+    return result
 
 
 @dashboard_router.get("/summary-all", response_model=Dict[str, Any])
@@ -495,14 +521,19 @@ async def get_dashboard_summary_all(
     now = time.monotonic()
     cached = _summary_all_cache.get(cache_key)
     if cached and now - cached[0] < _SUMMARY_ALL_TTL_SECONDS:
+        logger.info(
+            "[dashboard summary-all] 命中进程内缓存，直接返回 (耗时 %.0fms)",
+            (time.monotonic() - now) * 1000,
+        )
         return cached[1]
 
+    overall_start = time.monotonic()
     tickets, source, response_time, avg_close_time, sync_parts = await asyncio.gather(
         _run_summary_all_query(task_dashboard_service.get_ticket_summary, pid_list),
         _run_summary_all_query(task_dashboard_service.get_source_analysis, pid_list),
         _run_summary_all_query(task_dashboard_service.get_response_time_analysis, pid_list),
         _run_summary_all_query(task_dashboard_service.get_avg_close_time_analysis, pid_list),
-        run_in_threadpool(_compute_summary_all_sync_parts, pid_list),
+        run_in_threadpool(_run_summary_all_sync_timed, pid_list),
     )
     monthly, urgency, projects_brief = sync_parts
 
@@ -517,6 +548,11 @@ async def get_dashboard_summary_all(
     }
     resp = {"code": 0, "data": data}
     _summary_all_cache[cache_key] = (time.monotonic(), resp)
+    logger.info(
+        "[dashboard summary-all] 总耗时 %.0fms (scope=%s)",
+        (time.monotonic() - overall_start) * 1000,
+        "all" if pid_list is None else f"{len(pid_list)}个项目",
+    )
     return resp
 
 
