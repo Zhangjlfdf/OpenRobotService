@@ -16,9 +16,13 @@ import { MacStat } from '@/shared/components/macaronBits';
 import { MacSearch, MacFolderClosed } from '@/shared/components/macaronIcons';
 
 interface TaskExecutionStats {
-  total_tasks: number;
-  finished_tasks: number;
+  // 项目没有任何采集数据时（后端返回 NO_TASK_EXECUTION_STATS）这些字段为 null，卡片显示「-」
+  total_tasks: number | null;
+  finished_tasks: number | null;
   completion_rate: number | null;
+  // 这组统计对应的数据日期（后端取该项目已导入的最新一天，YYYY-MM-DD）；
+  // 各项目导入频率不同，可能是一周前甚至更早，卡片左侧按此日期标注
+  data_date?: string | null;
 }
 
 interface ProjectItem {
@@ -276,8 +280,16 @@ export default function ProjectProgress() {
                 </div>
               )}
 
-              {/* 任务统计：任务总数 / 已完成任务 / 任务完成率 / 切手动次数 */}
-              <div className="mac-ministat-grid">
+              {/* 任务统计：任务总数 / 已完成任务 / 任务完成率 / 切手动次数
+                  四格左侧的日期标签标注这组数据的真实日期——后端取各项目已导入的最新一天，
+                  导入频率不同，可能不是当天（一周前甚至更早） */}
+              <div className="mac-ministat-grid" style={{ gridTemplateColumns: 'auto repeat(4, 1fr)' }}>
+                <div className="mac-ministat">
+                  <div className="mac-ministat__value" style={{ fontSize: 11.5, whiteSpace: 'nowrap' }}>
+                    {p.task_execution_stats?.data_date ?? '-'}
+                  </div>
+                  <div className="mac-ministat__label">数据日期</div>
+                </div>
                 <div className="mac-ministat">
                   <div className="mac-ministat__value">{p.task_execution_stats?.total_tasks ?? '-'}</div>
                   <div className="mac-ministat__label">任务总数</div>

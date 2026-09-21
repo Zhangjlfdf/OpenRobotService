@@ -8,7 +8,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional, Dict, List, Any
 from app.modules.admin.schemas_das.request_models import ProjectCreate, ProjectUpdate, ProjectResponse
-from app.modules.admin.services.project_service import project_service, ProjectConflictError
+from app.modules.admin.services.project_service import project_service, ProjectConflictError, NO_TASK_EXECUTION_STATS
 from app.modules.admin.services.risk_service import risk_service
 from app.modules.admin.services import project_ai_summary_service
 from app.modules.admin.services.task_dashboard_service import task_dashboard_service
@@ -68,13 +68,14 @@ async def get_projects(
     if project_codes:
         detailed_risks = risk_service.get_detailed_open_risks_by_project_codes(project_codes)
         # 批量预取任务指标与切手动次数（此前在循环内逐项目查询，N 个项目为 3N 条 SQL；
-        # 切手动次数现随任务指标一起取自 collection_data，见 get_task_execution_metrics_7d_batch）
-        metrics_7d = project_service.get_task_execution_metrics_7d_batch(project_codes)
+        # 切手动次数现随任务指标一起取自 collection_data，
+        # 见 get_task_execution_metrics_latest_batch——取各项目已导入的最新一天数据）
+        metrics_latest = project_service.get_task_execution_metrics_latest_batch(project_codes)
 
         for project in projects:
             project_code = project["project_code"]
             project_risks = detailed_risks.get(project_code, [])
-            metric = metrics_7d.get(project_code)
+            metric = metrics_latest.get(project_code)
 
             project["risks"] = 0
 
@@ -88,7 +89,7 @@ async def get_projects(
             risk_summary = []
             
             project["task_execution_status"] = metric["status"] if metric else "无数据"
-            project["task_execution_stats"] = metric["stats"] if metric else {"total_tasks": 0, "finished_tasks": 0, "completion_rate": None, "manual_switch_count": None}
+            project["task_execution_stats"] = metric["stats"] if metric else NO_TASK_EXECUTION_STATS
             project["latest_manual_switch_count"] = metric["stats"].get("manual_switch_count") if metric else None
 
             for category, risks in custom_categories.items():
@@ -168,12 +169,12 @@ async def get_my_projects(
     if project_codes:
         detailed_risks = risk_service.get_detailed_open_risks_by_project_codes(project_codes)
         # 批量预取任务指标与切手动次数（与 GET /projects/ 同口径，避免循环内 3N 条 SQL）
-        metrics_7d = project_service.get_task_execution_metrics_7d_batch(project_codes)
+        metrics_latest = project_service.get_task_execution_metrics_latest_batch(project_codes)
 
         for project in projects:
             project_code = project["project_code"]
             project_risks = detailed_risks.get(project_code, [])
-            metric = metrics_7d.get(project_code)
+            metric = metrics_latest.get(project_code)
 
             project["risks"] = 0
             
@@ -187,7 +188,7 @@ async def get_my_projects(
             risk_summary = []
             
             project["task_execution_status"] = metric["status"] if metric else "无数据"
-            project["task_execution_stats"] = metric["stats"] if metric else {"total_tasks": 0, "finished_tasks": 0, "completion_rate": None, "manual_switch_count": None}
+            project["task_execution_stats"] = metric["stats"] if metric else NO_TASK_EXECUTION_STATS
             project["latest_manual_switch_count"] = metric["stats"].get("manual_switch_count") if metric else None
 
             for category, risks in custom_categories.items():
