@@ -313,6 +313,11 @@ const mergeDbMessages = (prev: Message[], fresh: Message[]): Message[] => {
 };
 
 // 单条消息气泡（React.memo）：流式期间仅最后一条 content/streaming 变化，历史消息跳过整列表重渲染，消除抖动
+// iPhone=程序化选区必弹系统拷贝菜单（与我们的菜单叠加成双菜单，H5 无法关闭）
+// → 长按只弹我们的菜单（复制/多选/选择文字），部分复制走「选择文字」全屏页
+const IS_IOS = /iPad|iPhone|iPod/.test(navigator.userAgent)
+  || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+
 const MessageBubble = memo(function MessageBubble({
   msg, editingId, compact, expandedDesc, onToggleDesc, onToggleReaction, onCopy, onEditStart, onEditChange, onEditSave,   onEditCancel, onImageClick, onOpenTicket, onRedispatch, onProjectChoice, answered, selectedChoice,
   selectMode, checked, onCheck, onLongPress, selActive,
@@ -359,7 +364,7 @@ const MessageBubble = memo(function MessageBubble({
   // 长按就地全选（0922 微信式）：selActive 时程序化全选本气泡可见内容——
   // 手柄定位/拖拽由父层按 selectionchange 驱动；容器禁选在此气泡临时放开（CSS）
   useEffect(() => {
-    if (!selActive) return;
+    if (!selActive || IS_IOS) return;
     const content = wrapRef.current?.querySelector(':scope > .chat-bubble');
     const sel = window.getSelection();
     if (!content || !sel) return;
@@ -773,11 +778,15 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
     setSelectedIds(new Set());
   }, []);
 
-  // ── 长按操作菜单（微信式，0918/0922）：长按气泡 = 菜单（复制/多选）+ 消息
-  // 就地全选（高亮 + 自绘拖拽手柄）。「复制」跟随当前选区：未拖动 = 整条，
+  // iOS 判定（0922 分流）：安卓=长按全选+内核原生拖拽光标+我们的菜单；
+
+// ── 长按操作菜单（微信式，0918/0922）：长按气泡 = 菜单（复制/多选）+ 消息
+  // 就地全选（高亮 + 内核自动配原生拖拽光标）。「复制」跟随当前选区：未拖动 = 整条，
   // 拖动手柄改选后 = 所选部分（selectionchange 驱动手柄跟随，原生选区变化也同步）。
+  // ⚠️ 仅安卓走此交互：iOS 对选中内容必弹系统拷贝菜单（H5 无法关闭），与我们的
+  // 菜单叠加成双菜单 → iPhone 回退「菜单 + 选择文字全屏页」流程（isIOS 分流）
   const [pressMenu, setPressMenu] = useState<{ id: string; rect: DOMRect } | null>(null);
-  // 就地选中的消息 id + 两个手柄的屏幕坐标（fixed 渲染，selectionchange/scroll 驱动）
+  // 就地选中的消息 id（安卓；fixed 手柄坐标已随自绘手柄一并移除）
   const [selMsgId, setSelMsgId] = useState<string | null>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const openPressMenu = useCallback((id: string, rect: DOMRect) => {
@@ -797,6 +806,15 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
     setPressMenu(null);
     enterSelect(id);
   }, [pressMenu, enterSelect]);
+  // 「选择文字」全文视图（0922 恢复，仅 iOS 出入口）：iPhone 程序化选区必弹
+  // 系统拷贝菜单，与我们的菜单叠加双菜单 → 部分复制走受控全文视图
+  const [textViewMsgId, setTextViewMsgId] = useState<string | null>(null);
+  const handlePressSelectText = useCallback(() => {
+    if (!pressMenu) return;
+    const id = pressMenu.id;
+    setPressMenu(null);
+    setTextViewMsgId(id);
+  }, [pressMenu]);
   // 菜单打开期间滚动即自动关闭（仿微信，防 fixed 锚点与气泡实际位置脱节）；
   // scroll 不冒泡用捕获监听，wheel 兜底 PC 端 overflow 容器外滚轮
   useEffect(() => {
@@ -3026,8 +3044,10 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
   const handlePressCopy = useCallback(() => {
     if (!pressMenu) return;
     const sel = window.getSelection();
-    // 0922 微信式：复制跟随当前选区——未拖动手柄时选区=整条消息
-    const selText = sel && !sel.isCollapsed ? sel.toString() : '';
+    // 0922 微信式：复制跟随当前选区——未拖动手柄时选区=整条消息。
+    // 用 Range.toString：Selection.toString 在 Chrome 对程序化选区可能返回空串
+    const selText = sel && !sel.isCollapsed && sel.rangeCount > 0
+      ? sel.getRangeAt(0).toString() : '';
     const m = messages.find((x) => x.id === pressMenu.id);
     setPressMenu(null);   // effect 统一清选区
     if (selText.trim()) copyContent(selText);
@@ -3152,6 +3172,9 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
               {pressMenuCopyable && (
                 <>
                   <button type="button" className="chat-press-menu__item" onClick={handlePressCopy}>复制</button>
+                  {IS_IOS && (
+                    <button type="button" className="chat-press-menu__item" onClick={handlePressSelectText}>选择文字</button>
+                  )}
                 </>
               )}
               <button type="button" className="chat-press-menu__item" onClick={handlePressSelect}>多选</button>
@@ -3730,6 +3753,63 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
           </div>,
           document.body,
         )}
+
+        {/* 选择文字全文视图（0922 恢复，仅 iOS 出入口）：长按拖蓝出系统选择菜单，
+            复制的是选中的那部分；挂 body 不受消息区禁选规则影响 */}
+        {textViewMsgId && (() => {
+          const m = messages.find((x) => x.id === textViewMsgId);
+          if (!m) return null;
+          return createPortal(
+            <div
+              onClick={() => setTextViewMsgId(null)}
+              style={{
+                position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, zIndex: 1200,
+                background: 'rgba(10, 12, 20, .72)', display: 'flex',
+                alignItems: 'center', justifyContent: 'center', padding: 16, boxSizing: 'border-box',
+              }}
+            >
+              <button
+                aria-label="关闭"
+                onClick={() => setTextViewMsgId(null)}
+                style={{
+                  position: 'absolute', top: 10, right: 12, width: 34, height: 34,
+                  borderRadius: '50%', border: 'none', cursor: 'pointer',
+                  background: 'rgba(255,255,255,.14)', color: '#fff', fontSize: 18, lineHeight: 1,
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  WebkitTouchCallout: 'none', userSelect: 'none', WebkitUserSelect: 'none',
+                }}
+              >
+                ✕
+              </button>
+              <div
+                onClick={(e) => e.stopPropagation()}
+                style={{
+                  background: 'var(--card)', borderRadius: 'var(--radius-xl)', maxWidth: 420, width: '100%',
+                  maxHeight: '80vh', display: 'flex', flexDirection: 'column',
+                  overflow: 'hidden', boxSizing: 'border-box',
+                }}
+              >
+                <div
+                  style={{
+                    flex: 1, minHeight: 0, overflowY: 'auto', padding: 16, WebkitOverflowScrolling: 'touch',
+                    userSelect: 'text', WebkitUserSelect: 'text', WebkitTouchCallout: 'default',
+                  }}
+                >
+                  <MarkdownRenderer content={m.content} compact={compact} />
+                </div>
+                <div
+                  style={{
+                    padding: '10px 14px 12px', fontSize: '12.5px', color: 'var(--muted-foreground)', textAlign: 'center', flexShrink: 0,
+                    WebkitTouchCallout: 'none', userSelect: 'none', WebkitUserSelect: 'none',
+                  }}
+                >
+                  长按文字拖动选区，即可复制选中部分
+                </div>
+              </div>
+            </div>,
+            document.body,
+          );
+        })()}
 
       </div>
     </div>
