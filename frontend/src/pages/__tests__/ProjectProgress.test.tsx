@@ -213,8 +213,8 @@ describe('ProjectProgress 排序', () => {
 describe('ProjectProgress 筛选', () => {
   beforeEach(() => vi.clearAllMocks());
 
-  // 每个字段都填上值（项目经理也一样）：否则「未填写」会在多个维度里同时出现，
-  // 弹层里的同名 chip 就不唯一了——单个维度的用例（AGV 那一档）才测得出「未填写」
+  // 每个字段都填上值（项目经理也一样）：否则「其他」会在多个维度里同时出现，
+  // 弹层里的同名选项就不唯一了——单个维度的用例（AGV 那一档）才测得出「其他」
   const rows = [
     project({ id: 'a', name: '项目A', contact_person: '白永奇', project_region: '欧洲 Europe', total_vehicle_count: 3, status: '正在实施', project_manager: '张三' }),
     project({ id: 'b', name: '项目B', contact_person: '田树政', project_region: '大陆(China Mainland)', total_vehicle_count: 20, status: '项目结束', project_manager: '李四' }),
@@ -248,7 +248,7 @@ describe('ProjectProgress 筛选', () => {
     expect(renderedNames()).toEqual(['项目A']);
   });
 
-  it('AGV 数量按区间分档筛选，未填写单独一档', async () => {
+  it('AGV 数量按区间分档筛选，没填车数的归到「其他」单独一档', async () => {
     setup(rows);
     await waitFor(() => expect(renderedNames()).toHaveLength(3));
 
@@ -256,8 +256,25 @@ describe('ProjectProgress 筛选', () => {
     pickOption('11-30 台');
     expect(renderedNames()).toEqual(['项目B']);
 
-    pickOption('未填写');
+    pickOption('其他');
     expect(renderedNames()).toEqual(['项目B', '项目C']);
+  });
+
+  it('没填值的项目归到「其他」，且永远排在选项最后', async () => {
+    // 两个项目没填对接人（比「白永奇」还多一个），按命中数本该排最前
+    setup([
+      project({ id: 'a', name: '项目A', contact_person: '' }),
+      project({ id: 'b', name: '项目B', contact_person: '' }),
+      project({ id: 'c', name: '项目C', contact_person: '白永奇' }),
+    ]);
+    await waitFor(() => expect(renderedNames()).toHaveLength(3));
+
+    openDropdown('对接人');
+    expect(screen.getAllByText(/^(白永奇|其他)$/).map((el) => el.textContent))
+      .toEqual(['白永奇', '其他']);
+
+    pickOption('其他');
+    expect(renderedNames()).toEqual(['项目A', '项目B']);
   });
 
   it('下拉框「清空此项」只清当前维度，「清空筛选」清掉全部维度', async () => {
