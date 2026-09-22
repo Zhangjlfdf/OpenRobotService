@@ -196,6 +196,13 @@ export default function TicketDetailPage() {
   const [allUsers, setAllUsers] = useState<ProjectMember[]>([]);
   // @U老师 AI 讨论中标记
   const [askingAI, setAskingAI] = useState(false);
+  const aiAbortRef = useRef<AbortController | null>(null);
+  const [aiEpoch, setAiEpoch] = useState(0);
+  const abortAi = () => {
+    aiAbortRef.current?.abort();
+    aiAbortRef.current = null;
+    setAskingAI(false);
+  };
   // 代他人提单（代理提单）：关系横幅数据。走独立接口（非参与人 403 → 置空不渲染），
   // 与系统任务详情页同一组件同一口径，避免两处详情页体验分叉。
   const [proxyRelation, setProxyRelation] = useState<ProxyRelation | null>(null);
@@ -649,6 +656,10 @@ export default function TicketDetailPage() {
   const handleAIDiscuss = async (text: string, files: File[] = [], options?: { replyTo?: string | number }): Promise<boolean> => {
     if (!ticket?.ticket_id) return false;
     const userMsg = text;
+    aiAbortRef.current?.abort();
+    const controller = new AbortController();
+    aiAbortRef.current = controller;
+    setAiEpoch((n) => n + 1);
     setAskingAI(true);
     try {
       // 上传附件（同名文件自动改名，避免后端对象名重复覆盖）
@@ -686,6 +697,7 @@ export default function TicketDetailPage() {
         : undefined;
       const res = await fetchWithAuth(`${API_CONFIG.AI.BASE_URL}/task/discuss`, {
         method: 'POST',
+        signal: controller.signal,
         body: JSON.stringify({
           task_id: String(ticket.ticket_id),
           // 去掉文本中任意位置的 @U老师 标记（可能有空格/重复），保留整段话作为 query，
@@ -708,10 +720,15 @@ export default function TicketDetailPage() {
         return false;
       }
     } catch (err) {
+      const aborted = err instanceof Error && err.name === 'AbortError';
+      if (aborted) return false;
       Toast({ message: `AI 回复失败: ${err instanceof Error ? err.message : ''}`, theme: 'error' });
       return false;
     } finally {
-      setAskingAI(false);
+      if (aiAbortRef.current === controller) {
+        aiAbortRef.current = null;
+        setAskingAI(false);
+      }
     }
   };
 
@@ -1107,7 +1124,10 @@ export default function TicketDetailPage() {
           comments={ticket.comments || []}
           onSend={handleSendComment}
           onDeleteComment={handleDeleteComment}
-          sending={submittingComment || askingAI}
+          sending={submittingComment}
+          optimisticAi={askingAI}
+          onAbortAi={abortAi}
+          aiEpoch={aiEpoch}
           disabled={!ticket?.ticket_id}
           enableAttach
           enableAI

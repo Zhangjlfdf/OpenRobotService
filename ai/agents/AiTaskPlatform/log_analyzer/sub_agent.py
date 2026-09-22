@@ -123,31 +123,60 @@ def _facts_to_text(facts: Dict) -> str:
     return "\n".join(lines)
 
 
+def _anchor_spotlight(facts: Dict, task: Dict, question: str) -> str:
+    """首轮程序化锚定：现象/时间窗/对象先算好，禁止 LLM 扫全量日志。"""
+    title = (task.get("title") or "").strip()
+    summary = (task.get("problem_summary") or "").strip()
+    phenomenon = question or summary or title or "（工单未写明现象）"
+    robot = (task.get("robot_type") or "").strip()
+    robots = facts.get("top_robots") or []
+    obj = robot or (robots[0] if robots else "（从客观事实里的车型选）")
+    hours = facts.get("error_hours") or []
+    if hours:
+        window_hint = f"优先查错误密集时段 {hours[0][0]} 时附近（前后各 15 分钟），不要扫整天"
+    else:
+        ts, te = facts.get("time_start"), facts.get("time_end")
+        window_hint = (
+            f"日志范围 {ts} ~ {te}，先缩到可疑 10～20 分钟再查" if ts and te
+            else "先缩窄时间窗再查"
+        )
+    return (
+        "## 首轮锚定（程序已给出，日期/对象禁止改写）\n"
+        f"- 现象: {phenomenon[:120]}\n"
+        f"- 对象: {obj}\n"
+        f"- 时间窗: {window_hint}\n"
+        "- 方法: 先锚定 → 分层（现象模块 vs 根因模块）→ 用 query 验证一个假设 → "
+        "正常时段对照 → 证据不足就 conclude 并写清要补充哪份日志，禁止硬猜、禁止全量扫描。\n"
+    )
+
+
 # ── System Prompt ───────────────────────────────────────────
 
 def _make_system_prompt() -> str:
-    """通用、不绑定任何具体场景的 system prompt。"""
-    return """你是资深AGV调度系统日志分析专家。你只能输出【一行JSON】，禁止输出JSON以外的任何散文、解释、Markdown。
+    """通用 7 步方法论：不绑定具体故障场景。"""
+    return """你是资深AGV/AMR日志分析专家。你只能输出【一行JSON】，禁止输出JSON以外的任何散文、解释、Markdown。
 
-可用命令（每次输出恰好一个）:
+按 7 步思考，但每轮只输出一个命令：
+①锚定现象/时间/对象 ②建模依赖链 ③分层定位 ④假设-验证 ⑤正常vs异常对照 ⑥跨模块归因（缺日志就明确要数据）⑦收敛报告。
 
-1) 查询:
-{"action":"query","analysis":"这一步想验证什么假设","query":{"time_start":"YYYY-MM-DD HH:MM","time_end":"YYYY-MM-DD HH:MM","robot_filter":"车型ID或空串","task_filter":"任务ID或空串","error_only":true,"max_results":50}}
+可用命令（每次恰好一个）:
 
-2) 下结论（证据足够时用）:
-{"action":"conclude","conclusion":"一句话根因(引用知识库故障场景编号)+证据链+解决方案","evidence_lines":["L数字: 关键内容","L数字: 关键内容"]}
+1) 查询（④⑤用；analysis 必须写清本轮假设）:
+{"action":"query","analysis":"假设:…；验证若成立/不成立下一步","query":{"time_start":"YYYY-MM-DD HH:MM","time_end":"YYYY-MM-DD HH:MM","robot_filter":"车型ID或空串","task_filter":"任务ID或空串","error_only":true,"max_results":50}}
 
-3) 放弃（确实查不到）:
-{"action":"fallback","reason":"为什么确定查不出有效线索"}
+2) 下结论（⑦；证据不足也要 conclude，写清缺什么）:
+{"action":"conclude","conclusion":"一句话根因+证据","confidence":0.0,"need_feed":"","evidence_lines":["L数字: 关键内容"]}
+
+3) 放弃（当前日志完全无法推进）:
+{"action":"fallback","reason":"为什么确定查不出","need_feed":"建议用户补充的日志模块"}
 
 硬性规则:
-- time_start/time_end、robot_filter、task_filter 只能从「日志客观事实」里选真实存在的值；不知道就填空串""。绝不虚构日期或ID。
-- error_only=true 只回错误/警告行；要上下文时回 false 并配合窄时间窗。
-- max_results 建议 30~100；时间窗越窄信息越准。
-- 每轮只输出一个JSON命令，输出前不要有任何思考文字。"""
-
-
-# ── 日志分析结论模型 ─────────────────────────────────────────
+- time_start/time_end、robot_filter、task_filter 只能从「日志客观事实」或「首轮锚定」里选；绝不虚构日期或ID。
+- 第一轮必须用锚定给出的时间窗/对象做一次窄查询，禁止整日/全量扫描。
+- 每条 query 只验证一个假设；命中过多就缩窗，不要加大 max_results。
+- error_only=true 只回错误/警告；要上下文时 false 且时间窗 ≤20 分钟。
+- 证据不足时 conclude.need_feed 写清要 TMS/全局规划/定位等哪类日志，禁止硬猜。
+- 每轮只输出一个JSON，输出前不要有任何思考文字。"""
 
 
 # ── 日志分析结论模型 ─────────────────────────────────────────
@@ -160,6 +189,8 @@ class LogAnalysisResult:
         self.queries_made = 0         # 执行了几轮查询
         self.fallback_used = False    # 是否兜底了
         self.parse_failures = 0       # LLM 输出解析失败次数
+        self.confidence = None        # 0~1，可选
+        self.need_feed = ""           # 建议补充的日志模块
 
     def to_dict(self):
         return {
@@ -167,6 +198,8 @@ class LogAnalysisResult:
             "evidence": self.evidence[:10],
             "queries": self.queries_made,
             "fallback": self.fallback_used,
+            "confidence": self.confidence,
+            "need_feed": self.need_feed,
         }
 
     def to_prompt_text(self) -> str:
@@ -174,11 +207,15 @@ class LogAnalysisResult:
         parts = []
         if self.conclusion:
             parts.append(f"日志分析结论: {self.conclusion}")
+        if self.confidence is not None:
+            parts.append(f"置信度: {self.confidence}")
+        if self.need_feed:
+            parts.append(f"建议补充数据: {self.need_feed}")
         if self.evidence:
             parts.append("关键日志行:")
             for e in self.evidence[:8]:
                 # summary 已包含时间戳和字段信息，直接展示
-                parts.append(f"  L{e['line']}: {e['summary'][:150]}")
+                parts.append(f"  L{e['line']}: {e['summary'][:280]}")
         if self.queries_made:
             parts.append(f"共查询 {self.queries_made} 轮")
         return "\n".join(parts)
@@ -316,6 +353,7 @@ class LogSubAgent:
         context_text = _build_context(task_context, user_question)
         context_text += f"\n\n{_facts_to_text(self._facts)}"
         context_text += f"\n\n**日志日期**: {log_date}"
+        context_text += f"\n\n{_anchor_spotlight(self._facts, task_context or {}, user_question)}"
 
         system_prompt = _make_system_prompt()
 
@@ -398,7 +436,7 @@ class LogSubAgent:
                     "result_summary": f"R{round_num}: {matched} lines",
                 })
 
-                feedback = f"查询第{round_num}轮结果(命中{matched}行):\n{query_result[:_MAX_FEEDBACK_CHARS]}"
+                feedback = _feedback_to_llm(query_result, matched)
                 if _feedback_is_too_broad(matched):
                     feedback += (f"\n\n⚠ 本轮命中 {matched} 行过多，说明过滤条件太宽。"
                                  "请从「日志客观事实」里挑一个真实车型/任务，或把时间窗缩窄到错误密集时段再查询；"
@@ -412,10 +450,17 @@ class LogSubAgent:
             else:
                 if action == "conclude":
                     result.conclusion = cmd.get("conclusion", "") or _salvage_conclusion(response)
+                    result.need_feed = str(cmd.get("need_feed") or "").strip()
+                    try:
+                        if cmd.get("confidence") is not None:
+                            result.confidence = max(0.0, min(1.0, float(cmd.get("confidence"))))
+                    except (TypeError, ValueError):
+                        result.confidence = None
                     _filter_evidence_by_citation(result, cmd.get("evidence_lines", []))
                     logger.info(f"LogSubAgent conclude at R{round_num}: {result.conclusion[:80]} (evidence={len(result.evidence)})")
                 elif action == "fallback":
                     result.conclusion = cmd.get("reason", "无结论")
+                    result.need_feed = str(cmd.get("need_feed") or "").strip()
                     result.fallback_used = True
                     logger.info(f"LogSubAgent fallback at R{round_num}: {result.conclusion[:80]}")
                 _p({
@@ -502,7 +547,7 @@ class LogSubAgent:
             ln, sm = line_match
             summary = sm.strip()
             if summary:
-                sample.append({"line": int(ln), "summary": summary[:180]})
+                sample.append({"line": int(ln), "summary": summary[:280]})
             if len(sample) >= 30:
                 break
         # 命中行不足时补充 context 行
@@ -511,13 +556,13 @@ class LogSubAgent:
                 ln, sm = line_match
                 summary = sm.strip()
                 if summary:
-                    sample.append({"line": int(ln), "summary": summary[:180]})
+                    sample.append({"line": int(ln), "summary": summary[:280]})
                 if len(sample) >= 15:
                     break
 
         return {
             "matched": matched,
-            "text": query_result[:_MAX_FEEDBACK_CHARS],
+            "text": _feedback_to_llm(query_result, matched),
             "sample": sample,
             "evidence": result_evidence,
         }
@@ -540,14 +585,48 @@ def _build_context(task: Dict, question: str) -> str:
             for k, v in ci.items(): parts.append(f"{k}: {v}")
     if question: parts.append(f"\n## 用户问题\n{question}")
     parts.append("\n---")
-    parts.append("请先查看知识库中的故障场景排查路径，找到匹配的症状后按 Step 指导开始查询。")
+    parts.append("请按 7 步方法论推进：先用首轮锚定的时间窗/对象做窄查询，不要扫全量日志。")
     return "\n".join(parts)
 
 
 # ── 查询参数的可信校验与夹紧 ─────────────────────────────────
 
 _MAX_FEEDBACK_CHARS = 1500      # 每轮反馈给 LLM 的最大字符数
-_BROAD_WINDOW_HINT_LINES = 20_000  # 命中超过此数量视为"太宽"，提示 LLM 缩窄
+_BROAD_WINDOW_HINT_LINES = 200  # 命中超过此数量视为太宽，提示缩窄（原 2 万几乎从不触发）
+_FEEDBACK_HIT_CAP = 12          # 回灌样例行上限
+
+
+def _feedback_to_llm(query_result: str, matched: int) -> str:
+    """命中过多时截断 + 聚合，避免把几万行回灌给 LLM（1.5h 硬伤）。"""
+    header = f"查询结果(命中{matched}行)"
+    raw = query_result or ""
+    if matched <= _FEEDBACK_HIT_CAP and len(raw) <= _MAX_FEEDBACK_CHARS:
+        return f"{header}:\n{raw[:_MAX_FEEDBACK_CHARS]}"
+
+    hits = re.findall(r"\* L(\d+)\| (.*)", raw)
+    from collections import Counter
+    phrases = Counter()
+    for _ln, sm in hits:
+        text = (sm or "").strip()
+        for tok in re.findall(r"[\u4e00-\u9fff]{2,}|[A-Za-z][A-Za-z0-9_\-]{2,}|ERR=\S+|0x[0-9A-Fa-f]+", text):
+            phrases[tok] += 1
+    top = phrases.most_common(8)
+    freq = "、".join(f"{k}×{v}" for k, v in top) if top else "（无稳定短语）"
+    samples = hits[:8] + (hits[-4:] if len(hits) > 8 else [])
+    # 去重保序
+    seen = set()
+    sample_lines = []
+    for ln, sm in samples:
+        if ln in seen:
+            continue
+        seen.add(ln)
+        sample_lines.append(f"* L{ln}| {(sm or '').strip()[:280]}")
+    body = (
+        f"{header}，已截断聚合，禁止据此假装读完全量。\n"
+        f"高频片段: {freq}\n"
+        f"样例 {len(sample_lines)} 行:\n" + "\n".join(sample_lines)
+    )
+    return body[:_MAX_FEEDBACK_CHARS]
 
 
 def _validate_query(q: Dict, idx: LogIndex, facts: Dict) -> Dict:
@@ -734,7 +813,7 @@ def _collect_evidence(result: LogAnalysisResult, query_result: str, round_num: i
             continue
         if any(e["line"] == int(ln) for e in result.evidence):
             continue
-        result.evidence.append({"line": int(ln), "summary": sm[:150], "round": round_num})
+        result.evidence.append({"line": int(ln), "summary": sm[:280], "round": round_num})
 
 
 def _collect_evidence_into(evidence: List[Dict], query_result: str, only_hit: bool = False) -> None:
@@ -752,7 +831,7 @@ def _collect_evidence_into(evidence: List[Dict], query_result: str, only_hit: bo
             continue
         if int(ln) in seen:
             continue
-        evidence.append({"line": int(ln), "summary": sm[:150]})
+        evidence.append({"line": int(ln), "summary": sm[:280]})
         seen.add(int(ln))
 
 
@@ -767,7 +846,8 @@ def _filter_evidence_by_citation(result: LogAnalysisResult, cited: List):
         result.evidence = [e for e in result.evidence if e["line"] in cited_lines]
     else:
         _SIGNAL_KW = ("一致性", "MAPF-T", "ABORTED", "WARNING", "等待时间", "last_node",
-                      "超时", "失败", "ERR=", "CANCELED", "拒绝")
+                      "超时", "失败", "ERR=", "CANCELED", "拒绝", "锁区", "回调", "状态机",
+                      "occupy", "release")
         result.evidence = [
             e for e in result.evidence
             if any(kw in e["summary"] for kw in _SIGNAL_KW)

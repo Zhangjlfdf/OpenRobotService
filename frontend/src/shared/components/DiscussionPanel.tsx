@@ -191,6 +191,10 @@ interface DiscussionPanelProps {
    *  收到真实 ai.progress 后用真实数据覆盖。用于 [帮我分析] 这类点击即触发、
    *  但 WS 首条 running 可能稍晚到达的场景，避免过程区“晚出现 / 闪一下”。 */
   optimisticAi?: boolean;
+  /** 分析进行中允许打断：过程区显示「打断」，点了由父级 abort 在途 discuss/diagnose */
+  onAbortAi?: () => void;
+  /** 父级每次新开一轮 U老师 分析时递增，用来清空上一轮过程区（含分析中再 @U老师 / 帮我分析） */
+  aiEpoch?: number;
   /** 进场自动定位：目标评论 id（列表卡片点引用/参与人头像跳进来时传，滚动 + is-flash 高亮） */
   focusCommentId?: string | number | null;
   /** 进场无 commentId 时，按作者 username 定位到该作者在该工单的**最近一条**评论（参与人头像跳转用） */
@@ -215,6 +219,8 @@ export default function DiscussionPanel({
   taskId,
   onTaskUpdated,
   optimisticAi = false,
+  onAbortAi,
+  aiEpoch = 0,
   focusCommentId = null,
   focusAuthor = null,
 }: DiscussionPanelProps) {
@@ -298,6 +304,11 @@ export default function DiscussionPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [taskId]);
 
+  useEffect(() => {
+    if (!aiEpoch) return;
+    dismissAiProcess();
+  }, [aiEpoch, dismissAiProcess]);
+
   // ── WS 实时订阅：合并基线评论与增量事件，含在线/输入中/已读 + U老师 进度 ──
   const {
     displayComments,
@@ -334,26 +345,19 @@ export default function DiscussionPanel({
 
   // 新一轮开始：记下当时最后一条评论，用来识别「本轮新回复」。
   // 回复上屏或 POST 结束后立刻收起过程区，不用等到再发下一条。
-  const prevSendingRef = useRef<boolean>(sending);
   useEffect(() => {
     const wasActive = prevAiActiveRef.current;
     if (aiActive && !wasActive) {
       const last = displayComments[displayComments.length - 1];
       runAnchorCommentIdRef.current = last?.id ?? null;
     }
-    if (sending && !prevSendingRef.current) {
-      setAiRunId(undefined);
-      setAiTodos([]);
-      setAiPhase('done');
-    }
-    prevSendingRef.current = sending;
     prevAiActiveRef.current = aiActive;
     // 本页这一轮刚跑完（POST / 帮我分析结束）：回复已返回，过程区立刻收。
     // 切走再回来时 wasActive 为 false，不会误清「还在跑」的缓存。
     if (wasActive && !aiActive) {
       dismissAiProcess();
     }
-  }, [sending, aiActive, dismissAiProcess, displayComments]);
+  }, [aiActive, dismissAiProcess, displayComments]);
 
   // 评论区已经出现本轮 U老师 回复 → 过程区可以收（不必等下一轮发送）。
   useEffect(() => {
@@ -904,6 +908,10 @@ export default function DiscussionPanel({
     const text = commentText.trim();
     const files = pendingFiles;
     const replyTo = quoted ? quoted.id : undefined;
+    if (text.includes('@U老师')) {
+      // 分析中再 @U老师：清过程区，父级会 abort 上一轮再开新轮
+      dismissAiProcess();
+    }
     let ok = false;
     try {
       ok = await onSend(text, files, replyTo !== undefined ? { replyTo } : undefined);
@@ -1482,6 +1490,18 @@ export default function DiscussionPanel({
                 <i />
               </span>
               {!allTodosDone ? 'U老师 正在排查执行' : '排查执行完成'}
+              {onAbortAi && !allTodosDone && (
+                <button
+                  type="button"
+                  className="detail-chat-ai-progress__abort"
+                  onClick={() => {
+                    dismissAiProcess();
+                    onAbortAi();
+                  }}
+                >
+                  打断
+                </button>
+              )}
             </div>
             <ul className="detail-chat-ai-progress__list">
               {displayTodos.map((t, i) => {

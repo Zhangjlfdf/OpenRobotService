@@ -187,12 +187,22 @@ class DiscussFlow:
             logger.warning(f"[discuss] 引用评论注入失败: {_q_e}")
             quoted_comment = ""
 
+        # 2c. 长期记忆：用户明确「记住 XX」则写入；召回注入 prompt（失败不阻断）。
+        memory_block = ""
+        saved_memory = ""
+        try:
+            from ai.agents.AiTaskPlatform.memory import prepare_discuss_memory
+            memory_block, saved_memory = await prepare_discuss_memory(query or "", task_id)
+        except Exception as _m_e:
+            logger.warning(f"[discuss] 长期记忆准备失败: {_m_e}")
+
         # 3. Supervisor 自主调度能力（方案甲全量收敛：图片/日志/代码/历史都由调度 LLM 决定）
         #    替代原先 3a/3b/3c/3d 写死的关键词触发。
         from ai.agents.AiTaskPlatform.capabilities import Supervisor, CapabilityRegistry
         from ai.agents.AiTaskPlatform.contexts import build_img_ctx
 
         facultative = ""
+        early_stopped = False  # 历史方案已验证：跳过 Evaluator 二次改写
         reasoning_trace = {}  # 透明化 planning（G6）：记录 Supervisor 的调度 plan/todo
         # 澄清闭环（P4）：当 Supervisor 判定需向用户确认关键信息且无子任务可派时为 True
         is_clarify = False
@@ -223,6 +233,8 @@ class DiscussFlow:
         # 才保留 ticket_ref 给大脑"按需检索相似工单"（形态 C 大脑决策版）。
         if referenced_tickets:
             available_caps = [c for c in available_caps if c != "ticket_ref"]
+        # memory_store 由入口触发词确定性写入，不让 Supervisor 自行抽取
+        available_caps = [c for c in available_caps if c != "memory_store"]
         if ctx.attachments:
             runtime_ctx["img_ctx"] = build_img_ctx(ctx)
             try:
@@ -311,6 +323,7 @@ class DiscussFlow:
             f"假设: {' / '.join(ctx.hypotheses) if ctx.hypotheses else '无'}\n"
             f"用户问题: {query or '（本轮用户仅@U老师未附加文字，请基于下方讨论历史延续解答）'}\n"
             f"{quoted_comment}"
+            f"{memory_block}"
             f"最近讨论历史:\n{(discussion_history if discussion_lines else '（暂无讨论）')[:600]}\n"
             f"本次新增/未解读附件（需重点分析）:\n{new_txt}\n"
             f"历史已解读附件摘要（**仅作历史参考**：图片结论稳定可复述；"
@@ -394,6 +407,8 @@ class DiscussFlow:
             # 把各能力结果拼进 facultative
             if sup_result.get("results"):
                 for cap_name, res in sup_result["results"].items():
+                    if isinstance(res, dict) and (res.get("terminate") or (res.get("meta") or {}).get("terminate")):
+                        early_stopped = True
                     if isinstance(res, dict) and res.get("text"):
                         label = {
                             "image_analyze": "图片分析",
@@ -581,7 +596,7 @@ class DiscussFlow:
         #    若用户 @# 引用了历史工单（referenced_tickets 非空），或本轮引用了某条评论
         #    （quoted_comment 非空），说明在针对具体内容提问，绝非闲聊 —— 强制走完整
         #    DISCUSS 模板（light 模板原先没有这些占位，会把引用丢掉）。
-        if is_pure_chat and not referenced_tickets and not quoted_comment:
+        if is_pure_chat and not referenced_tickets and not quoted_comment and not saved_memory:
             from ai.agents.AiTaskPlatform.prompts import (
                 DISCUSS_LIGHT_SYSTEM_PROMPT, DISCUSS_LIGHT_USER_TEMPLATE,
             )
@@ -617,6 +632,8 @@ class DiscussFlow:
         # 注入用户画像到 system prompt（有画像时追加，无画像保持原样）
         if user_profile_block:
             system_prompt = f"{system_prompt}\n\n{user_profile_block}"
+        if memory_block:
+            prompt = f"{prompt}\n\n{memory_block}"
 
         t_llm = time.perf_counter()
         reply = await self._llm_client.complete(
@@ -629,8 +646,9 @@ class DiscussFlow:
                         elapsed_ms=round((time.perf_counter() - t_llm) * 1000))
 
         # 4.5 Evaluator-optimizer（改造点 C/G4）：仅对"需工具的讨论"启用（成本护栏，纯闲聊不启用）
+        # 早停（已验证历史方案）跳过自评改写，避免把可直接采用的结论改偏。
         eval_used = False
-        if facultative and reply.strip():
+        if facultative and reply.strip() and not early_stopped:
             try:
                 from ai.agents.AiTaskPlatform.capabilities import Evaluator
                 eval_res = await Evaluator.evaluate_and_rewrite(
@@ -675,6 +693,11 @@ class DiscussFlow:
             reply = (reply or "").rstrip() + _appendix
             self._add_trace(self.NODE_LLM, "ok",
                             output={"clarify_appendix": len(_pending_q), "reply_chars": len(reply)})
+
+        if saved_memory:
+            marker = f"已记住：{saved_memory}"
+            if marker not in (reply or ""):
+                reply = f"✅ {marker}\n\n{(reply or '').lstrip()}"
 
         # 5. 回复写入 task_comments
         #    最终评论只写入纯粹答复（不含"分析过程"）——执行过程已通过 ai.progress

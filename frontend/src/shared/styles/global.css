@@ -7256,6 +7256,19 @@ html, body, #root {
   color: var(--primary);
   margin-bottom: 6px;
 }
+.detail-chat-ai-progress__abort {
+  margin-left: auto;
+  border: 0;
+  background: transparent;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  font-weight: 500;
+  padding: 2px 6px;
+  cursor: pointer;
+}
+.detail-chat-ai-progress__abort:hover {
+  color: var(--primary);
+}
 .detail-chat-ai-progress__spinner {
   display: inline-flex;
   align-items: center;

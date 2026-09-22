@@ -211,6 +211,15 @@ export default function TaskDetailPage() {
   const [submittingDeadline, setSubmittingDeadline] = useState(false);
   const [submittingComment, setSubmittingComment] = useState(false);
   const [askingAI, setAskingAI] = useState(false);
+  const aiAbortRef = useRef<AbortController | null>(null);
+  const [aiEpoch, setAiEpoch] = useState(0);
+
+  const abortAi = () => {
+    aiAbortRef.current?.abort();
+    aiAbortRef.current = null;
+    setAskingAI(false);
+    setDiagnosing(false);
+  };
 
   // 结束工单确认弹窗：问题 + AI 解决方式
   const [showResolutionPopup, setShowResolutionPopup] = useState(false);
@@ -979,6 +988,11 @@ export default function TaskDetailPage() {
   const handleAIDiscuss = async (text: string, files: File[] = [], options?: { replyTo?: string | number }): Promise<boolean> => {
     if (!detail) return false;
     const userMsg = text;
+    aiAbortRef.current?.abort();
+    const controller = new AbortController();
+    aiAbortRef.current = controller;
+    setAiEpoch((n) => n + 1);
+    setDiagnosing(false);
     setAskingAI(true);
     try {
       // 上传附件（同名文件自动改名，避免后端对象名重复覆盖）
@@ -1016,6 +1030,7 @@ export default function TaskDetailPage() {
         : undefined;
       const res = await fetchWithAuth(`${API_CONFIG.AI.BASE_URL}/task/discuss`, {
         method: 'POST',
+        signal: controller.signal,
         body: JSON.stringify({
           task_id: String(detail.id),
           // 去掉文本中任意位置的 @U老师 标记（可能有空格/重复），保留整段话作为 query，
@@ -1038,10 +1053,15 @@ export default function TaskDetailPage() {
         return false;
       }
     } catch (err) {
+      const aborted = err instanceof Error && err.name === 'AbortError';
+      if (aborted) return false;
       Toast({ message: `AI 回复失败: ${err instanceof Error ? err.message : ''}`, theme: 'error' });
       return false;
     } finally {
-      setAskingAI(false);
+      if (aiAbortRef.current === controller) {
+        aiAbortRef.current = null;
+        setAskingAI(false);
+      }
     }
   };
 
@@ -1058,10 +1078,16 @@ export default function TaskDetailPage() {
   // ── [帮我分析] → POST /api/ai/task/diagnose → 讨论区展示短链接 ──
   const handleDiagnose = async () => {
     if (!detail || diagnosing) return;
+    aiAbortRef.current?.abort();
+    const controller = new AbortController();
+    aiAbortRef.current = controller;
+    setAiEpoch((n) => n + 1);
+    setAskingAI(false);
     setDiagnosing(true);
     try {
       const res = await fetchWithAuth(`${API_CONFIG.AI.BASE_URL}/task/diagnose`, {
         method: 'POST',
+        signal: controller.signal,
         body: JSON.stringify({ task_id: String(detail.id) }),
       });
       const data = await res.json();
@@ -1087,9 +1113,15 @@ export default function TaskDetailPage() {
         Toast({ message: data.message || '分析失败', theme: 'error' });
       }
     } catch (err) {
-      Toast({ message: `分析失败: ${err instanceof Error ? err.message : ''}`, theme: 'error' });
+      const aborted = err instanceof Error && err.name === 'AbortError';
+      if (!aborted) {
+        Toast({ message: `分析失败: ${err instanceof Error ? err.message : ''}`, theme: 'error' });
+      }
     } finally {
-      setDiagnosing(false);
+      if (aiAbortRef.current === controller) {
+        aiAbortRef.current = null;
+        setDiagnosing(false);
+      }
     }
   };
 
@@ -1557,8 +1589,10 @@ export default function TaskDetailPage() {
           comments={detail.comments || []}
           onSend={handleSendComment}
           onDeleteComment={handleDeleteComment}
-          sending={submittingComment || askingAI}
+          sending={submittingComment}
           optimisticAi={diagnosing || askingAI}
+          onAbortAi={abortAi}
+          aiEpoch={aiEpoch}
           enableAI
           enableAttach
           mentionUsers={projectMembers}

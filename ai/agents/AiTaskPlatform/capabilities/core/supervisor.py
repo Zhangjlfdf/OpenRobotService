@@ -255,6 +255,7 @@ class Supervisor:
             "- 多领域线索交叉 → complexity=complex，plan 含多项，parallel 合理设 true\n"
             "- capability 只能从可用能力清单里选，严禁凭空命名\n"
             "- 若派 log_analyze 且故障属缓慢累积/日志稀疏，可在 window_minutes 指定更长的前因窗口（默认15即可）\n"
+            "- retrieve_history 与 log_analyze 同时派时，程序会先跑历史方案；已验证命中则跳过日志分析\n"
             "- **若关键信息缺失（如故障发生时间/是否可复现/变更了什么/报错现场）导致无法可靠排查，"
             "且无能力/无充足依据可先派发硬性定位 → 设 ask_user=true，并在 questions 里列出"
             "需要向用户确认的具体问题（每一项都应是可直接回答的高价值问题，不要笼统）**；\n"
@@ -395,8 +396,43 @@ class Supervisor:
         d.plan = kept[:max_sub_tasks]
         return d
 
-    # ── 派生子任务（支持并行/串行 + 并发上限）──
+    # ── 派生子任务（支持并行/串行 + 并发上限 + 早停）──
     async def _dispatch(self, plan: list[dict], todo: TodoList, max_sub_tasks: int, emit: Optional[Callable] = None) -> dict:
+        """log_analyze 放到第二波：历史方案已验证则跳过昂贵日志分析。
+
+        按原 plan 下标对齐 todo，避免 log_analyze 排在前面时跳错项。
+        """
+        early = [(i, s) for i, s in enumerate(plan) if s.get("capability") != "log_analyze"]
+        late = [(i, s) for i, s in enumerate(plan) if s.get("capability") == "log_analyze"]
+        results = {}
+        if early:
+            results.update(await self._dispatch_group(early, todo, emit))
+            if any(_result_terminated(r) for r in results.values()):
+                for i, step in late:
+                    if i >= len(todo._items):
+                        continue
+                    item = todo._items[i]
+                    if item.status == "completed":
+                        continue
+                    todo.mark_done(item.id, result="已跳过：历史方案已验证（早停）")
+                    if emit is not None:
+                        emit("done", {
+                            "id": item.id,
+                            "description": item.description or step.get("capability") or "",
+                            "status": "completed",
+                            "capability": step.get("capability") or "",
+                        })
+                return results
+        if late:
+            results.update(await self._dispatch_group(late, todo, emit))
+        return results
+
+    async def _dispatch_group(
+        self,
+        indexed_plan: list[tuple[int, dict]],
+        todo: TodoList,
+        emit: Optional[Callable],
+    ) -> dict:
         sem = asyncio.Semaphore(_CONCURRENCY)
 
         async def _run_one(step: dict, todo_item: TodoItem):
@@ -410,51 +446,49 @@ class Supervisor:
                 emit("running", {"id": todo_item.id, "description": todo_item.description, "status": "in_progress", "capability": cap_name})
             try:
                 async with sem:
-                    # 把调度 LLM 定的 goal 与运行时上下文(runtime_ctx)一起传给能力
-                    # query=goal（语义）：goal 即"这个子任务要解决什么"，能力以 query 接收
                     kwargs = {"query": step.get("goal", "")}
-                    kwargs.update(self._runtime_ctx)  # 注入 log_path / robot_type 等
-                    # 透传 plan 里的能力专属参数（如 window_minutes / occurred_at）
+                    kwargs.update(self._runtime_ctx)
                     for extra_key in ("window_minutes", "occurred_at", "params"):
                         if extra_key in step and step[extra_key] is not None:
                             kwargs[extra_key] = step[extra_key]
-                    result = await cap(**kwargs)      # 统一入口 __call__（含配额/异常兜底）
-            except Exception as e:  # 极外层保险
+                    result = await cap(**kwargs)
+            except Exception as e:
                 result = {"ok": False, "error": f"{type(e).__name__}: {e}", "text": ""}
-            # 归一化为 dict（cap 返回 CapabilityResult 或 dict）
             res_dict = result.to_dict() if hasattr(result, "to_dict") else (result if isinstance(result, dict) else {"text": str(result), "ok": True})
             todo.mark_done(todo_item.id, result=str(res_dict.get("text", ""))[:80])
             if emit is not None:
                 emit("done", {"id": todo_item.id, "description": todo_item.description, "status": "completed", "capability": cap_name})
             return cap_name, res_dict
 
-        # 按 parallel 分组：并行组用 gather，串行组顺序执行
-        if any(step.get("parallel") for step in plan):
-            # 简单实现：所有任务都进 gather（由 Semaphore 控并发），保证不超限
-            todo_items = todo._items[: len(plan)]
-            tasks = [_run_one(step, todo_items[i]) for i, step in enumerate(plan)]
+        if any(step.get("parallel") for _, step in indexed_plan) and len(indexed_plan) > 1:
+            tasks = [_run_one(step, todo._items[i]) for i, step in indexed_plan]
             done = await asyncio.gather(*tasks, return_exceptions=True)
             results = {}
-            for i, (cap_name, res) in enumerate(done):
-                if isinstance(res, BaseException):
-                    results[plan[i]["capability"]] = {"ok": False, "error": str(res)}
-                else:
-                    results[cap_name] = res
+            for n, item in enumerate(done):
+                cap_name = indexed_plan[n][1]["capability"]
+                if isinstance(item, BaseException):
+                    results[cap_name] = {"ok": False, "error": str(item)}
+                    continue
+                name, res = item
+                results[name] = res
             return results
-        else:
-            results = {}
-            todo_items = todo._items[: len(plan)]
-            for i, step in enumerate(plan):
-                cap_name, res = await _run_one(step, todo_items[i])
-                results[cap_name] = res
-            return results
+
+        results = {}
+        for i, step in indexed_plan:
+            cap_name, res = await _run_one(step, todo._items[i])
+            results[cap_name] = res
+            if _result_terminated(res):
+                break
+        return results
 
     # ── 汇总 ──
     @staticmethod
     def _synthesize(results: dict) -> str:
         """把各子任务结果拼成最终文本（简单拼接，供上层 LLM 继续整理）。"""
         parts = []
-        for cap_name, res in results.items():
+        items = list(results.items())
+        items.sort(key=lambda kv: (not _result_terminated(kv[1]), kv[0]))
+        for cap_name, res in items:
             if isinstance(res, dict):
                 text = res.get("text", "")
                 ok = res.get("ok", True)
@@ -464,6 +498,15 @@ class Supervisor:
                 elif not ok:
                     parts.append(f"[{cap_name}] ⚠️ {res.get('error', '执行失败')}")
         return "\n\n".join(parts)
+
+
+def _result_terminated(res) -> bool:
+    if not isinstance(res, dict):
+        return bool(getattr(res, "terminate", False))
+    if res.get("terminate"):
+        return True
+    meta = res.get("meta") or {}
+    return bool(meta.get("terminate"))
 
 
 def _cap_desc(name: str) -> str:
