@@ -780,7 +780,6 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
   // 就地选中的消息 id + 两个手柄的屏幕坐标（fixed 渲染，selectionchange/scroll 驱动）
   const [selMsgId, setSelMsgId] = useState<string | null>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
-  const [selHandles, setSelHandles] = useState<{ sx: number; sy: number; ex: number; ey: number } | null>(null);
   const openPressMenu = useCallback((id: string, rect: DOMRect) => {
     setPressMenu({ id, rect });
     setSelMsgId(id);   // 长按同时就地全选该消息（MessageBubble 内 effect 执行）
@@ -790,7 +789,6 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
   useEffect(() => {
     if (pressMenu) return;
     setSelMsgId(null);
-    setSelHandles(null);
     window.getSelection()?.removeAllRanges();
   }, [pressMenu]);
   const handlePressSelect = useCallback(() => {
@@ -810,71 +808,8 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
       window.removeEventListener('wheel', closePressMenu, true);
     };
   }, [pressMenu, closePressMenu]);
-  // 手柄位置跟随：selectionchange（含原生选区变化）+ 滚动/缩放时重算
-  useEffect(() => {
-    if (!selMsgId) return;
-    const update = () => {
-      const el = messagesContainerRef.current?.querySelector(
-        `[data-msg-id="${CSS.escape(selMsgId)}"] > .chat-bubble`);
-      const sel = window.getSelection();
-      if (!el || !sel || sel.rangeCount === 0 || sel.isCollapsed) { setSelHandles(null); return; }
-      const range = sel.getRangeAt(0);
-      if (!el.contains(range.commonAncestorContainer)) { setSelHandles(null); return; }
-      const rects = range.getClientRects();
-      if (!rects.length) return;
-      setSelHandles({ sx: rects[0].left, sy: rects[0].top,
-                      ex: rects[rects.length - 1].right - 12, ey: rects[rects.length - 1].bottom - 24 });
-    };
-    update();
-    document.addEventListener('selectionchange', update);
-    window.addEventListener('scroll', update, true);
-    window.addEventListener('resize', update);
-    return () => {
-      document.removeEventListener('selectionchange', update);
-      window.removeEventListener('scroll', update, true);
-      window.removeEventListener('resize', update);
-    };
-  }, [selMsgId]);
   // 手柄拖拽：caretRangeFromPoint 把触点映射回文本位置，与固定锚点组成新选区
   // （拖过锚点自动换向）。拖拽期间 selectionchange 同步手柄位置。
-  const startHandleDrag = useCallback((which: 'start' | 'end', e: React.PointerEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    const sel = window.getSelection();
-    if (!sel || sel.rangeCount === 0 || !selMsgId) return;
-    const cur = sel.getRangeAt(0);
-    const anchor = which === 'start'
-      ? { container: cur.endContainer, offset: cur.endOffset }
-      : { container: cur.startContainer, offset: cur.startOffset };
-    const move = (ev: PointerEvent) => {
-      ev.preventDefault();
-      const el = document.elementFromPoint(ev.clientX, ev.clientY);
-      const bubble = messagesContainerRef.current?.querySelector(
-        `[data-msg-id="${CSS.escape(selMsgId)}"] > .chat-bubble`);
-      if (!el || !bubble || !bubble.contains(el)) return;
-      const caret = document.caretRangeFromPoint
-        ? document.caretRangeFromPoint(ev.clientX, ev.clientY)
-        : null;
-      if (!caret || !bubble.contains(caret.startContainer)) return;
-      const sel2 = window.getSelection();
-      if (!sel2) return;
-      const aC = anchor.container, aO = anchor.offset;
-      const cC = caret.startContainer, cO = caret.startOffset;
-      const caretAfter = (aC === cC) ? cO > aO
-        : !!(aC.compareDocumentPosition(cC) & Node.DOCUMENT_POSITION_FOLLOWING);
-      const nr = document.createRange();
-      if (caretAfter) { nr.setStart(aC, aO); nr.setEnd(cC, cO); }
-      else { nr.setStart(cC, cO); nr.setEnd(aC, aO); }
-      sel2.removeAllRanges();
-      sel2.addRange(nr);
-    };
-    const up = () => {
-      window.removeEventListener('pointermove', move);
-      window.removeEventListener('pointerup', up);
-    };
-    window.addEventListener('pointermove', move);
-    window.addEventListener('pointerup', up);
-  }, [selMsgId, messagesContainerRef]);
   // 菜单打开期间滚动即自动关闭（仿微信，防 fixed 锚点与气泡实际位置脱节）；
   // scroll 不冒泡用捕获监听，wheel 兜底 PC 端 overflow 容器外滚轮
   useEffect(() => {
@@ -3224,19 +3159,6 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
           ) : null
         }
       />
-
-      {/* 就地选择手柄（0922 微信式）：selectionchange/scroll 驱动定位，
-          拖拽经 caretRangeFromPoint 映射回文本位置重算选区 */}
-      {selHandles && selMsgId && createPortal(
-        <>
-          <div className="chat-sel-handle is-s" style={{ left: selHandles.sx, top: selHandles.sy }}
-               onPointerDown={(e) => startHandleDrag('start', e)} />
-          <div className="chat-sel-handle is-e" style={{ left: selHandles.ex, top: selHandles.ey }}
-               onPointerDown={(e) => startHandleDrag('end', e)} />
-        </>,
-        document.body,
-      )}
-
       {/* 「猜你想问」：文档流内嵌于消息区与输入栏之间（不遮挡对话内容） */}
       {suggestedList.length > 0 && (
         <SuggestedQuestions
