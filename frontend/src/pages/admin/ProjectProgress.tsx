@@ -96,14 +96,18 @@ const EMPTY_FILTERS: Record<FilterDim, string[]> = {
   manager: [], contact: [], region: [], status: [], agv: [],
 };
 
+// 筛选项里的「其他」兜底：项目在该维度没填值的都归到这里（空值也得能被筛出来）。
+// 它不是真实取值，所以列选项时永远摆在最后一个。
+const OTHER_VALUE = '其他';
+
 // AGV 数量分档：车数是 1-162 的长尾分布（本地库 154 个项目中 1-10 台占八成），
-// 所以前几档切得细、尾部合并；「未填写」单列一档，否则这批项目筛不出来。
+// 所以前几档切得细、尾部合并；没填车数的单列一档，否则这批项目筛不出来。
 const AGV_BUCKETS: { key: string; label: string; match: (n: number | null | undefined) => boolean }[] = [
   { key: 'le5', label: '5 台及以下', match: (n) => n != null && n <= 5 },
   { key: '6to10', label: '6-10 台', match: (n) => n != null && n > 5 && n <= 10 },
   { key: '11to30', label: '11-30 台', match: (n) => n != null && n > 10 && n <= 30 },
   { key: 'gt30', label: '30 台以上', match: (n) => n != null && n > 30 },
-  { key: 'none', label: '未填写', match: (n) => n == null },
+  { key: 'none', label: OTHER_VALUE, match: (n) => n == null },
 ];
 
 const agvBucketLabel = (key: string): string =>
@@ -358,18 +362,18 @@ export default function ProjectProgress() {
     return null;
   };
 
-  // 项目在某个筛选维度上的取值（空值统一返回「未填写」，才能被筛出来）。
+  // 项目在某个筛选维度上的取值（空值统一返回「其他」，才能被筛出来）。
   // 项目经理用卡片上实际显示的那个值（台账优先、回退本地字段），与用户看到的一致。
   function filterValueOf(p: ProjectItem, dim: FilterDim): string {
     switch (dim) {
       case 'manager':
-        return wecomManagerOf(p) || p.project_manager || '未填写';
+        return wecomManagerOf(p) || p.project_manager || OTHER_VALUE;
       case 'contact':
-        return p.contact_person || '未填写';
+        return p.contact_person || OTHER_VALUE;
       case 'region':
-        return p.project_region || '未填写';
+        return p.project_region || OTHER_VALUE;
       case 'status':
-        return p.status || '未填写';
+        return p.status || OTHER_VALUE;
       case 'agv': {
         const bucket = AGV_BUCKETS.find((b) => b.match(p.total_vehicle_count));
         return bucket ? bucket.key : 'none';
@@ -413,7 +417,7 @@ export default function ProjectProgress() {
     return sortProjects(list, sort, pinnedRank);
   })();
 
-  // 各筛选维度的候选项：只列当前项目列表里真实出现过的（含「未填写」），
+  // 各筛选维度的候选项：只列当前项目列表里真实出现过的（含「其他」），
   // 这样不会出现点进去必然为空的死选项；带上命中项目数，按出现次数从多到少排，
   // 常用的在前（下拉框里同时在右侧标出每个选项能筛出多少个项目）。
   const filterOptions = (() => {
@@ -439,7 +443,12 @@ export default function ProjectProgress() {
           .map((b) => ({ value: b.key, count: counts.agv.get(b.key) || 0 }));
         continue;
       }
-      entries.sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], 'zh-Hans-CN'));
+      entries.sort((a, b) => {
+        // 「其他」永远排最后：它只是空值的兜底，不是真实取值，
+        // 按命中数排在中间容易被当成正常选项误点
+        if ((a[0] === OTHER_VALUE) !== (b[0] === OTHER_VALUE)) return a[0] === OTHER_VALUE ? 1 : -1;
+        return b[1] - a[1] || a[0].localeCompare(b[0], 'zh-Hans-CN');
+      });
       options[dim.key] = entries.map(([value, count]) => ({ value, count }));
     }
     return options;
