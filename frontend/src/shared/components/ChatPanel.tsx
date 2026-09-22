@@ -315,7 +315,7 @@ const mergeDbMessages = (prev: Message[], fresh: Message[]): Message[] => {
 // 单条消息气泡（React.memo）：流式期间仅最后一条 content/streaming 变化，历史消息跳过整列表重渲染，消除抖动
 const MessageBubble = memo(function MessageBubble({
   msg, editingId, compact, expandedDesc, onToggleDesc, onToggleReaction, onCopy, onEditStart, onEditChange, onEditSave,   onEditCancel, onImageClick, onOpenTicket, onRedispatch, onProjectChoice, answered, selectedChoice,
-  selectMode, checked, onCheck, onLongPress,
+  selectMode, checked, onCheck, onLongPress, selActive,
 }: {
   msg: Message;
   editingId: string | null;
@@ -341,6 +341,8 @@ const MessageBubble = memo(function MessageBubble({
   checked?: boolean;
   onCheck?: (id: string) => void;
   onLongPress?: (id: string, rect: DOMRect) => void;
+  // 长按就地全选（0922 微信式）：本气泡进入选择态（全选高亮+父层手柄）
+  selActive?: boolean;
 }) {
   // 长按 500ms 唤起操作菜单（复制/多选）。编辑中/流式中不触发；语音长按在输入区不冲突。
   const wrapRef = useRef<HTMLDivElement | null>(null);
@@ -354,10 +356,22 @@ const MessageBubble = memo(function MessageBubble({
   // 长按触发后置真，抑制紧随的 click（防菜单刚弹就误触气泡内部交互）
   const suppressClickRef = useRef(false);
   const canLongPress = !!onLongPress && editingId !== msg.id && !msg.streaming && !msg.uploading && !msg.phase;
+  // 长按就地全选（0922 微信式）：selActive 时程序化全选本气泡可见内容——
+  // 手柄定位/拖拽由父层按 selectionchange 驱动；容器禁选在此气泡临时放开（CSS）
+  useEffect(() => {
+    if (!selActive) return;
+    const content = wrapRef.current?.querySelector(':scope > .chat-bubble');
+    const sel = window.getSelection();
+    if (!content || !sel) return;
+    const range = document.createRange();
+    range.selectNodeContents(content);
+    sel.removeAllRanges();
+    sel.addRange(range);
+  }, [selActive]);
   return (
     <div
       ref={wrapRef}
-      className={`chat-bubble-wrap ${msg.role === 'user' ? 'is-right' : 'is-left'}${selectMode ? ' is-selecting' : ''}${selectMode && checked ? ' is-checked' : ''}`}
+      className={`chat-bubble-wrap ${msg.role === 'user' ? 'is-right' : 'is-left'}${selectMode ? ' is-selecting' : ''}${selectMode && checked ? ' is-checked' : ''}${selActive ? ' chat-sel-active' : ''}`}
       data-msg-id={msg.id}
       onPointerDown={canLongPress && !selectMode ? (e) => {
         // 仅主键/触摸；移动指针滑出取消
@@ -759,30 +773,108 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
     setSelectedIds(new Set());
   }, []);
 
-  // ── 长按操作菜单（微信式，0918）：长按气泡唤起「复制/多选」──
-  // 修复 0911 转发功能上线后长按被多选独占、原生复制被禁且复制钮 hover-only
-  // 手机上够不着的问题。菜单承载抄 DiscussionPanel：TDesign Popover + 透明
-  // 代理锚点定位到被长按气泡的 rect（不拦截气泡交互/滚动）。
+  // ── 长按操作菜单（微信式，0918/0922）：长按气泡 = 菜单（复制/多选）+ 消息
+  // 就地全选（高亮 + 自绘拖拽手柄）。「复制」跟随当前选区：未拖动 = 整条，
+  // 拖动手柄改选后 = 所选部分（selectionchange 驱动手柄跟随，原生选区变化也同步）。
   const [pressMenu, setPressMenu] = useState<{ id: string; rect: DOMRect } | null>(null);
+  // 就地选中的消息 id + 两个手柄的屏幕坐标（fixed 渲染，selectionchange/scroll 驱动）
+  const [selMsgId, setSelMsgId] = useState<string | null>(null);
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
+  const [selHandles, setSelHandles] = useState<{ sx: number; sy: number; ex: number; ey: number } | null>(null);
   const openPressMenu = useCallback((id: string, rect: DOMRect) => {
     setPressMenu({ id, rect });
+    setSelMsgId(id);   // 长按同时就地全选该消息（MessageBubble 内 effect 执行）
   }, []);
   const closePressMenu = useCallback(() => setPressMenu(null), []);
+  // pressMenu 关闭（外点/复制/多选）→ 统一清选区与手柄
+  useEffect(() => {
+    if (pressMenu) return;
+    setSelMsgId(null);
+    setSelHandles(null);
+    window.getSelection()?.removeAllRanges();
+  }, [pressMenu]);
   const handlePressSelect = useCallback(() => {
     if (!pressMenu) return;
     const id = pressMenu.id;
     setPressMenu(null);
     enterSelect(id);
   }, [pressMenu, enterSelect]);
-  // 「选择文字」全文视图（0918）：部分复制入口——气泡内长按已被菜单占用，
-  // 原生拖蓝放进受控全文视图做；视图挂 body，不受 .chat-view__messages 禁选影响
-  const [textViewMsgId, setTextViewMsgId] = useState<string | null>(null);
-  const handlePressSelectText = useCallback(() => {
+  // 菜单打开期间滚动即自动关闭（仿微信，防 fixed 锚点与气泡实际位置脱节）；
+  // scroll 不冒泡用捕获监听，wheel 兜底 PC 端 overflow 容器外滚轮
+  useEffect(() => {
     if (!pressMenu) return;
-    const id = pressMenu.id;
-    setPressMenu(null);
-    setTextViewMsgId(id);
-  }, [pressMenu]);
+    window.addEventListener('scroll', closePressMenu, true);
+    window.addEventListener('wheel', closePressMenu, true);
+    return () => {
+      window.removeEventListener('scroll', closePressMenu, true);
+      window.removeEventListener('wheel', closePressMenu, true);
+    };
+  }, [pressMenu, closePressMenu]);
+  // 手柄位置跟随：selectionchange（含原生选区变化）+ 滚动/缩放时重算
+  useEffect(() => {
+    if (!selMsgId) return;
+    const update = () => {
+      const el = messagesContainerRef.current?.querySelector(
+        `[data-msg-id="${CSS.escape(selMsgId)}"] > .chat-bubble`);
+      const sel = window.getSelection();
+      if (!el || !sel || sel.rangeCount === 0 || sel.isCollapsed) { setSelHandles(null); return; }
+      const range = sel.getRangeAt(0);
+      if (!el.contains(range.commonAncestorContainer)) { setSelHandles(null); return; }
+      const rects = range.getClientRects();
+      if (!rects.length) return;
+      setSelHandles({ sx: rects[0].left, sy: rects[0].top,
+                      ex: rects[rects.length - 1].right - 12, ey: rects[rects.length - 1].bottom - 24 });
+    };
+    update();
+    document.addEventListener('selectionchange', update);
+    window.addEventListener('scroll', update, true);
+    window.addEventListener('resize', update);
+    return () => {
+      document.removeEventListener('selectionchange', update);
+      window.removeEventListener('scroll', update, true);
+      window.removeEventListener('resize', update);
+    };
+  }, [selMsgId]);
+  // 手柄拖拽：caretRangeFromPoint 把触点映射回文本位置，与固定锚点组成新选区
+  // （拖过锚点自动换向）。拖拽期间 selectionchange 同步手柄位置。
+  const startHandleDrag = useCallback((which: 'start' | 'end', e: React.PointerEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0 || !selMsgId) return;
+    const cur = sel.getRangeAt(0);
+    const anchor = which === 'start'
+      ? { container: cur.endContainer, offset: cur.endOffset }
+      : { container: cur.startContainer, offset: cur.startOffset };
+    const move = (ev: PointerEvent) => {
+      ev.preventDefault();
+      const el = document.elementFromPoint(ev.clientX, ev.clientY);
+      const bubble = messagesContainerRef.current?.querySelector(
+        `[data-msg-id="${CSS.escape(selMsgId)}"] > .chat-bubble`);
+      if (!el || !bubble || !bubble.contains(el)) return;
+      const caret = document.caretRangeFromPoint
+        ? document.caretRangeFromPoint(ev.clientX, ev.clientY)
+        : null;
+      if (!caret || !bubble.contains(caret.startContainer)) return;
+      const sel2 = window.getSelection();
+      if (!sel2) return;
+      const aC = anchor.container, aO = anchor.offset;
+      const cC = caret.startContainer, cO = caret.startOffset;
+      const caretAfter = (aC === cC) ? cO > aO
+        : !!(aC.compareDocumentPosition(cC) & Node.DOCUMENT_POSITION_FOLLOWING);
+      const nr = document.createRange();
+      if (caretAfter) { nr.setStart(aC, aO); nr.setEnd(cC, cO); }
+      else { nr.setStart(cC, cO); nr.setEnd(aC, aO); }
+      sel2.removeAllRanges();
+      sel2.addRange(nr);
+    };
+    const up = () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+  }, [selMsgId, messagesContainerRef]);
   // 菜单打开期间滚动即自动关闭（仿微信，防 fixed 锚点与气泡实际位置脱节）；
   // scroll 不冒泡用捕获监听，wheel 兜底 PC 端 overflow 容器外滚轮
   useEffect(() => {
@@ -1190,7 +1282,6 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
 
   // 滚动跟随：仅在用户贴底时自动跟随；流式中瞬时置底（behavior:'auto'）避免 smooth 动画排队抖动
   const atBottomRef = useRef(true);
-  const messagesContainerRef = useRef<HTMLDivElement>(null);
   const prevCountRef = useRef(0); // 上一次消息条数：区分「新消息追加」与「内容增长」
   // 用户滚动意图标记：wheel/touchstart 手势一开始即置 true，800ms 防抖复位。
   // 程序置底据此避让——用户手指刚搭上/滚轮刚动（scrollTop 尚未变化、atBottom 未翻转）时，
@@ -2999,9 +3090,13 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
   // 先关菜单再复制——Toast 与菜单不同层，关了再弹不冲突
   const handlePressCopy = useCallback(() => {
     if (!pressMenu) return;
+    const sel = window.getSelection();
+    // 0922 微信式：复制跟随当前选区——未拖动手柄时选区=整条消息
+    const selText = sel && !sel.isCollapsed ? sel.toString() : '';
     const m = messages.find((x) => x.id === pressMenu.id);
-    setPressMenu(null);
-    if (m?.content) copyContent(m.content);
+    setPressMenu(null);   // effect 统一清选区
+    if (selText.trim()) copyContent(selText);
+    else if (m?.content) copyContent(m.content);
   }, [pressMenu, messages, copyContent]);
 
   // 长按菜单渲染参数：可复制判定 + 代理锚点样式 + 上/下翻转（贴近容器顶部时翻到下方）
@@ -3099,6 +3194,7 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
             checked={selectedIds.has(msg.id)}
             onCheck={toggleCheck}
             onLongPress={openPressMenu}
+            selActive={selMsgId === msg.id}
           />
           );
         })}
@@ -3121,7 +3217,6 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
               {pressMenuCopyable && (
                 <>
                   <button type="button" className="chat-press-menu__item" onClick={handlePressCopy}>复制</button>
-                  <button type="button" className="chat-press-menu__item" onClick={handlePressSelectText}>选择文字</button>
                 </>
               )}
               <button type="button" className="chat-press-menu__item" onClick={handlePressSelect}>多选</button>
@@ -3129,6 +3224,18 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
           ) : null
         }
       />
+
+      {/* 就地选择手柄（0922 微信式）：selectionchange/scroll 驱动定位，
+          拖拽经 caretRangeFromPoint 映射回文本位置重算选区 */}
+      {selHandles && selMsgId && createPortal(
+        <>
+          <div className="chat-sel-handle is-s" style={{ left: selHandles.sx, top: selHandles.sy }}
+               onPointerDown={(e) => startHandleDrag('start', e)} />
+          <div className="chat-sel-handle is-e" style={{ left: selHandles.ex, top: selHandles.ey }}
+               onPointerDown={(e) => startHandleDrag('end', e)} />
+        </>,
+        document.body,
+      )}
 
       {/* 「猜你想问」：文档流内嵌于消息区与输入栏之间（不遮挡对话内容） */}
       {suggestedList.length > 0 && (
@@ -3702,62 +3809,6 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
           document.body,
         )}
 
-        {/* 选择文字全文视图（0918）：部分复制入口——长按拖蓝出系统选择菜单，
-            复制的是选中的那部分；挂 body 不受消息区禁选规则影响 */}
-        {textViewMsgId && (() => {
-          const m = messages.find((x) => x.id === textViewMsgId);
-          if (!m) return null;
-          return createPortal(
-            <div
-              onClick={() => setTextViewMsgId(null)}
-              style={{
-                position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, zIndex: 1200,
-                background: 'rgba(10, 12, 20, .72)', display: 'flex',
-                alignItems: 'center', justifyContent: 'center', padding: 16, boxSizing: 'border-box',
-              }}
-            >
-              <button
-                aria-label="关闭"
-                onClick={() => setTextViewMsgId(null)}
-                style={{
-                  position: 'absolute', top: 10, right: 12, width: 34, height: 34,
-                  borderRadius: '50%', border: 'none', cursor: 'pointer',
-                  background: 'rgba(255,255,255,.14)', color: '#fff', fontSize: 18, lineHeight: 1,
-                  display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  WebkitTouchCallout: 'none', userSelect: 'none', WebkitUserSelect: 'none',
-                }}
-              >
-                ✕
-              </button>
-              <div
-                onClick={(e) => e.stopPropagation()}
-                style={{
-                  background: 'var(--card)', borderRadius: 'var(--radius-xl)', maxWidth: 420, width: '100%',
-                  maxHeight: '80vh', display: 'flex', flexDirection: 'column',
-                  overflow: 'hidden', boxSizing: 'border-box',
-                }}
-              >
-                <div
-                  style={{
-                    flex: 1, minHeight: 0, overflowY: 'auto', padding: 16, WebkitOverflowScrolling: 'touch',
-                    userSelect: 'text', WebkitUserSelect: 'text', WebkitTouchCallout: 'default',
-                  }}
-                >
-                  <MarkdownRenderer content={m.content} compact={compact} />
-                </div>
-                <div
-                  style={{
-                    padding: '10px 14px 12px', fontSize: '12.5px', color: 'var(--muted-foreground)', textAlign: 'center', flexShrink: 0,
-                    WebkitTouchCallout: 'none', userSelect: 'none', WebkitUserSelect: 'none',
-                  }}
-                >
-                  长按文字拖动选区，即可复制选中部分
-                </div>
-              </div>
-            </div>,
-            document.body,
-          );
-        })()}
       </div>
     </div>
   );
