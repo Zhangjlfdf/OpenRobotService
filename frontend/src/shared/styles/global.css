@@ -6950,16 +6950,7 @@ html, body, #root {
   -webkit-user-select: text !important;
   user-select: text !important;
 }
-.chat-sel-handle { position: fixed; z-index: 1300; width: 12px; height: 24px;
-  pointer-events: auto; touch-action: none; cursor: grab;
-  -webkit-user-select: none; user-select: none; }
-.chat-sel-handle::before { content: ""; position: absolute; left: 50%; transform: translateX(-50%);
-  width: 3px; height: 100%; background: rgba(59,130,246,.5); border-radius: 2px; }
-.chat-sel-handle::after { content: ""; position: absolute; left: 50%; transform: translateX(-50%);
-  width: 15px; height: 15px; border-radius: 50%; background: #3b82f6;
-  box-shadow: 0 1px 4px rgba(0,0,0,.35); }
-.chat-sel-handle.is-s::after { bottom: -4px; }
-.chat-sel-handle.is-e::after { top: -4px; }
+
 
 /* 气泡删除按钮（仅自己消息，hover/长按显示） */
 .detail-chat-bubble__del {
