@@ -61,12 +61,18 @@ jobs:
       git_ref: ${{ steps.resolve.outputs.git_ref }}
       health_urls: ${{ steps.resolve.outputs.health_urls }}
     steps:
+      # 供下方安全校验使用：确认 git_ref 是本仓库的既有分支，而非 fork 或其他仓库的 ref
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
       - name: Validate and resolve
         id: resolve
         env:
           ENV_NAME: ${{ inputs.environment }}
           CONFIRM: ${{ inputs.confirm }}
           INPUT_REF: ${{ inputs.git_ref }}
+          BACKUP_ID: ${{ inputs.backup_id }}
           ACTION: ${{ inputs.action }}
           HEALTH_TEST: ${{ vars.DEPLOY_TEST_HEALTH_URLS }}
           HEALTH_PROD: ${{ vars.DEPLOY_PROD_HEALTH_URLS }}
@@ -88,6 +94,28 @@ jobs:
             if [ "$ENV_NAME" = "prod" ]; then ref="dev"; else ref="test"; fi
           fi
 
+          # 安全：只允许使用「本仓库已存在的分支」，避免 secrets 被交给本仓库之外的代码
+          case "$ref" in
+            *:*)
+              echo "::error::git_ref 不允许包含 ':'（该形式指向 fork 等其他仓库的分支）"
+              exit 1 ;;
+            [!A-Za-z0-9]*|*[!A-Za-z0-9._/-]*)
+              echo "::error::git_ref 含非法字符，仅允许字母、数字与 . _ / -，且需以字母或数字开头"
+              exit 1 ;;
+          esac
+          if ! git ls-remote --exit-code --heads origin "$ref" >/dev/null 2>&1; then
+            echo "::error::git_ref=$ref 不是本仓库的既有分支，已拒绝（禁止使用本仓库之外的代码）"
+            exit 1
+          fi
+
+          # 备份 id 白名单（latest 或 时间戳-短哈希），杜绝特殊字符进入远端命令
+          case "$BACKUP_ID" in
+            ""|latest) ;;
+            [!A-Za-z0-9]*|*[!A-Za-z0-9._-]*)
+              echo "::error::backup_id 含非法字符，仅允许字母、数字与 . _ -（或填 latest）"
+              exit 1 ;;
+          esac
+
           if [ "$ENV_NAME" = "test" ]; then
             health="${HEALTH_TEST:-http://127.0.0.1:9400/api/health,http://127.0.0.1:9411/health,https://usp.ep-zl.com/t/app/}"
           else
@@ -104,7 +132,7 @@ jobs:
             echo "| --- | --- |"
             echo "| 动作 | \`$ACTION\` |"
             echo "| 环境 | \`$ENV_NAME\` |"
-            echo "| 备份 id | \`${{ inputs.backup_id }}\` |"
+            echo "| 备份 id | \`$BACKUP_ID\` |"
             echo "| 代码分支 | \`$ref\` |"
           } >> "$GITHUB_STEP_SUMMARY"
 

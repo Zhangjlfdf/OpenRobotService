@@ -132,5 +132,37 @@ python deploy/deploy.py -e test --rollback latest \
   --health-urls "http://127.0.0.1:9400/api/health,https://usp.ep-zl.com/t/app/"
 ```
 
+## 七、安全边界（本仓库为 public，务必知悉）
+
+**开源代码 ≠ 开放部署权限。** 外部人员可查看代码、workflow 定义与 Actions 日志，但**无法触发部署、无法读取 Secrets**：
+
+| 能力 | 非项目人员 | 有 Write 权限的成员 |
+| --- | --- | --- |
+| 查看代码 / workflow / Actions 日志 | 可以（public 仓库） | 可以 |
+| 点击 `Run workflow` 触发部署 | **不可以**（按钮不可用，API 403） | 可以 |
+| 读取 `TEST_SSH_PRIVATE_KEY` 等 Secrets | **不可以**（日志打码；fork PR 按设计也拿不到） | 不能直接读取，但**改 workflow 可间接取用** |
+| 修改 `deploy.py` / workflow 并生效 | 不可以（需 PR + review + ruleset 保护） | 需 PR 合并后才生效 |
+
+关键机制与纪律：
+
+1. **触发权限**：`workflow_dispatch` 仅有仓库 **Write 权限**者能触发；本仓库 8 个 fork 均为只读，无法触发。
+2. **Secrets 隔离**：Secrets 不会出现在日志（GitHub 自动打码），fork 提交的 PR 事件按设计拿不到 Secrets；
+   本仓库 workflow **未使用** `pull_request_target` / `workflow_run`，不存在「以主仓库密钥执行外部代码」的经典漏洞模式。
+3. **`git_ref` 白名单（防 secrets 被交给外部代码）**：guard 会拒绝含 `:` 的 ref（`owner:branch` 指向 fork）、
+   `refs/pull/*` 等非分支 ref、以 `-` 开头或含 shell 元字符的值，并要求分支**确实存在于本仓库**。
+   因此**不要**用他人 fork 的分支名去部署。
+4. **workflow 文件即执行配置**：任何改动 `.github/workflows/*` 或 `deploy/deploy.py` 的 PR，
+   等同「允许其在 CI 中以服务器密钥执行代码」，**review 必须严格**（尤其新增 `run` 步骤、把 Secret 转进 env/日志、上传到外部地址）。
+   脚本内所有用户输入均经 `env` 传递，**不得**直接 `${{ inputs.* }}` 插值进 `run`（脚本注入）。
+5. **日志公开**：public 仓库的日志与 Summary 对所有人可见 —— 非敏感连接信息（服务器地址/账号/端口/路径）会明文出现，
+   这与团队既有的 `UI_REGRESSION_*` 做法一致；真正的机密是 SSH **私钥**（存于 Secrets），且服务器已禁用密码登录、仅公钥可用。
+   **禁止**在 workflow 中 `echo` 任何 Secret 或把 Secret 写入日志与 artifact。
+6. **凭据最小化**：流水线**不持有 sudo 密码** —— `usp-a` 属 `supervisor` 组，`supervisorctl restart` 免 sudo，故统一 `--no-sudo`。
+7. **生产确认词不是密码**：`DEPLOY-PROD` / `ROLLBACK-PROD` 在 public 仓库中可见，仅用于**防误点**，不构成安全边界；
+   真正的边界是触发权限、ref 白名单与 PR review。
+
+> 已知残留风险：复用 `TEST_SSH_PRIVATE_KEY`（`usp-a` 身份 —— 该账号在服务器上有生产写目录与 supervisor 权限）。
+> 这是既有 workflow 早已存在的现状，本次未扩大攻击面；如需进一步收敛，可新建仅有 test 权限、无 sudo 的专用部署账号并换用其密钥。
+
 常用可选参数：`--no-backup`（跳过备份，不推荐）、`--backup-keep N`、`--remote-tmp DIR`、
 `--yes`（跳过生产交互确认，CI 用）、`--no-sudo`（服务器已给 supervisor 组 socket 权限）。
