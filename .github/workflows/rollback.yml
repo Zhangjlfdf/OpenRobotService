@@ -255,6 +255,7 @@ jobs:
         if: ${{ always() && inputs.action == 'rollback' }}
         env:
           NOTIFY_WEBHOOK: ${{ secrets.NOTIFY_WEBHOOK }}
+          NOTIFY_WEBHOOKS: ${{ secrets.NOTIFY_WEBHOOKS }}
           NOTIFY_PROVIDER: ${{ vars.NOTIFY_PROVIDER || 'wecom' }}
           NOTIFY_STATUS: ${{ job.status }}
           NOTIFY_TITLE: 回滚
