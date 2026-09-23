@@ -1191,6 +1191,10 @@ class ChatRequest(BaseModel):
     max_tokens: int = Field(default=2000)
     temperature: float = Field(default=0.7, ge=0, le=2)
     system_prompt: str = Field(default="", max_length=20000, description="可选系统提示词")
+    thinking: bool | None = Field(
+        default=None,
+        description="是否开启思考模式；None 用默认（reasoning_effort 配置决定），False 显式关闭",
+    )
     tools: list | None = Field(
         default=None, description="OpenAI tools 协议工具定义；非空时走工具调用模式"
     )
@@ -1267,6 +1271,7 @@ async def chat(request: ChatRequest) -> dict:
                 system_prompt=request.system_prompt or None,
                 max_tokens=request.max_tokens,
                 temperature=request.temperature,
+                thinking=request.thinking,
             )
         total_ms = round((time.perf_counter() - t0) * 1000)
         # 空回答不落库（agentic 中间轮只调工具无正文时避免历史污染）
@@ -1294,6 +1299,7 @@ async def chat_stream(request: ChatRequest):
                 system_prompt=request.system_prompt or None,
                 max_tokens=request.max_tokens,
                 temperature=request.temperature,
+                thinking=request.thinking,
             )):
                 if token is None:
                     yield _HEARTBEAT_SSE
