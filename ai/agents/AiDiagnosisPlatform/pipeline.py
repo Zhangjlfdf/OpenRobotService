@@ -640,6 +640,10 @@ def _reset_state_after_submit(agent_state: AgentState, memory, ticket: dict, db_
     memory.turns.append({
         "role": "assistant",
         "content": "工单已提交，已进入自动派单。有新问题随时告诉我。"})
+    # 0922 上下文切分：收尾轮之后即下一单的对话起点——草稿/描述生成从
+    # context_start 切片，上一单的对话不再进入下一单的提炼视野（修 872 实锤
+    # 「有历史对话的会话提炼跑偏」）。收集轮/看图的中间态照旧由各自逻辑管理。
+    agent_state.context_start = len(memory.turns)
     # 聊天记录附件的工单分割锚点：下次提单的附件只带此刻之后的对话。
     agent_state.last_ticket_submitted_at = int(time.time())
     _save_agent_state(memory, agent_state)
