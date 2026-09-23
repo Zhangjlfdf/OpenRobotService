@@ -119,6 +119,23 @@ jobs:
         with:
           ref: ${{ needs.guard.outputs.git_ref }}
 
+      # 分支未包含流水线改动时给出明确指引
+      - name: Verify deploy script supports rollback flags
+        env:
+          GIT_REF: ${{ needs.guard.outputs.git_ref }}
+        run: |
+          set -euo pipefail
+          missing=""
+          for flag in --rollback --list-backups --backups-format; do
+            grep -q -- "$flag" deploy/deploy.py || missing="$missing $flag"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::分支 $GIT_REF 的 deploy/deploy.py 缺少回滚所需参数：$missing"
+            echo "该分支尚未包含部署流水线改动，请把 git_ref 指向已合并的分支，或先合并对应 PR。"
+            exit 1
+          fi
+          echo "deploy/deploy.py 回滚参数就绪"
+
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
