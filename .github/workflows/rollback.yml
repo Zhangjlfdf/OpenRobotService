@@ -182,6 +182,7 @@ jobs:
             --ssh-port "$DEPLOY_SSH_PORT" \
             --ssh-identity "$HOME/.ssh/ci_key" \
             --rollback "$target" \
+            --no-sudo \
             --health-urls "$HEALTH_URLS" \
             --health-retries 20 \
             --health-interval 3 2>&1 | tee rollback.log
