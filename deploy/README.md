@@ -27,7 +27,8 @@
 | 名称 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
 | `TEST_SSH_PRIVATE_KEY` | Secret | 是（复用已有） | usp-a 私钥，多条既有 workflow 已在用 |
-| `NOTIFY_WEBHOOK` | Secret | 否 | 群机器人 Webhook；未配置则跳过通知 |
+| `NOTIFY_WEBHOOKS` | Secret | 否 | 多群推送，逗号分隔，每项写 `<url>\|<policy>\|<群名>`（后两段可省）：`always`（默认，每条都发）/ `failure`（仅失败或自动回滚）/ `success`（仅成功）/ `off`（永久禁发，仅留档 URL）；群名仅作日志标签。例：`群A的url\|always\|研发群,群B的url\|failure\|运维群,群C的url\|off\|勿扰群`。<br>注意：**没写进本变量的群本来就不会收到通知**（不在名单 = 不发） |
+| `NOTIFY_WEBHOOK` | Secret | 否 | 单群 Webhook（旧变量，作为 `NOTIFY_WEBHOOKS` 的回退，等价 `always`） |
 | `NOTIFY_PROVIDER` | Variable | 否 | `wecom`（默认）/ `feishu` |
 | `DEPLOY_SSH_HOST` | Variable | 否 | 缺省回退 `UI_REGRESSION_SSH_HOST` |
 | `DEPLOY_SSH_USER` | Variable | 否 | 缺省 `usp-a` |
@@ -109,7 +110,7 @@ $HOME/deploy_backups/test/20260923-152741-381030/
 | 前端构建失败在 `tsc -b` | 类型检查未过，本地 `npm run build:test` 可复现 |
 | SSH 连接失败 | 检查 `TEST_SSH_PRIVATE_KEY` 与 `DEPLOY_SSH_*`；preflight 步骤会打印远端 `supervisorctl status` |
 | 健康检查失败并自动回滚 | Summary 标注「自动回滚=是」，需人工确认服务；必要时再 Rollback 到更早备份 |
-| 没收到通知 | 未配置 `NOTIFY_WEBHOOK` 会跳过；Webhook 域名仅允许企业微信 / 飞书（防 SSRF） |
+| 没收到通知 | 未配置 `NOTIFY_WEBHOOKS` / `NOTIFY_WEBHOOK` 会跳过；Webhook 域名仅允许企业微信 / 飞书（防 SSRF）；某群策略与本次结果不匹配时也会跳过（如 `failure` 群在部署成功时不发），日志会逐条打印每个目标的发送 / 跳过原因 |
 | 备份占用磁盘 | 调小 `DEPLOY_BACKUP_KEEP`，或到服务器清理 `~/deploy_backups/<env>/` |
 
 ## 六、本地等价操作
