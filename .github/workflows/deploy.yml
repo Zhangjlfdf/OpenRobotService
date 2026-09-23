@@ -68,6 +68,11 @@ jobs:
       health_urls: ${{ steps.resolve.outputs.health_urls }}
       backup_keep: ${{ steps.resolve.outputs.backup_keep }}
     steps:
+      # 供下方安全校验使用：确认 git_ref 是本仓库的既有分支，而非 fork 或其他仓库的 ref
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
       - name: Validate and resolve
         id: resolve
         env:
@@ -97,6 +102,23 @@ jobs:
           ref="$INPUT_REF"
           if [ -z "$ref" ]; then
             if [ "$ENV_NAME" = "prod" ]; then ref="dev"; else ref="test"; fi
+          fi
+
+          # 安全：只允许部署「本仓库已存在的分支」。
+          #  - 阻断 owner:branch 形式（指向 fork 等其他仓库）与 refs/pull/* 等非分支 ref，
+          #    否则触发者可以把一段外部代码当作待部署代码，从 runner 上取走 secrets；
+          #  - 字符白名单同时阻止选项注入（如 --upload-pack=...）与 shell 元字符。
+          case "$ref" in
+            *:*)
+              echo "::error::git_ref 不允许包含 ':'（该形式指向 fork 等其他仓库的分支）"
+              exit 1 ;;
+            [!A-Za-z0-9]*|*[!A-Za-z0-9._/-]*)
+              echo "::error::git_ref 含非法字符，仅允许字母、数字与 . _ / -，且需以字母或数字开头"
+              exit 1 ;;
+          esac
+          if ! git ls-remote --exit-code --heads origin "$ref" >/dev/null 2>&1; then
+            echo "::error::git_ref=$ref 不是本仓库的既有分支，已拒绝（禁止部署本仓库之外的代码）"
+            exit 1
           fi
 
           # 健康检查地址（由服务器本机 curl，均为实测可用地址；可用仓库 Variables 覆盖）
