@@ -1,0 +1,219 @@
+name: Rollback
+
+# 网页手动触发：Actions → Rollback → Run workflow
+#   两步交互（workflow_dispatch 的下拉选项是静态的，无法动态列出备份）：
+#     1) action = list      → 在 Summary 中列出全部可用备份（id / 时间 / 提交 / 组件）
+#     2) action = rollback  → 填 backup_id（留空或 latest 表示最近一份）执行还原并重启
+#   还原动作由 deploy/deploy.py --rollback 完成，本文件只做编排与通知。
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "list=只列出可用备份；rollback=执行回滚"
+        type: choice
+        required: true
+        default: list
+        options: [list, rollback]
+      environment:
+        description: "目标环境"
+        type: choice
+        required: true
+        default: test
+        options: [test, prod]
+      backup_id:
+        description: "备份 id（留空或 latest = 最近一份）；请先用 action=list 查看"
+        type: string
+        required: false
+        default: "latest"
+      git_ref:
+        description: "代码分支（留空则 test→test、prod→dev）"
+        type: string
+        required: false
+        default: ""
+      confirm:
+        description: "生产回滚确认词：environment=prod 时必须精确填写 ROLLBACK-PROD"
+        type: string
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  actions: read
+
+# 与 Deploy 共用同一环境的互斥组，避免回滚和发布同时改动服务器
+concurrency:
+  group: deploy-${{ inputs.environment }}
+  cancel-in-progress: false
+
+env:
+  PYTHON_VERSION: "3.11"
+  DEPLOY_SSH_HOST: ${{ vars.DEPLOY_SSH_HOST || vars.UI_REGRESSION_SSH_HOST }}
+  DEPLOY_SSH_USER: ${{ vars.DEPLOY_SSH_USER || vars.UI_REGRESSION_SSH_USER || 'usp-a' }}
+  DEPLOY_SSH_PORT: ${{ vars.DEPLOY_SSH_PORT || vars.UI_REGRESSION_SSH_PORT || '8802' }}
+
+jobs:
+  guard:
+    name: Validate inputs
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      git_ref: ${{ steps.resolve.outputs.git_ref }}
+      health_urls: ${{ steps.resolve.outputs.health_urls }}
+    steps:
+      - name: Validate and resolve
+        id: resolve
+        env:
+          ENV_NAME: ${{ inputs.environment }}
+          CONFIRM: ${{ inputs.confirm }}
+          INPUT_REF: ${{ inputs.git_ref }}
+          ACTION: ${{ inputs.action }}
+          HEALTH_TEST: ${{ vars.DEPLOY_TEST_HEALTH_URLS }}
+          HEALTH_PROD: ${{ vars.DEPLOY_PROD_HEALTH_URLS }}
+        run: |
+          set -euo pipefail
+
+          if [ "$ENV_NAME" = "prod" ] && [ "$CONFIRM" != "ROLLBACK-PROD" ]; then
+            echo "::error::生产回滚需在 confirm 输入框精确填写 ROLLBACK-PROD"
+            exit 1
+          fi
+
+          if [ -z "${DEPLOY_SSH_HOST:-}" ] || [ -z "${DEPLOY_SSH_USER:-}" ]; then
+            echo "::error::未解析到服务器连接信息，请在仓库 Variables 配置 DEPLOY_SSH_HOST / DEPLOY_SSH_USER（或沿用 UI_REGRESSION_SSH_*）"
+            exit 1
+          fi
+
+          ref="$INPUT_REF"
+          if [ -z "$ref" ]; then
+            if [ "$ENV_NAME" = "prod" ]; then ref="dev"; else ref="test"; fi
+          fi
+
+          if [ "$ENV_NAME" = "test" ]; then
+            health="${HEALTH_TEST:-http://127.0.0.1:9400/api/health,http://127.0.0.1:9411/health,https://usp.ep-zl.com/t/app/}"
+          else
+            health="${HEALTH_PROD:-http://127.0.0.1:8400/api/health,http://127.0.0.1:8401/health,https://usp.ep-zl.com/p/app/}"
+          fi
+
+          echo "git_ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "health_urls=$health" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### 回滚请求"
+            echo ""
+            echo "| 项 | 值 |"
+            echo "| --- | --- |"
+            echo "| 动作 | \`$ACTION\` |"
+            echo "| 环境 | \`$ENV_NAME\` |"
+            echo "| 备份 id | \`${{ inputs.backup_id }}\` |"
+            echo "| 代码分支 | \`$ref\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  rollback:
+    name: Rollback ${{ inputs.environment }}
+    needs: guard
+    if: ${{ !cancelled() && needs.guard.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.guard.outputs.git_ref }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Prepare SSH key
+        env:
+          TEST_SSH_PRIVATE_KEY: ${{ secrets.TEST_SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TEST_SSH_PRIVATE_KEY:-}" ]; then
+            echo "::error::secret TEST_SSH_PRIVATE_KEY 未配置，无法连接服务器"
+            exit 1
+          fi
+          install -m 700 -d "$HOME/.ssh"
+          printf '%s\n' "$TEST_SSH_PRIVATE_KEY" | tr -d '\r' > "$HOME/.ssh/ci_key"
+          chmod 600 "$HOME/.ssh/ci_key"
+
+      - name: List available backups
+        env:
+          ENV_NAME: ${{ inputs.environment }}
+        run: |
+          set -uo pipefail
+          python deploy/deploy.py \
+            -e "$ENV_NAME" \
+            --ssh-host "$DEPLOY_SSH_HOST" \
+            --ssh-user "$DEPLOY_SSH_USER" \
+            --ssh-port "$DEPLOY_SSH_PORT" \
+            --ssh-identity "$HOME/.ssh/ci_key" \
+            --list-backups --backups-format md 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Rollback (restore + restart + health check)
+        if: ${{ inputs.action == 'rollback' }}
+        env:
+          ENV_NAME: ${{ inputs.environment }}
+          BACKUP_ID: ${{ inputs.backup_id }}
+          HEALTH_URLS: ${{ needs.guard.outputs.health_urls }}
+        run: |
+          set -uo pipefail
+          target="${BACKUP_ID:-latest}"
+          python deploy/deploy.py \
+            -e "$ENV_NAME" \
+            --ssh-host "$DEPLOY_SSH_HOST" \
+            --ssh-user "$DEPLOY_SSH_USER" \
+            --ssh-port "$DEPLOY_SSH_PORT" \
+            --ssh-identity "$HOME/.ssh/ci_key" \
+            --rollback "$target" \
+            --health-urls "$HEALTH_URLS" \
+            --health-retries 20 \
+            --health-interval 3 2>&1 | tee rollback.log
+          exit "${PIPESTATUS[0]}"
+
+      - name: Summary
+        if: always()
+        env:
+          ENV_NAME: ${{ inputs.environment }}
+          ACTION: ${{ inputs.action }}
+          BACKUP_ID: ${{ inputs.backup_id }}
+          GIT_REF: ${{ needs.guard.outputs.git_ref }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          set -uo pipefail
+          {
+            echo ""
+            echo "### 回滚结果：$JOB_STATUS"
+            echo ""
+            echo "| 项 | 值 |"
+            echo "| --- | --- |"
+            echo "| 环境 | \`$ENV_NAME\` |"
+            echo "| 动作 | \`$ACTION\` |"
+            echo "| 备份 id | \`${BACKUP_ID:-latest}\` |"
+            echo "| 代码分支 | \`$GIT_REF\` |"
+            echo ""
+            if [ "$ACTION" = "list" ]; then
+              echo "本次仅列出备份。执行回滚请重新运行并选择 \`action=rollback\`，填入上表中的备份 id。"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload rollback log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rollback-log-${{ inputs.environment }}-${{ github.run_id }}
+          path: rollback.log
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Notify
+        if: ${{ always() && inputs.action == 'rollback' }}
+        env:
+          NOTIFY_WEBHOOK: ${{ secrets.NOTIFY_WEBHOOK }}
+          NOTIFY_PROVIDER: ${{ vars.NOTIFY_PROVIDER || 'wecom' }}
+          NOTIFY_STATUS: ${{ job.status }}
+          NOTIFY_TITLE: 回滚
+          ENV_NAME: ${{ inputs.environment }}
+          GIT_REF: ${{ needs.guard.outputs.git_ref }}
+          ACTOR: ${{ github.actor }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: python deploy/notify.py
