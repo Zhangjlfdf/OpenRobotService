@@ -157,15 +157,23 @@ export async function importInfoTreeApi(projectId: string, nodes: ApiInfoTreeImp
   return data?.imported ?? 0;
 }
 
-/** 一键清空本项目**已填的内容**（只清值；节点与结构保留）；返回清掉的字段数。
+/** 一键清空（恢复为模板结构）的结果：清掉的内容数 + 删掉的增补节点数 */
+export interface ApiResetInfoTreeResult {
+  /** 留下来的全局字段（模板）上被清掉的内容数 */
+  cleared: number;
+  /** 删掉的本项目增补节点数（导入 / 同步 / 「增补信息」加进来的，含子孙） */
+  nodesRemoved: number;
+}
+
+/** 一键清空：删掉本项目增补的节点、清掉全部已填值，恢复成模板的样子，返回两个计数。
  *  后端逐条记入编辑历史（delete + change_reason=一键清空），门槛与结构类接口相同（项目成员）。
  */
-export async function clearProjectInfoValuesApi(projectId: string): Promise<number> {
-  const data = await request()<{ cleared?: number }>(
-    `/info-nodes/projects/${encodeURIComponent(projectId)}/clear-values`,
+export async function resetProjectInfoTreeApi(projectId: string): Promise<ApiResetInfoTreeResult> {
+  const data = await request()<{ cleared?: number; nodes_removed?: number }>(
+    `/info-nodes/projects/${encodeURIComponent(projectId)}/reset-to-template`,
     { method: 'POST' },
   );
-  return data?.cleared ?? 0;
+  return { cleared: data?.cleared ?? 0, nodesRemoved: data?.nodes_removed ?? 0 };
 }
 
 /** 按后端模板重建信息树 —— 已废弃。
@@ -385,6 +393,50 @@ export async function fetchLedgerSyncPreviewApi(projectId: string): Promise<ApiL
     fill: Array.isArray(data?.fill) ? data.fill : [],
     overwrite: Array.isArray(data?.overwrite) ? data.overwrite : [],
     unmatched: Array.isArray(data?.unmatched) ? data.unmatched : [],
+  };
+}
+
+// —— 一键导入全部项目节点内容（仅管理员/超级管理员）：后台管理-项目管理页 ——
+
+/** POST /info-nodes/ledger-sync/all 返回：整批的汇总计数（单个项目的问题也在里面报，不失败整批） */
+export interface ApiImportAllResult {
+  /** 台账镜像（project 表）里的项目总数 */
+  project_total: number;
+  /** 有新写入 / 跑过但无需改动 / 跳过（无信息节点）/ 出错的项目数（四类互斥） */
+  project_written: number;
+  project_no_change: number;
+  project_skipped: number;
+  project_failed: number;
+  /** 新填条数 / 覆盖条数 */
+  filled: number;
+  overwritten: number;
+  /** 台账有、树里没有的条目数：没落库，提示还要去详情模板补字段 */
+  unmatched: number;
+  failures: { project_id: string; project_name: string; reason: string }[];
+  duration_ms: number;
+}
+
+/**
+ * 一键把台账（本地 project 表镜像）里有值的内容写进**全部项目**的信息节点：
+ * 空的填上、与台账矛盾的就地覆盖（逐条进编辑历史），不新建节点。
+ * 数据量大（几百个项目、上千条写入），超时按整批给足。
+ */
+export async function importAllProjectsLedgerApi(): Promise<ApiImportAllResult> {
+  const data = await request()<ApiImportAllResult>('/info-nodes/ledger-sync/all', {
+    method: 'POST',
+    timeout: 300000,
+  });
+  return {
+    project_total: data?.project_total ?? 0,
+    project_written: data?.project_written ?? 0,
+    project_no_change: data?.project_no_change ?? 0,
+    project_skipped: data?.project_skipped ?? 0,
+    project_failed: data?.project_failed ?? 0,
+    filled: data?.filled ?? 0,
+    overwritten: data?.overwritten ?? 0,
+    unmatched: data?.unmatched ?? 0,
+    failures: Array.isArray(data?.failures) ? data.failures : [],
+    duration_ms: data?.duration_ms ?? 0,
   };
 }
 
