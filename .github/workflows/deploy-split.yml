@@ -360,6 +360,15 @@ jobs:
     runs-on: [self-hosted, ors-verify]
     timeout-minutes: 30
     steps:
+      # 自托管 runner 的 workspace 不会在两次运行之间清空，download-artifact
+      # 也只覆盖同名文件。残留的上一次 tar 会被 --from-artifacts 一起展开，
+      # 等于把旧代码混进本次部署，必须先清干净。
+      - name: Clean stale artifacts
+        run: |
+          set -euo pipefail
+          rm -rf _artifacts
+          echo "已清空 _artifacts"
+
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
