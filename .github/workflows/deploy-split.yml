@@ -324,8 +324,11 @@ jobs:
           python deploy/deploy.py --build-artifacts _artifacts \
             -e "$ENV_NAME" -c "$COMPONENTS" \
             --git-ref "$GIT_REF" --git-commit "$GIT_SHA"
-          # 部署脚本随产物一起过去：自托管 runner 无法 checkout 源码
-          cp -r deploy _artifacts/deploy
+          # 部署脚本随产物一起过去：自托管 runner 无法 checkout 源码。
+          # 只带运行时真正需要的两个脚本——deploy/ 下的 OpenRobotDeploy.exe 是
+          # 12MB 的 Windows 打包二进制，带上只会白白拖慢 artifact 下载。
+          mkdir -p _artifacts/deploy
+          cp deploy/deploy.py deploy/notify.py _artifacts/deploy/
           ls -lh _artifacts
 
       - name: Upload artifacts
@@ -512,6 +515,7 @@ jobs:
           python3 "${{ steps.locate.outputs.script }}" \
             --rollback "$BACKUP_ID" \
             -e "$ENV_NAME" \
+            --local \
             --remote-tmp "$DEPLOY_REMOTE_TMP" \
             --yes --no-sudo \
             --health-urls "$HEALTH_URLS" \

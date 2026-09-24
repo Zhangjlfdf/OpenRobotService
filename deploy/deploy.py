@@ -392,6 +392,33 @@ def send_tarball(cfg: SshConfig, local_tar, remote_name):
     return f"{bash_dir}/{remote_name}"
 
 
+def send_file(cfg: SshConfig, local_path, rel_target):
+    """把单个文件投递到远端 HOME 下的相对路径；cfg.local 时直接复制到本机。
+
+    与 send_tarball 同源：本机/远端的路径分支集中在这里，避免各处裸调 scp 时
+    漏掉本机模式——分离式部署下「目标机」就是 runner 本机，根本没有 ssh 可用。
+    """
+    target = validate_remote_path(f"~/{rel_target.lstrip('/')}", "远端目标文件")
+    rel = target[2:] if target.startswith("~/") else target.lstrip("/")
+
+    if cfg.local:
+        dest = os.path.join(os.path.expanduser("~"), rel)
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        if cfg.dry_run:
+            write_info(f"[dryrun] cp {local_path} {dest}")
+        else:
+            shutil.copy2(str(local_path), dest)
+        return
+
+    # 远端仍用相对路径（相对远端 HOME），兼容新版 sftp 后端与旧版 scp
+    scp_args = cfg.ssh_args("scp") + [str(local_path), f"{cfg.target()}:{rel}"]
+    if cfg.dry_run:
+        write_info(f"[dryrun] scp {' '.join(scp_args)}")
+        return
+    if _run(["scp"] + scp_args) != 0:
+        raise RuntimeError(f"scp 上传失败: {local_path}")
+
+
 def new_local_tar(source_dir, paths, excludes=None, dry_run=False, out_path=None):
     """生成本地 tar.gz：-C 指定源目录，后续参数为要打包的内容。
 
@@ -868,12 +895,12 @@ def create_backup(cfg: SshConfig, environment, env, components, *,
     with open(local_manifest, "w", encoding="utf-8") as fh:
         json.dump(manifest, fh, ensure_ascii=False, indent=2)
         fh.write("\n")
+    rel_manifest = f"{BACKUP_ROOT}/{environment}/{backup_id}/manifest.json"
     try:
-        # scp 远端用相对路径（相对远端 HOME），兼容新版 sftp 后端与旧版 scp
-        rel_target = f"{BACKUP_ROOT}/{environment}/{backup_id}/manifest.json"
-        scp_args = cfg.ssh_args("scp") + [local_manifest, f"{cfg.target()}:{rel_target}"]
-        if _run(["scp"] + scp_args) != 0:
-            raise RuntimeError("备份清单上传失败（已中止部署）")
+        try:
+            send_file(cfg, local_manifest, rel_manifest)
+        except RuntimeError as exc:
+            raise RuntimeError(f"备份清单上传失败（已中止部署）: {exc}") from exc
     finally:
         try:
             os.remove(local_manifest)
@@ -1068,6 +1095,7 @@ def build_ssh_config(args) -> SshConfig:
                      identity=identity, sudo_password=sudo_password,
                      dry_run=args.dry_run,
                      no_sudo=getattr(args, "no_sudo", False),
+                     local=getattr(args, "local", False),
                      remote_tmp=getattr(args, "remote_tmp", None) or "~/tmp")
 
 
@@ -1095,7 +1123,14 @@ def main_cli(args):
             args.skip_build = True
         if build_dir:
             cfg.local = True
-        if not artifact_dir and not build_dir and not repo_root.is_dir():
+
+        # 仅查询备份 / 执行回滚时不构建前端，无需 npm；本机模式不需要 ssh/scp
+        query_only = bool(args.list_backups or args.rollback)
+
+        # 回滚与列备份不读源码树（自托管 runner 上脚本可能单独缓存），
+        # 其余模式要求项目路径存在
+        if (not query_only and not artifact_dir and not build_dir
+                and not repo_root.is_dir()):
             raise RuntimeError(f"项目路径不存在: {repo_root}")
 
         components = parse_components(args.components)
@@ -1109,7 +1144,6 @@ def main_cli(args):
                 raise RuntimeError("必须提供远程服务器地址")
 
         # 仅查询备份 / 执行回滚时不构建前端，无需 npm；本机模式不需要 ssh/scp
-        query_only = bool(args.list_backups or args.rollback)
         if build_dir:
             required_tools = ["tar"]
             if "frontend" in components and not args.skip_build:
@@ -1566,6 +1600,9 @@ def build_parser():
                         help="跳过交互式确认（CI 非交互执行时必须指定）。")
     parser.add_argument("--no-sudo", dest="no_sudo", action="store_true",
                         help="supervisorctl 不加 sudo（服务器已给 supervisor 组 socket 权限时使用）。")
+    parser.add_argument("--local", dest="local", action="store_true",
+                        help="本机模式：目标机就是当前主机，全部操作用本机 bash 执行，"
+                             "不建立 ssh/scp 连接（自托管 runner 部署与回滚用）。")
     parser.add_argument("--remote-tmp", dest="remote_tmp", default="~/tmp",
                         help="远端暂存目录，默认 ~/tmp（scp 自动展开 ~，bash 侧自动转 $HOME）；"
                              "家目录亦不可写时可用绝对路径覆盖。")
