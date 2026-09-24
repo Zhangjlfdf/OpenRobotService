@@ -4,6 +4,7 @@
 discuss = 针对性：按 query 关键词触发日志/图片/代码/历史，组合讨论历史回复。
 """
 
+import asyncio
 import time
 
 from ai.core.logging import get_logger
@@ -20,9 +21,48 @@ from ai.agents.AiTaskPlatform.contexts import (
 
 logger = get_logger("TASK_AGENT")
 
+
+async def _client_cancelled(is_cancelled) -> bool:
+    """浏览器 AbortController 断开后，服务端应停止写评论、停止拉过程区。"""
+    if not is_cancelled:
+        return False
+    try:
+        res = is_cancelled()
+        if asyncio.iscoroutine(res):
+            res = await res
+        return bool(res)
+    except Exception:
+        return False
+
 # 澄清建议的稳定标记（P4）：追加"建议补充信息"时以该标记开头，
 # 后续轮次检测到此标记即视为"已建议过一次"，不再重复建议（只建议一次）。
 CLARIFY_SUGGEST_MARKER = "🔄 U老师已建议补充"
+
+
+async def _append_round_supplements(task_id: str, runtime_ctx: dict | None, prompt: str) -> str:
+    """把「插入本轮」邮箱 + 本轮已消费补充拼进最终回复 prompt。"""
+    extra: list[str] = []
+    try:
+        from ai.agents.AiTaskPlatform.runtime.inject_mailbox import drain, format_block
+        extra = await drain(task_id)
+    except Exception as e:
+        logger.warning(f"[discuss] inject drain 失败: {e}")
+        return prompt
+    bag: list[str] = []
+    if runtime_ctx is not None:
+        bag = list(runtime_ctx.get("round_supplements") or [])
+        bag.extend(extra)
+        runtime_ctx["round_supplements"] = bag
+    else:
+        bag = extra
+    try:
+        from ai.agents.AiTaskPlatform.runtime.inject_mailbox import format_block
+        block = format_block(bag)
+    except Exception:
+        block = ""
+    if not block:
+        return prompt
+    return f"{prompt}\n\n{block}"
 
 
 # ── 附件记忆「大脑决策」分类 ─────────────────────────────────────────
@@ -129,7 +169,8 @@ class DiscussFlow:
     # discuss — @U老师 讨论回复
     # ============================================================
 
-    async def discuss(self, task_id: str, query: str, context: dict, username: str = "") -> dict:
+    async def discuss(self, task_id: str, query: str, context: dict, username: str = "",
+                      is_cancelled=None) -> dict:
         """@U老师 讨论：基于讨论历史 + 工单上下文 + 按需附件/历史工单 回复。
 
         Supervisor 派发能力时的实时进度会通过后端 WS 广播 ai.progress，前端动态
@@ -227,6 +268,8 @@ class DiscussFlow:
                 "fault_code": ctx.fault_code or "",
                 "robot_type": ctx.robot_type or "",
             },
+            "is_cancelled": is_cancelled,
+            "round_supplements": [],
         }
         # @# 确定性引用已在本函数入口预加载注入（Q3c=B 主路径）→ 让大脑不再派发 ticket_ref，
         # 避免对同一个 @#编号 重复注入。只有当入口 query 没有顶层 @#（没有预加载）时，
@@ -629,11 +672,25 @@ class DiscussFlow:
             system_prompt = _select_system_prompt(self._is_platform_ticket(ctx), "discuss")
             max_tokens = 600
 
+        prompt = await _append_round_supplements(task_id, runtime_ctx, prompt)
+
         # 注入用户画像到 system prompt（有画像时追加，无画像保持原样）
         if user_profile_block:
             system_prompt = f"{system_prompt}\n\n{user_profile_block}"
         if memory_block:
             prompt = f"{prompt}\n\n{memory_block}"
+
+        if await _client_cancelled(is_cancelled):
+            logger.info(f"[discuss] 客户端已打断，跳过生成回复 task={task_id}")
+            return {
+                "task_id": task_id,
+                "reply": "",
+                "aborted": True,
+                "comment_id": None,
+                "reasoning_trace": reasoning_trace,
+                "_trace": self._pop_trace(),
+                "_total_ms": round((time.perf_counter() - t0) * 1000),
+            }
 
         t_llm = time.perf_counter()
         reply = await self._llm_client.complete(
@@ -702,6 +759,17 @@ class DiscussFlow:
         # 5. 回复写入 task_comments
         #    最终评论只写入纯粹答复（不含"分析过程"）——执行过程已通过 ai.progress
         #    WS 事件在前端动态展示，不污染最终回复。
+        if await _client_cancelled(is_cancelled):
+            logger.info(f"[discuss] 客户端已打断，不写评论 task={task_id}")
+            return {
+                "task_id": task_id,
+                "reply": "",
+                "aborted": True,
+                "comment_id": None,
+                "reasoning_trace": reasoning_trace,
+                "_trace": self._pop_trace(),
+                "_total_ms": round((time.perf_counter() - t0) * 1000),
+            }
         comment_reply = reply.strip()
         try:
             self._add_diagnosis_comment_short(int(task_id), comment_reply)

@@ -191,10 +191,16 @@ interface DiscussionPanelProps {
    *  收到真实 ai.progress 后用真实数据覆盖。用于 [帮我分析] 这类点击即触发、
    *  但 WS 首条 running 可能稍晚到达的场景，避免过程区“晚出现 / 闪一下”。 */
   optimisticAi?: boolean;
-  /** 分析进行中允许打断：过程区显示「打断」，点了由父级 abort 在途 discuss/diagnose */
+  /** 分析进行中允许停止当前轮：过程区显示「停止」，点了由父级 abort 在途 discuss/diagnose；队列保留 */
   onAbortAi?: () => void;
-  /** 父级每次新开一轮 U老师 分析时递增，用来清空上一轮过程区（含分析中再 @U老师 / 帮我分析） */
+  /** 父级每次真正新开一轮 U老师 分析时递增，用来清空上一轮过程区 */
   aiEpoch?: number;
+  /** 已排队、等本轮结束后再跑的 @U老师 原文（不上评论墙，只在过程区展示） */
+  aiQueueItems?: string[];
+  /** 把过程区里第 index 条排队提升为「插入本轮」 */
+  onInsertQueueItem?: (index: number) => Promise<boolean>;
+  /** 取消排队：这条不发了 */
+  onRemoveQueueItem?: (index: number) => void;
   /** 进场自动定位：目标评论 id（列表卡片点引用/参与人头像跳进来时传，滚动 + is-flash 高亮） */
   focusCommentId?: string | number | null;
   /** 进场无 commentId 时，按作者 username 定位到该作者在该工单的**最近一条**评论（参与人头像跳转用） */
@@ -221,6 +227,9 @@ export default function DiscussionPanel({
   optimisticAi = false,
   onAbortAi,
   aiEpoch = 0,
+  aiQueueItems = [],
+  onInsertQueueItem,
+  onRemoveQueueItem,
   focusCommentId = null,
   focusAuthor = null,
 }: DiscussionPanelProps) {
@@ -249,6 +258,7 @@ export default function DiscussionPanel({
   // 本轮开始时评论区最后一条 id：用来判断「新的 U老师回复」而不是历史回复。
   const runAnchorCommentIdRef = useRef<string | number | null>(null);
   const prevAiActiveRef = useRef<boolean>(aiActive);
+  const abortedRunIdsRef = useRef<Set<string>>(new Set());
 
   const dismissAiProcess = useCallback(() => {
     setAiRunId(undefined);
@@ -256,6 +266,12 @@ export default function DiscussionPanel({
     setAiPhase('done');
     clearAiProgress(taskId);
   }, [taskId]);
+
+  const abortShownRun = useCallback(() => {
+    const rid = aiRunIdRef.current;
+    if (rid) abortedRunIdsRef.current.add(rid);
+    dismissAiProcess();
+  }, [dismissAiProcess]);
 
   const applyAiProgress = useCallback((ev: { run_id?: string; phase: 'running' | 'done'; todos: AiProgressTodo[] }) => {
     if (ev.phase === 'done') {
@@ -272,18 +288,13 @@ export default function DiscussionPanel({
   }, [taskId, dismissAiProcess]);
 
   const handleWsAiProgress = useCallback((ev: { run_id?: string; phase: 'running' | 'done'; todos: AiProgressTodo[] }) => {
+    if (ev.run_id && abortedRunIdsRef.current.has(ev.run_id)) return;
     if (aiActiveRef.current) {
       applyAiProgress(ev);
       return;
     }
-    if (
-      ev.phase === 'running'
-      && aiPhaseRef.current === 'done'
-      && ev.run_id
-      && ev.run_id === aiRunIdRef.current
-    ) {
-      return;
-    }
+    // 用户已打断 / 过程区已收起：不要被服务端还在跑的同一轮进度重新拉开
+    if (ev.phase === 'running' && aiPhaseRef.current === 'done') return;
     applyAiProgress(ev);
   }, [applyAiProgress]);
 
@@ -306,8 +317,8 @@ export default function DiscussionPanel({
 
   useEffect(() => {
     if (!aiEpoch) return;
-    dismissAiProcess();
-  }, [aiEpoch, dismissAiProcess]);
+    abortShownRun();
+  }, [aiEpoch, abortShownRun]);
 
   // ── WS 实时订阅：合并基线评论与增量事件，含在线/输入中/已读 + U老师 进度 ──
   const {
@@ -908,10 +919,6 @@ export default function DiscussionPanel({
     const text = commentText.trim();
     const files = pendingFiles;
     const replyTo = quoted ? quoted.id : undefined;
-    if (text.includes('@U老师')) {
-      // 分析中再 @U老师：清过程区，父级会 abort 上一轮再开新轮
-      dismissAiProcess();
-    }
     let ok = false;
     try {
       ok = await onSend(text, files, replyTo !== undefined ? { replyTo } : undefined);
@@ -932,6 +939,15 @@ export default function DiscussionPanel({
     // 发送完成（无论成功/失败）焦点回到输入框，避免点「发送」按钮夺焦后需手动点回，支持连续输入；
     // textarea 始终挂载，下一帧渲染（sending 解除 disabled）后 focus 生效。
     setTimeout(() => { inputRef.current?.focus(); }, 0);
+  };
+
+  const handleInsertQueued = async (index: number) => {
+    if (!onInsertQueueItem) return;
+    try {
+      await onInsertQueueItem(index);
+    } catch (err) {
+      Toast({ message: `插入本轮失败: ${err instanceof Error ? err.message : ''}`, theme: 'error' });
+    }
   };
 
   // ── 长按操作菜单（微信式）：长按 400ms 或右键唤起 ──
@@ -1490,16 +1506,19 @@ export default function DiscussionPanel({
                 <i />
               </span>
               {!allTodosDone ? 'U老师 正在排查执行' : '排查执行完成'}
+              {aiQueueItems.length > 0 && (
+                <span className="detail-chat-ai-progress__queue">另有 {aiQueueItems.length} 条排队</span>
+              )}
               {onAbortAi && !allTodosDone && (
                 <button
                   type="button"
                   className="detail-chat-ai-progress__abort"
                   onClick={() => {
-                    dismissAiProcess();
+                    abortShownRun();
                     onAbortAi();
                   }}
                 >
-                  打断
+                  停止
                 </button>
               )}
             </div>
@@ -1531,6 +1550,35 @@ export default function DiscussionPanel({
                 );
               })}
             </ul>
+            {aiQueueItems.length > 0 && (
+              <ul className="detail-chat-ai-progress__queue-list">
+                {aiQueueItems.map((q, i) => (
+                  <li key={`${i}-${q.slice(0, 12)}`} className="detail-chat-ai-progress__queue-item">
+                    <span className="detail-chat-ai-progress__queue-text">
+                      排队 {i + 1}/{aiQueueItems.length}：{q.replace(/\s*@U老师\s*/g, ' ').trim() || q}
+                    </span>
+                    {onInsertQueueItem && (
+                      <button
+                        type="button"
+                        className="detail-chat-ai-progress__queue-insert"
+                        onClick={() => { void handleInsertQueued(i); }}
+                      >
+                        插入本轮
+                      </button>
+                    )}
+                    {onRemoveQueueItem && (
+                      <button
+                        type="button"
+                        className="detail-chat-ai-progress__queue-remove"
+                        onClick={() => onRemoveQueueItem(i)}
+                      >
+                        删除
+                      </button>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
         )}
         {(enableAI || (enableAttach && pendingFiles.length > 0)) && (

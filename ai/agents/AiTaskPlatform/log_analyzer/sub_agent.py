@@ -22,6 +22,7 @@
 """
 
 import json, re, os, time as _time
+import asyncio
 from pathlib import Path
 from typing import Optional, Dict, List
 
@@ -123,16 +124,40 @@ def _facts_to_text(facts: Dict) -> str:
     return "\n".join(lines)
 
 
+_RE_ROBOT_ID = re.compile(r"\b([A-Z]{2,6}[-_]\d{1,4})\b", re.I)
+_RE_WHEN = re.compile(
+    r"(?:(20\d{2})[-/])?(\d{1,2})[-/](\d{1,2})[ T日]*(\d{1,2}:\d{2})"
+)
+
+
 def _anchor_spotlight(facts: Dict, task: Dict, question: str) -> str:
-    """首轮程序化锚定：现象/时间窗/对象先算好，禁止 LLM 扫全量日志。"""
+    """首轮程序化锚定：现象/时间窗/对象先算好，禁止 LLM 扫全量日志。
+
+    用户问题里的车号/时刻优先于「错误最密集时段 / top 车型」，避免把 08-24 17:58
+    的单查到 08-22 13 时、把 XTD-96 查成日志里出现最多的 XTD-92。
+    """
     title = (task.get("title") or "").strip()
     summary = (task.get("problem_summary") or "").strip()
     phenomenon = question or summary or title or "（工单未写明现象）"
+    blob = " ".join(x for x in (question or "", title, summary) if x)
     robot = (task.get("robot_type") or "").strip()
+    m_bot = _RE_ROBOT_ID.search(question or "") or _RE_ROBOT_ID.search(blob)
     robots = facts.get("top_robots") or []
-    obj = robot or (robots[0] if robots else "（从客观事实里的车型选）")
+    obj = robot or (m_bot.group(1).upper() if m_bot else "") or (
+        robots[0] if robots else "（从客观事实里的车型选）"
+    )
+    m_when = _RE_WHEN.search(question or "") or _RE_WHEN.search(blob)
     hours = facts.get("error_hours") or []
-    if hours:
+    if m_when:
+        year, mon, day, hm = m_when.group(1), m_when.group(2), m_when.group(3), m_when.group(4)
+        if not year:
+            year = (facts.get("date") or "")[:4] or "2026"
+        stamp = f"{year}-{int(mon):02d}-{int(day):02d} {hm}"
+        window_hint = (
+            f"优先查用户给出的故障时刻 {stamp} 前后各约 10 分钟，"
+            "不要改用错误密集时段"
+        )
+    elif hours:
         window_hint = f"优先查错误密集时段 {hours[0][0]} 时附近（前后各 15 分钟），不要扫整天"
     else:
         ts, te = facts.get("time_start"), facts.get("time_end")
@@ -330,6 +355,9 @@ class LogSubAgent:
         task_context: Dict,
         user_question: str = "",
         progress=None,
+        is_cancelled=None,
+        task_id: str = "",
+        supplements_bag: Optional[list] = None,
     ) -> LogAnalysisResult:
         """主入口：多轮推理 → 返回分析结论。
 
@@ -362,8 +390,42 @@ class LogSubAgent:
             {"role": "user", "content": context_text},
         ]
         query_history: List[Dict] = []
+        tid = str(task_id or (task_context or {}).get("task_id") or "")
+
+        async def _pull_round_injects() -> None:
+            nonlocal user_question
+            if not tid:
+                return
+            try:
+                from ai.agents.AiTaskPlatform.runtime.inject_mailbox import drain
+                extras = await drain(tid)
+            except Exception:
+                extras = []
+            if not extras:
+                return
+            if supplements_bag is not None:
+                supplements_bag.extend(extras)
+            extra_txt = "\n".join(extras)
+            user_question = f"{user_question}\n{extra_txt}".strip() if user_question else extra_txt
+            messages.append({
+                "role": "user",
+                "content": f"工程师本轮补充（请纳入后续查询与结论，不要当成新一轮独立问题）:\n{extra_txt}",
+            })
 
         for round_num in range(1, self.MAX_ROUNDS + 1):
+            if is_cancelled is not None:
+                try:
+                    _c = is_cancelled()
+                    if asyncio.iscoroutine(_c):
+                        _c = await _c
+                    if _c:
+                        logger.info(f"LogSubAgent aborted by client at R{round_num}")
+                        result.conclusion = ""
+                        result.fallback_used = True
+                        break
+                except Exception:
+                    pass
+            await _pull_round_injects()
             _p({
                 "id": f"log_r{round_num}",
                 "description": f"日志分析第 {round_num} 轮：推理下一步查询",
@@ -655,9 +717,18 @@ def _validate_query(q: Dict, idx: LogIndex, facts: Dict) -> Dict:
     q["time_start"] = t_start
     q["time_end"] = t_end
 
-    # 2) 车型/任务过滤须命中索引，否则置空（防伪造 "100"）
+    # 2) 车型/任务：伪造纯数字置空；真实车号不在本日志里则保留，查询回 no match（禁止改成扫全车）
     robot = (q.get("robot_filter") or "").strip()
-    q["robot_filter"] = (idx.valid_robot(robot) or "") if robot else ""
+    if robot:
+        hit = idx.valid_robot(robot)
+        if hit:
+            q["robot_filter"] = hit
+        elif re.search(r"[A-Za-z]", robot):
+            q["robot_filter"] = robot
+        else:
+            q["robot_filter"] = ""
+    else:
+        q["robot_filter"] = ""
 
     task = (q.get("task_filter") or "").strip()
     q["task_filter"] = (idx.valid_task(task) or "") if task else ""

@@ -297,6 +297,7 @@ class Supervisor:
         t0 = _time.perf_counter()
         caps = available_caps or CapabilityRegistry.list_available()
         self._runtime_ctx = runtime_ctx or {}  # 供 _dispatch 注入给能力
+        self._runtime_ctx.setdefault("round_supplements", [])
         self._on_progress = on_progress  # 实时进度回调（逐项能力推送，供前端动态展示）
 
         def _emit(phase: str, td: dict) -> None:
@@ -330,6 +331,7 @@ class Supervisor:
             }
 
         # 4. 执行 plan（派生子任务）
+        await self._consume_injects(todo, _emit)
         results = await self._dispatch(decision.plan, todo, max_sub_tasks, _emit)
 
         # 5. 汇总
@@ -447,6 +449,9 @@ class Supervisor:
             try:
                 async with sem:
                     kwargs = {"query": step.get("goal", "")}
+                    extra = "\n".join(self._runtime_ctx.get("round_supplements") or [])
+                    if extra:
+                        kwargs["query"] = f"{kwargs['query']}\n\n工程师本轮补充:\n{extra}".strip()
                     kwargs.update(self._runtime_ctx)
                     for extra_key in ("window_minutes", "occurred_at", "params"):
                         if extra_key in step and step[extra_key] is not None:
@@ -458,6 +463,7 @@ class Supervisor:
             todo.mark_done(todo_item.id, result=str(res_dict.get("text", ""))[:80])
             if emit is not None:
                 emit("done", {"id": todo_item.id, "description": todo_item.description, "status": "completed", "capability": cap_name})
+            await self._consume_injects(todo, emit)
             return cap_name, res_dict
 
         if any(step.get("parallel") for _, step in indexed_plan) and len(indexed_plan) > 1:
@@ -471,6 +477,7 @@ class Supervisor:
                     continue
                 name, res = item
                 results[name] = res
+            await self._consume_injects(todo, emit)
             return results
 
         results = {}
@@ -480,6 +487,34 @@ class Supervisor:
             if _result_terminated(res):
                 break
         return results
+
+    async def _consume_injects(self, todo: TodoList, emit: Optional[Callable] = None) -> None:
+        """能力边界读取「插入本轮」邮箱：不中断当前步骤，只纳入后续能力/最终答复。"""
+        ctx = self._runtime_ctx or {}
+        current = ctx.get("current_task") or {}
+        task_id = str(current.get("task_id") or ctx.get("task_id") or "")
+        if not task_id:
+            return
+        try:
+            from ai.agents.AiTaskPlatform.runtime.inject_mailbox import drain
+            texts = await drain(task_id)
+        except Exception as e:
+            logger.warning(f"[supervisor] inject drain 失败: {e}")
+            return
+        if not texts:
+            return
+        bag = ctx.setdefault("round_supplements", [])
+        bag.extend(texts)
+        preview = "；".join(t.replace("\n", " ")[:40] for t in texts)
+        item = todo.add(f"本轮补充：{preview[:60]}", capability="inject")
+        todo.mark_done(item.id, result="已纳入本轮")
+        if emit is not None:
+            emit("done", {
+                "id": item.id,
+                "description": item.description,
+                "status": "completed",
+                "capability": "inject",
+            })
 
     # ── 汇总 ──
     @staticmethod

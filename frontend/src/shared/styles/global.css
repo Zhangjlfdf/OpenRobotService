@@ -7269,6 +7269,59 @@ html, body, #root {
 .detail-chat-ai-progress__abort:hover {
   color: var(--primary);
 }
+.detail-chat-ai-progress__queue {
+  font-weight: 500;
+  color: var(--muted-foreground);
+}
+.detail-chat-ai-progress__queue-list {
+  margin: 4px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.detail-chat-ai-progress__queue-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--muted-foreground);
+  line-height: 1.5;
+  padding: 2px 0 2px 22px;
+}
+.detail-chat-ai-progress__queue-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.detail-chat-ai-progress__queue-insert {
+  flex-shrink: 0;
+  border: 0;
+  background: transparent;
+  color: var(--primary);
+  font-size: 12px;
+  font-weight: 500;
+  padding: 0;
+  cursor: pointer;
+}
+.detail-chat-ai-progress__queue-insert:hover {
+  text-decoration: underline;
+}
+.detail-chat-ai-progress__queue-remove {
+  flex-shrink: 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  font-weight: 500;
+  padding: 0;
+  cursor: pointer;
+}
+.detail-chat-ai-progress__queue-remove:hover {
+  color: var(--destructive, #d54941);
+  text-decoration: underline;
+}
 .detail-chat-ai-progress__spinner {
   display: inline-flex;
   align-items: center;

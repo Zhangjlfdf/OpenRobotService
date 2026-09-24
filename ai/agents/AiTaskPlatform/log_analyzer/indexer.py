@@ -442,11 +442,10 @@ class LogIndex:
                           (q.path_filter, self._path_idx)]:
             if fval:
                 s = set()
-                # 部分匹配：LLM 可能只传 "1098000" 而索引 key 是 "I|1098000"
                 for key, lines in idx.items():
                     if fval in key:
                         s.update(lines)
-                if s: filters.append(s)
+                filters.append(s)
         if q.error_only: filters.append(set(self._err_lines))
 
         if filters:
@@ -456,6 +455,9 @@ class LogIndex:
             cand = set(self._err_lines[:q.max_results])
 
         if not cand:
+            if q.robot_filter:
+                known = ",".join(list(self._robot_idx)[:8]) or "none"
+                return "(no match: robot={} 不在本日志; known={})".format(q.robot_filter, known)
             # 降级：把时间窗口行 + 错误行合并，给 LLM 一些数据
             if q.time_start and q.time_end:
                 for ts, lines in self._ts_idx.items():
