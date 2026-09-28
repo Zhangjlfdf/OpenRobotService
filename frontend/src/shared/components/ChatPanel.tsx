@@ -3603,8 +3603,9 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
                 )}
                 {/* 代他人提单：AI 从对话识别到「帮张三提个单」时预填姓名，由用户确认到具体人。
                     选填 —— 不选即普通自提单，行为与改造前一致。 */}
+                {/* 标题固定「被代理人」，不再追加「· 代提」标记；未选时仅提示选填 */}
                 <label className="ticket-confirm__label">
-                  被代理人 {onBehalfUser ? <span style={{ color: 'var(--primary)' }}>· 代提</span> : <span className="ticket-confirm__hint">（选填）</span>}
+                  被代理人 {!onBehalfUser && <span className="ticket-confirm__hint">（选填）</span>}
                 </label>
                 {/* AI 从对话里识别到「帮张三提个单」时只给姓名，这里提示用户手动选到具体人 */}
                 {!onBehalfUser && ticketConfirm.draft?.on_behalf_of_name ? (
