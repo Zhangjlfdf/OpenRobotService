@@ -1143,7 +1143,8 @@ def _proxy_relation_response(relation, roles) -> ProxyRelationResponse:
         is_principal=roles.is_principal or roles.is_pending_principal,
         is_assignee=roles.is_assignee,
         agent_name=user_map.get(agent_id) or getattr(relation, "agent_username", None) or agent_id,
-        principal_name=user_map.get(principal_id) or getattr(relation, "principal_username", None) or principal_id,
+        # 未注册 / 未实名的 wechat id 不下发裸 id，前端缺省「代未知用户提交」
+        principal_name=user_map.get(principal_id),
         notified_at=relation.notified_at,
         acked_at=relation.acked_at,
         declined_at=relation.declined_at,
