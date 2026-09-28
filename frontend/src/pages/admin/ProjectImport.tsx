@@ -10,16 +10,18 @@
 // （POST /info-nodes/ledger-sync/all，见 backend/docs/...5.18）。
 //
 // 两个必须的护栏：
-//   ① 仅管理员/超级管理员可见可点——与后端 get_current_admin_user 同一判据
-//      （permissions 含 admin，与项目工单卡「配置阻滞权重」一致）；接口是直连可达的，
-//      真正的闸门在后端，这里只是不给无权的人一个点了就报错的按钮。
+//   ① 仅「全局角色 超级管理员」或「有管理员权限（permissions 含 admin）」的人可见可点
+//      ——判据是 PERM_PROJECT_LEDGER_IMPORT 权限码：超级管理员由后端按全局角色名派生、
+//      随登录态下发（2026-09-28 用户口径，此前只有 admin 看得到），admin 直通；
+//      接口是直连可达的，真正的闸门在后端（require_permission 读同一个码），
+//      这里只是不给无权的人一个点了就报错的按钮。
 //   ② 点了先二次确认：写的是全体项目的数据，误触代价大；确认文案把「会覆盖什么」写清楚，
 //      并说明不新建节点、不删节点。
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Dialog, Toast } from 'tdesign-mobile-react';
 import { importAllProjectsLedgerApi } from '@/api/infoNodes';
-import { useAuthStore } from '@/stores/auth';
+import { useAuthStore, PERM_PROJECT_LEDGER_IMPORT } from '@/stores/auth';
 
 const errMsg = (err: unknown, fallback: string) =>
   err instanceof Error && err.message ? err.message : fallback;
@@ -37,8 +39,9 @@ function summaryText(result: Awaited<ReturnType<typeof importAllProjectsLedgerAp
 
 export default function ProjectImport() {
   const navigate = useNavigate();
-  // 一键导入是全局批量写，闸门与后端 get_current_admin_user 对齐（permissions 含 admin）
-  const canImportAll = useAuthStore((s) => Array.isArray(s.permissions) && s.permissions.includes('admin'));
+  // 一键导入是全局批量写：后端按全局角色「超级管理员」派生权限码随登录态下发，admin 直通，
+  // 这里读同一个码（与详情模板页 canEditTemplate 同一写法）
+  const canImportAll = useAuthStore((s) => s.hasPermission(PERM_PROJECT_LEDGER_IMPORT));
   const [importing, setImporting] = useState(false);
 
   const runImportAll = async () => {
