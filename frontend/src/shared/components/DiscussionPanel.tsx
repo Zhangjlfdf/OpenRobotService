@@ -7,7 +7,7 @@
 import { useState, useRef, useEffect, useMemo, useCallback, Fragment } from 'react';
 import { Button, Toast, Popover } from 'tdesign-mobile-react';
 import { Paperclip, Send, Smile } from 'lucide-react';
-import MarkdownRenderer from '@/shared/components/MarkdownRenderer';
+import MarkdownRenderer, { ClipboardRefContext } from '@/shared/components/MarkdownRenderer';
 import AttachmentViewer, { type AttachmentViewItem } from '@/shared/components/AttachmentViewer';
 import AvatarImg from '@/shared/components/AvatarImg';
 import EmojiPicker from '@/shared/components/EmojiPicker';
@@ -18,6 +18,8 @@ import API_CONFIG from '@/config/api';
 import { avatarUrl } from '@/api/profile';
 import { parseUtcDate } from '@/shared/utils/url';
 import { dedupeFileNames } from '@/shared/utils/uniqueFileNames';
+import { TEXT_INPUT_LIMIT, spillOverLimit, makeSpillFile, insertSpillName, appendAttachmentNames, readClipboardText, clipboardLabel } from '@/shared/utils/textOverflowAttachment';
+import { attachmentPreviewKind, commentFileProxyUrl } from '@/shared/utils/attachmentPreview';
 import { useTaskCommentsWS, type OnlineMember } from '@/shared/hooks/useTaskCommentsWS';
 import { ReadReporter } from '@/shared/utils/readReceipt';
 import { fetchCommentReadList, reportCommentRead } from '@/api/taskRead';
@@ -108,8 +110,22 @@ function richerTodos(a?: AiProgressTodo[] | null, b?: AiProgressTodo[] | null): 
   return countTodoNodes(left) >= countTodoNodes(right) ? left : right;
 }
 
+const CAP_LABELS: Record<string, string> = {
+  attachment_parse: '读取附件',
+  log_analyze: '日志分析',
+  image_analyze: '图片分析',
+  retrieve_history: '检索历史相似工单',
+  retrieve_troubleshooting: '检索排查树',
+  retrieve_kb: '检索知识库',
+  code_search: '代码检索',
+  ticket_ref: '引用工单',
+  memory_store: '写入记忆',
+  memory_recall: '读取记忆',
+  planning: '规划排查步骤',
+};
+
 function ProgressTodoItem({ t }: { t: AiProgressTodo }) {
-  const desc = t.description || t.capability || '分析';
+  const desc = t.description || (t.capability ? CAP_LABELS[t.capability] : '') || t.capability || '分析';
   const status = t.phase === 'done' || t.status === 'completed';
   const running = t.phase === 'running' || t.status === 'in_progress';
   const children = Array.isArray(t.children) ? t.children : [];
@@ -330,6 +346,7 @@ export default function DiscussionPanel({
 
   const dismissAiProcess = useCallback(() => {
     persistProgress('done');
+    aiTodosRef.current = [];
     setAiRunId(undefined);
     setAiTodos([]);
     setAiPhase('done');
@@ -366,9 +383,11 @@ export default function DiscussionPanel({
       applyAiProgress(ev);
       return;
     }
-    // 不在本页这一轮：迟到的 done 只更新快照/已灌回的 todo，不要把过程区再藏起来。
+    // 本页开过这一轮（有 runAnchor）：回复上屏后过程区已收起，迟到的进度包只写快照，不要再展开。
+    const startedHere = runAnchorCommentIdRef.current != null;
     if (ev.phase === 'done') {
       persistProgress('done', ev.todos?.length ? ev.todos : aiTodosRef.current, ev.run_id || aiRunIdRef.current);
+      if (startedHere) return;
       if (aiTodosRef.current.length > 0) {
         const shown = readAiProgress(taskId)?.todos || [];
         if (shown.length) {
@@ -378,7 +397,7 @@ export default function DiscussionPanel({
       }
       return;
     }
-    if (aiPhaseRef.current === 'done') return;
+    if (startedHere || aiPhaseRef.current === 'done') return;
     applyAiProgress(ev);
   }, [applyAiProgress, persistProgress, taskId]);
 
@@ -538,6 +557,21 @@ export default function DiscussionPanel({
   /** 表情选择器显隐：点表情按钮切换，点面板外部 / 发送后收起 */
   const [showEmoji, setShowEmoji] = useState(false);
   const [pendingFiles, setPendingFiles] = useState<File[]>([]);
+  const pendingFilesRef = useRef(pendingFiles);
+  pendingFilesRef.current = pendingFiles;
+  const [spillHintKey, setSpillHintKey] = useState(0);
+  const spillHintTimer = useRef<number | null>(null);
+  const notifySpill = useCallback(() => {
+    setSpillHintKey((k) => k + 1);
+    if (spillHintTimer.current) window.clearTimeout(spillHintTimer.current);
+    spillHintTimer.current = window.setTimeout(() => {
+      setSpillHintKey(0);
+      spillHintTimer.current = null;
+    }, 3200);
+  }, []);
+  useEffect(() => () => {
+    if (spillHintTimer.current) window.clearTimeout(spillHintTimer.current);
+  }, []);
   const [viewer, setViewer] = useState<AttachmentViewItem | null>(null);
   // 待发送图片的预览 objectURL（与 pendingFiles 一一对应，非图片为空串），
   // 让用户一眼区分多张同名图片（如剪贴板默认 image.png）；依赖变化时自动 revoke 旧 URL。
@@ -795,7 +829,14 @@ export default function DiscussionPanel({
   // ── @mention: 检测 @ 触发 + 自动增高 ──
   const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const el = e.target;
-    const val = el.value;
+    let val = el.value;
+    const spilled = spillOverLimit(val, pendingFilesRef.current.map((f) => f.name));
+    if (spilled.filename) {
+      val = spilled.text;
+      el.value = val;
+      setPendingFiles((prev) => [...prev, makeSpillFile(spilled.content, spilled.filename!)]);
+      notifySpill();
+    }
     setCommentText(val);
 
     // 自动增高：先归零再用 scrollHeight 撑开
@@ -995,10 +1036,40 @@ export default function DiscussionPanel({
         pastedFiles.push(e.clipboardData.files[i]);
       }
     }
-    if (pastedFiles.length > 0) {
+    const realFiles = pastedFiles.filter((f) => f.size > 0);
+    if (realFiles.length > 0) {
       e.preventDefault();
       // 与已有待发送文件合并后去重重命名，避免多张同名图片（如剪贴板默认 image.png）在预览/上传时混淆
-      setPendingFiles((prev) => dedupeFileNames([...prev, ...pastedFiles]));
+      setPendingFiles((prev) => dedupeFileNames([...prev, ...realFiles]));
+      return;
+    }
+    const pasted = readClipboardText(e);
+    if (!pasted) return;
+    const ta = e.currentTarget;
+    const start = ta.selectionStart ?? commentText.length;
+    const end = ta.selectionEnd ?? start;
+    const before = commentText.slice(0, start);
+    const after = commentText.slice(end);
+    const names = pendingFilesRef.current.map((f) => f.name);
+    if (pasted.length > TEXT_INPUT_LIMIT) {
+      e.preventDefault();
+      const spilled = spillOverLimit(pasted, names);
+      if (!spilled.filename) return;
+      const nextInput = insertSpillName(before, spilled.text, after);
+      setCommentText(nextInput.length <= TEXT_INPUT_LIMIT ? nextInput : spilled.text);
+      setPendingFiles((prev) => [...prev, makeSpillFile(spilled.content, spilled.filename!)]);
+      notifySpill();
+      return;
+    }
+    const next = before + pasted + after;
+    if (next.length > TEXT_INPUT_LIMIT) {
+      e.preventDefault();
+      const spilled = spillOverLimit(next, names);
+      setCommentText(spilled.text);
+      if (spilled.filename) {
+        setPendingFiles((prev) => [...prev, makeSpillFile(spilled.content, spilled.filename!)]);
+        notifySpill();
+      }
     }
   };
 
@@ -1006,8 +1077,14 @@ export default function DiscussionPanel({
 
   const handleSend = async () => {
     if (!canSend) return;
-    const text = commentText.trim();
-    const files = pendingFiles;
+    const text0 = commentText.trim();
+    let files = pendingFiles;
+    const spilled = spillOverLimit(text0, files.map((f) => f.name));
+    const text = spilled.text.trim();
+    if (spilled.filename) {
+      files = [...files, makeSpillFile(spilled.content, spilled.filename)];
+      notifySpill();
+    }
     const replyTo = quoted ? quoted.id : undefined;
     let ok = false;
     try {
@@ -1127,7 +1204,8 @@ export default function DiscussionPanel({
   };
   const handleCopy = () => {
     if (!menu) return;
-    const text = stripHtml(menu.comment.content);
+    const names = (menu.comment.attachments || []).map((a) => parseAttachment(a).filename);
+    const text = appendAttachmentNames(stripHtml(menu.comment.content), names);
     const done = () => Toast({ message: '已复制', theme: 'success' });
     if (navigator.clipboard && window.isSecureContext) {
       navigator.clipboard.writeText(text).then(done, () => fallbackCopy(text));
@@ -1333,20 +1411,44 @@ export default function DiscussionPanel({
                           />
                         );
                       }
-                      return <MarkdownRenderer content={replaceWechatEmoji(c.content)} compact />;
+                      return (
+                        <ClipboardRefContext.Provider
+                          value={(filename) => {
+                            const hit = (c.attachments || []).map(parseAttachment).find((a) => (
+                              a.filename === filename
+                              || clipboardLabel(a.filename) === clipboardLabel(filename)
+                              || /clipboard/i.test(a.filename)
+                            ));
+                            if (!hit?.objectPath) return;
+                            const url = commentFileProxyUrl(API_CONFIG.TASKS.BASE_URL, hit.objectPath);
+                            const raw = (c.attachments || []).find((a) => parseAttachment(a).filename === hit.filename);
+                            const name = hit.filename || filename;
+                            setViewer({
+                              filename: name,
+                              size: typeof raw === 'object' && raw ? raw.size : undefined,
+                              previewUrl: url,
+                              downloadUrl: url,
+                              previewKind: attachmentPreviewKind(name, url),
+                            });
+                          }}
+                        >
+                          <MarkdownRenderer content={replaceWechatEmoji(c.content)} compact />
+                        </ClipboardRefContext.Provider>
+                      );
                     })()}
                     {c.attachments && c.attachments.length > 0 && (
                       <div className="detail-chat-attachments">
                         {c.attachments.map((a, i) => {
                           const att = parseAttachment(a);
                           if (!att.objectPath) return null;
-                          const url = `${API_CONFIG.TASKS.BASE_URL}/files/${att.objectPath}`;
+                          const url = commentFileProxyUrl(API_CONFIG.TASKS.BASE_URL, att.objectPath);
                           const openViewer = () =>
                             setViewer({
                               filename: att.filename || 'file',
                               size: typeof a === 'object' ? a.size : undefined,
                               previewUrl: url,
                               downloadUrl: url,
+                              previewKind: attachmentPreviewKind(att.filename || 'file', url),
                             });
                           if (att.isImage) {
                             return (
@@ -1535,6 +1637,11 @@ export default function DiscussionPanel({
         <div className="detail-chat-typing">{typingName} 正在输入…</div>
       )}
       <div className="detail-chat-input" style={{ position: 'relative' }}>
+        {spillHintKey > 0 && (
+          <div key={spillHintKey} className="detail-chat-spill-hint" role="status">
+            超出 {TEXT_INPUT_LIMIT} 字限制，已自动转为附件
+          </div>
+        )}
         {/* 引用条：引用某条消息后显示在输入框上方，可点击定位/取消 */}
         {quoted && (
           <div className="detail-chat-quote-bar">
@@ -1668,7 +1775,7 @@ export default function DiscussionPanel({
                     ) : (
                       <span className="detail-chat-file__icon">📄</span>
                     )}
-                    <span className="detail-chat-file__name">{f.name}</span>
+                    <span className="detail-chat-file__name">{clipboardLabel(f.name)}</span>
                     <button type="button" onClick={() => removeFile(i)} aria-label="移除">×</button>
                   </span>
                 ))}
