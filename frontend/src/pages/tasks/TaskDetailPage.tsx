@@ -314,14 +314,14 @@ export default function TaskDetailPage() {
           .then((res) => setStepTemplate(res?.data?.steps || []))
           .catch(() => setStepTemplate([]));
 
-        // 获取项目成员用于 @ 提及（无项目时也能拉到提单人和被指派人）
+        # 获取项目成员用于 @ 提及（无项目时也能拉到提单人、处理人和代提单人）
         getProjectMembers(detailId)
           .then((members) => {
-            const reporterUsername = t.created_by;
+            const pinRoles = ['提单人', '处理人', '代提单人'];
             const sorted = [...members].sort((a, b) => {
-              if (a.username === reporterUsername) return -1;
-              if (b.username === reporterUsername) return 1;
-              return 0;
+              const ai = pinRoles.indexOf(a.role_name || '');
+              const bi = pinRoles.indexOf(b.role_name || '');
+              return (ai === -1 ? pinRoles.length : ai) - (bi === -1 ? pinRoles.length : bi);
             });
             setProjectMembers(sorted);
           })

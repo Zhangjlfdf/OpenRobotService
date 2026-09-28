@@ -60,7 +60,7 @@ from app.utils.notification_utils import NotificationUtils, _format_shanghai
 from app.integrations.api import verify_sync_api_key, verify_robot_alarm_api_key
 from app.services.identity_service import IdentityService
 from app.core.config import settings
-from app.core.user_identity import user_matches, is_admin_user, to_user_id, actor_username, identity_keys
+from app.core.user_identity import user_matches, is_admin_user, to_user_id, actor_username, identity_keys, same_identity
 from app.services.redispatch_tip_service import (  # 派单说明：列表/气泡/详情同一出口
     build_redispatch_tip,
     clean_reasoning_for_display,
@@ -1263,7 +1263,7 @@ async def get_task_project_members(
 ):
     """获取任务关联项目的成员列表 + 工单处理人（用于讨论区 @ 提及）。
 
-    all=false：仅返回提单人/处理人 + 项目成员（默认候选池）。
+    all=false：仅返回处理人/提单人/代提单人 + 项目成员（默认候选池）。
     all=true：在前者基础上再追加全部 active 在职用户（已去重），
              使讨论区输入 @关键字 时可过滤到项目外的人。
     """
@@ -1280,7 +1280,7 @@ async def get_task_project_members(
 
         project_id = getattr(ticket, "project_id", None)
 
-        # ── 1. 提单人和被指派人始终排在最前面 ──
+        # ── 1. 处理人 / 提单人 / 代提单人始终排在最前面 ──
         key_users = []
         assigned_to = getattr(ticket, "assigned_to", None)
         created_by = getattr(ticket, "created_by", None)
@@ -1288,6 +1288,19 @@ async def get_task_project_members(
             key_users.append((assigned_to, "处理人"))
         if created_by and created_by != assigned_to:
             key_users.append((created_by, "提单人"))
+
+        # 代他人提单：被代理人一并置顶，角色标为「代提单人」（与提单人、处理人并列）
+        try:
+            proxy = await ProxyRelationService.get_task_relation(db, task_id)
+        except Exception:
+            logger.warning("读取代提关系失败，@ 列表不置顶代提单人: task_id=%s", task_id, exc_info=True)
+            proxy = None
+        if proxy:
+            principal_key = (getattr(proxy, "principal_username", None) or "").strip() or (
+                getattr(proxy, "principal_id", None) or ""
+            ).strip()
+            if principal_key and not any(same_identity(principal_key, existing) for existing, _ in key_users):
+                key_users.append((principal_key, "代提单人"))
 
         if key_users:
             from app.core.db import SessionLocal
@@ -1311,8 +1324,8 @@ async def get_task_project_members(
             finally:
                 sync_db.close()
 
-        # ── 2. 提单人/处理人 + 项目成员 ──
-        # 即使没有项目也能 @ 提单人和处理人
+        # ── 2. 处理人/提单人/代提单人 + 项目成员 ──
+        # 即使没有项目也能 @ 处理人、提单人和代提单人
         if project_id:
             members = db_manager.get_project_members(project_id, include_usp=False)
             for m in members:
