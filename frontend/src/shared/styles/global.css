@@ -1442,17 +1442,31 @@ html, body, #root {
 /* ── 详情页代理关系横幅 ─────────────────────────────────────────── */
 
 .proxy-banner {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 10px;
   margin: 0 0 12px;
   padding: 12px 14px 12px 12px;
-  /* 毛玻璃卡片（同 .surface-card 规范）+ 左侧主色竖条 */
-  background: color-mix(in oklab, var(--card) 80%, transparent);
+  /* 实底白卡 + 左侧主色竖条。不用 .surface-card 的 80% 半透明白：
+     半透明会让页面底色从卡片底边/顶边透出，视觉上「白色不闭合」。 */
+  background: var(--card);
   border: 1px solid color-mix(in oklab, var(--border) 60%, transparent);
-  border-left: 3px solid var(--primary);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-soft);
+  /* 竖条用 ::before 而非 border-left：border-left(3px) 与其余 1px 描边在
+     圆角处按对角线混色，左上/左下角会露出浅色缺口；伪元素 + overflow 裁切可完整闭合。 */
+  overflow: hidden;
+}
+
+.proxy-banner::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: var(--primary);
 }
 
 .proxy-banner--action {
@@ -1461,12 +1475,14 @@ html, body, #root {
   gap: 12px;
   /* 待办提示用品牌主色软底（--blue-1 是深蓝色阶，不可作背景色） */
   background: var(--primary-soft);
-  border-left-color: var(--primary);
 }
 
 .proxy-banner--muted {
   background: var(--muted);
-  border-left-color: var(--border);
+}
+
+.proxy-banner--muted::before {
+  background: var(--border);
 }
 
 .proxy-banner__text {

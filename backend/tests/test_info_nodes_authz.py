@@ -28,6 +28,7 @@ from app.modules.admin.api.auth import get_current_active_user_from_token
 from app.modules.admin.api.info_nodes import info_node_router
 from app.services.permission_service import PERM_PROJECT_INFO_TEMPLATE, PermissionService
 from app.modules.admin.services.info_node_service import info_node_service
+from app.modules.admin.services.info_template_service import info_template_service
 
 # 默认调用者：普通登录用户，哪个项目下都没有角色
 CALLER = {"id": "u-1", "username": "bob", "name": "Bob", "permissions": [], "roles": {}}
@@ -36,6 +37,16 @@ MEMBER_OF = {"P1"}
 
 GATE_DENIED = "只有该项目下的人员可以编辑项目信息树"
 TEMPLATE_ONLY = "全局字段定义请在「详情模板」里修改"
+# get_template 的真实返回形状，见 info_template_service.get_template()
+TEMPLATE = {
+    "id": "default",
+    "name": "项目详情模板",
+    "nodes": [],
+    "updated_at": None,
+    "updated_by": None,
+    "project_count": 0,
+    "source": "db",
+}
 
 
 @pytest.fixture
@@ -70,7 +81,24 @@ def svc(monkeypatch):
 
 
 @pytest.fixture
-def client(caller, member_calls, svc, monkeypatch):
+def template_svc(monkeypatch):
+    """模板服务同样打桩：模板那两条用例只看闸门放不放行，不该连库。
+
+    `/template` 走的是 info_template_service（不是 info_node_service），
+    漏打桩会让用例在无 MySQL 的环境（CI、本机没起库时）直接 ConnectionRefused。
+    """
+    mocks = SimpleNamespace(
+        get_template=MagicMock(return_value=dict(TEMPLATE)),
+        preview_sync=MagicMock(return_value={"changed": 0}),
+        save_and_sync=MagicMock(return_value={"changed": 0}),
+    )
+    for name, mock in vars(mocks).items():
+        monkeypatch.setattr(info_template_service, name, mock)
+    return mocks
+
+
+@pytest.fixture
+def client(caller, member_calls, svc, template_svc, monkeypatch):
     app = FastAPI()
     app.include_router(info_node_router, prefix="/api/admin")
     app.dependency_overrides[get_current_active_user_from_token] = lambda: caller

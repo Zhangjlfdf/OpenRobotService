@@ -243,9 +243,11 @@ class TicketService:
                         ticket, "proxy_agent_name",
                         user_map.get(rel.agent_id) or rel.agent_username or rel.agent_id,
                     )
+                    # 被代提人姓名：仅取注册用户实名（user_map 命中）；
+                    # 未注册 / 未实名的 wechat id 不裸奔，回 None 由前端缺省「代未知用户提交」。
                     setattr(
                         ticket, "proxy_principal_name",
-                        user_map.get(rel.principal_id) or rel.principal_username or rel.principal_id,
+                        user_map.get(rel.principal_id),
                     )
                 else:
                     setattr(ticket, "proxy_agent_name", None)
