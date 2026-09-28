@@ -3,6 +3,7 @@ import { DatePicker } from 'antd';
 import dayjs from 'dayjs';
 import { AlarmClock } from 'lucide-react';
 import type { ComponentProps } from 'react';
+import { useState } from 'react';
 import type { useStepNegotiation, StepNegotiationTicket } from '@/shared/hooks/useStepNegotiation';
 import { getDeadlineRange, makeDisabledDate, makeDisabledTime, parseDeadlineString } from '@/shared/utils/deadline';
 import { formatRawDateTime } from '@/shared/utils/url';
@@ -25,6 +26,7 @@ export interface StepCardTicket extends StepNegotiationTicket {
   priority?: string;
   created_at?: string;
   comments?: Array<{ content?: string; created_at?: string }>;
+  metadata_info?: Record<string, unknown>;
 }
 
 interface StepRoles {
@@ -48,6 +50,8 @@ interface StepNegotiationCardProps {
   onEscalate: (round: number, maxRound: number) => void;
   /** 重新指派 → 父组件打开重新指派弹窗 */
   onReassign: () => void;
+  /** 暂停请求回应：确认暂停（→pending，无理由）或驳回（→in_progress，必须带理由） */
+  onPauseResponse?: (nextStatus: 'pending' | 'in_progress', rejectReason?: string) => void;
 }
 
 /**
@@ -63,6 +67,7 @@ export default function StepNegotiationCard({
   onResolve,
   onEscalate,
   onReassign,
+  onPauseResponse,
 }: StepNegotiationCardProps) {
   const {
     stepTemplate, responding, completing,
@@ -92,6 +97,14 @@ export default function StepNegotiationCard({
   const total = stepTemplate.length;
   const currIdx = stepTemplate.findIndex((s) => s.id === detail?.curr_step_id);
   const stepName = detail?.curr_step_name || (currIdx >= 0 ? stepTemplate[currIdx].step_name : '');
+  // 暂停请求理由（metadata_info.pause_reason，仅 pending_requested 状态存在）
+  const pauseReason = (detail?.metadata_info as Record<string, unknown> | undefined)?.pause_reason as string | undefined;
+  // 上一次驳回理由（metadata_info.reject_reason，仅 IN_PROGRESS 状态存在，处理人侧可见）
+  const rejectReason = (detail?.metadata_info as Record<string, unknown> | undefined)?.reject_reason as string | undefined;
+
+  // 驳回暂停理由弹窗（本地 state，仅组件内部使用）
+  const [showRejectPopup, setShowRejectPopup] = useState(false);
+  const [rejectReasonDraft, setRejectReasonDraft] = useState('');
   // 尚未开始阶段性处理（当前节点未初始化）→ 整卡隐藏
   if (!stepName) return null;
 
@@ -357,19 +370,46 @@ export default function StepNegotiationCard({
             )}
           </div>
         ) : isPauseRequested ? (
-          // 暂停请求中：阶段协商/推进操作已冻结，等待提单人侧在顶部确认或驳回
+          // 暂停请求中：阶段协商/推进操作已冻结，回应按钮放在卡内
           <div style={{
-            display: 'flex', alignItems: 'center', gap: 8,
             padding: '10px 14px', background: 'var(--apricot-soft)',
             borderRadius: 'var(--radius-sm)', borderLeft: '3px solid var(--apricot)',
             fontSize: 13, color: 'var(--foreground)',
           }}>
-            <span style={{ fontSize: 18 }}>⏸</span>
-            <span>
-              {isAssignee
-                ? '暂停请求已发送，等待提单人确认后将进入"已挂起"状态。'
-                : '处理人已请求暂停此工单，请在顶部操作区确认或驳回。'}
-            </span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: pauseReason ? 8 : 0 }}>
+              <span style={{ fontSize: 18 }}>⏸</span>
+              <span>
+                {isAssignee
+                  ? '暂停请求已发送，等待提单人确认后将进入"已挂起"状态。'
+                  : '处理人已请求暂停此工单，请查看理由后决定是否同意。'}
+              </span>
+            </div>
+            {pauseReason && (
+              <div style={{
+                padding: '8px 12px', background: 'var(--background)',
+                borderRadius: 'var(--radius-sm)', fontSize: 13, lineHeight: 1.6,
+                color: 'var(--foreground)', whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+              }}>
+                <span style={{ color: 'var(--muted-foreground)', fontSize: 12 }}>暂停理由：</span>
+                {pauseReason}
+              </div>
+            )}
+            {isCreatorSide && onPauseResponse && (
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10, marginTop: 12 }}>
+                <Button size="small" theme="default" onClick={() => { setRejectReasonDraft(''); setShowRejectPopup(true); }}>驳回暂停</Button>
+                <Button size="small" theme="primary" onClick={() => onPauseResponse('pending')}>确认暂停</Button>
+              </div>
+            )}
+          </div>
+        ) : rejectReason && isAssignee && status === 'in_progress' ? (
+          // 刚被驳回暂停（IN_PROGRESS 状态保留 reject_reason），提示处理人上次为什么被驳回
+          <div style={{
+            padding: '8px 14px', background: 'var(--apricot-soft)',
+            borderRadius: 'var(--radius-sm)', borderLeft: '3px solid var(--apricot)',
+            fontSize: 13, color: 'var(--foreground)', marginBottom: 10,
+          }}>
+            <span style={{ color: 'var(--muted-foreground)', fontSize: 12 }}>上次驳回理由：</span>
+            <span style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{rejectReason}</span>
           </div>
         ) : null}
       </div>
@@ -566,6 +606,47 @@ export default function StepNegotiationCard({
           </Popup>
         );
       })()}
+
+      {/* 驳回暂停理由弹窗（仅提单人侧可触发） */}
+      <Popup
+        visible={showRejectPopup}
+        onClose={() => { setShowRejectPopup(false); setRejectReasonDraft(''); }}
+        placement="bottom"
+        showOverlay
+        destroyOnClose
+      >
+        <div className="ticket-edit">
+          <h4 className="ticket-edit__title">驳回暂停请求</h4>
+          <p style={{ color: 'var(--muted-foreground)', fontSize: '13px', marginBottom: '12px', lineHeight: 1.6 }}>
+            请说明驳回理由，处理人将看到。
+          </p>
+          <Form initialData={{}}>
+            <FormItem label="驳回理由" name="rejectReason" labelAlign="top" requiredMark>
+              <Textarea
+                value={rejectReasonDraft}
+                onChange={(v) => setRejectReasonDraft(String(v))}
+                placeholder="请说明为什么不同意暂停"
+                autosize={{ minRows: 3, maxRows: 6 }}
+                maxlength={500}
+              />
+            </FormItem>
+          </Form>
+          <div className="ticket-edit__btns">
+            <Button theme="default" onClick={() => { setShowRejectPopup(false); setRejectReasonDraft(''); }}>取消</Button>
+            <Button
+              theme="primary"
+              disabled={!rejectReasonDraft.trim()}
+              onClick={() => {
+                onPauseResponse?.('in_progress', rejectReasonDraft.trim());
+                setShowRejectPopup(false);
+                setRejectReasonDraft('');
+              }}
+            >
+              确认驳回
+            </Button>
+          </div>
+        </div>
+      </Popup>
     </>
   );
 }
