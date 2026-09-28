@@ -2553,11 +2553,14 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
     { value: 7, label: '7天' },
     { value: 14, label: '14天' },
   ];
-  /** 阶段完成时间当前值（dayjs），未设置则返回 null */
-  const stepEndtimeValue = (() => {
-    const raw = draftField('curr_step_endtime');
-    return raw ? parseBackendDayjs(raw) : null;
-  })();
+  /** 阶段完成时间当前值（dayjs），未设置则返回 null。
+   *  用 useMemo 以字符串为依赖缓存实例，稳定受控 value 引用——否则每次渲染都生成新 dayjs
+   *  实例，rc-picker 会按引用把「面板已选但未点 OK 的暂存值」重置回受控 value（表现为选完 2-3 秒跳回）。 */
+  const stepEndtimeRaw = draftField('curr_step_endtime');
+  const stepEndtimeValue = useMemo(
+    () => (stepEndtimeRaw ? parseBackendDayjs(stepEndtimeRaw) : null),
+    [stepEndtimeRaw],
+  );
   /** 当前选中的阶段 id（数字，未选为 undefined） */
   const selectedStepId = (() => {
     const raw = draftField('curr_step_id');
