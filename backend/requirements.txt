@@ -11,7 +11,11 @@ httpx>=0.27.0
 Jinja2>=3.1.6
 kombu>=5.6.2
 Mako>=1.3.12
-mammoth>=1.6.0
+# 钉在 1.13 之前：1.13 起 mammoth 会转义链接/图片目标里的 - 和 .
+# （/api/tasks/files/helpdesk-comment/… → helpdesk\-comment/…），同一份 docx 产出的
+# markdown 随环境版本变化，spec_doc 的图片引用就不再可复现。要升级需先确认
+# 前端渲染与存量内容都能接受转义形态，再连同用例一起改。
+mammoth>=1.6.0,<1.13
 MarkupSafe>=3.0.3
 minio>=7.2.20
 openai>=2.44.0
