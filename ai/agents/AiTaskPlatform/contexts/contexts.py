@@ -240,6 +240,7 @@ def build_query(context: TaskContext) -> str:
 def build_task_ctx(context: TaskContext) -> dict:
     """组装日志子 Agent 的 task_ctx（disagnose/discuss 共用）。"""
     return {
+        "task_id": context.task_id,
         "title": context.title,
         "description": context.description,
         "problem_summary": context.problem_summary,

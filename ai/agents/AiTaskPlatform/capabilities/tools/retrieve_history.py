@@ -54,13 +54,28 @@ class RetrieveHistoryCapability(BaseCapability):
             if not results:
                 return CapabilityResult(text="（无相似的历史工单方案）", meta={"count": 0}, ok=True)
 
-            # 格式化（与 retrieval.format_retrieval_results 类似，简化）
             from ai.agents.AiTaskPlatform.retrieval import format_retrieval_results
             text = format_retrieval_results(results, "task_resolutions")
+            confirmed = [
+                r for r in results
+                if (getattr(r, "verified", None) or "unknown") == "confirmed"
+            ]
+            terminate = bool(confirmed)
+            if terminate:
+                text = "【早停】命中已验证的历史根因，可直接采用，无需再跑日志分析。\n" + text
+            bus = kwargs.get("trace_bus")
+            if bus is not None:
+                try:
+                    bus.set_attribute("命中数", len(results))
+                    bus.set_attribute("verified", "confirmed" if terminate else "unknown")
+                    bus.add_event("retrieve", count=len(results), confirmed=len(confirmed))
+                except Exception:
+                    pass
             return CapabilityResult(
                 text=text,
-                meta={"count": len(results)},
+                meta={"count": len(results), "confirmed": len(confirmed)},
                 ok=True,
+                terminate=terminate,
             )
         except Exception as e:
             logger.warning(f"RetrieveHistoryCapability 执行失败: {e}")

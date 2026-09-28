@@ -31,13 +31,21 @@ class CapabilityResult:
     - error: 失败原因（ok=False 时，对外只暴露轻量原因，不泄漏内部堆栈）
     """
 
-    __slots__ = ("text", "meta", "ok", "error")
+    __slots__ = ("text", "meta", "ok", "error", "terminate")
 
-    def __init__(self, text: str = "", meta: Optional[dict] = None, ok: bool = True, error: Optional[str] = None):
+    def __init__(
+        self,
+        text: str = "",
+        meta: Optional[dict] = None,
+        ok: bool = True,
+        error: Optional[str] = None,
+        terminate: bool = False,
+    ):
         self.text = text
         self.meta = meta or {}
         self.ok = ok
         self.error = error
+        self.terminate = bool(terminate)
 
     @classmethod
     def failure(cls, message: str) -> "CapabilityResult":
@@ -46,7 +54,13 @@ class CapabilityResult:
 
     def to_dict(self) -> dict:
         """转 dict（供 Supervisor/tracing 展示）。"""
-        return {"text": self.text, "meta": self.meta, "ok": self.ok, "error": self.error}
+        return {
+            "text": self.text,
+            "meta": self.meta,
+            "ok": self.ok,
+            "error": self.error,
+            "terminate": self.terminate,
+        }
 
 
 class BaseCapability(ABC):
