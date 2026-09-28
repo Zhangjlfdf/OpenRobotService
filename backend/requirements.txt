@@ -29,7 +29,10 @@ python-dotenv>=1.2.2
 python-jose>=3.3.0
 python-multipart>=0.0.9
 PyYAML>=6.0.3
-SQLAlchemy>=2.0.31
+# 必须带 [asyncio] extra：app/core/db.py 用的是 create_async_engine，
+# 而 greenlet 只在 asyncio extra 里声明（SQLAlchemy 2.1 起基础依赖不再带它，
+# 净装 SQLAlchemy 会导致 import app.core.db 直接 ImportError: greenlet is not installed）
+SQLAlchemy[asyncio]>=2.0.31
 PyMySQL>=1.1.1
 asyncmy>=0.2.11
 starlette>=0.37.2
