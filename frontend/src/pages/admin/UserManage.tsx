@@ -662,7 +662,9 @@ export default function UserManage() {
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
                     <span className="mac-user-card__title">{user.name || user.username}</span>
-                    {user.name && user.name !== user.username && (
+                    {/* @账号 标签：username 非空时不再显示（微信登录账号形如 wechat_xxxx，展示无意义）；
+                        username 为空的历史账号保持原有展示逻辑 */}
+                    {!user.username && user.name && user.name !== user.username && (
                       <span className="mac-user-card__account">@{user.username}</span>
                     )}
                     <span className={`mac-chip mac-chip--tag ${user.status === 'active' ? 'mac-chip--tag-blue' : 'mac-chip--tag-muted'}`}>
@@ -940,7 +942,8 @@ export default function UserManage() {
                 />
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', flex: 1, minWidth: 0 }}>
                   <span className="mac-detail-name">{detailUser.name || detailUser.username}</span>
-                  {detailUser.name && detailUser.name !== detailUser.username && (
+                  {/* 同用户卡片：username 非空时不显示 @账号 标签，为空时保持原逻辑 */}
+                  {!detailUser.username && detailUser.name && detailUser.name !== detailUser.username && (
                     <span className="mac-detail-account">@{detailUser.username}</span>
                   )}
                   <span className={`mac-chip mac-chip--tag ${detailUser.status === 'active' ? 'mac-chip--tag-blue' : 'mac-chip--tag-muted'}`}>
