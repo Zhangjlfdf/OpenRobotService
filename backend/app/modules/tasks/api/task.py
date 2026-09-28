@@ -3004,13 +3004,44 @@ async def re_dispatch_task(
     comment_text = f"{user_name} {base}"
     if remark:
         comment_text += f"（备注：{remark}）"
+    # 方案 A：默认重派算不准确；若上一轮 preferred 与本次相同 → 倾向人×2，不算不准确
+    prev_pref = ""
+    try:
+        from app.models.task_dispatch_log import TaskDispatchLog
+        last_log = (
+            await db.execute(
+                select(TaskDispatchLog)
+                .where(TaskDispatchLog.task_id == int(task_id))
+                .order_by(TaskDispatchLog.dispatch_round.desc())
+                .limit(1)
+            )
+        ).scalars().first()
+        if last_log is not None:
+            prev_pref = str(getattr(last_log, "preferred_id", None) or "").strip()
+    except Exception as e:
+        logger_task.warning(f"读取上一轮 preferred_id 失败 task_id={task_id}: {e}")
+    twice = bool(preferred and prev_pref and preferred == prev_pref)
+    redispatch_detail = {
+        "preferred_assignee": preferred,
+        "remark": remark or None,
+        "channel": "redispatch",
+        "from_assignee": (old_assigned_to or "").strip() or None,
+        "preferred_twice_confirm": twice,
+    }
+    if twice:
+        redispatch_detail["kind_source"] = "preferred_twice"
+    else:
+        redispatch_detail["redispatch_verdict"] = "inaccurate"
+        redispatch_detail["kind_source"] = "scheme_a_auto"
+        redispatch_detail["learn_at"] = datetime.utcnow().isoformat() + "Z"
+
     await OperationLogService.log(
         db=db,
         task_id=task_id,
         op_type=OperationType.REASSIGN,
         operator=username,
         operator_name=user_name,
-        detail={"preferred_assignee": preferred, "remark": remark or None, "channel": "redispatch", "from_assignee": (old_assigned_to or "").strip() or None},
+        detail=redispatch_detail,
         description=desc,
     )
     await _add_system_comment(db, task_id, comment_text, username, token)
