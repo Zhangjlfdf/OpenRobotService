@@ -3121,9 +3121,15 @@ html, body, #root {
   align-items: center;
   gap: 7px;
   min-width: 0;
+  /* 两侧（发起人 / 处理人）等宽：basis 0 + grow 1 → 各分得（可用宽 − 流线区 − 两处 gap）的一半。
+     ⚠️ 必须 basis 0 才等宽：basis 用 auto（内容宽）时，发起人挂上「代 X」胶囊会变宽，
+     把中间流线区整体推右 → 箭头不在卡片水平中心（见 ORS-818 列表胶囊联调）。 */
+  flex: 1 1 0;
 }
 .task-card2__person--assignee {
-  margin-left: auto;
+  /* 两侧等宽后无需 auto 边距分担剩余空间，内容靠右（姓名 + 头像贴右端） */
+  margin-left: 0;
+  justify-content: flex-end;
 }
 .task-card2__avatar {
   flex-shrink: 0;
@@ -3151,9 +3157,13 @@ html, body, #root {
    有堆叠时线退至底部作头像的「下划线」，堆叠头像（24px 小两号）在线上方。 */
 .task-card2__flow {
   position: relative;
-  flex: 1;
+  /* 固定一个箭头长（32px）：两侧等宽 → 流线区中心恒等于整行水平中心，
+     区内箭头（left:50% 居中）随之稳定居中，不再随两侧文字/胶囊宽度漂移。
+     ⚠️ 不可改回 flex:1：那只剩「两侧内容之后的剩余空间」，中心会随之漂移。 */
+  flex: 0 0 32px;
+  width: 32px;
   align-self: stretch;
-  min-width: 48px;
+  min-width: 32px;
 }
 .task-card2__person-arrow {
   position: absolute;
@@ -3172,13 +3182,14 @@ html, body, #root {
    箭头与堆叠都回归常规流 → 箭头宽度用 100% 直接跟随堆叠盒，
    不再依赖「相对整行 flow 求解」的绝对定位（那会把线拉成整行宽、并顶到行底）。 */
 .task-card2__flow--stacked {
-  flex: 0 1 auto; /* ⚠️ 覆盖基础类的 flex:1，否则永远撑满整行、无法跟随堆叠宽 */
-  margin-left: auto; /* 与处理人 margin-left:auto 各分剩余空间一半 → 堆叠+箭头组在发起/处理人间居中（⚠️ 不可再加 margin-right:auto，否则成三个 auto 边距三分空间、组偏左 F/6） */
+  flex: 0 1 auto; /* ⚠️ 覆盖基础类的固定宽，否则永远 32px、无法跟随堆叠宽 */
+  width: auto; /* 复位基础类 width:32px：宽度由堆叠内容决定，箭头再按 100%+12px 跟随 */
+  margin-left: 0; /* 两侧等宽已保证堆叠+箭头组居中，无需 auto 边距 */
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  min-width: 0; /* 复位基础类 min-width:48px，避免堆叠更窄时反向撑宽 */
+  min-width: 0; /* 复位基础类 min-width，避免堆叠更窄时反向撑宽 */
 }
 .task-card2__flow--stacked .task-card2__person-arrow {
   position: static; /* 归入常规流：落在堆叠下方，作其「下划线」 */
@@ -8564,15 +8575,15 @@ html, body, #root {
   align-items: center;
   gap: 8px;
   min-width: 0;
-}
-.task-card2__person--creator {
-  flex: 0 1 auto;
-  padding-right: 30px;
+  /* 两侧等宽（basis 0）：中间流线区中心 = 整行水平中心，箭头不随「代 X」胶囊漂移（与块 A 同步）。
+     ⚠️ --creator 曾有的 padding-right:30px、--assignee 曾有的 padding-left:30px 已随本方案移除：
+     那是给「固定中点箭头」留的让位空隙，现两侧等宽天然无重叠，而单边 padding 会把流线区推偏。 */
+  flex: 1 1 0;
 }
 .task-card2__person--assignee {
-  margin-left: auto;
-  flex: 0 1 auto;
-  padding-left: 30px;
+  /* 等宽后无需 auto 边距；内容靠右（姓名 + 头像贴右端） */
+  margin-left: 0;
+  justify-content: flex-end;
 }
 .task-card2__avatar {
   flex-shrink: 0;
@@ -8611,9 +8622,11 @@ html, body, #root {
 }
 .task-card2__flow {
   position: relative;
-  flex: 1;
+  /* 固定一个箭头长（32px）→ 配合两侧等宽，流线区中心恒等于整行水平中心（与块 A 同步） */
+  flex: 0 0 32px;
+  width: 32px;
   align-self: stretch;
-  min-width: 48px;
+  min-width: 32px;
 }
 .task-card2__person-arrow {
   position: absolute;
@@ -8630,8 +8643,9 @@ html, body, #root {
 }
 /* 有堆叠：流线区收缩为内容宽 + 纵向居中列（与块 A 同步） */
 .task-card2__flow--stacked {
-  flex: 0 1 auto;
-  margin-left: auto; /* 堆叠组在发起/处理人间居中（与块 A 同步，勿加 margin-right） */
+  flex: 0 1 auto; /* 覆盖基础类固定宽，宽度改由堆叠内容决定 */
+  width: auto; /* 复位基础类 width:32px */
+  margin-left: 0; /* 两侧等宽已保证居中 */
   display: flex;
   flex-direction: column;
   align-items: center;
