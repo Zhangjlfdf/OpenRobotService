@@ -11,13 +11,24 @@ interface Props {
   onChange?: (user: UserItem) => void;
   placeholder?: string;
   title?: string;
+  /** 临时：置顶用户 id（如项目对接人）；无则不置顶 */
+  pinUserId?: string | null;
+  /** 置顶标注文案，默认「项目对接人」 */
+  pinLabel?: string;
 }
 
 // 模块级缓存，5 分钟内复用，减少重复请求
 let userCache: UserItem[] | null = null;
 let userCacheTs = 0;
 
-export default function UserSelect({ value, onChange, placeholder = '请选择', title = '选择人员' }: Props) {
+export default function UserSelect({
+  value,
+  onChange,
+  placeholder = '请选择',
+  title = '选择人员',
+  pinUserId = null,
+  pinLabel = '项目对接人',
+}: Props) {
   const [visible, setVisible] = useState(false);
   const [users, setUsers] = useState<UserItem[]>(userCache || []);
   const [loading, setLoading] = useState(false);
@@ -54,10 +65,31 @@ export default function UserSelect({ value, onChange, placeholder = '请选择',
 
   const filtered = useMemo(() => {
     const kw = keyword.trim().toLowerCase();
-    return kw ? users.filter(
-      (u) => (u.name || '').toLowerCase().includes(kw) || (u.username || '').toLowerCase().includes(kw),
-    ) : users;
-  }, [users, keyword]);
+    const list = kw
+      ? users.filter(
+          (u) => (u.name || '').toLowerCase().includes(kw) || (u.username || '').toLowerCase().includes(kw),
+        )
+      : [...users];
+    const pin = (pinUserId || '').trim();
+    if (!pin) return list;
+    const idx = list.findIndex((u) => u.id === pin);
+    if (idx > 0) {
+      const pinned = list[idx];
+      return [pinned, ...list.slice(0, idx), ...list.slice(idx + 1)];
+    }
+    if (idx === 0) return list;
+    // 对接人不在当前列表（过滤掉或 assignable 未返回）时，补一条置顶占位，避免「有对接人却看不见」
+    if (!kw) {
+      const stub: UserItem = {
+        id: pin,
+        username: pin,
+        name: pinLabel || pin,
+        status: 'active',
+      };
+      return [stub, ...list];
+    }
+    return list;
+  }, [users, keyword, pinUserId, pinLabel]);
 
   const handlePick = (u: UserItem) => {
     onChange?.(u);
@@ -98,23 +130,43 @@ export default function UserSelect({ value, onChange, placeholder = '请选择',
               ) : filtered.length === 0 ? (
                 <div className="user-select__empty">未找到匹配用户</div>
               ) : (
-                filtered.map((u) => (
-                  <div
-                    key={u.id}
-                    className={`user-select__item ${u.id === value ? 'is-selected' : ''}`}
-                    onClick={() => handlePick(u)}
-                  >
-                    <div className="user-select__item-name">{u.name || u.username}</div>
-                    <div className="user-select__item-meta">
-                      <span>{u.username}</span>
-                      {u.status && (
-                        <span className={`user-select__status user-select__status--${u.status}`}>
-                          {u.status}
-                        </span>
-                      )}
+                filtered.map((u) => {
+                  const isPinned = !!(pinUserId && u.id === pinUserId);
+                  return (
+                    <div
+                      key={u.id}
+                      className={`user-select__item ${u.id === value ? 'is-selected' : ''}`}
+                      onClick={() => handlePick(u)}
+                    >
+                      <div className="user-select__item-name" style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                        <span>{u.name || u.username}</span>
+                        {isPinned && (
+                          <span
+                            style={{
+                              fontSize: 10,
+                              lineHeight: '16px',
+                              padding: '0 6px',
+                              borderRadius: 3,
+                              color: 'var(--blue-2)',
+                              background: 'var(--blue-soft)',
+                              whiteSpace: 'nowrap',
+                            }}
+                          >
+                            {pinLabel}
+                          </span>
+                        )}
+                      </div>
+                      <div className="user-select__item-meta">
+                        <span>{isPinned ? pinLabel : u.username}</span>
+                        {u.status && (
+                          <span className={`user-select__status user-select__status--${u.status}`}>
+                            {u.status}
+                          </span>
+                        )}
+                      </div>
                     </div>
-                  </div>
-                ))
+                  );
+                })
               )}
             </div>
           </div>

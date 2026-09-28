@@ -80,6 +80,9 @@ interface AiTicket {
   project_name?: string;
   // 所属项目编码（DB TicketResponse 返回，编辑回显与提交用）
   project_id?: string;
+  // 临时：重新指派选人置顶用
+  project_contact_person_id?: string | null;
+  project_contact_person_name?: string | null;
   // 当前阶段截止时间（ISO 字符串，编辑弹窗 antd DatePicker 回显/编辑；详情页只读展示。tasks 详情接口返回蛇形 curr_step_endtime）
   curr_step_endtime?: string | null;
   // 工单阶段性处理（协商节点）：与系统任务详情页同源
@@ -260,6 +263,8 @@ export default function TicketDetailPage() {
           assigned_to_name: taskDetail.assigned_to_name || '',
           project_name: taskDetail.project_name || '',
           project_id: taskDetail.project_id || '',
+          project_contact_person_id: (taskDetail as { project_contact_person_id?: string | null }).project_contact_person_id || null,
+          project_contact_person_name: (taskDetail as { project_contact_person_name?: string | null }).project_contact_person_name || null,
           created_at: taskDetail.created_at || '',
           // 当前阶段截止时间：tasks 详情接口 GET /{id} 返回蛇形 curr_step_endtime（见 TicketResponse）
           curr_step_endtime: taskDetail.curr_step_endtime ?? null,
@@ -322,6 +327,8 @@ export default function TicketDetailPage() {
               project_name: taskDetail.project_name || prev.project_name || prev.project,
               // 项目编码以 DB 为准（编辑回显与提交用），AI 接口不返回该字段
               project_id: taskDetail.project_id || prev.project_id,
+              project_contact_person_id: (taskDetail as { project_contact_person_id?: string | null }).project_contact_person_id ?? prev.project_contact_person_id ?? null,
+              project_contact_person_name: (taskDetail as { project_contact_person_name?: string | null }).project_contact_person_name ?? prev.project_contact_person_name ?? null,
               // 当前阶段截止时间以 DB 为准（tasks 详情接口蛇形 curr_step_endtime），覆盖 AI 滞后副本
               curr_step_endtime: taskDetail.curr_step_endtime ?? prev.curr_step_endtime ?? null,
               // 工单阶段性处理（协商节点）以 DB 为准
@@ -1456,7 +1463,14 @@ export default function TicketDetailPage() {
         <div className="ticket-edit">
           <h4 className="ticket-edit__title">重新指派</h4>
           <p style={{ color: 'var(--muted-foreground)', fontSize: '13px', marginBottom: '12px' }}>选择新的处理人</p>
-          <UserSelect value={reassignUser?.id ?? null} onChange={setReassignUser} placeholder="请选择处理人" title="选择处理人" />
+          <UserSelect
+            value={reassignUser?.id ?? null}
+            onChange={setReassignUser}
+            placeholder="请选择处理人"
+            title="选择处理人"
+            pinUserId={ticket?.project_contact_person_id || null}
+            pinLabel="项目对接人"
+          />
           <div style={{ margin: '12px 0 8px', fontSize: '14px', color: 'var(--foreground)' }}>转派类型<span style={{ color: 'var(--danger)' }}> *</span></div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginBottom: '12px' }}>
             {([
