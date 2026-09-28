@@ -21,6 +21,22 @@ from ai.agents.AiTaskPlatform.capabilities.core.base import BaseCapability, Capa
 logger = get_logger("TASK_AGENT")
 
 
+def _resolve_query(kwargs: dict) -> str:
+    """调度 goal → 用户原话 → 工单摘要，避免 LLM 漏填 goal 时检索空跑。"""
+    q = (kwargs.get("query") or kwargs.get("query_text") or "").strip()
+    if q:
+        return q
+    q = (kwargs.get("user_query") or "").strip()
+    if q:
+        return q
+    ct = kwargs.get("current_task") or {}
+    if isinstance(ct, dict):
+        return (
+            ct.get("problem_summary") or ct.get("title") or ct.get("description") or ""
+        ).strip()
+    return ""
+
+
 class RetrieveHistoryCapability(BaseCapability):
     """历史工单方案检索：在 Qdrant task_resolutions 里找相似历史工单的解决方案。
 
@@ -37,7 +53,7 @@ class RetrieveHistoryCapability(BaseCapability):
     tags = ["history", "历史", "历史工单", "历史方案"]
 
     async def run(self, **kwargs) -> CapabilityResult:
-        query = kwargs.get("query") or kwargs.get("query_text") or ""
+        query = _resolve_query(kwargs)
         if not query:
             return CapabilityResult.failure("历史工单检索需要 query 参数")
 

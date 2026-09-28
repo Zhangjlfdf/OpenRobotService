@@ -296,11 +296,13 @@ class DiscussFlow:
         new_atts, known_map, known_atts, kind_of = _classify_attachments(ctx)
 
         # 运行时上下文（供能力取资源；attachments 默认只给"本次需新读"的附件）
+        # user_query：用户本轮原话；勿用 key=query，避免 Supervisor 用它覆盖 step.goal
         runtime_ctx = {
             "attachments": new_atts,          # 默认只读新附件（能力据此分析）
             "all_attachments": ctx.attachments or [],   # 全量（需要时扩展）
             "attachment_memory": known_map,   # 已解读附件的摘要（能力/LLM 参考，不必重读）
             "retriever": self._retriever,
+            "user_query": (query or "").strip(),
             # 当前工单上下文（供 ticket_ref 在"无 @#编号、需大脑按需检索相似工单"时作检索基准）
             "current_task": {
                 "task_id": getattr(ctx, "task_id", "") or task_id,
