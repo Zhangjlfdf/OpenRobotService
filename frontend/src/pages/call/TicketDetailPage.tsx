@@ -196,6 +196,18 @@ export default function TicketDetailPage() {
   const [allUsers, setAllUsers] = useState<ProjectMember[]>([]);
   // @U老师 AI 讨论中标记
   const [askingAI, setAskingAI] = useState(false);
+  const aiAbortRef = useRef<AbortController | null>(null);
+  const [aiEpoch, setAiEpoch] = useState(0);
+  const ticketRef = useRef(ticket);
+  ticketRef.current = ticket;
+  const aiBusyRef = useRef(false);
+  const discussQueueRef = useRef<Array<{ text: string; files: File[]; options?: { replyTo?: string | number } }>>([]);
+  const [aiQueueItems, setAiQueueItems] = useState<string[]>([]);
+  const MAX_AI_DISCUSS_QUEUE = 3;
+  const bumpAiQueue = () => setAiQueueItems(discussQueueRef.current.map((j) => j.text));
+  const abortAi = () => {
+    aiAbortRef.current?.abort();
+  };
   // 代他人提单（代理提单）：关系横幅数据。走独立接口（非参与人 403 → 置空不渲染），
   // 与系统任务详情页同一组件同一口径，避免两处详情页体验分叉。
   const [proxyRelation, setProxyRelation] = useState<ProxyRelation | null>(null);
@@ -566,6 +578,11 @@ export default function TicketDetailPage() {
   const [editForm, setEditForm] = useState<{ title: string; description: string; priority: string; ticket_type: string; project_id: string; project_name: string; curr_step_endtime?: string }>({ title: '', description: '', priority: '中', ticket_type: 'problem', project_id: '', project_name: '' });
   // 当前阶段截止时间区间：基准 = 工单创建时间（ticket.created_at），而非用户操作时刻
   const editDeadlineRange = getDeadlineRange(editForm.priority, ticket?.created_at);
+  // 稳定 DatePicker 受控 value 引用（内联 parse 每次渲染生成新 dayjs 实例会触发 rc-picker 受控同步，重置面板暂存值）
+  const editFormDeadlineValue = useMemo(
+    () => (editForm.curr_step_endtime ? parseDeadlineString(editForm.curr_step_endtime) : null),
+    [editForm.curr_step_endtime],
+  );
   // 优先级仅在「尚未派单」（待处理/待派单）可修改；已派单及后续状态禁止（置灰不可点）
   const priorityDisabled = !canEditPriority(ticket?.status);
   const [savingEdit, setSavingEdit] = useState(false);
@@ -644,38 +661,61 @@ export default function TicketDetailPage() {
     }
   };
 
-  // ── @U老师 讨论：先存用户消息 → 调 POST /api/ai/task/discuss → 重新加载评论；返回 true=成功 ──
-  // 与系统任务详情页同款逻辑，用 ticket.ticket_id 代替 detail.id，fetchDetail(true) 代替 loadDetail()
-  const handleAIDiscuss = async (text: string, files: File[] = [], options?: { replyTo?: string | number }): Promise<boolean> => {
-    if (!ticket?.ticket_id) return false;
-    const userMsg = text;
-    setAskingAI(true);
+  // ── @U老师 讨论：先存用户消息 → 空闲立刻 discuss / 进行中入队；返回 true=成功 ──
+  const postDiscussUserComment = async (text: string, files: File[] = [], options?: { replyTo?: string | number }): Promise<boolean> => {
+    const current = ticketRef.current;
+    if (!current?.ticket_id) return false;
+    const tempId = tempIdRef.current;
+    const uploads = dedupeFileNames(files);
+    const objectPaths: string[] = [];
+    for (const f of uploads) {
+      const p = await uploadCommentAttachment(f, tempId);
+      if (p) objectPaths.push(p);
+    }
     try {
-      // 上传附件（同名文件自动改名，避免后端对象名重复覆盖）
-      const tempId = tempIdRef.current;
-      const uploads = dedupeFileNames(files);
-      for (const f of uploads) {
-        await uploadCommentAttachment(f, tempId);
-      }
-      // 1. 先保存用户的 @U老师 消息到 task_comments
-      try {
-        const newComment = await request<Comment>(`/${ticket.ticket_id}/comments`, {
-          method: 'POST',
-          body: JSON.stringify({ content: userMsg, is_public: true, attachments: files.length ? [tempId] : [], reply_to: options?.replyTo }),
-        });
-        setTicket((prev) => {
-          if (!prev) return prev;
-          const updatedComments = prev.comments ? [...prev.comments, newComment] : [newComment];
-          return { ...prev, comments: updatedComments };
-        });
-      } catch { /* 保存用户消息失败不阻塞 AI 调用 */ }
-      // 2. 调 AI 讨论（引用某条后再 @U老师：把被引评论单独带上，避免淹没在最近 10 条里）
-      const recentComments = (ticket.comments || []).slice(-10).map((c) => ({
+      const newComment = await request<Comment>(`/${current.ticket_id}/comments`, {
+        method: 'POST',
+        body: JSON.stringify({ content: text, is_public: true, attachments: objectPaths, reply_to: options?.replyTo }),
+      });
+      setTicket((prev) => {
+        if (!prev) return prev;
+        const updatedComments = prev.comments ? [...prev.comments, newComment] : [newComment];
+        return { ...prev, comments: updatedComments };
+      });
+      tempIdRef.current = typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID() : `t_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  const pumpDiscussQueue = () => {
+    const next = discussQueueRef.current.shift();
+    bumpAiQueue();
+    if (!next) return;
+    void startDiscussTurn(next.text, next.files, next.options);
+  };
+
+  const startDiscussTurn = async (text: string, files: File[] = [], options?: { replyTo?: string | number }): Promise<boolean> => {
+    await postDiscussUserComment(text, files, options);
+    return runDiscussHttp(text, options);
+  };
+
+  const runDiscussHttp = async (text: string, options?: { replyTo?: string | number }): Promise<boolean> => {
+    const current = ticketRef.current;
+    if (!current?.ticket_id) return false;
+    const controller = new AbortController();
+    aiAbortRef.current = controller;
+    aiBusyRef.current = true;
+    setAskingAI(true);
+    setAiEpoch((n) => n + 1);
+    try {
+      const recentComments = (current.comments || []).slice(-10).map((c) => ({
         author: c.created_by_name || c.created_by || '?',
         content: c.content,
       }));
       const quotedSrc = options?.replyTo != null
-        ? (ticket.comments || []).find((c) => String(c.id) === String(options.replyTo))
+        ? (current.comments || []).find((c) => String(c.id) === String(options.replyTo))
         : undefined;
       const quotedComment = quotedSrc
         ? {
@@ -686,11 +726,10 @@ export default function TicketDetailPage() {
         : undefined;
       const res = await fetchWithAuth(`${API_CONFIG.AI.BASE_URL}/task/discuss`, {
         method: 'POST',
+        signal: controller.signal,
         body: JSON.stringify({
-          task_id: String(ticket.ticket_id),
-          // 去掉文本中任意位置的 @U老师 标记（可能有空格/重复），保留整段话作为 query，
-          // 兼容"先说话、句尾@U老师"的场景（否则 @U老师 在尾部时 query 会带残留或丢失）
-          query: userMsg.replace(/\s*@U老师\s*/g, ' ').trim(),
+          task_id: String(current.ticket_id),
+          query: text.replace(/\s*@U老师\s*/g, ' ').trim(),
           context: {
             recent_comments: recentComments,
             ...(quotedComment ? { quoted_comment: quotedComment } : {}),
@@ -701,18 +740,88 @@ export default function TicketDetailPage() {
       const data = await res.json();
       if (data.code === 0) {
         Toast({ message: 'AI 已回复', theme: 'success' });
-        await fetchDetail(true);  // 静默刷新评论（含 AI 回复）
+        await fetchDetail(true);
         return true;
-      } else {
-        Toast({ message: data.message || 'AI 回复失败', theme: 'error' });
-        return false;
       }
+      Toast({ message: data.message || 'AI 回复失败', theme: 'error' });
+      return false;
     } catch (err) {
+      const aborted = err instanceof Error && err.name === 'AbortError';
+      if (aborted) return false;
       Toast({ message: `AI 回复失败: ${err instanceof Error ? err.message : ''}`, theme: 'error' });
       return false;
     } finally {
-      setAskingAI(false);
+      const stillMine = aiAbortRef.current === controller;
+      if (stillMine) {
+        aiAbortRef.current = null;
+        setAskingAI(false);
+        aiBusyRef.current = false;
+        pumpDiscussQueue();
+      }
     }
+  };
+
+  const handleAIDiscuss = async (text: string, files: File[] = [], options?: { replyTo?: string | number }): Promise<boolean> => {
+    if (!ticketRef.current?.ticket_id) return false;
+    if (aiBusyRef.current) {
+      if (discussQueueRef.current.length >= MAX_AI_DISCUSS_QUEUE) {
+        Toast({ message: `排队已满（最多 ${MAX_AI_DISCUSS_QUEUE} 条），等当前排查结束后再 @U老师`, theme: 'warning' });
+        return false;
+      }
+      discussQueueRef.current.push({ text, files, options });
+      bumpAiQueue();
+      Toast({ message: `已排队（${discussQueueRef.current.length}/${MAX_AI_DISCUSS_QUEUE}），轮到时再上评论区`, theme: 'success' });
+      return true;
+    }
+    return startDiscussTurn(text, files, options);
+  };
+
+  const handleInsertThisRound = async (text: string, files: File[] = [], options?: { replyTo?: string | number }): Promise<boolean> => {
+    const current = ticketRef.current;
+    if (!current?.ticket_id) return false;
+    if (aiBusyRef.current) {
+      await postDiscussUserComment(text, files, options);
+      try {
+        const res = await fetchWithAuth(`${API_CONFIG.AI.BASE_URL}/task/discuss/inject`, {
+          method: 'POST',
+          body: JSON.stringify({
+            task_id: String(current.ticket_id),
+            text: text.replace(/\s*@U老师\s*/g, ' ').trim(),
+          }),
+        });
+        const data = await res.json();
+        if (data.code === 0) {
+          Toast({ message: '已插入本轮排查', theme: 'success' });
+          return true;
+        }
+        Toast({ message: data.message || '插入本轮失败', theme: 'error' });
+        return false;
+      } catch (err) {
+        Toast({ message: `插入本轮失败: ${err instanceof Error ? err.message : ''}`, theme: 'error' });
+        return false;
+      }
+    }
+    return startDiscussTurn(text, files, options);
+  };
+
+  const handleInsertQueueItem = async (index: number): Promise<boolean> => {
+    const job = discussQueueRef.current[index];
+    if (!job) return false;
+    discussQueueRef.current.splice(index, 1);
+    bumpAiQueue();
+    const ok = await handleInsertThisRound(job.text, job.files, job.options);
+    if (!ok) {
+      discussQueueRef.current.splice(index, 0, job);
+      bumpAiQueue();
+    }
+    return ok;
+  };
+
+  const handleRemoveQueueItem = (index: number) => {
+    if (index < 0 || index >= discussQueueRef.current.length) return;
+    discussQueueRef.current.splice(index, 1);
+    bumpAiQueue();
+    Toast({ message: '已取消排队', theme: 'success' });
   };
 
   // 发送评论（附件上传 + POST /api/tasks/{ticket_id}/comments）；返回 true=成功（组件清空输入）
@@ -730,15 +839,16 @@ export default function TicketDetailPage() {
     setSubmittingComment(true);
     try {
       const tempId = tempIdRef.current;
-      // 先逐个上传附件（temp_id 关联，后端登记到 comment_attachment_map）
-      // 同名文件自动改名，避免后端对象名重复覆盖
+      // 先逐个上传附件；发评论时直接带 MinIO object_path，不依赖后端进程内存 temp_id 映射
       const uploads = dedupeFileNames(files);
+      const objectPaths: string[] = [];
       for (const f of uploads) {
-        await uploadCommentAttachment(f, tempId);
+        const p = await uploadCommentAttachment(f, tempId);
+        if (p) objectPaths.push(p);
       }
       const newComment = await request<Comment>(`/${ticket.ticket_id}/comments`, {
         method: 'POST',
-        body: JSON.stringify({ content: text, is_public: true, attachments: files.length ? [tempId] : [], reply_to: options?.replyTo }),
+        body: JSON.stringify({ content: text, is_public: true, attachments: objectPaths, reply_to: options?.replyTo }),
       });
       const enrichedComment = {
         ...newComment,
@@ -1107,7 +1217,13 @@ export default function TicketDetailPage() {
           comments={ticket.comments || []}
           onSend={handleSendComment}
           onDeleteComment={handleDeleteComment}
-          sending={submittingComment || askingAI}
+          sending={submittingComment}
+          optimisticAi={askingAI}
+          onAbortAi={abortAi}
+          aiEpoch={aiEpoch}
+          aiQueueItems={aiQueueItems}
+          onInsertQueueItem={handleInsertQueueItem}
+          onRemoveQueueItem={handleRemoveQueueItem}
           disabled={!ticket?.ticket_id}
           enableAttach
           enableAI
@@ -1255,7 +1371,7 @@ export default function TicketDetailPage() {
                 showNow={false}
                 placement="topLeft"
                 getPopupContainer={(trigger) => trigger.parentElement || document.body}
-                value={editForm.curr_step_endtime ? parseDeadlineString(editForm.curr_step_endtime) : null}
+                value={editFormDeadlineValue}
                 disabledDate={editDeadlineRange ? makeDisabledDate(editDeadlineRange.min, editDeadlineRange.max) : undefined}
                 disabledTime={editDeadlineRange ? makeDisabledTime(editDeadlineRange.min, editDeadlineRange.max) : undefined}
                 onChange={(d: dayjs.Dayjs | null) =>

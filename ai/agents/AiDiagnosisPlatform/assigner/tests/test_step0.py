@@ -687,6 +687,51 @@ class TestStep0EveryoneCollision:
         assert result.matched_pref is True
         assert unresolved is None
 
+
+class TestStep0WeakPromptDistinguishesQuotedTicket:
+    """弱信号 prompt 必须提醒区分「转述别的工单指定人」与「本单指定人」。
+
+    回归背景：工单 #872 描述里复述了 #870 的诉求
+    （「工单 #870（…）用户要求重新派单给汪海波。」），
+    Step0 弱信号 LLM 误把 #870 的指定人当成 #872 本单要指定的人。
+    """
+
+    def test_prompt_has_quoted_ticket_guard(self):
+        """正常流程：prompt 含转述/引用他单的反例与判定要点。"""
+        from ai.agents.AiDiagnosisPlatform.assigner.prompts.step0 import build_weak
+
+        prompt = build_weak(_ticket("工单处理人派单错误需重新派单"))
+        # 反例：引用他单里的人名不算本单指定
+        assert "转述" in prompt
+        assert "别的工单" in prompt
+        # 正例仍在：本单指派意图（含"客服说让X看看"这类转达）要认
+        assert "客服说让汪海波看看" in prompt
+        # 判定要点：本单 vs 另一张单
+        assert "本单" in prompt and "另一张单" in prompt
+
+    def test_prompt_still_keeps_all_intent_examples(self):
+        """正常流程：原有典型表达清单不被削弱（重派备注场景仍要认）。"""
+        from ai.agents.AiDiagnosisPlatform.assigner.prompts.step0 import build_weak
+
+        prompt = build_weak(_ticket("车辆定位漂移"))
+        for phrase in (
+            "这个给张三看一下",
+            "让李四处理",
+            "建议由某某某处理",
+            "某某某才是负责这个的",
+            "（重新派单备注里也常出现以上说法）",
+        ):
+            assert phrase in prompt
+
+    def test_prompt_includes_ticket_fields(self):
+        """正常流程：关键区分段不挤掉【工单】字段块。"""
+        from ai.agents.AiDiagnosisPlatform.assigner.prompts.step0 import build_weak
+
+        prompt = build_weak(_ticket("调度平台报无法解析电梯所在地图", "mapId=HY_5"))
+        assert "【工单】" in prompt
+        assert "调度平台报无法解析电梯所在地图" in prompt
+        assert "mapId=HY_5" in prompt
+
     def test_everyone_single_no_collision(self):
         """正常流程：池外只有一个张三 → 不打同名。"""
         result, unresolved = _run_detect(

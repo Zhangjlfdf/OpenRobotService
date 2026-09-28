@@ -595,7 +595,7 @@ class AssignmentWorker:
             return None
 
     def _load_recent_misassigns(self, since: datetime) -> list:
-        """窗口内可学习纠错：弹窗「派错了」+ 审核为不准确的重新派单。阶段/其它不进。"""
+        """窗口内可学习纠错：弹窗「派错了」+ 方案A下默认不准确的重新派单（×2/测试不算除外）。"""
         try:
             from sqlalchemy import func, or_
             from app.models.task import Task, TaskOperationLog, OperationType

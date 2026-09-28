@@ -4,6 +4,7 @@
 discuss = 针对性：按 query 关键词触发日志/图片/代码/历史，组合讨论历史回复。
 """
 
+import asyncio
 import time
 
 from ai.core.logging import get_logger
@@ -17,12 +18,52 @@ from ai.agents.AiTaskPlatform.contexts import (
     format_referenced_tickets,
     format_quoted_comment_block,
 )
+from ai.agents.AiTaskPlatform.tracing import nest_progress_todos
 
 logger = get_logger("TASK_AGENT")
+
+
+async def _client_cancelled(is_cancelled) -> bool:
+    """浏览器 AbortController 断开后，服务端应停止写评论、停止拉过程区。"""
+    if not is_cancelled:
+        return False
+    try:
+        res = is_cancelled()
+        if asyncio.iscoroutine(res):
+            res = await res
+        return bool(res)
+    except Exception:
+        return False
 
 # 澄清建议的稳定标记（P4）：追加"建议补充信息"时以该标记开头，
 # 后续轮次检测到此标记即视为"已建议过一次"，不再重复建议（只建议一次）。
 CLARIFY_SUGGEST_MARKER = "🔄 U老师已建议补充"
+
+
+async def _append_round_supplements(task_id: str, runtime_ctx: dict | None, prompt: str) -> str:
+    """把「插入本轮」邮箱 + 本轮已消费补充拼进最终回复 prompt。"""
+    extra: list[str] = []
+    try:
+        from ai.agents.AiTaskPlatform.runtime.inject_mailbox import drain, format_block
+        extra = await drain(task_id)
+    except Exception as e:
+        logger.warning(f"[discuss] inject drain 失败: {e}")
+        return prompt
+    bag: list[str] = []
+    if runtime_ctx is not None:
+        bag = list(runtime_ctx.get("round_supplements") or [])
+        bag.extend(extra)
+        runtime_ctx["round_supplements"] = bag
+    else:
+        bag = extra
+    try:
+        from ai.agents.AiTaskPlatform.runtime.inject_mailbox import format_block
+        block = format_block(bag)
+    except Exception:
+        block = ""
+    if not block:
+        return prompt
+    return f"{prompt}\n\n{block}"
 
 
 # ── 附件记忆「大脑决策」分类 ─────────────────────────────────────────
@@ -48,11 +89,18 @@ def _classify_attachments(ctx):
     known_atts = []
     kind_of = {}
     for att in ctx.attachments or []:
+        try:
+            from ai.agents.AiTaskPlatform.attachments.utils import (
+                normalize_attachment, attachment_kind,
+            )
+            att = normalize_attachment(att) or att
+        except Exception:
+            attachment_kind = None
         if not isinstance(att, dict):
             continue
         obj = att.get("object_path") or att.get("path") or att.get("url") or ""
         fname = att.get("filename") or att.get("name") or ""
-        ext = _attachment_kind(fname, obj)
+        ext = attachment_kind(fname, obj) if attachment_kind else _attachment_kind(fname, obj)
         kind_of[obj] = ext
         mem = memo.get(obj) if obj and isinstance(memo, dict) else None
         if mem and mem.get("analyzed"):
@@ -69,6 +117,11 @@ def _classify_attachments(ctx):
 
 def _attachment_kind(filename: str, path: str = "") -> str:
     """按扩展名粗略判断附件类型：image / log / doc / other。"""
+    try:
+        from ai.agents.AiTaskPlatform.attachments.utils import attachment_kind
+        return attachment_kind(filename, path)
+    except Exception:
+        pass
     name = ((filename or path) or "").lower()
     for ext in (".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp"):
         if name.endswith(ext):
@@ -80,6 +133,31 @@ def _attachment_kind(filename: str, path: str = "") -> str:
         if name.endswith(ext):
             return "doc"
     return "log" if ("log" in name) else "other"
+
+
+def _is_chat_record_name(name: str) -> bool:
+    n = name or ""
+    return "对话记录" in n or "chat_record" in n.lower()
+
+
+def _attachment_inventory(ctx, kinds: dict, has_log_file: bool) -> str:
+    """给调度 LLM / 回复用的附件实情，避免把对话记录.md 当成现场日志。"""
+    rows = []
+    for att in ctx.attachments or []:
+        if not isinstance(att, dict):
+            rows.append(f"- {att}")
+            continue
+        fname = att.get("filename") or att.get("name") or att.get("object_path") or "未命名"
+        obj = att.get("object_path") or att.get("path") or ""
+        kind = kinds.get(obj) or _attachment_kind(fname, obj)
+        extra = "（摇人吧转工单的聊天记录，不是车端/服务端日志）" if _is_chat_record_name(fname) else ""
+        rows.append(f"- [{kind}] {fname}{extra}")
+    if not rows:
+        return "工单附件清单：空（没有可下载的文件）"
+    head = f"工单附件清单（共 {len(rows)} 个，已从存储读到）：\n" + "\n".join(rows)
+    if has_log_file:
+        return head + "\n其中含可分析的日志文件，应派 log_analyze。"
+    return head + "\n没有 .log/.zip 等现场日志，不能做日志逐行分析；有文档则应派 attachment_parse 读内容。"
 
 
 def _build_progress_emitter(task_id, run_id, live_todo: dict):
@@ -98,8 +176,11 @@ def _build_progress_emitter(task_id, run_id, live_todo: dict):
         # 但剩下的项还在 ⏳，造成「完成了却还在转」的自相矛盾困惑。
         # 整场收尾的 done 由 _broadcast_ai_progress_await(..., "done") 单独发送。
         phase = "running"
-        _broadcast_ai_progress(task_id, run_id, todos=list(live_todo.values()),
-                              phase=phase)
+        _broadcast_ai_progress(
+            task_id, run_id,
+            todos=nest_progress_todos(list(live_todo.values())),
+            phase=phase,
+        )
     return emitter
 
 
@@ -129,7 +210,8 @@ class DiscussFlow:
     # discuss — @U老师 讨论回复
     # ============================================================
 
-    async def discuss(self, task_id: str, query: str, context: dict, username: str = "") -> dict:
+    async def discuss(self, task_id: str, query: str, context: dict, username: str = "",
+                      is_cancelled=None) -> dict:
         """@U老师 讨论：基于讨论历史 + 工单上下文 + 按需附件/历史工单 回复。
 
         Supervisor 派发能力时的实时进度会通过后端 WS 广播 ai.progress，前端动态
@@ -187,13 +269,24 @@ class DiscussFlow:
             logger.warning(f"[discuss] 引用评论注入失败: {_q_e}")
             quoted_comment = ""
 
+        # 2c. 长期记忆：用户明确「记住 XX」则写入；召回注入 prompt（失败不阻断）。
+        memory_block = ""
+        saved_memory = ""
+        try:
+            from ai.agents.AiTaskPlatform.memory import prepare_discuss_memory
+            memory_block, saved_memory = await prepare_discuss_memory(query or "", task_id)
+        except Exception as _m_e:
+            logger.warning(f"[discuss] 长期记忆准备失败: {_m_e}")
+
         # 3. Supervisor 自主调度能力（方案甲全量收敛：图片/日志/代码/历史都由调度 LLM 决定）
         #    替代原先 3a/3b/3c/3d 写死的关键词触发。
         from ai.agents.AiTaskPlatform.capabilities import Supervisor, CapabilityRegistry
         from ai.agents.AiTaskPlatform.contexts import build_img_ctx
 
         facultative = ""
+        early_stopped = False  # 历史方案已验证：跳过 Evaluator 二次改写
         reasoning_trace = {}  # 透明化 planning（G6）：记录 Supervisor 的调度 plan/todo
+        progress_done_payload = None  # (run_id, todos)，评论落库后再广播 done
         # 澄清闭环（P4）：当 Supervisor 判定需向用户确认关键信息且无子任务可派时为 True
         is_clarify = False
         clarify_questions: list[str] = []
@@ -217,18 +310,28 @@ class DiscussFlow:
                 "fault_code": ctx.fault_code or "",
                 "robot_type": ctx.robot_type or "",
             },
+            "is_cancelled": is_cancelled,
+            "round_supplements": [],
         }
+        try:
+            from ai.agents.AiTaskPlatform.tracing import TraceBus
+            runtime_ctx["trace_bus"] = TraceBus()
+        except Exception:
+            pass
         # @# 确定性引用已在本函数入口预加载注入（Q3c=B 主路径）→ 让大脑不再派发 ticket_ref，
         # 避免对同一个 @#编号 重复注入。只有当入口 query 没有顶层 @#（没有预加载）时，
         # 才保留 ticket_ref 给大脑"按需检索相似工单"（形态 C 大脑决策版）。
         if referenced_tickets:
             available_caps = [c for c in available_caps if c != "ticket_ref"]
+        # memory_store 由入口触发词确定性写入，不让 Supervisor 自行抽取
+        available_caps = [c for c in available_caps if c != "memory_store"]
         if ctx.attachments:
             runtime_ctx["img_ctx"] = build_img_ctx(ctx)
             try:
-                log_paths, _tmp_dirs = self._extract_log_paths(new_atts, task_id)
+                log_paths, _tmp_dirs = self._extract_log_paths(ctx.attachments, task_id)
                 if log_paths:
                     runtime_ctx["log_path"] = log_paths[0]
+                    logger.info(f"[discuss] 解析到 {len(log_paths)} 个日志文件")
             except Exception:
                 log_paths, _tmp_dirs = [], []
             runtime_ctx.setdefault("_tmp_dirs", _tmp_dirs)
@@ -286,7 +389,16 @@ class DiscussFlow:
         ]
         if available_caps != CapabilityRegistry.list_available():
             removed = [c for c in CapabilityRegistry.list_available() if c not in available_caps]
-            logger.info(f"[discuss] 按资源剔除不可用能力: {removed}（可用: {available_caps}）")
+            att_names = []
+            for a in (ctx.attachments or []):
+                if isinstance(a, dict):
+                    att_names.append(a.get("filename") or a.get("object_path") or "")
+                else:
+                    att_names.append(str(a)[:80])
+            logger.info(
+                f"[discuss] 按资源剔除不可用能力: {removed}（可用: {available_caps}）"
+                f" attachments={att_names[:8]} kinds={sorted(_kinds)} log_path={bool(runtime_ctx.get('log_path'))}"
+            )
 
         cap_hint = ", ".join(available_caps) or "（无可用能力）"
         has_att = bool(ctx.attachments)
@@ -304,6 +416,7 @@ class DiscussFlow:
             fname = att.get("filename") or att.get("name") or ""
             new_lines.append(f"- {kind_of.get(obj, 'other')}: {fname or obj}")
         new_txt = "\n".join(new_lines) if new_lines else "（无）"
+        att_inventory = _attachment_inventory(ctx, kind_of, bool(runtime_ctx.get("log_path")))
 
         task_ctx_for_plan = (
             f"工单: {ctx.title or ''}\n"
@@ -311,7 +424,9 @@ class DiscussFlow:
             f"假设: {' / '.join(ctx.hypotheses) if ctx.hypotheses else '无'}\n"
             f"用户问题: {query or '（本轮用户仅@U老师未附加文字，请基于下方讨论历史延续解答）'}\n"
             f"{quoted_comment}"
+            f"{memory_block}"
             f"最近讨论历史:\n{(discussion_history if discussion_lines else '（暂无讨论）')[:600]}\n"
+            f"{att_inventory}\n"
             f"本次新增/未解读附件（需重点分析）:\n{new_txt}\n"
             f"历史已解读附件摘要（**仅作历史参考**：图片结论稳定可复述；"
             f"日志/文档摘要不代表已分析完成，若需分析请派 log_analyze 真实重读）:\n{known_txt}\n"
@@ -321,6 +436,8 @@ class DiscussFlow:
             "规则：新增附件必分析；历史图片一般用其摘要即可（除非用户明确要重看）；\n"
             "历史日志/文档摘要**不能替代真实分析**：用户可能说\"之前的分析是错的\"，"
             "只要本问题需要从日志取证，就应派 log_analyze 真实分析日志（内部复用缓存索引，快）。\n"
+            "若附件只有「对话记录」md：派 attachment_parse 读取聊天内容，"
+            "**不要说工单没有任何附件**，但要说清楚这不是车端日志、没法逐行分析 log。\n"
             "若问题属于知识问答（怎么操作/错误码含义/协议标准/产品介绍/排查方法）→ 派 retrieve_kb 查知识库。\n"
             "若当前轮仅@U老师无新问题，但讨论历史有未决疑问或刚提到需要分析的内容 → 仍应继续深化分析。\n"
             "若确无实质内容可派、只需总结/寒暄，则 complexity=simple 不派生任何能力。"
@@ -394,6 +511,8 @@ class DiscussFlow:
             # 把各能力结果拼进 facultative
             if sup_result.get("results"):
                 for cap_name, res in sup_result["results"].items():
+                    if isinstance(res, dict) and (res.get("terminate") or (res.get("meta") or {}).get("terminate")):
+                        early_stopped = True
                     if isinstance(res, dict) and res.get("text"):
                         label = {
                             "image_analyze": "图片分析",
@@ -448,6 +567,41 @@ class DiscussFlow:
                             logger.info("[discuss] 已强制补做 image_analyze（图片保底分析）")
                 except Exception as e:
                     logger.warning(f"[discuss] 强制 image_analyze 失败: {e}")
+
+            # 用户点名日志/全面分析，但 Supervisor 没读文档附件（常见：只有对话记录.md）
+            _ask_logs = any(kw in (query or "") for kw in ("日志", "附件", "全面分析", "分析一下"))
+            if (
+                _ask_logs
+                and "attachment_parse" in available_caps
+                and "attachment_parse" not in (sup_result.get("results") or {})
+                and (runtime_ctx.get("attachments") or _cap_all)
+            ):
+                try:
+                    from ai.agents.AiTaskPlatform.capabilities import CapabilityRegistry
+                    _parse_cap = CapabilityRegistry.get("attachment_parse")
+                    if _parse_cap is not None and _parse_cap.is_available():
+                        _parse_res = await _parse_cap(
+                            query=query,
+                            attachments=runtime_ctx.get("attachments") or _cap_all,
+                            all_attachments=_cap_all,
+                        )
+                        _res_dict = _parse_res.to_dict() if hasattr(_parse_res, "to_dict") else _parse_res
+                        if isinstance(_res_dict, dict) and _res_dict.get("text"):
+                            facultative += f"\n[附件分析]\n{_res_dict['text']}\n"
+                            sup_result.setdefault("results", {})["attachment_parse"] = _res_dict
+                            _live_todo.setdefault("attachment_parse", {
+                                "id": "attachment_parse",
+                                "description": "读取工单已有附件（含对话记录）",
+                                "status": "completed",
+                                "capability": "attachment_parse",
+                                "phase": "done",
+                                "result_summary": (_res_dict.get("text") or "")[:80],
+                            })
+                            logger.info("[discuss] 已强制补做 attachment_parse（文档/对话记录保底）")
+                except Exception as e:
+                    logger.warning(f"[discuss] 强制 attachment_parse 失败: {e}")
+            if ctx.attachments and "log_analyze" not in available_caps:
+                facultative += f"\n[附件清单]\n{att_inventory}\n"
 
             # ── 日志「重新分析」确定性保底 ──
             # 用户明确说"重新分析/再分析/前面的分析是错了/不对"时，必须**真实重跑日志分析**
@@ -506,12 +660,22 @@ class DiscussFlow:
             _log_re_todo = _live_todo.get("log_analyze")
             if _log_re_todo and not any(t.get("capability") == "log_analyze" for t in final_todo):
                 final_todo = final_todo + [_log_re_todo]
+            if _live_todo:
+                present = {t.get("id") for t in final_todo}
+                for kid, payload in _live_todo.items():
+                    if kid in present:
+                        continue
+                    final_todo.append(payload)
             reasoning_trace = {
                 "complexity": sup_result.get("complexity"),
                 "plan": sup_result.get("plan", []),
                 "todo": final_todo,
                 "decision": sup_result.get("_decision"),
                 "run_id": run_id,
+                "spans": sup_result.get("spans") or (
+                    runtime_ctx["trace_bus"].tree()
+                    if hasattr(runtime_ctx.get("trace_bus"), "tree") else []
+                ),
             }
 
             # ── 澄清闭环（P4）：Supervisor 判定还需向用户确认关键信息（ask_user=true）——
@@ -538,8 +702,11 @@ class DiscussFlow:
                 if _t.get("phase") in ("running", "in_progress"):
                     _t["phase"] = "done"
                 _final_todo.append(_t)
-            final_todo = _final_todo
-            await _broadcast_ai_progress_await(task_id, run_id, final_todo, "done")
+            final_todo = nest_progress_todos(_final_todo)
+            reasoning_trace["todo"] = final_todo
+            # 先不广播 done：浏览器离开/刷新时连接会断，若此处就「完成」前端会收起过程区，
+            # 后面再跳过写评论就变成「执行完成但没有回复」。等评论落库后再发 done。
+            progress_done_payload = (run_id, final_todo)
 
             # 清理临时目录（如日志解压）
             for td in runtime_ctx.get("_tmp_dirs", []):
@@ -581,7 +748,7 @@ class DiscussFlow:
         #    若用户 @# 引用了历史工单（referenced_tickets 非空），或本轮引用了某条评论
         #    （quoted_comment 非空），说明在针对具体内容提问，绝非闲聊 —— 强制走完整
         #    DISCUSS 模板（light 模板原先没有这些占位，会把引用丢掉）。
-        if is_pure_chat and not referenced_tickets and not quoted_comment:
+        if is_pure_chat and not referenced_tickets and not quoted_comment and not saved_memory:
             from ai.agents.AiTaskPlatform.prompts import (
                 DISCUSS_LIGHT_SYSTEM_PROMPT, DISCUSS_LIGHT_USER_TEMPLATE,
             )
@@ -598,7 +765,15 @@ class DiscussFlow:
             if not facultative and query:
                 att_mentions = _rules.ATTACHMENT_MENTION_WORDS
                 if any(kw in query.lower() for kw in att_mentions):
-                    facultative = "当前工单没有日志、图片或任何可解析的附件。请如实告知工程师，不要编造。"
+                    n_att = len(ctx.attachments or [])
+                    if n_att:
+                        facultative = (
+                            f"工单上已有 {n_att} 个附件，但本轮未能解析为可分析的日志/图片。"
+                            "不要说用户没上传、不要让用户重新上传已经在工单上的文件；"
+                            "说明本轮读附件失败，可请对方确认是 zip/log 而非 rar。"
+                        )
+                    else:
+                        facultative = "当前工单没有日志、图片或任何可解析的附件。请如实告知工程师，不要编造。"
 
             diag_summary = f"推测: {' / '.join(ctx.hypotheses) if ctx.hypotheses else '无'}"
             prompt = DISCUSS_USER_TEMPLATE.format(
@@ -614,9 +789,16 @@ class DiscussFlow:
             system_prompt = _select_system_prompt(self._is_platform_ticket(ctx), "discuss")
             max_tokens = 600
 
+        prompt = await _append_round_supplements(task_id, runtime_ctx, prompt)
+
         # 注入用户画像到 system prompt（有画像时追加，无画像保持原样）
         if user_profile_block:
             system_prompt = f"{system_prompt}\n\n{user_profile_block}"
+        if memory_block:
+            prompt = f"{prompt}\n\n{memory_block}"
+
+        if await _client_cancelled(is_cancelled):
+            logger.info(f"[discuss] 客户端已离开，仍生成并写入回复 task={task_id}")
 
         t_llm = time.perf_counter()
         reply = await self._llm_client.complete(
@@ -629,8 +811,9 @@ class DiscussFlow:
                         elapsed_ms=round((time.perf_counter() - t_llm) * 1000))
 
         # 4.5 Evaluator-optimizer（改造点 C/G4）：仅对"需工具的讨论"启用（成本护栏，纯闲聊不启用）
+        # 早停（已验证历史方案）跳过自评改写，避免把可直接采用的结论改偏。
         eval_used = False
-        if facultative and reply.strip():
+        if facultative and reply.strip() and not early_stopped:
             try:
                 from ai.agents.AiTaskPlatform.capabilities import Evaluator
                 eval_res = await Evaluator.evaluate_and_rewrite(
@@ -676,14 +859,33 @@ class DiscussFlow:
             self._add_trace(self.NODE_LLM, "ok",
                             output={"clarify_appendix": len(_pending_q), "reply_chars": len(reply)})
 
+        if saved_memory:
+            marker = f"已记住：{saved_memory}"
+            if marker not in (reply or ""):
+                reply = f"✅ {marker}\n\n{(reply or '').lstrip()}"
+
         # 5. 回复写入 task_comments
         #    最终评论只写入纯粹答复（不含"分析过程"）——执行过程已通过 ai.progress
         #    WS 事件在前端动态展示，不污染最终回复。
-        comment_reply = reply.strip()
+        #    浏览器离开工单/刷新会断开 HTTP，但排查已经做完：仍要写评论，回来能看见。
+        if await _client_cancelled(is_cancelled):
+            logger.info(f"[discuss] 客户端已离开，仍写入评论 task={task_id}")
+        comment_reply = (reply or "").strip()
+        if not comment_reply:
+            comment_reply = "本轮排查步骤已跑完，但没有生成文字结论。请再 @U老师 一次，或根据过程区步骤补充问题。"
+            reply = comment_reply
         try:
             self._add_diagnosis_comment_short(int(task_id), comment_reply)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"[discuss] 写评论失败 task={task_id}: {e}")
+
+        if progress_done_payload:
+            try:
+                await _broadcast_ai_progress_await(
+                    task_id, progress_done_payload[0], progress_done_payload[1], "done",
+                )
+            except Exception as e:
+                logger.warning(f"[discuss] 收尾进度广播失败 task={task_id}: {e}")
 
         total_ms = round((time.perf_counter() - t0) * 1000)
         return {

@@ -133,10 +133,38 @@ class LogAnalyzeCapability(BaseCapability):
             sub = LogSubAgent(log_path)
             # progress：由上层（discuss_flow via runtime_ctx）注入的 ai.progress 回调，
             # 让 LogSubAgent 内部各阶段（建索引/R1..Rn）也能上报子节点，避免前端只看一个卡住的节点
+            current = kwargs.get("current_task") or {}
+            if isinstance(task_context, dict) and not task_context.get("task_id") and current.get("task_id"):
+                task_context = {**task_context, "task_id": current.get("task_id")}
+            bag = kwargs.get("round_supplements")
+            if not isinstance(bag, list):
+                bag = []
+                kwargs["round_supplements"] = bag
+            orig_progress = kwargs.get("progress_emitter")
+            bus = kwargs.get("trace_bus")
+
+            def _progress(payload: dict) -> None:
+                if bus is not None:
+                    try:
+                        desc = (payload or {}).get("description") or (payload or {}).get("id") or ""
+                        if desc:
+                            bus.add_event(
+                                str(desc),
+                                id=(payload or {}).get("id"),
+                                status=(payload or {}).get("status"),
+                            )
+                    except Exception:
+                        pass
+                if orig_progress is not None:
+                    orig_progress(payload)
+
             result = await sub.analyze(
                 task_context=task_context,
                 user_question=query,
-                progress=kwargs.get("progress_emitter"),
+                progress=_progress,
+                is_cancelled=kwargs.get("is_cancelled"),
+                task_id=str(current.get("task_id") or (task_context or {}).get("task_id") or ""),
+                supplements_bag=bag,
             )
         except Exception as e:
             logger.error(f"LogAnalyzeCapability 执行失败: {e}")
@@ -173,6 +201,13 @@ class LogAnalyzeCapability(BaseCapability):
                 "\n\n（提示：若告知故障发生的大致时间，可用时间窗加速定位，速度更快。）"
             )
         cap = CapabilityResult(text=text, meta=meta, ok=True)
+        bus = kwargs.get("trace_bus")
+        if bus is not None:
+            try:
+                bus.set_attribute("window_applied", window_applied)
+                bus.set_attribute("queries", meta.get("queries") or 0)
+            except Exception:
+                pass
 
         # 清理临时窗口文件（分析完成后删除，避免残留）
         if tmp_path and tmp_path != log_path and os.path.exists(tmp_path):

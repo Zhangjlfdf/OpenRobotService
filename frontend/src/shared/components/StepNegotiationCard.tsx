@@ -2,6 +2,7 @@ import { Button, Popup, Form, FormItem, Textarea } from 'tdesign-mobile-react';
 import { DatePicker } from 'antd';
 import dayjs from 'dayjs';
 import { AlarmClock } from 'lucide-react';
+import { useMemo } from 'react';
 import type { ComponentProps } from 'react';
 import type { useStepNegotiation, StepNegotiationTicket } from '@/shared/hooks/useStepNegotiation';
 import { getDeadlineRange, makeDisabledDate, makeDisabledTime, parseDeadlineString } from '@/shared/utils/deadline';
@@ -78,6 +79,20 @@ export default function StepNegotiationCard({
     handleRespond, handleStepComplete, handleSetStepTime, handleNegotiateStep,
     openNegotiate, openCompleteStep,
   } = negotiation;
+
+  // 稳定 DatePicker 受控 value 引用（内联 parse 每次渲染生成新 dayjs 实例会触发 rc-picker 受控同步，重置面板暂存值）
+  const negotiateEndTimeValue = useMemo(
+    () => (negotiateEndTime ? parseDeadlineString(negotiateEndTime) : null),
+    [negotiateEndTime],
+  );
+  const completeNextEndTimeValue = useMemo(
+    () => (completeNextEndTime ? parseDeadlineString(completeNextEndTime) : null),
+    [completeNextEndTime],
+  );
+  const setStepTimePickerValue = useMemo(
+    () => (setStepTimeValue ? parseDeadlineString(setStepTimeValue) : null),
+    [setStepTimeValue],
+  );
 
   const { isAssignee, isReporter, isPrincipal = false } = roles;
   // 被代理人（已确认跟进）与代理人同侧（creator 侧，代表问题方）：
@@ -403,7 +418,7 @@ export default function StepNegotiationCard({
                 showNow={false}
                 placement="topLeft"
                 getPopupContainer={() => document.body}
-                value={negotiateEndTime ? parseDeadlineString(negotiateEndTime) : null}
+                value={negotiateEndTimeValue}
                 disabledDate={range ? makeDisabledDate(range.min) : undefined}
                 disabledTime={range ? makeDisabledTime(range.min) : undefined}
                 onChange={(d: dayjs.Dayjs | null) =>
@@ -484,7 +499,7 @@ export default function StepNegotiationCard({
                 showNow={false}
                 placement="topLeft"
                 getPopupContainer={() => document.body}
-                value={completeNextEndTime ? parseDeadlineString(completeNextEndTime) : null}
+                value={completeNextEndTimeValue}
                 disabledDate={range ? makeDisabledDate(range.min) : undefined}
                 disabledTime={range ? makeDisabledTime(range.min) : undefined}
                 onChange={(d: dayjs.Dayjs | null) =>
@@ -526,7 +541,7 @@ export default function StepNegotiationCard({
                 showNow={false}
                 placement="topLeft"
                 getPopupContainer={() => document.body}
-                value={setStepTimeValue ? parseDeadlineString(setStepTimeValue) : null}
+                value={setStepTimePickerValue}
                 disabledDate={range ? makeDisabledDate(range.min) : undefined}
                 disabledTime={range ? makeDisabledTime(range.min) : undefined}
                 onChange={(d: dayjs.Dayjs | null) =>

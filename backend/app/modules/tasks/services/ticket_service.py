@@ -243,9 +243,11 @@ class TicketService:
                         ticket, "proxy_agent_name",
                         user_map.get(rel.agent_id) or rel.agent_username or rel.agent_id,
                     )
+                    # 被代提人姓名：仅取注册用户实名（user_map 命中）；
+                    # 未注册 / 未实名的 wechat id 不裸奔，回 None 由前端缺省「代未知用户提交」。
                     setattr(
                         ticket, "proxy_principal_name",
-                        user_map.get(rel.principal_id) or rel.principal_username or rel.principal_id,
+                        user_map.get(rel.principal_id),
                     )
                 else:
                     setattr(ticket, "proxy_agent_name", None)
@@ -1297,10 +1299,22 @@ class TicketService:
         processed_attachments = []
         for attachment in comment_data.attachments or []:
             if attachment in comment_attachment_map:
-                processed_attachments.extend(comment_attachment_map[attachment])
-                comment_attachment_map[attachment].clear()
-            else:
-                processed_attachments.append(attachment)
+                mapped = list(comment_attachment_map.get(attachment) or [])
+                processed_attachments.extend(mapped)
+                comment_attachment_map[attachment] = []
+                # 内存映射已被其它 worker / 重启清掉时，temp_id 本身不是文件路径
+                if mapped or (isinstance(attachment, str) and "/" in attachment):
+                    continue
+                logger.warning(
+                    "评论附件 temp_id 未命中映射且不是对象路径，已丢弃: %s", attachment
+                )
+                continue
+            if isinstance(attachment, str) and "/" not in attachment:
+                logger.warning(
+                    "评论附件既不是对象路径也不是已知 temp_id，已丢弃: %s", attachment
+                )
+                continue
+            processed_attachments.append(attachment)
 
         comment = TicketComment(
             ticket_id=ticket_id,

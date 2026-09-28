@@ -60,7 +60,7 @@ from app.utils.notification_utils import NotificationUtils, _format_shanghai
 from app.integrations.api import verify_sync_api_key, verify_robot_alarm_api_key
 from app.services.identity_service import IdentityService
 from app.core.config import settings
-from app.core.user_identity import user_matches, is_admin_user, to_user_id, actor_username, identity_keys
+from app.core.user_identity import user_matches, is_admin_user, to_user_id, actor_username, identity_keys, same_identity
 from app.services.redispatch_tip_service import (  # 派单说明：列表/气泡/详情同一出口
     build_redispatch_tip,
     clean_reasoning_for_display,
@@ -906,79 +906,133 @@ async def get_task(
         raise HTTPException(status_code=500, detail=f"获取任务详情失败: {str(e)}")
 
 
+def _similar_item_from_task(t) -> dict:
+    return {
+        "task_id": t.id,
+        "title": (t.title or "")[:80] or f"工单#{t.id}",
+        "status": t.status.value if hasattr(t.status, "value") else str(t.status),
+        "project_name": getattr(t, "project_name", "") or "",
+    }
+
+
+async def _hydrate_similar_from_db(db: AsyncSession, items: list, exclude_id: int, limit: int) -> list:
+    """按向量检索顺序把 task_id 回表，只保留已解决/已关闭。"""
+    from app.modules.tasks.models.ticket import Task, TaskStatus
+    ids = []
+    seen = set()
+    for it in items or []:
+        if not isinstance(it, dict):
+            continue
+        raw = it.get("task_id")
+        try:
+            tid = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if tid == exclude_id or tid in seen:
+            continue
+        seen.add(tid)
+        ids.append(tid)
+    if not ids:
+        return []
+    stmt = select(Task).where(Task.id.in_(ids), Task.id != exclude_id)
+    rows = (await db.execute(stmt)).scalars().all()
+    by_id = {t.id: t for t in rows}
+    done = {TaskStatus.RESOLVED, TaskStatus.CLOSED}
+    out = []
+    for tid in ids:
+        t = by_id.get(tid)
+        if not t or t.status not in done:
+            continue
+        out.append(_similar_item_from_task(t))
+        if len(out) >= limit:
+            break
+    return out
+
+
+async def _similar_by_keywords(db: AsyncSession, task_id: int, query_text: str, limit: int) -> list:
+    """Qdrant 不可用或尚未沉淀时的 SQL 关键词兜底。"""
+    import re as _re
+    from sqlalchemy import or_
+    from app.modules.tasks.models.ticket import Task, TaskStatus
+
+    kws = set(_re.findall(r"[\u4e00-\u9fff]{2,}|[A-Za-z0-9]{2,}", query_text or ""))
+    kws.discard("问题")
+    kws.discard("解决")
+    if not kws:
+        return []
+
+    conditions = []
+    for kw in kws:
+        pat = f"%{kw}%"
+        conditions.append(Task.title.ilike(pat))
+        conditions.append(Task.description.ilike(pat))
+    stmt = (
+        select(Task)
+        .where(Task.status.in_([TaskStatus.RESOLVED, TaskStatus.CLOSED]))
+        .where(Task.id != task_id)
+        .where(or_(*conditions))
+        .order_by(Task.created_at.desc())
+        .limit(limit * 3)
+    )
+    rows = (await db.execute(stmt)).scalars().all()
+    scored = []
+    for t in rows:
+        title = t.title or ""
+        desc = t.description or ""
+        score = 0
+        for kw in kws:
+            if kw in title:
+                score += 3
+            if kw in desc:
+                score += 1
+        scored.append((score, t))
+    scored.sort(key=lambda x: (-x[0], (x[1].created_at or datetime.min)))
+    similar = []
+    for score, t in scored[:limit]:
+        if score <= 0:
+            continue
+        similar.append(_similar_item_from_task(t))
+    return similar
+
+
 @router.get("/{task_id}/similar", response_model=dict)
 async def get_similar_tasks(
     task_id: int,
     limit: int = Query(10, description="返回相似工单条数上限"),
     db: AsyncSession = Depends(get_db),
 ):
-    """@# 相似工单检索：按当前工单标题+描述做关键词相似，返回已解决的同款历史工单（含进行中? 否，限定 resolved）。
+    """@# 相似工单：优先 Qdrant 向量（已沉淀方案），失败或空结果回退 SQL 关键词。
 
-    仅用于 @# 引用"找相似"的弹列表（Q2d-①）。返回 [{task_id, title, status, project_name}]。
-    跨项目、无权限过滤（工单可分享）；排除自身。
+    仅用于 @# 引用「找相似」弹列表。返回 [{task_id, title, status, project_name}]。
+    跨项目、无权限过滤（工单可分享）；排除自身；只含已解决/已关闭。
     """
     import logging
-    from app.modules.tasks.models.ticket import Task, TaskStatus
+    import httpx
+    from app.modules.tasks.models.ticket import Task
     logger = logging.getLogger(__name__)
     try:
-        # 读取当前工单文本作为查询基准
         cur = await db.get(Task, task_id)
         if not cur:
             raise HTTPException(status_code=404, detail="任务未找到")
         query_text = " ".join(filter(None, [cur.title or "", cur.description or ""]))
+        cap = max(1, min(int(limit or 10), 30))
 
-        # 关键词：过滤掉停用词/无意义单字，保留 2 字及以上 token
-        import re as _re
-        kws = set(_re.findall(r"[\u4e00-\u9fff]{2,}|[A-Za-z0-9]{2,}", query_text))
-        kws.discard("问题")
-        kws.discard("解决")
-        if not kws:
-            return {"task_id": task_id, "similar": []}
+        try:
+            url = f"{settings.AI_SERVICE_URL.rstrip('/')}/api/ai/task/tickets/similar"
+            async with httpx.AsyncClient(timeout=12.0) as client:
+                resp = await client.get(url, params={"task_id": task_id, "limit": cap})
+            if resp.status_code == 200:
+                payload = resp.json() if resp.content else {}
+                if int(payload.get("code") or 0) == 0:
+                    data = payload.get("data") or {}
+                    items = data.get("similar") or []
+                    hydrated = await _hydrate_similar_from_db(db, items, task_id, cap)
+                    if hydrated:
+                        return {"task_id": task_id, "similar": hydrated}
+        except Exception as e:
+            logger.warning(f"相似工单向量检索不可用，回退 SQL: task_id={task_id}, error={e}")
 
-        # 限定已解决，排除自身；按标题+描述匹配关键词打分（命中数加权）
-        from sqlalchemy import or_, select
-
-        # 简单打分：标题命中权重高于描述，用关键词出现次数近似
-        conditions = []
-        for kw in kws:
-            pat = f"%{kw}%"
-            conditions.append(Task.title.ilike(pat))
-            conditions.append(Task.description.ilike(pat))
-        # distinct 去重并按创建时间倒序取前 N（打分近似：先取含任一关键词的候选，再按更新排序）
-        stmt = (
-            select(Task)
-            .where(Task.status == TaskStatus.RESOLVED)
-            .where(Task.id != task_id)
-            .where(or_(*conditions))
-            .order_by(Task.created_at.desc())
-            .limit(limit * 3)  # 多取一些用于打分
-        )
-        rows = (await db.execute(stmt)).scalars().all()
-
-        # 打分：标题命中 +3/词，描述命中 +1/词
-        scored = []
-        for t in rows:
-            title = t.title or ""
-            desc = t.description or ""
-            score = 0
-            for kw in kws:
-                if kw in title:
-                    score += 3
-                if kw in desc:
-                    score += 1
-            scored.append((score, t))
-
-        scored.sort(key=lambda x: (-x[0], (x[1].created_at or datetime.min)))
-        similar = []
-        for score, t in scored[:limit]:
-            if score <= 0:
-                continue
-            similar.append({
-                "task_id": t.id,
-                "title": (t.title or "")[:80] or f"工单#{t.id}",
-                "status": t.status.value if hasattr(t.status, "value") else str(t.status),
-                "project_name": getattr(t, "project_name", "") or "",
-            })
+        similar = await _similar_by_keywords(db, task_id, query_text, cap)
         return {"task_id": task_id, "similar": similar}
     except HTTPException:
         raise
@@ -1089,7 +1143,8 @@ def _proxy_relation_response(relation, roles) -> ProxyRelationResponse:
         is_principal=roles.is_principal or roles.is_pending_principal,
         is_assignee=roles.is_assignee,
         agent_name=user_map.get(agent_id) or getattr(relation, "agent_username", None) or agent_id,
-        principal_name=user_map.get(principal_id) or getattr(relation, "principal_username", None) or principal_id,
+        # 未注册 / 未实名的 wechat id 不下发裸 id，前端缺省「代未知用户提交」
+        principal_name=user_map.get(principal_id),
         notified_at=relation.notified_at,
         acked_at=relation.acked_at,
         declined_at=relation.declined_at,
@@ -1209,7 +1264,7 @@ async def get_task_project_members(
 ):
     """获取任务关联项目的成员列表 + 工单处理人（用于讨论区 @ 提及）。
 
-    all=false：仅返回提单人/处理人 + 项目成员（默认候选池）。
+    all=false：仅返回处理人/提单人/代提单人 + 项目成员（默认候选池）。
     all=true：在前者基础上再追加全部 active 在职用户（已去重），
              使讨论区输入 @关键字 时可过滤到项目外的人。
     """
@@ -1226,7 +1281,7 @@ async def get_task_project_members(
 
         project_id = getattr(ticket, "project_id", None)
 
-        # ── 1. 提单人和被指派人始终排在最前面 ──
+        # ── 1. 处理人 / 提单人 / 代提单人始终排在最前面 ──
         key_users = []
         assigned_to = getattr(ticket, "assigned_to", None)
         created_by = getattr(ticket, "created_by", None)
@@ -1234,6 +1289,19 @@ async def get_task_project_members(
             key_users.append((assigned_to, "处理人"))
         if created_by and created_by != assigned_to:
             key_users.append((created_by, "提单人"))
+
+        # 代他人提单：被代理人一并置顶，角色标为「代提单人」（与提单人、处理人并列）
+        try:
+            proxy = await ProxyRelationService.get_task_relation(db, task_id)
+        except Exception:
+            logger.warning("读取代提关系失败，@ 列表不置顶代提单人: task_id=%s", task_id, exc_info=True)
+            proxy = None
+        if proxy:
+            principal_key = (getattr(proxy, "principal_username", None) or "").strip() or (
+                getattr(proxy, "principal_id", None) or ""
+            ).strip()
+            if principal_key and not any(same_identity(principal_key, existing) for existing, _ in key_users):
+                key_users.append((principal_key, "代提单人"))
 
         if key_users:
             from app.core.db import SessionLocal
@@ -1257,8 +1325,8 @@ async def get_task_project_members(
             finally:
                 sync_db.close()
 
-        # ── 2. 提单人/处理人 + 项目成员 ──
-        # 即使没有项目也能 @ 提单人和处理人
+        # ── 2. 处理人/提单人/代提单人 + 项目成员 ──
+        # 即使没有项目也能 @ 处理人、提单人和代提单人
         if project_id:
             members = db_manager.get_project_members(project_id, include_usp=False)
             for m in members:
@@ -3004,13 +3072,44 @@ async def re_dispatch_task(
     comment_text = f"{user_name} {base}"
     if remark:
         comment_text += f"（备注：{remark}）"
+    # 方案 A：默认重派算不准确；若上一轮 preferred 与本次相同 → 倾向人×2，不算不准确
+    prev_pref = ""
+    try:
+        from app.models.task_dispatch_log import TaskDispatchLog
+        last_log = (
+            await db.execute(
+                select(TaskDispatchLog)
+                .where(TaskDispatchLog.task_id == int(task_id))
+                .order_by(TaskDispatchLog.dispatch_round.desc())
+                .limit(1)
+            )
+        ).scalars().first()
+        if last_log is not None:
+            prev_pref = str(getattr(last_log, "preferred_id", None) or "").strip()
+    except Exception as e:
+        logger_task.warning(f"读取上一轮 preferred_id 失败 task_id={task_id}: {e}")
+    twice = bool(preferred and prev_pref and preferred == prev_pref)
+    redispatch_detail = {
+        "preferred_assignee": preferred,
+        "remark": remark or None,
+        "channel": "redispatch",
+        "from_assignee": (old_assigned_to or "").strip() or None,
+        "preferred_twice_confirm": twice,
+    }
+    if twice:
+        redispatch_detail["kind_source"] = "preferred_twice"
+    else:
+        redispatch_detail["redispatch_verdict"] = "inaccurate"
+        redispatch_detail["kind_source"] = "scheme_a_auto"
+        redispatch_detail["learn_at"] = datetime.utcnow().isoformat() + "Z"
+
     await OperationLogService.log(
         db=db,
         task_id=task_id,
         op_type=OperationType.REASSIGN,
         operator=username,
         operator_name=user_name,
-        detail={"preferred_assignee": preferred, "remark": remark or None, "channel": "redispatch", "from_assignee": (old_assigned_to or "").strip() or None},
+        detail=redispatch_detail,
         description=desc,
     )
     await _add_system_comment(db, task_id, comment_text, username, token)
