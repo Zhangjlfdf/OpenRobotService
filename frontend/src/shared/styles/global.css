@@ -3859,6 +3859,9 @@ html, body, #root {
   padding: 4px 0;
 }
 .chip-dropdown__item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   padding: 9px 14px;
   font-size: 14px;
   color: var(--foreground);
@@ -3867,6 +3870,18 @@ html, body, #root {
   overflow: hidden;
   text-overflow: ellipsis;
   transition: background 0.15s ease;
+}
+.chip-dropdown__item-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.chip-dropdown__check {
+  flex: 0 0 14px;
+  color: var(--primary);
+}
+.chip-dropdown__check.is-hidden {
+  visibility: hidden;
 }
 .chip-dropdown__item:hover {
   background: var(--muted);
@@ -3909,7 +3924,9 @@ html, body, #root {
   padding: 4px 6px;
 }
 .filter-menu__inline-item {
-  display: block;
+  display: flex;
+  align-items: center;
+  gap: 8px;
   width: 100%;
   padding: 9px 12px;
   border: none;
