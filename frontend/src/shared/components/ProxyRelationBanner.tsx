@@ -9,7 +9,7 @@
 //      · declined     → 弱化只读态「你已表示与本单无关」
 //  - 接单人视角：X 代 Y 提交 + 关系状态胶囊（只读，便于处理人判断该找谁对接）
 //
-// 视觉：复用 .surface-card 毛玻璃 + 左侧主色竖条，配色全部走 global.css 的 oklch token。
+// 视觉：实底白卡（.surface-card 同尺寸但背景不透明，避免页面底色透出）+ 左侧主色竖条，配色全部走 global.css 的 oklch token。
 import { useState } from 'react';
 import { Button, Popup, Textarea, Toast } from 'tdesign-mobile-react';
 import { ackProxyRelation, declineProxyRelation } from '@/api/ticket';
