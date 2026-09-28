@@ -1,4 +1,4 @@
-import { Fragment, useState, useEffect, useRef } from 'react';
+import { Fragment, useState, useEffect, useRef, useMemo } from 'react';
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import { Navbar, Button, Textarea, Toast, Loading, Tag, Popup, Dialog, Form, FormItem } from 'tdesign-mobile-react';
 import AppButton from '@/shared/components/AppButton';
@@ -600,6 +600,20 @@ export default function TaskDetailPage() {
 
   // 工单阶段性处理（协商节点）+ 结束工单（解决方式）：抽到共享 hook，与历史工单详情页复用
   const negotiation = useStepNegotiation(detailId ?? '', detail, refreshDetail);
+  // 稳定 DatePicker 受控 value 引用：内联 parse 每次渲染都生成新 dayjs 实例，会触发 rc-picker
+  // 的受控同步 effect，把「面板已选但未确认」的暂存值重置回受控 value（选完自动跳回当前时间的根因）
+  const editFormDeadlineValue = useMemo(
+    () => (editForm.curr_step_endtime ? parseDeadlineString(editForm.curr_step_endtime) : null),
+    [editForm.curr_step_endtime],
+  );
+  const deadlineDraftValue = useMemo(
+    () => (deadlineDraft ? parseDeadlineString(deadlineDraft) : null),
+    [deadlineDraft],
+  );
+  const reopenEndTimeValue = useMemo(
+    () => (negotiation.reopenEndTime ? parseDeadlineString(negotiation.reopenEndTime) : null),
+    [negotiation.reopenEndTime],
+  );
   const resolve = useResolveTicket(detailId ?? '', detail, refreshDetail, refreshTasks, (b) => setBlockedError(b));
 
   // ===== 公司/部门审核 =====
@@ -1708,7 +1722,7 @@ export default function TaskDetailPage() {
                 showNow={false}
                 placement="topLeft"
                 getPopupContainer={(trigger) => trigger.parentElement || document.body}
-                value={editForm.curr_step_endtime ? parseDeadlineString(editForm.curr_step_endtime) : null}
+                value={editFormDeadlineValue}
                 disabledDate={editDeadlineRange ? makeDisabledDate(editDeadlineRange.min) : undefined}
                 disabledTime={editDeadlineRange ? makeDisabledTime(editDeadlineRange.min) : undefined}
                 onChange={(d: dayjs.Dayjs | null) =>
@@ -1943,7 +1957,7 @@ export default function TaskDetailPage() {
                 showNow={false}
                 placement="topLeft"
                 getPopupContainer={(trigger) => trigger.parentElement || document.body}
-                value={deadlineDraft ? parseDeadlineString(deadlineDraft) : null}
+                value={deadlineDraftValue}
                 disabledDate={range ? makeDisabledDate(range.min) : undefined}
                 disabledTime={range ? makeDisabledTime(range.min) : undefined}
                 onChange={(d: dayjs.Dayjs | null) =>
@@ -2029,7 +2043,7 @@ export default function TaskDetailPage() {
                 showNow={false}
                 placement="topLeft"
                 getPopupContainer={() => document.body}
-                value={negotiation.reopenEndTime ? parseDeadlineString(negotiation.reopenEndTime) : null}
+                value={reopenEndTimeValue}
                 disabledDate={range ? makeDisabledDate(range.min) : undefined}
                 disabledTime={range ? makeDisabledTime(range.min) : undefined}
                 onChange={(d: dayjs.Dayjs | null) =>

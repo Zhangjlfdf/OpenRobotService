@@ -566,6 +566,11 @@ export default function TicketDetailPage() {
   const [editForm, setEditForm] = useState<{ title: string; description: string; priority: string; ticket_type: string; project_id: string; project_name: string; curr_step_endtime?: string }>({ title: '', description: '', priority: '中', ticket_type: 'problem', project_id: '', project_name: '' });
   // 当前阶段截止时间区间：基准 = 工单创建时间（ticket.created_at），而非用户操作时刻
   const editDeadlineRange = getDeadlineRange(editForm.priority, ticket?.created_at);
+  // 稳定 DatePicker 受控 value 引用（内联 parse 每次渲染生成新 dayjs 实例会触发 rc-picker 受控同步，重置面板暂存值）
+  const editFormDeadlineValue = useMemo(
+    () => (editForm.curr_step_endtime ? parseDeadlineString(editForm.curr_step_endtime) : null),
+    [editForm.curr_step_endtime],
+  );
   // 优先级仅在「尚未派单」（待处理/待派单）可修改；已派单及后续状态禁止（置灰不可点）
   const priorityDisabled = !canEditPriority(ticket?.status);
   const [savingEdit, setSavingEdit] = useState(false);
@@ -1255,7 +1260,7 @@ export default function TicketDetailPage() {
                 showNow={false}
                 placement="topLeft"
                 getPopupContainer={(trigger) => trigger.parentElement || document.body}
-                value={editForm.curr_step_endtime ? parseDeadlineString(editForm.curr_step_endtime) : null}
+                value={editFormDeadlineValue}
                 disabledDate={editDeadlineRange ? makeDisabledDate(editDeadlineRange.min, editDeadlineRange.max) : undefined}
                 disabledTime={editDeadlineRange ? makeDisabledTime(editDeadlineRange.min, editDeadlineRange.max) : undefined}
                 onChange={(d: dayjs.Dayjs | null) =>
