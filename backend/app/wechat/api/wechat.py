@@ -268,9 +268,12 @@ async def handle_text_message(message: dict):
 async def handle_event_message(message: dict):
     event_type = message.get('Event')
     from_user_name = message.get('FromUserName')
+    event_key = message.get('EventKey', '')
 
     if event_type == 'subscribe':
         return await handle_subscribe_event(message)
+    elif event_type == 'SCAN':
+        return await handle_scan_event(message)
     elif event_type == 'unsubscribe':
         return await handle_unsubscribe_event(message)
     elif event_type == 'CLICK':
@@ -284,9 +287,9 @@ async def handle_event_message(message: dict):
             status_code=200,
             processing_time=0.0,
             operator=generate_wechat_username(from_user_name),
-            summary=f'点击菜单（{parts[-1] if (parts := [p for p in message.get("EventKey", "").split("/") if p]) else ""}）',
+            summary=f'点击菜单（{parts[-1] if (parts := [p for p in event_key.split("/") if p]) else ""}）',
         )
-        logger.info(f"用户 {from_user_name} 点击了View类型菜单，EventKey: {message.get('EventKey')}")
+        logger.info(f"用户 {from_user_name} 点击了View类型菜单，EventKey: {event_key}")
         return Response(content='', media_type="text/xml")
     return Response(content='', media_type="text/xml")
 
@@ -889,10 +892,91 @@ async def get_wechat_openid(code: str = Query(..., description="微信授权code
         return {"success": False, "error": f"系统错误: {str(e)}"}
 
 
+@router.get("/qrcode")
+async def generate_qrcode(
+    scene: str = Query(..., description="场景值 (scene_str)，1~64 字符，扫码后微信通过 EventKey 回传"),
+    permanent: bool = Query(False, description="是否永久二维码 (永久码最多 10 万个)"),
+    expire_seconds: int = Query(2592000, ge=1, le=2592000, description="临时码有效期 (秒)，最大 2592000"),
+    as_json: bool = Query(False, description="True 时返回 JSON (含 ticket/url)，否则直接返回图片"),
+    credentials: Optional = admin_auth,
+):
+    """生成带参数的微信公众号二维码。
+
+    浏览器直接访问此接口即可看到二维码图片。用户扫码后微信会推送
+    SCAN 或 subscribe 事件到 /api/wechat，EventKey 即此处传入的 scene 值。
+
+    示例：
+        GET /api/wechat/qrcode?scene=robot_2026&expire_seconds=604800
+        GET /api/wechat/qrcode?scene=robot_perm&permanent=true
+
+    返回：
+        - 默认：image/jpeg 二维码图片
+        - as_json=true: {"success": true, "ticket": "...", "url": "...", "expire_seconds": N}
+    """
+    if not scene or len(scene) > 64:
+        raise HTTPException(status_code=400, detail="scene 不能为空且长度不能超过 64 字符")
+
+    try:
+        loop = asyncio.get_event_loop()
+        ticket_result = await loop.run_in_executor(
+            None,
+            lambda: wechat_service.create_qrcode_ticket(
+                scene_str=scene,
+                is_permanent=permanent,
+                expire_seconds=expire_seconds,
+            )
+        )
+
+        if ticket_result is None:
+            raise HTTPException(status_code=500, detail="创建二维码 ticket 失败，请稍后重试")
+
+        if 'ticket' not in ticket_result:
+            # 微信返回了错误 JSON（含 errcode）
+            errcode = ticket_result.get('errcode', -1)
+            errmsg = ticket_result.get('errmsg', '微信接口返回错误')
+            raise HTTPException(
+                status_code=400,
+                detail=f"微信创建二维码失败: errcode={errcode}, errmsg={errmsg}"
+            )
+
+        ticket = ticket_result['ticket']
+
+        # 只调试模式下返回 JSON
+        if as_json:
+            return {
+                "success": True,
+                "ticket": ticket,
+                "url": ticket_result.get('url', ''),
+                "expire_seconds": ticket_result.get('expire_seconds'),
+                "action_name": 'QR_LIMIT_STR_SCENE' if permanent else 'QR_STR_SCENE',
+                "scene_str": scene,
+            }
+
+        # 正常模式：取图片字节返回
+        image_bytes = await loop.run_in_executor(
+            None,
+            lambda: wechat_service.get_qrcode_image_bytes(ticket)
+        )
+
+        if image_bytes is None:
+            raise HTTPException(status_code=502, detail="用 ticket 换取二维码图片失败")
+
+        return Response(content=image_bytes, media_type="image/jpeg")
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"生成二维码异常: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"生成二维码过程中发生错误: {str(e)}")
+
+
 async def handle_subscribe_event(message: dict):
     from_user_name = message.get('FromUserName')
     to_user_name = message.get('ToUserName')
-    logger.info(f"用户 {from_user_name} 关注")
+    event_key = message.get('EventKey', '')
+    is_scan_follow = bool(event_key)  # 通过扫码关注 → EventKey 非空
+
+    logger.info(f"用户 {from_user_name} 关注 (扫码={is_scan_follow}, EventKey={event_key})")
     log_operation(
         timestamp=datetime.now().astimezone().isoformat(timespec='milliseconds'),
         client_ip='127.0.0.1',
@@ -901,7 +985,7 @@ async def handle_subscribe_event(message: dict):
         status_code=200,
         processing_time=0.0,
         operator=generate_wechat_username(from_user_name),
-        summary='用户关注',
+        summary=f'用户关注 (扫码={is_scan_follow})',
     )
     auth_service.register_wechat_user(from_user_name)
     welcome_message = """👋 欢迎关注我们！
@@ -923,21 +1007,76 @@ async def handle_subscribe_event(message: dict):
 点击右上角 → 再点击右上角「…」→【设置】→ 关闭【消息免打扰】
     """
     reply_xml = build_reply_text(from_user_name, to_user_name, welcome_message)
-    # 追加推送个人中心分享卡片（news 类型图文消息）
 
+    # 扫码关注：额外推一张跳 /app/call 的图文卡片，让用户直达扫码来源页
+    if is_scan_follow:
+        _send_scan_redirect_card(from_user_name, event_key)
+    else:
+        # 普通关注：推个人中心卡片
+        try:
+            profile_url = f"{settings.FRONTEND_BASE_URL}/admin/profile"
+            share_img = f"{settings.FRONTEND_BASE_URL}/share-thumb.png"
+            wechat_service.send_news_message_to_user(
+                open_id=from_user_name,
+                title="设置你的个人信息",
+                description="设置你的真实姓名，公司，部门等， 为你开放全部功能！",
+                url=profile_url,
+                picurl=share_img,
+            )
+        except Exception as e:
+            logger.error(f"推送个人中心卡片失败: {e}")
+
+    return Response(content=reply_xml, media_type="text/xml")
+
+
+def _send_scan_redirect_card(openid: str, scene_str: str):
+    """扫码后推送图文卡片，引导用户跳 /app/call 页面。
+
+    subscribe 事件未关注先关注 和 SCAN 事件已关注扫码 都会触发。
+    客服消息要求 48 小时内有交互，扫码本身满足条件。
+    """
     try:
-        profile_url = f"{settings.FRONTEND_BASE_URL}/admin/profile"
-        share_img = f"{settings.FRONTEND_BASE_URL}/share-thumb.png"
+        from urllib.parse import urlencode
+        call_path = f"{settings.FRONTEND_BASE_URL}/app/call"
+        params = urlencode({'scene': scene_str, 'openid': openid})
+        redirect_url = f"{call_path}?{params}"
+
+        logger.info(f'推送扫码跳转卡片: openid={openid}, scene={scene_str}, url={redirect_url}')
+
         wechat_service.send_news_message_to_user(
-            open_id=from_user_name,
-            title="设置你的个人信息",
-            description="设置你的真实姓名，公司，部门等， 为你开放全部功能！",
-            url=profile_url,
-            picurl=share_img,
+            open_id=openid,
+            title="点击继续",
+            description="你扫了一个带参数的二维码，点击前往对应页面",
+            url=redirect_url,
+            picurl='',
         )
     except Exception as e:
-        logger.error(f"推送个人中心卡片失败: {e}")
-    return Response(content=reply_xml, media_type="text/xml")
+        logger.error(f"推送扫码跳转卡片失败: openid={openid}, scene={scene_str}, error={e}")
+
+
+async def handle_scan_event(message: dict):
+    """已关注用户扫码 → 微信推送 SCAN 事件，EventKey 即场景值 (scene_str)。"""
+    from_user_name = message.get('FromUserName')
+    to_user_name = message.get('ToUserName')
+    event_key = message.get('EventKey', '')
+
+    logger.info(f"已关注用户 {from_user_name} 扫码, EventKey={event_key}")
+    log_operation(
+        timestamp=datetime.now().astimezone().isoformat(timespec='milliseconds'),
+        client_ip='127.0.0.1',
+        method='POST',
+        path='',
+        status_code=200,
+        processing_time=0.0,
+        operator=generate_wechat_username(from_user_name),
+        summary=f'扫码 (EventKey={event_key})',
+    )
+
+    if event_key:
+        _send_scan_redirect_card(from_user_name, event_key)
+
+    # SCAN 事件被动回复空串即可（主操作是上面的客服消息）
+    return Response(content='', media_type="text/xml")
 
 
 async def handle_unsubscribe_event(message: dict):
