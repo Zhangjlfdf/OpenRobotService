@@ -438,6 +438,13 @@ export default function TaskDetailPage() {
     // 拥有 backend:tasks:operate 权限的用户，对所有活跃状态工单均可见且可操作
     const canOperate = hasPermission('backend:tasks:operate');
 
+    // pending_requested：处理人已请求暂停，等待提单人确认——此时只有提单人侧（isReporter / isPrincipal）能操作
+    // 处理人和普通登录用户看不到按钮
+    if (status === 'pending_requested') {
+      if (!isReporter && !isPrincipal && !canOperate) return [];
+      // 管理员可以代替任何一方操作（运维兜底），但走和提单人侧一样的确认/驳回按钮
+    }
+
     const assigneeOnlyStatuses = ['new', 'in_progress', 'pending', 'paused'];
     if (assigneeOnlyStatuses.includes(status) && !isAssignee && !canOperate) return [];
 
@@ -450,9 +457,20 @@ export default function TaskDetailPage() {
     const actions: Record<string, { label: string; nextStatus: string; theme: string; actionType?: string; customStyle?: Record<string, string> }[]> = {
       // new 状态由处理人首次响应（协商节点时间/确认同意）自动转为 in_progress，不再提供「开始处理」按钮
       new: [],
-      in_progress: [
-        { label: '暂停任务', nextStatus: 'pending', theme: 'warning', customStyle: BTN_SECONDARY },
-        { label: '处理完成', nextStatus: 'resolved', theme: 'success', customStyle: BTN_PRIMARY },
+      // 有步骤模板的工单 → "处理完成"由阶段性处理卡的「最末阶段结束」流程控制，顶部不再提供快捷入口
+      // 无步骤模板的工单 → 保留「处理完成」作为 fallback 解决途径
+      in_progress: detail?.curr_step_id
+        ? [
+            { label: '请求暂停', nextStatus: 'pending_requested', theme: 'warning', customStyle: BTN_SECONDARY },
+          ]
+        : [
+            { label: '请求暂停', nextStatus: 'pending_requested', theme: 'warning', customStyle: BTN_SECONDARY },
+            { label: '处理完成', nextStatus: 'resolved', theme: 'success', customStyle: BTN_PRIMARY },
+          ],
+      // 暂停请求中：仅提单人/被代理人/管理员可见——确认暂停(→pending) 或 驳回(→继续处理)
+      pending_requested: [
+        { label: '驳回暂停', nextStatus: 'in_progress', theme: 'default', customStyle: BTN_SECONDARY },
+        { label: '确认暂停', nextStatus: 'pending', theme: 'warning', customStyle: BTN_PRIMARY },
       ],
       pending: (isAssignee && isReporter)
         ? [

@@ -87,6 +87,8 @@ export default function StepNegotiationCard({
   const status = (detail?.status || '').toLowerCase();
   // 终态（已解决/已关闭/已取消）：保留节点信息展示，但隐藏卡内所有操作按钮
   const isTerminal = ['resolved', 'closed', 'canceled', 'cancelled'].includes(status);
+  // 暂停请求中：处理人已请求暂停、等待提单人确认——节点信息保留、回合协商冻结
+  const isPauseRequested = status === 'pending_requested';
   const total = stepTemplate.length;
   const currIdx = stepTemplate.findIndex((s) => s.id === detail?.curr_step_id);
   const stepName = detail?.curr_step_name || (currIdx >= 0 ? stepTemplate[currIdx].step_name : '');
@@ -115,8 +117,9 @@ export default function StepNegotiationCard({
     return '';
   })();
   const stepAgreed = !!detail?.curr_step_agreed;
-  const canRespond = !!detail?.curr_step_id && (status === 'new' || (status === 'in_progress' && !stepAgreed));
-  const canNegotiate = !!detail?.curr_step_id;
+  // 暂停请求期间冻结所有协商/响应操作，等待提单人侧确认或驳回
+  const canRespond = !isPauseRequested && !!detail?.curr_step_id && (status === 'new' || (status === 'in_progress' && !stepAgreed));
+  const canNegotiate = !isPauseRequested && !!detail?.curr_step_id;
   const currSeq = currIdx >= 0 ? stepTemplate[currIdx].sequence : null;
   const hasNext = currSeq === null ? true : stepTemplate.some((s) => s.sequence > currSeq);
   // 回合展示
@@ -145,9 +148,14 @@ export default function StepNegotiationCard({
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 10, flexWrap: 'wrap' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
             <h4 className="detail-card__h" style={{ marginBottom: 0 }}>工单阶段性处理</h4>
-            {myTurn && !reachedMax && !stepAgreed && !isTerminal && (
+            {myTurn && !reachedMax && !stepAgreed && !isTerminal && !isPauseRequested && (
               <span style={{ fontSize: 12, color: 'var(--blue-2)', fontWeight: 500 }}>
                 ● 轮到你确认/答复
+              </span>
+            )}
+            {isPauseRequested && (
+              <span style={{ fontSize: 12, color: 'var(--apricot)', fontWeight: 500 }}>
+                ● 处理人已请求暂停工单，等待提单人确认
               </span>
             )}
             {reachedMax && !stepAgreed && (
@@ -236,7 +244,7 @@ export default function StepNegotiationCard({
             </div>
           );
         })()}
-        {!isTerminal && (
+        {!isTerminal && !isPauseRequested ? (
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
             {canOperate ? (
               reachedMax ? (
@@ -348,7 +356,22 @@ export default function StepNegotiationCard({
               </span>
             )}
           </div>
-        )}
+        ) : isPauseRequested ? (
+          // 暂停请求中：阶段协商/推进操作已冻结，等待提单人侧在顶部确认或驳回
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: 8,
+            padding: '10px 14px', background: 'var(--apricot-soft)',
+            borderRadius: 'var(--radius-sm)', borderLeft: '3px solid var(--apricot)',
+            fontSize: 13, color: 'var(--foreground)',
+          }}>
+            <span style={{ fontSize: 18 }}>⏸</span>
+            <span>
+              {isAssignee
+                ? '暂停请求已发送，等待提单人确认后将进入"已挂起"状态。'
+                : '处理人已请求暂停此工单，请在顶部操作区确认或驳回。'}
+            </span>
+          </div>
+        ) : null}
       </div>
 
       {/* 协商节点时间弹窗 */}

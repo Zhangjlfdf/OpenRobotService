@@ -1503,7 +1503,7 @@ class TicketService:
             "total": total,
             "statistics": stats,
             "breakdown": {
-                "opened": stats.get("new", 0) + stats.get("in_progress", 0) + stats.get("pending", 0),
+                "opened": stats.get("new", 0) + stats.get("in_progress", 0) + stats.get("pending_requested", 0) + stats.get("pending", 0),
                 "closed": stats.get("closed", 0),
                 "resolved": stats.get("resolved", 0),
                 "in_progress": stats.get("in_progress", 0)
@@ -1582,7 +1582,7 @@ class TicketService:
         base_query = select(Ticket).where(Ticket.assigned_to.in_(keys) if keys else Ticket.assigned_to == username)
         
         pending_query = base_query.where(
-            Ticket.status.in_([TicketStatus.NEW, TicketStatus.PENDING, TicketStatus.IN_PROGRESS])
+            Ticket.status.in_([TicketStatus.NEW, TicketStatus.PENDING_REQUESTED, TicketStatus.PENDING, TicketStatus.IN_PROGRESS])
         )
         pending_result = await db.execute(select(func.count()).select_from(pending_query.subquery()))
         pending_count = pending_result.scalar() or 0

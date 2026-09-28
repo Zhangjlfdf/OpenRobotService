@@ -76,6 +76,7 @@ logger_task = logging.getLogger(__name__)
 STATUS_LABEL = {
     "new": "待处理",
     "in_progress": "处理中",
+    "pending_requested": "暂停请求中",
     "pending": "已挂起",
     "resolved": "已解决",
     "canceled": "已取消",
@@ -1335,7 +1336,7 @@ async def update_task(
         if ticket_update.status:
             if ticket.status == TicketStatus.NEW and not roles.is_creator:
                 raise HTTPException(status_code=400, detail="只允许创建者开始任务！")
-            if ticket.status in [TicketStatus.PENDING, TicketStatus.IN_PROGRESS] and not roles.is_assignee:
+            if ticket.status in [TicketStatus.PENDING, TicketStatus.IN_PROGRESS, TicketStatus.PENDING_REQUESTED] and not roles.is_assignee:
                 raise HTTPException(status_code=400, detail="只允许处理人更新任务！")
             # 关单（resolved →）：决策 6 —— 由 created_by（代理人）+ 已确认被代理人 + 管理员判定，
             # customer 收敛为纯展示「联系人」，不再参与权限（修掉「新单 customer 为空导致非 admin 关不掉单」）
@@ -1656,8 +1657,8 @@ def _maybe_notify_mentions(
             try:
                 # 取工单真实状态的中文名
                 status_text_map = {
-                    "new": "待处理", "in_progress": "处理中", "pending": "已挂起",
-                    "resolved": "已解决", "closed": "已关闭", "canceled": "已取消",
+                    "new": "待处理", "in_progress": "处理中", "pending_requested": "暂停请求中",
+                    "pending": "已挂起", "resolved": "已解决", "closed": "已关闭", "canceled": "已取消",
                 }
                 raw_status = (ticket.status.value if hasattr(ticket.status, 'value')
                               else str(ticket.status or "")).lower()
@@ -1899,6 +1900,23 @@ async def update_task_status(
         # created_by 过渡期可能是 username 或 users.id，与当前用户双键比较。
         if status_enum == TicketStatus.CANCELED and not is_admin and not user_matches(current_user, ticket.created_by):
             raise HTTPException(status_code=403, detail="仅提单人或管理员可撤回工单")
+
+        # ── 请求暂停（→ pending_requested）权限收窄：仅**处理人**可发起，提单人/管理员不能替处理人请求暂停 ──
+        if status_enum == TicketStatus.PENDING_REQUESTED:
+            if ticket.status != TicketStatus.IN_PROGRESS:
+                raise HTTPException(status_code=400, detail="仅处理中的工单可发起暂停请求")
+            if not _roles.is_assignee and not is_admin:
+                # 管理员可临时代处理人发起（运维兜底）
+                raise HTTPException(status_code=403, detail="仅处理人可请求暂停工单")
+
+        # ── 暂停请求后续操作权限收窄：必须由**提单人侧**（creator / principal / admin）来决定 ──
+        # pending_requested → pending  = 提单人确认暂停
+        # pending_requested → in_progress = 提单人驳回（继续处理）
+        if ticket.status == TicketStatus.PENDING_REQUESTED:
+            if not (_roles.is_creator or _roles.is_principal or is_admin):
+                raise HTTPException(status_code=403, detail="仅提单人/被代理人/管理员可处理暂停请求")
+            if status_enum not in (TicketStatus.PENDING, TicketStatus.IN_PROGRESS):
+                raise HTTPException(status_code=400, detail="暂停请求中仅可「确认暂停」或「驳回」")
 
         # ── 结束工单（→ resolved）需携带解决方式：接单人确认后提交的最终文本 ──
         resolution_summary = None
