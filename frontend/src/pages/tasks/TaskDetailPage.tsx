@@ -115,6 +115,9 @@ interface Comment { id: string; content: string; created_by_name?: string; creat
 interface Ticket {
   id: string; title: string; description: string; status: string; priority: string;
   ticket_type: string; project_name?: string; project_id?: string;
+  // 临时：重新指派选人置顶用
+  project_contact_person_id?: string | null;
+  project_contact_person_name?: string | null;
   created_by?: string; created_by_name?: string;
   assigned_to?: string; assigned_to_name?: string;
   reporter_name?: string; assignee_name?: string;
@@ -1993,7 +1996,14 @@ export default function TaskDetailPage() {
         <div className="ticket-edit">
           <h4 className="ticket-edit__title">重新指派</h4>
           <p style={{ color: 'var(--muted-foreground)', fontSize: '13px', marginBottom: '12px' }}>选择新的处理人</p>
-          <UserSelect value={reassignUser?.id ?? null} onChange={setReassignUser} placeholder="请选择处理人" title="选择处理人" />
+          <UserSelect
+            value={reassignUser?.id ?? null}
+            onChange={setReassignUser}
+            placeholder="请选择处理人"
+            title="选择处理人"
+            pinUserId={detail?.project_contact_person_id || null}
+            pinLabel="项目对接人"
+          />
           <div style={{ margin: '12px 0 8px', fontSize: '14px', color: 'var(--foreground)' }}>转派类型<span style={{ color: 'var(--danger)' }}> *</span></div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginBottom: '12px' }}>
             {([

@@ -132,6 +132,111 @@ def _get_attachment_label(attachments) -> Optional[str]:
 
 
 
+_REDISPATCH_CONTACT_TAG = "项目对接人"
+
+
+def _resolve_project_contact(ticket) -> tuple:
+    """查工单所属项目的对接人 (contact_person_id, contact_person_name)；没有则 (None, None)。
+
+    只用 with_entities 取对接人两列，避免 Project 全量 ORM 因本地库缺 ext_info 等列而炸。
+    """
+    key_id = (getattr(ticket, "project_id", None) or "").strip()
+    key_name = (getattr(ticket, "project_name", None) or "").strip()
+    if not key_id and not key_name:
+        return None, None
+    try:
+        from app.models.delivery import Project
+        from app.core.database import SessionLocal
+
+        db = SessionLocal()
+        try:
+            q = db.query(Project.contact_person_id, Project.contact_person)
+            row = None
+            if key_id:
+                row = q.filter((Project.code == key_id) | (Project.id == key_id)).first()
+            if not row and key_name:
+                row = q.filter(Project.name == key_name).first()
+            if not row:
+                return None, None
+            cid = (row[0] or "").strip() if row[0] is not None else ""
+            if not cid:
+                return None, None
+            cname = (row[1] or "").strip() or None
+            return cid, cname
+        finally:
+            db.close()
+    except Exception as e:
+        logger_task.warning(f"查询项目对接人失败: {e}")
+        return None, None
+
+
+def _enrich_candidates_pin_contact(candidates: Optional[List[Dict]], ticket) -> List[Dict]:
+    """临时：重派候选里把项目对接人打标并置顶；没有对接人则原样返回。"""
+    base = [dict(c) for c in (candidates or []) if isinstance(c, dict)]
+    cid, cname = _resolve_project_contact(ticket)
+    if not cid:
+        return base
+
+    idx = next(
+        (i for i, c in enumerate(base) if str(c.get("engineer_id") or "").strip() == cid),
+        None,
+    )
+    if idx is not None:
+        entry = base.pop(idx)
+    else:
+        entry = None
+        try:
+            from app.services.user_service import UserService
+
+            users = UserService.get_user_list(limit=999999999) or []
+            u = next((x for x in users if str(x.get("id") or "") == cid), None)
+        except Exception as e:
+            logger_task.warning(f"补全项目对接人候选失败 contact_id={cid}: {e}")
+            u = None
+        if u:
+            rm = u.get("responsibility_modules") or {}
+            if isinstance(rm, dict):
+                modules = [k for k, v in rm.items() if v]
+            elif isinstance(rm, list):
+                modules = list(rm)
+            else:
+                modules = []
+            entry = {
+                "rank": 0,
+                "engineer_id": cid,
+                "name": str(u.get("name") or u.get("username") or cname or cid),
+                "department": u.get("department"),
+                "job_level": u.get("job_level"),
+                "modules": modules or [],
+                "duty": u.get("duty_text"),
+                "missing": [],
+                "scores": {"llm": 0, "semantic": 0, "history": 0, "total": 0},
+                "tags": [],
+            }
+        elif cname:
+            entry = {
+                "rank": 0,
+                "engineer_id": cid,
+                "name": cname,
+                "department": None,
+                "job_level": None,
+                "modules": [],
+                "duty": None,
+                "missing": ["department", "responsibility_modules"],
+                "scores": {"llm": 0, "semantic": 0, "history": 0, "total": 0},
+                "tags": [],
+            }
+        else:
+            return base
+
+    tags = [t for t in (entry.get("tags") or []) if t and t != _REDISPATCH_CONTACT_TAG]
+    entry["tags"] = [_REDISPATCH_CONTACT_TAG] + tags
+    base.insert(0, entry)
+    for i, c in enumerate(base, 1):
+        c["rank"] = i
+    return base
+
+
 def _fallback_redispatch_candidates() -> List[Dict]:
     """候选快照为空时的兜底：拉全部启用工程师（users.status='active'，与派单权威口径一致），
     按「有画像优先、无画像殿后」排序，供重派弹窗在无精排候选时仍能选择。
@@ -858,7 +963,11 @@ async def get_task(
                 tip_detail = build_redispatch_tip(_log, user_map)
                 # 二次派单感知增强（M2 兜底）：候选快照为空（老工单 Step0/精排不足 → 空落库）时，
                 # 拉全部启用工程师作兜底候选，保证重派弹窗有可选项；重派落地后由流水线覆盖。
-                _cands = _log.candidates if _log.candidates else _fallback_redispatch_candidates()
+                # 临时：项目对接人打标置顶（无对接人则不改序）。
+                _cands = _enrich_candidates_pin_contact(
+                    _log.candidates if _log.candidates else _fallback_redispatch_candidates(),
+                    ticket,
+                )
                 setattr(ticket, "redispatch", {
                     "dispatch_round": _log.dispatch_round,
                     "candidates": _cands,
@@ -890,13 +999,24 @@ async def get_task(
             else:
                 # 无派单日志（老工单/未派过单）：重派弹窗没有候选会形成「无法选人→无法重派→无新日志」死锁，
                 # 故仍给兜底候选（拉全部启用工程师，有画像优先），保证弹窗有可选项。重派落地后由流水线覆盖。
+                # 临时：项目对接人打标置顶（无对接人则不改序）。
                 setattr(ticket, "redispatch", {
                     "dispatch_round": 0,
-                    "candidates": _fallback_redispatch_candidates(),
+                    "candidates": _enrich_candidates_pin_contact(
+                        _fallback_redispatch_candidates(), ticket,
+                    ),
                     "result": None,
                 })
         except Exception as redisp_err:
             logger.warning(f"组装 redispatch 失败 task_id={task_id}: {redisp_err}")
+
+        # 临时：详情页「重新指派」选人置顶用（无对接人则为空）
+        try:
+            _cid, _cname = _resolve_project_contact(ticket)
+            setattr(ticket, "project_contact_person_id", _cid)
+            setattr(ticket, "project_contact_person_name", _cname)
+        except Exception as contact_err:
+            logger.warning(f"回填项目对接人失败 task_id={task_id}: {contact_err}")
 
         return ticket
     except HTTPException:
