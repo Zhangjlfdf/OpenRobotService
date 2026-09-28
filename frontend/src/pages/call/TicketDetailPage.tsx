@@ -662,19 +662,22 @@ export default function TicketDetailPage() {
     if (!current?.ticket_id) return false;
     const tempId = tempIdRef.current;
     const uploads = dedupeFileNames(files);
+    const objectPaths: string[] = [];
     for (const f of uploads) {
-      await uploadCommentAttachment(f, tempId);
+      const p = await uploadCommentAttachment(f, tempId);
+      if (p) objectPaths.push(p);
     }
     try {
       const newComment = await request<Comment>(`/${current.ticket_id}/comments`, {
         method: 'POST',
-        body: JSON.stringify({ content: text, is_public: true, attachments: files.length ? [tempId] : [], reply_to: options?.replyTo }),
+        body: JSON.stringify({ content: text, is_public: true, attachments: objectPaths, reply_to: options?.replyTo }),
       });
       setTicket((prev) => {
         if (!prev) return prev;
         const updatedComments = prev.comments ? [...prev.comments, newComment] : [newComment];
         return { ...prev, comments: updatedComments };
       });
+      tempIdRef.current = typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID() : `t_${Date.now()}_${Math.random().toString(36).slice(2)}`;
       return true;
     } catch {
       return false;
@@ -831,15 +834,16 @@ export default function TicketDetailPage() {
     setSubmittingComment(true);
     try {
       const tempId = tempIdRef.current;
-      // 先逐个上传附件（temp_id 关联，后端登记到 comment_attachment_map）
-      // 同名文件自动改名，避免后端对象名重复覆盖
+      // 先逐个上传附件；发评论时直接带 MinIO object_path，不依赖后端进程内存 temp_id 映射
       const uploads = dedupeFileNames(files);
+      const objectPaths: string[] = [];
       for (const f of uploads) {
-        await uploadCommentAttachment(f, tempId);
+        const p = await uploadCommentAttachment(f, tempId);
+        if (p) objectPaths.push(p);
       }
       const newComment = await request<Comment>(`/${ticket.ticket_id}/comments`, {
         method: 'POST',
-        body: JSON.stringify({ content: text, is_public: true, attachments: files.length ? [tempId] : [], reply_to: options?.replyTo }),
+        body: JSON.stringify({ content: text, is_public: true, attachments: objectPaths, reply_to: options?.replyTo }),
       });
       const enrichedComment = {
         ...newComment,

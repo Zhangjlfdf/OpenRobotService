@@ -953,12 +953,14 @@ export default function TaskDetailPage() {
       // 上传附件（同名文件自动改名，避免后端对象名重复覆盖）
       const tempId = generateTempId();
       const uploads = dedupeFileNames(files);
+      const objectPaths: string[] = [];
       for (const f of uploads) {
-        await uploadCommentAttachment(f, tempId);
+        const p = await uploadCommentAttachment(f, tempId);
+        if (p) objectPaths.push(p);
       }
       const newComment = await request<Comment>(`/${detail.id}/comments`, {
         method: 'POST',
-        body: JSON.stringify({ content: text, is_public: true, attachments: files.length ? [tempId] : [], reply_to: options?.replyTo }),
+        body: JSON.stringify({ content: text, is_public: true, attachments: objectPaths, reply_to: options?.replyTo }),
       });
       const enrichedComment = {
         ...newComment,
@@ -997,13 +999,15 @@ export default function TaskDetailPage() {
     if (!current) return false;
     const tempId = generateTempId();
     const uploads = dedupeFileNames(files);
+    const objectPaths: string[] = [];
     for (const f of uploads) {
-      await uploadCommentAttachment(f, tempId);
+      const p = await uploadCommentAttachment(f, tempId);
+      if (p) objectPaths.push(p);
     }
     try {
       const newComment = await request<Comment>(`/${current.id}/comments`, {
         method: 'POST',
-        body: JSON.stringify({ content: text, is_public: true, attachments: files.length ? [tempId] : [], reply_to: options?.replyTo }),
+        body: JSON.stringify({ content: text, is_public: true, attachments: objectPaths, reply_to: options?.replyTo }),
       });
       setDetail((prev) => {
         if (!prev) return prev;

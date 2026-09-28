@@ -33,6 +33,7 @@ from typing import Any, Callable, Optional, Protocol
 from ai.core.logging import get_logger
 from ai.agents.AiTaskPlatform.capabilities.core.registry import CapabilityRegistry
 from ai.agents.AiTaskPlatform.capabilities.core.supervisor_todo import TodoList, TodoItem
+from ai.agents.AiTaskPlatform.tracing import TraceBus
 
 logger = get_logger("TASK_AGENT")
 
@@ -236,6 +237,16 @@ class Supervisor:
         self._build_plan_prompt = plan_prompt_builder or self._default_plan_prompt
         self._runtime_ctx: dict = {}  # 由 run() 设置；派能力时注入 kwargs
 
+    def _bus(self) -> TraceBus:
+        ctx = self._runtime_ctx or {}
+        bus = ctx.get("trace_bus")
+        if isinstance(bus, TraceBus):
+            return bus
+        bus = TraceBus()
+        ctx["trace_bus"] = bus
+        self._runtime_ctx = ctx
+        return bus
+
     # ── 默认调度 prompt（产品无关，仅描述"如何规划排查"）──
     @staticmethod
     def _default_plan_prompt(task_context: str, cap_names: list[str]) -> str:
@@ -298,6 +309,8 @@ class Supervisor:
         caps = available_caps or CapabilityRegistry.list_available()
         self._runtime_ctx = runtime_ctx or {}  # 供 _dispatch 注入给能力
         self._runtime_ctx.setdefault("round_supplements", [])
+        if not isinstance(self._runtime_ctx.get("trace_bus"), TraceBus):
+            self._runtime_ctx["trace_bus"] = TraceBus()
         self._on_progress = on_progress  # 实时进度回调（逐项能力推送，供前端动态展示）
 
         def _emit(phase: str, td: dict) -> None:
@@ -308,44 +321,52 @@ class Supervisor:
             except Exception:
                 pass
 
-        # 1. 调度决策（LLM 建议）
-        decision = await self._plan(task_context, caps, max_sub_tasks)
+        bus = self._bus()
 
-        # 2. 建 todo（F7：plan 转 TodoList）
-        todo = TodoList()
-        for step in decision.plan:
-            todo.add(step.get("goal") or step.get("capability"), capability=step.get("capability", ""))
+        with bus.start_span("supervisor.run"):
+            # 1. 调度决策（LLM 建议）
+            with bus.start_span("plan"):
+                decision = await self._plan(task_context, caps, max_sub_tasks)
+                bus.set_attribute("complexity", decision.complexity)
+                bus.set_attribute("派生数", len(decision.plan or []))
 
-        # 3. simple → 0 派生，直接返回（无 plan）
-        if decision.is_simple() or not decision.plan:
+            # 2. 建 todo（F7：plan 转 TodoList）
+            todo = TodoList()
+            for step in decision.plan:
+                todo.add(step.get("goal") or step.get("capability"), capability=step.get("capability", ""))
+
+            # 3. simple → 0 派生，直接返回（无 plan）
+            if decision.is_simple() or not decision.plan:
+                return {
+                    "complexity": decision.complexity,
+                    "plan": decision.plan,
+                    "ask_user": decision.ask_user,
+                    "questions": decision.questions,
+                    "todo": todo.to_dict_list(),
+                    "results": {},
+                    "final_text": "",
+                    "elapsed_ms": round((_time.perf_counter() - t0) * 1000),
+                    "_decision": decision.__dict__,
+                    "spans": bus.tree(),
+                }
+
+            # 4. 执行 plan（派生子任务）
+            await self._consume_injects(todo, _emit)
+            results = await self._dispatch(decision.plan, todo, max_sub_tasks, _emit)
+
+            # 5. 汇总
             return {
                 "complexity": decision.complexity,
                 "plan": decision.plan,
                 "ask_user": decision.ask_user,
                 "questions": decision.questions,
                 "todo": todo.to_dict_list(),
-                "results": {},
-                "final_text": "",
+                "results": results,
+                "final_text": self._synthesize(results),
                 "elapsed_ms": round((_time.perf_counter() - t0) * 1000),
                 "_decision": decision.__dict__,
+                "spans": bus.tree(),
             }
-
-        # 4. 执行 plan（派生子任务）
-        await self._consume_injects(todo, _emit)
-        results = await self._dispatch(decision.plan, todo, max_sub_tasks, _emit)
-
-        # 5. 汇总
-        return {
-            "complexity": decision.complexity,
-            "plan": decision.plan,
-            "ask_user": decision.ask_user,
-            "questions": decision.questions,
-            "todo": todo.to_dict_list(),
-            "results": results,
-            "final_text": self._synthesize(results),
-            "elapsed_ms": round((_time.perf_counter() - t0) * 1000),
-            "_decision": decision.__dict__,
-        }
 
     # ── 调度决策 ──
     async def _plan(self, task_context: str, caps: list[str], max_sub_tasks: int) -> SupervisorDecision:
@@ -410,12 +431,15 @@ class Supervisor:
         if early:
             results.update(await self._dispatch_group(early, todo, emit))
             if any(_result_terminated(r) for r in results.values()):
+                bus = self._bus()
                 for i, step in late:
                     if i >= len(todo._items):
                         continue
                     item = todo._items[i]
                     if item.status == "completed":
                         continue
+                    with bus.start_span(step.get("capability") or "log_analyze"):
+                        bus.set_status("skipped", reason="历史方案已验证")
                     todo.mark_done(item.id, result="已跳过：历史方案已验证（早停）")
                     if emit is not None:
                         emit("done", {
@@ -456,7 +480,10 @@ class Supervisor:
                     for extra_key in ("window_minutes", "occurred_at", "params"):
                         if extra_key in step and step[extra_key] is not None:
                             kwargs[extra_key] = step[extra_key]
-                    result = await cap(**kwargs)
+                    bus = self._bus()
+                    with bus.start_span(cap_name):
+                        result = await cap(**kwargs)
+                        self._annotate_span(bus, result)
             except Exception as e:
                 result = {"ok": False, "error": f"{type(e).__name__}: {e}", "text": ""}
             res_dict = result.to_dict() if hasattr(result, "to_dict") else (result if isinstance(result, dict) else {"text": str(result), "ok": True})
@@ -515,6 +542,29 @@ class Supervisor:
                 "status": "completed",
                 "capability": "inject",
             })
+
+    @staticmethod
+    def _annotate_span(bus: TraceBus, result) -> None:
+        """把能力结果的关键字段写到当前 span。"""
+        res_dict = result.to_dict() if hasattr(result, "to_dict") else (
+            result if isinstance(result, dict) else {"ok": True}
+        )
+        if not res_dict.get("ok", True):
+            bus.set_status("error")
+        if res_dict.get("terminate"):
+            bus.set_attribute("terminate", True)
+        meta = res_dict.get("meta") or {}
+        if not isinstance(meta, dict):
+            return
+        for key, alias in (
+            ("count", "命中数"),
+            ("confirmed", "confirmed"),
+            ("verified", "verified"),
+            ("window_applied", "window_applied"),
+            ("queries", "queries"),
+        ):
+            if key in meta and meta[key] is not None:
+                bus.set_attribute(alias, meta[key])
 
     # ── 汇总 ──
     @staticmethod

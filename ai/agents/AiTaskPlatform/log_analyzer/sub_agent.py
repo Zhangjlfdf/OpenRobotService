@@ -187,19 +187,24 @@ def _make_system_prompt() -> str:
 可用命令（每次恰好一个）:
 
 1) 查询（④⑤用；analysis 必须写清本轮假设）:
-{"action":"query","analysis":"假设:…；验证若成立/不成立下一步","query":{"time_start":"YYYY-MM-DD HH:MM","time_end":"YYYY-MM-DD HH:MM","robot_filter":"车型ID或空串","task_filter":"任务ID或空串","error_only":true,"max_results":50}}
+   {"action":"query","analysis":"假设:…；验证若成立/不成立下一步","query":{"time_start":"YYYY-MM-DD HH:MM","time_end":"YYYY-MM-DD HH:MM","robot_filter":"车型ID或空串","task_filter":"任务ID或空串","error_only":true,"max_results":50}}
 
-2) 下结论（⑦；证据不足也要 conclude，写清缺什么）:
+2) 只读命令（③⑤取证；省略文件名则读当前日志）:
+   {"action":"shell","analysis":"假设:…","cmd":"grep -n '一致性校验失败' | head -n 50"}
+   允许 grep/head/tail/sed(-n)/awk({print})/wc/cat/sort/uniq/cut 及管道。禁止写文件、重定向、白名单外命令。
+
+3) 下结论（⑦；证据不足也要 conclude，写清缺什么）:
 {"action":"conclude","conclusion":"一句话根因+证据","confidence":0.0,"need_feed":"","evidence_lines":["L数字: 关键内容"]}
 
-3) 放弃（当前日志完全无法推进）:
+4) 放弃（当前日志完全无法推进）:
 {"action":"fallback","reason":"为什么确定查不出","need_feed":"建议用户补充的日志模块"}
 
 硬性规则:
 - time_start/time_end、robot_filter、task_filter 只能从「日志客观事实」或「首轮锚定」里选；绝不虚构日期或ID。
-- 第一轮必须用锚定给出的时间窗/对象做一次窄查询，禁止整日/全量扫描。
+- 第一轮必须用锚定给出的时间窗/对象做一次窄 query，禁止整日/全量扫描，禁止第一轮 cat 全文件。
 - 每条 query 只验证一个假设；命中过多就缩窗，不要加大 max_results。
 - error_only=true 只回错误/警告；要上下文时 false 且时间窗 ≤20 分钟。
+- shell 输出会被截断；命中过多先用 grep 收窄再 head，不要 cat 整份日志。
 - 证据不足时 conclude.need_feed 写清要 TMS/全局规划/定位等哪类日志，禁止硬猜。
 - 每轮只输出一个JSON，输出前不要有任何思考文字。"""
 
@@ -381,6 +386,7 @@ class LogSubAgent:
         context_text = _build_context(task_context, user_question)
         context_text += f"\n\n{_facts_to_text(self._facts)}"
         context_text += f"\n\n**日志日期**: {log_date}"
+        context_text += f"\n\n**当前日志文件**: {Path(self.log_path).name}（shell 省略文件名即读这一份）"
         context_text += f"\n\n{_anchor_spotlight(self._facts, task_context or {}, user_question)}"
 
         system_prompt = _make_system_prompt()
@@ -389,7 +395,7 @@ class LogSubAgent:
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": context_text},
         ]
-        query_history: List[Dict] = []
+        query_history: List = []
         tid = str(task_id or (task_context or {}).get("task_id") or "")
 
         async def _pull_round_injects() -> None:
@@ -454,12 +460,59 @@ class LogSubAgent:
                 # 轮数还浅 → 提示重新严格输出一行 JSON 后重试
                 messages.append({"role": "user",
                                  "content": "刚才的输出不是一行合法JSON命令，请重新输出一行JSON。"
-                                             "查数据用 {\"action\":\"query\",...}，证据足够用 {\"action\":\"conclude\",...}。"})
+                                             "查索引用 {\"action\":\"query\",...}，取证用 {\"action\":\"shell\",...}，"
+                                             "证据足够用 {\"action\":\"conclude\",...}。"})
                 continue
 
             action = cmd.get("action", "conclude")
 
-            if action == "query" and round_num <= self.SOFT_LIMIT:
+            if action == "shell" and round_num <= self.SOFT_LIMIT:
+                if round_num == 1:
+                    messages.append({
+                        "role": "user",
+                        "content": "第一轮请先用 query 按锚定的时间窗/对象做窄查询，不要一上来 shell。",
+                    })
+                    continue
+                raw_cmd = str(cmd.get("cmd") or "").strip()
+                if not raw_cmd:
+                    messages.append({
+                        "role": "user",
+                        "content": "shell 缺少 cmd。请给出白名单命令，例如 grep -n 'ERROR' | head -n 50。",
+                    })
+                    continue
+                if any(raw_cmd == h for h in query_history if isinstance(h, str)):
+                    messages.append({
+                        "role": "user",
+                        "content": "这条 shell 与之前一轮相同。请换关键词或改用 query 缩窗。",
+                    })
+                    continue
+                query_history.append(raw_cmd)
+                from ai.agents.AiTaskPlatform.log_analyzer.shell_tool import run_readonly_shell
+                ok, shell_text, n_lines = await asyncio.to_thread(
+                    run_readonly_shell, raw_cmd, self.log_path,
+                )
+                result.queries_made += 1
+                logger.info(
+                    f"LogSubAgent R{round_num} shell ok={ok} lines={n_lines} "
+                    f"cmd={raw_cmd[:80]}"
+                )
+                if ok:
+                    _collect_shell_evidence(result, shell_text)
+                _p({
+                    "id": f"log_r{round_num}",
+                    "description": f"日志 shell R{round_num}：{n_lines} 行（{cmd.get('analysis','')[:40]}）",
+                    "status": "completed",
+                    "capability": "log_analyze",
+                    "phase": "done",
+                    "result_summary": f"R{round_num} shell: {n_lines} lines",
+                })
+                feedback = shell_text
+                if round_num >= self.SOFT_LIMIT:
+                    feedback += f"\n\n(已查{round_num}轮，接近上限，请尽快conclude或fallback)"
+                messages.append({"role": "assistant", "content": response})
+                messages.append({"role": "user", "content": feedback})
+
+            elif action == "query" and round_num <= self.SOFT_LIMIT:
                 raw_q = cmd.get("query", {})
                 q = _validate_query(raw_q, self._index, self._facts)
 
@@ -805,7 +858,7 @@ def _iter_json_objects(raw: str):
 
 def _parse_llm_command(raw: str) -> Optional[Dict]:
     """从 LLM 输出中提取最可信的一条命令。
-    优先 action ∈ {query, conclude, fallback} 且形状正确的 JSON；
+    优先 action ∈ {query, shell, conclude, fallback} 且形状正确的 JSON；
     越靠后的完整命令越可能是最终意图。
     """
     best = None
@@ -814,10 +867,12 @@ def _parse_llm_command(raw: str) -> Optional[Dict]:
         if not isinstance(obj, dict):
             continue
         action = obj.get("action")
-        if action not in ("query", "conclude", "fallback"):
+        if action not in ("query", "shell", "conclude", "fallback"):
             continue
         score = 0
         if action == "query" and isinstance(obj.get("query"), dict):
+            score = 3
+        elif action == "shell" and obj.get("cmd"):
             score = 3
         elif action == "conclude" and obj.get("conclusion"):
             score = 3
@@ -860,6 +915,8 @@ def _matched_lines(query_result: str) -> int:
 def _is_near_duplicate(q: Dict, history: List[Dict]) -> bool:
     """判断新查询是否与历史查询近重复：过滤条件一致 且 时间窗重叠。"""
     for h in history:
+        if not isinstance(h, dict):
+            continue
         if (q.get("robot_filter") == h.get("robot_filter")
                 and q.get("task_filter") == h.get("task_filter")
                 and q.get("error_only") == h.get("error_only")):
@@ -885,6 +942,20 @@ def _collect_evidence(result: LogAnalysisResult, query_result: str, round_num: i
         if any(e["line"] == int(ln) for e in result.evidence):
             continue
         result.evidence.append({"line": int(ln), "summary": sm[:280], "round": round_num})
+
+
+def _collect_shell_evidence(result: LogAnalysisResult, shell_text: str) -> None:
+    """grep -n 的「行号:正文」收进证据，供 conclude 引用。"""
+    for ln, sm in re.findall(r"^(\d{1,8})[:|](.*)$", shell_text or "", re.M):
+        summary = (sm or "").strip()
+        if not summary:
+            continue
+        line_no = int(ln)
+        if any(e["line"] == line_no for e in result.evidence):
+            continue
+        result.evidence.append({"line": line_no, "summary": summary[:280], "round": 0})
+        if len(result.evidence) >= 20:
+            break
 
 
 def _collect_evidence_into(evidence: List[Dict], query_result: str, only_hit: bool = False) -> None:

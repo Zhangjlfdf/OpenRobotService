@@ -7486,17 +7486,29 @@ html, body, #root {
   list-style: none;
   margin: 0;
   padding: 0;
-  max-height: 140px;
+  max-height: 220px;
   overflow-y: auto;
+}
+.detail-chat-ai-progress.is-finished .detail-chat-ai-progress__list {
+  max-height: min(60vh, 480px);
 }
 .detail-chat-ai-progress__item {
   display: flex;
-  align-items: flex-start;
-  gap: 6px;
+  flex-direction: column;
   padding: 3px 0;
   font-size: 13px;
   color: var(--muted-foreground);
   line-height: 1.4;
+}
+.detail-chat-ai-progress__row {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+}
+.detail-chat-ai-progress__children {
+  list-style: none;
+  margin: 2px 0 0 22px;
+  padding: 0;
 }
 .detail-chat-ai-progress__icon {
   flex-shrink: 0;
@@ -8656,13 +8668,15 @@ html, body, #root {
   list-style: none;
   margin: 0;
   padding: 0;
-  max-height: 140px;
+  max-height: 220px;
   overflow-y: auto;
+}
+.detail-chat-ai-progress.is-finished .detail-chat-ai-progress__list {
+  max-height: min(60vh, 480px);
 }
 .detail-chat-ai-progress__item {
   display: flex;
-  align-items: flex-start;
-  gap: 6px;
+  flex-direction: column;
   padding: 3px 0;
   font-size: 13px;
   color: var(--muted-foreground);

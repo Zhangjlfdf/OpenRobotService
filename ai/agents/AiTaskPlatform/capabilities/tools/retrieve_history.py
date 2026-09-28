@@ -63,6 +63,14 @@ class RetrieveHistoryCapability(BaseCapability):
             terminate = bool(confirmed)
             if terminate:
                 text = "【早停】命中已验证的历史根因，可直接采用，无需再跑日志分析。\n" + text
+            bus = kwargs.get("trace_bus")
+            if bus is not None:
+                try:
+                    bus.set_attribute("命中数", len(results))
+                    bus.set_attribute("verified", "confirmed" if terminate else "unknown")
+                    bus.add_event("retrieve", count=len(results), confirmed=len(confirmed))
+                except Exception:
+                    pass
             return CapabilityResult(
                 text=text,
                 meta={"count": len(results), "confirmed": len(confirmed)},

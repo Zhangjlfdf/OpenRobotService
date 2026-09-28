@@ -42,7 +42,7 @@ export interface DiscussionComment {
 const IMAGE_EXT = /\.(png|jpe?g|gif|webp|bmp)$/i;
 
 /** 执行过程按工单缓存在 sessionStorage：切到别的页再回来仍能看到上次 todo。 */
-const aiProgressKey = (taskId: string | number) => `ors:ai-progress:${taskId}`;
+const aiProgressKey = (taskId: string | number) => `ors:ai-progress:${String(taskId)}`;
 type AiProgressSnap = { runId?: string; todos: AiProgressTodo[]; phase: 'running' | 'done' };
 
 function readAiProgress(taskId?: string | number): AiProgressSnap | null {
@@ -70,16 +70,79 @@ function writeAiProgress(taskId: string | number | undefined, snap: AiProgressSn
   } catch { /* 隐私模式等写入失败忽略 */ }
 }
 
-function clearAiProgress(taskId: string | number | undefined) {
-  if (taskId == null || taskId === '') return;
-  try {
-    sessionStorage.removeItem(aiProgressKey(taskId));
-  } catch { /* ignore */ }
-}
-
 function isTeacherComment(c?: { created_by?: string; created_by_name?: string } | null): boolean {
   if (!c) return false;
   return c.created_by === 'U老师' || c.created_by_name === 'U老师';
+}
+
+function isProgressRunning(t: AiProgressTodo): boolean {
+  if (t.phase === 'running' || t.status === 'in_progress') return true;
+  return (t.children || []).some(isProgressRunning);
+}
+
+function markTodoTreeDone(t: AiProgressTodo): AiProgressTodo {
+  return {
+    ...t,
+    phase: 'done',
+    status: 'completed',
+    children: (t.children || []).map(markTodoTreeDone),
+  };
+}
+
+function countTodoNodes(todos?: AiProgressTodo[] | null): number {
+  let n = 0;
+  const walk = (arr?: AiProgressTodo[]) => {
+    for (const t of arr || []) {
+      n += 1;
+      walk(t.children);
+    }
+  };
+  walk(todos || []);
+  return n;
+}
+
+/** 收尾包有时只有顶层能力、丢掉建索引/R1 子步骤。过程中较完整的那棵树优先留下。 */
+function richerTodos(a?: AiProgressTodo[] | null, b?: AiProgressTodo[] | null): AiProgressTodo[] {
+  const left = a || [];
+  const right = b || [];
+  return countTodoNodes(left) >= countTodoNodes(right) ? left : right;
+}
+
+function ProgressTodoItem({ t }: { t: AiProgressTodo }) {
+  const desc = t.description || t.capability || '分析';
+  const status = t.phase === 'done' || t.status === 'completed';
+  const running = t.phase === 'running' || t.status === 'in_progress';
+  const children = Array.isArray(t.children) ? t.children : [];
+  return (
+    <li className={`detail-chat-ai-progress__item ${running ? 'is-running' : ''} ${status ? 'is-done' : ''}`}>
+      <div className="detail-chat-ai-progress__row">
+        <span className="detail-chat-ai-progress__icon" aria-hidden="true">
+          {status ? (
+            <svg viewBox="0 0 16 16" className="detail-chat-ai-progress__ic done-icon">
+              <circle cx="8" cy="8" r="7" />
+              <path d="M4.9 8.3l1.9 1.9 4.2-4.2" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          ) : running ? (
+            <svg viewBox="0 0 16 16" className="detail-chat-ai-progress__ic running-icon">
+              <path d="M8 1.5a6.5 6.5 0 1 0 6.5 6.5" fill="none" strokeLinecap="round" />
+            </svg>
+          ) : (
+            <svg viewBox="0 0 16 16" className="detail-chat-ai-progress__ic pending-icon">
+              <circle cx="8" cy="8" r="5.5" fill="none" />
+            </svg>
+          )}
+        </span>
+        <span className="detail-chat-ai-progress__text">{desc}</span>
+      </div>
+      {children.length > 0 && (
+        <ul className="detail-chat-ai-progress__children">
+          {children.map((c, j) => (
+            <ProgressTodoItem key={`${c.id ?? j}-${j}`} t={c} />
+          ))}
+        </ul>
+      )}
+    </li>
+  );
 }
 
 /** 解析评论附件（字符串 object_path 或字典），提取 object_path/filename/isImage */
@@ -237,17 +300,11 @@ export default function DiscussionPanel({
   // 长按操作菜单的浮层由 TDesign Mobile <Popover> 承载（自带箭头/动画/外点关闭）；
   // 通过「透明、pointer-events:none 的代理锚点」定位到被长按气泡的 rect，避免覆盖气泡交互。
   // ── U老师 执行过程（Claude Code 式动态展示）──
-  // 跑的时候显示；回复一旦上屏就收起。sessionStorage 只用来接「切走时还在跑」的那一轮。
+  // 本页回复上屏后收起；快照留在 sessionStorage，退出工单再进来仍能看到上次 todo。
   const cachedSnap = readAiProgress(taskId);
-  const [aiRunId, setAiRunId] = useState<string | undefined>(() => (
-    cachedSnap?.phase === 'running' ? cachedSnap.runId : undefined
-  ));
-  const [aiTodos, setAiTodos] = useState<AiProgressTodo[]>(() => (
-    cachedSnap?.phase === 'running' ? cachedSnap.todos : []
-  ));
-  const [aiPhase, setAiPhase] = useState<'running' | 'done'>(() => (
-    cachedSnap?.phase === 'running' ? 'running' : 'done'
-  ));
+  const [aiRunId, setAiRunId] = useState<string | undefined>(() => cachedSnap?.runId);
+  const [aiTodos, setAiTodos] = useState<AiProgressTodo[]>(() => cachedSnap?.todos || []);
+  const [aiPhase, setAiPhase] = useState<'running' | 'done'>(() => cachedSnap?.phase || 'done');
   const aiActive = sending || optimisticAi;
   const aiActiveRef = useRef<boolean>(aiActive);
   aiActiveRef.current = aiActive;
@@ -255,17 +312,28 @@ export default function DiscussionPanel({
   aiPhaseRef.current = aiPhase;
   const aiRunIdRef = useRef(aiRunId);
   aiRunIdRef.current = aiRunId;
+  const aiTodosRef = useRef(aiTodos);
+  aiTodosRef.current = aiTodos;
   // 本轮开始时评论区最后一条 id：用来判断「新的 U老师回复」而不是历史回复。
   const runAnchorCommentIdRef = useRef<string | number | null>(null);
   const prevAiActiveRef = useRef<boolean>(aiActive);
   const abortedRunIdsRef = useRef<Set<string>>(new Set());
+  const bestTodosRef = useRef<AiProgressTodo[]>(cachedSnap?.todos || []);
+
+  const persistProgress = useCallback((phase: 'running' | 'done', todos = aiTodosRef.current, runId = aiRunIdRef.current) => {
+    const best = richerTodos(todos, bestTodosRef.current);
+    if (!best.length) return;
+    bestTodosRef.current = best;
+    const next = phase === 'done' ? best.map(markTodoTreeDone) : best;
+    writeAiProgress(taskId, { runId, todos: next, phase });
+  }, [taskId]);
 
   const dismissAiProcess = useCallback(() => {
+    persistProgress('done');
     setAiRunId(undefined);
     setAiTodos([]);
     setAiPhase('done');
-    clearAiProgress(taskId);
-  }, [taskId]);
+  }, [persistProgress]);
 
   const abortShownRun = useCallback(() => {
     const rid = aiRunIdRef.current;
@@ -274,18 +342,23 @@ export default function DiscussionPanel({
   }, [dismissAiProcess]);
 
   const applyAiProgress = useCallback((ev: { run_id?: string; phase: 'running' | 'done'; todos: AiProgressTodo[] }) => {
+    const runId = ev.run_id || aiRunIdRef.current;
+    const incoming = ev.todos || [];
+    if (runId && runId !== aiRunIdRef.current) {
+      bestTodosRef.current = [];
+    }
     if (ev.phase === 'done') {
-      // 过程收尾时评论已落库，过程区可以收了。
-      dismissAiProcess();
+      persistProgress('done', incoming.length ? incoming : aiTodosRef.current, runId);
+      setAiRunId(undefined);
+      setAiTodos([]);
+      setAiPhase('done');
       return;
     }
-    const todos = ev.todos || [];
-    const runId = ev.run_id || aiRunIdRef.current;
     if (runId) setAiRunId(runId);
     setAiPhase('running');
-    setAiTodos(todos);
-    writeAiProgress(taskId, { runId, todos, phase: 'running' });
-  }, [taskId, dismissAiProcess]);
+    setAiTodos(incoming);
+    persistProgress('running', incoming, runId);
+  }, [persistProgress]);
 
   const handleWsAiProgress = useCallback((ev: { run_id?: string; phase: 'running' | 'done'; todos: AiProgressTodo[] }) => {
     if (ev.run_id && abortedRunIdsRef.current.has(ev.run_id)) return;
@@ -293,25 +366,40 @@ export default function DiscussionPanel({
       applyAiProgress(ev);
       return;
     }
-    // 用户已打断 / 过程区已收起：不要被服务端还在跑的同一轮进度重新拉开
-    if (ev.phase === 'running' && aiPhaseRef.current === 'done') return;
+    // 不在本页这一轮：迟到的 done 只更新快照/已灌回的 todo，不要把过程区再藏起来。
+    if (ev.phase === 'done') {
+      persistProgress('done', ev.todos?.length ? ev.todos : aiTodosRef.current, ev.run_id || aiRunIdRef.current);
+      if (aiTodosRef.current.length > 0) {
+        const shown = readAiProgress(taskId)?.todos || [];
+        if (shown.length) {
+          setAiTodos(shown);
+          setAiPhase('done');
+        }
+      }
+      return;
+    }
+    if (aiPhaseRef.current === 'done') return;
     applyAiProgress(ev);
-  }, [applyAiProgress]);
+  }, [applyAiProgress, persistProgress, taskId]);
 
   useEffect(() => {
     const snap = readAiProgress(taskId);
-    const last = comments[comments.length - 1];
-    // 回复已经在最新一条：不要把完成态过程区再灌回来。
-    if (!snap || snap.phase !== 'running' || isTeacherComment(last)) {
+    if (!snap) {
       setAiRunId(undefined);
       setAiTodos([]);
       setAiPhase('done');
-      if (snap) clearAiProgress(taskId);
       return;
     }
+    const last = comments[comments.length - 1];
+    const finished = snap.phase === 'done' || isTeacherComment(last);
+    const todos = finished ? snap.todos.map(markTodoTreeDone) : snap.todos;
     setAiRunId(snap.runId);
-    setAiTodos(snap.todos);
-    setAiPhase('running');
+    setAiTodos(todos);
+    setAiPhase(finished ? 'done' : 'running');
+    bestTodosRef.current = richerTodos(todos, bestTodosRef.current);
+    if (finished && snap.phase === 'running') {
+      writeAiProgress(taskId, { runId: snap.runId, todos, phase: 'done' });
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [taskId]);
 
@@ -335,9 +423,9 @@ export default function DiscussionPanel({
     deletedIds,
   } = useTaskCommentsWS(taskId, comments, { currentUser: username, onTaskUpdated, onAiProgress: handleWsAiProgress });
 
-  // 过程区只在执行中显示；回复上屏 / done 后收起。
+  // 有 todo 就显示（含退出工单再进来灌回的上次步骤）；本页回复上屏后会把 aiTodos 清空从而收起。
   const showAiProcess =
-    (aiPhase === 'running' && aiTodos.length > 0) ||
+    aiTodos.length > 0 ||
     optimisticAi ||
     (sending && aiRunId !== undefined);
 
@@ -351,8 +439,9 @@ export default function DiscussionPanel({
 
   // 逐项状态：任一 todo 仍是进行中（phase=running / status=in_progress），就视为整场仍在执行。
   // 头部「正在排查 / 已完成」据此判断而非只看事件封套 phase，杜绝「已完成却还有项在转圈」的矛盾。
-  const anyTodoRunning = displayTodos.some((t) => t.phase === 'running' || t.status === 'in_progress');
-  const allTodosDone = displayTodos.length > 0 && !anyTodoRunning;
+  const anyTodoRunning = displayTodos.some(isProgressRunning);
+  const waitingReply = displayTodos.length > 0 && !anyTodoRunning && aiPhase === 'running';
+  const allTodosDone = displayTodos.length > 0 && !anyTodoRunning && aiPhase === 'done';
 
   // 新一轮开始：记下当时最后一条评论，用来识别「本轮新回复」。
   // 回复上屏或 POST 结束后立刻收起过程区，不用等到再发下一条。
@@ -363,22 +452,23 @@ export default function DiscussionPanel({
       runAnchorCommentIdRef.current = last?.id ?? null;
     }
     prevAiActiveRef.current = aiActive;
-    // 本页这一轮刚跑完（POST / 帮我分析结束）：回复已返回，过程区立刻收。
-    // 切走再回来时 wasActive 为 false，不会误清「还在跑」的缓存。
+    // 本页这一轮刚跑完：回复已返回，过程区立刻收（快照仍在，下次进工单能灌回）。
     if (wasActive && !aiActive) {
       dismissAiProcess();
     }
   }, [aiActive, dismissAiProcess, displayComments]);
 
-  // 评论区已经出现本轮 U老师 回复 → 过程区可以收（不必等下一轮发送）。
+  // 本页亲眼开过一轮、且评论区已经出现本轮 U老师 回复 → 过程区可以收。
+  // 退出再进来灌回的历史 todo 没有 runAnchor，不要清掉。
   useEffect(() => {
+    if (runAnchorCommentIdRef.current == null && !aiActive) return;
     if (aiTodos.length === 0 && aiPhase !== 'running') return;
     const last = displayComments[displayComments.length - 1];
     if (!isTeacherComment(last)) return;
     const anchor = runAnchorCommentIdRef.current;
     if (anchor != null && String(last.id) === String(anchor)) return;
     dismissAiProcess();
-  }, [displayComments, aiTodos.length, aiPhase, dismissAiProcess]);
+  }, [displayComments, aiTodos.length, aiPhase, dismissAiProcess, aiActive]);
 
   // username → 展示名 映射（用于在线头像 / 输入中提示）
   const nameMap = useMemo(() => {
@@ -1498,14 +1588,16 @@ export default function DiscussionPanel({
         {/* U老师 执行过程（Claude Code 式动态展示）：Supervisor 派发能力时逐项实时滚动，
             最终回复只写纯答复（不含此过程）；[帮我分析] 点按瞬间用乐观占位立即显示 */}
         {enableAI && showAiProcess && displayTodos.length > 0 && (
-          <div className="detail-chat-ai-progress">
+          <div className={`detail-chat-ai-progress${allTodosDone ? ' is-finished' : ''}`}>
             <div className="detail-chat-ai-progress__head">
-              <span className="detail-chat-ai-progress__spinner" aria-hidden="true">
-                <i />
-                <i />
-                <i />
-              </span>
-              {!allTodosDone ? 'U老师 正在排查执行' : '排查执行完成'}
+              {!allTodosDone && (
+                <span className="detail-chat-ai-progress__spinner" aria-hidden="true">
+                  <i />
+                  <i />
+                  <i />
+                </span>
+              )}
+              {waitingReply ? '正在生成回复' : !allTodosDone ? 'U老师 正在排查执行' : '排查执行完成'}
               {aiQueueItems.length > 0 && (
                 <span className="detail-chat-ai-progress__queue">另有 {aiQueueItems.length} 条排队</span>
               )}
@@ -1523,32 +1615,9 @@ export default function DiscussionPanel({
               )}
             </div>
             <ul className="detail-chat-ai-progress__list">
-              {displayTodos.map((t, i) => {
-                const desc = t.description || t.capability || '分析';
-                const status = t.phase === 'done' || t.status === 'completed';
-                const running = t.phase === 'running' || t.status === 'in_progress';
-                return (
-                  <li key={`${t.id ?? i}-${i}`} className={`detail-chat-ai-progress__item ${running ? 'is-running' : ''} ${status ? 'is-done' : ''}`}>
-                    <span className="detail-chat-ai-progress__icon" aria-hidden="true">
-                      {status ? (
-                        <svg viewBox="0 0 16 16" className="detail-chat-ai-progress__ic done-icon">
-                          <circle cx="8" cy="8" r="7" />
-                          <path d="M4.9 8.3l1.9 1.9 4.2-4.2" fill="none" strokeLinecap="round" strokeLinejoin="round" />
-                        </svg>
-                      ) : running ? (
-                        <svg viewBox="0 0 16 16" className="detail-chat-ai-progress__ic running-icon">
-                          <path d="M8 1.5a6.5 6.5 0 1 0 6.5 6.5" fill="none" strokeLinecap="round" />
-                        </svg>
-                      ) : (
-                        <svg viewBox="0 0 16 16" className="detail-chat-ai-progress__ic pending-icon">
-                          <circle cx="8" cy="8" r="5.5" fill="none" />
-                        </svg>
-                      )}
-                    </span>
-                    <span className="detail-chat-ai-progress__text">{desc}</span>
-                  </li>
-                );
-              })}
+              {displayTodos.map((t, i) => (
+                <ProgressTodoItem key={`${t.id ?? i}-${i}`} t={t} />
+              ))}
             </ul>
             {aiQueueItems.length > 0 && (
               <ul className="detail-chat-ai-progress__queue-list">

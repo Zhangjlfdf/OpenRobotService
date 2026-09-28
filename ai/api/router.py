@@ -1709,6 +1709,43 @@ async def task_discuss_inject(body: TaskDiscussInjectRequest, request: Request) 
         return {"code": 1, "message": str(e)}
 
 
+@task_agent_router.get("/tickets/similar", summary="@# 相似工单（向量）")
+async def task_tickets_similar(
+    task_id: str,
+    limit: int = 10,
+) -> dict:
+    """按当前工单标题/描述/故障码/车型做 Qdrant 语义检索，返回已沉淀的相似工单。
+
+    前端仍走后端 GET /api/tasks/{id}/similar；本接口给后端代理，Qdrant 不可用时后端再 SQL 兜底。
+    """
+    import logging
+    logger = logging.getLogger("TASK_AGENT")
+    tid = str(task_id or "").strip()
+    cap = max(1, min(int(limit or 10), 30))
+    if not tid:
+        return {"code": 1, "message": "task_id 不能为空"}
+    try:
+        from ai.core.task_adapter import load_task_context_dict
+        from ai.core import get_retrieval_service
+        cur = load_task_context_dict(tid) or {}
+        query_text = " ".join(filter(None, [
+            cur.get("problem_summary") or cur.get("title") or "",
+            cur.get("description") or "",
+            cur.get("fault_code") or "",
+            cur.get("robot_type") or "",
+        ])).strip()
+        if not query_text:
+            return {"code": 0, "data": {"task_id": tid, "similar": [], "source": "vector"}}
+        retriever = await get_retrieval_service()
+        similar = await retriever.search_similar_tickets(
+            query_text, exclude_task_id=tid, top_k=cap,
+        )
+        return {"code": 0, "data": {"task_id": tid, "similar": similar, "source": "vector"}}
+    except Exception:
+        logger.exception(f"[tickets.similar] 失败: task_id={tid}")
+        return {"code": 1, "message": "相似工单向量检索失败"}
+
+
 @task_agent_router.post("/summarize", summary="讨论摘要")
 async def task_summarize(body: SummarizeRequest = SummarizeRequest()) -> dict:
     """后端触发 → U老师 自动扫描所有活跃工单 → 逐条生成摘要 → 写 task_comments"""
