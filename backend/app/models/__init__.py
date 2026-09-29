@@ -104,6 +104,9 @@ from app.models.user_info import UserInfo
 # 用户统计（按日期 + 来源）
 from app.models.user_statistics import UserStatistics
 
+# 微信公众号带参数二维码
+from app.models.wechat_qrcode import WechatQrcode, QrcodeStatus, QrcodeType
+
 __all__ = [
     "Base",
     # identity
@@ -144,4 +147,6 @@ __all__ = [
     "UserInfo",
     # user statistics
     "UserStatistics",
+    # wechat qrcode
+    "WechatQrcode", "QrcodeStatus", "QrcodeType",
 ]

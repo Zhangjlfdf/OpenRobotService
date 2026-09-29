@@ -9583,6 +9583,86 @@ button.dispatch-dev__rate-row { cursor: pointer; }
 .mac-info-row.is-drop-child { box-shadow: 0 0 0 2px var(--mac-blue-2); }
 .mac-info-row.is-drop-before::before { content: ''; position: absolute; left: 4px; right: 4px; top: -5px; height: 3px; border-radius: 2px; background: var(--mac-blue-2); }
 
+/* —— 二维码管理 —— */
+.qr-manage { padding-top: 44px; padding-bottom: 24px; max-width: 720px; margin: 0 auto; }
+.qr-manage .t-navbar { background: #fff; }
+
+/* 统计卡片 */
+.qr-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; padding: 12px 16px; }
+.qr-stat-card { background: #fff; border-radius: 10px; padding: 10px 8px; text-align: center; box-shadow: 0 1px 2px rgba(80,90,100,.05); border-top: 3px solid transparent; }
+.qr-stat-card--quota { grid-column: span 3; border-top-color: #2d9d5c; }
+.qr-stat-val { display: block; font-size: 20px; font-weight: 600; color: #2d3436; }
+.qr-stat-label { display: block; font-size: 11px; color: #888d8f; margin-top: 2px; }
+
+/* 筛选栏 */
+.qr-filter { display: flex; gap: 6px; padding: 0 16px 8px; }
+.qr-filter-select, .qr-filter-input { flex: 1; min-width: 0; height: 34px; border-radius: 8px; border: 1px solid #e0e0e0; padding: 0 8px; font-size: 13px; background: #fff; }
+
+/* 工具栏 */
+.qr-toolbar { display: flex; gap: 8px; padding: 0 16px 12px; }
+.qr-toolbar .qr-btn { flex: 1; min-width: 0; justify-content: center; }
+
+/* 按钮 */
+.qr-btn { display: inline-flex; align-items: center; gap: 4px; height: 34px; padding: 0 12px; border-radius: 8px; border: 1px solid transparent; font-size: 13px; cursor: pointer; transition: all .15s; }
+.qr-btn:disabled { opacity: .4; cursor: not-allowed; }
+.qr-btn--primary { background: #227197; color: #fff; }
+.qr-btn--primary:hover:not(:disabled) { background: #1c5e7e; }
+.qr-btn--secondary { background: #3697c3; color: #fff; }
+.qr-btn--ghost { background: #f4f6f7; color: #555; border-color: #e0e0e0; }
+.qr-btn--ghost:hover:not(:disabled) { background: #eaf0f3; }
+
+/* 列表 */
+.qr-empty { text-align: center; color: #888d8f; padding: 40px 0; font-size: 13px; }
+.qr-list { padding: 0 16px; display: flex; flex-direction: column; gap: 8px; }
+
+.qr-item { background: #fff; border-radius: 10px; padding: 10px 12px; box-shadow: 0 1px 2px rgba(80,90,100,.05); }
+.qr-item-top { display: flex; align-items: flex-start; gap: 8px; }
+.qr-item-top > input { margin-top: 4px; flex-shrink: 0; }
+.qr-item-main { flex: 1; min-width: 0; cursor: pointer; }
+.qr-item-scene { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 13px; }
+.qr-item-scene code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: #2d3436; background: #f4f6f7; padding: 1px 6px; border-radius: 4px; font-size: 12px; }
+.qr-item-name { font-size: 14px; font-weight: 500; color: #2d3436; margin-top: 2px; }
+.qr-item-type { font-size: 11px; color: #888d8f; background: #f4f6f7; padding: 1px 6px; border-radius: 4px; }
+.qr-item-batch { font-size: 11px; color: #888d8f; margin-top: 2px; }
+.qr-item-chev { color: #c9d4d9; flex-shrink: 0; margin-top: 2px; }
+.qr-item-ticket { font-size: 11px; color: #5aa9cd; margin-top: 4px; padding-left: 24px; }
+.qr-item-actions { display: flex; gap: 6px; margin-top: 8px; padding-left: 24px; flex-wrap: wrap; }
+
+.qr-status-chip { display: inline-flex; align-items: center; font-size: 11px; padding: 1px 6px; border-radius: 10px; border: 1px solid; font-weight: 500; }
+
+.qr-action-btn { display: inline-flex; align-items: center; gap: 3px; height: 26px; padding: 0 8px; border-radius: 6px; border: 1px solid #e0e0e0; background: #fff; font-size: 12px; color: #555; cursor: pointer; }
+.qr-action-btn:hover:not(:disabled) { background: #f4f6f7; color: #227197; border-color: #227197; }
+.qr-action-btn:disabled { opacity: .4; cursor: not-allowed; }
+.qr-action-btn--danger:hover:not(:disabled) { background: #fdf2f2; color: #c94a4a; border-color: #c94a4a; }
+
+/* 分页 */
+.qr-pager { display: flex; align-items: center; justify-content: center; gap: 12px; padding: 16px; color: #888d8f; font-size: 12px; }
+
+/* 弹窗 */
+.qr-popup { background: #fff; border-radius: 16px 16px 0 0; padding: 20px 16px 24px; max-height: 80vh; overflow-y: auto; }
+.qr-popup h3 { font-size: 16px; font-weight: 600; margin-bottom: 4px; }
+.qr-popup-hint { font-size: 12px; color: #888d8f; margin-bottom: 16px; }
+.qr-field { display: block; font-size: 12px; color: #555; margin-bottom: 4px; }
+.qr-textarea { width: 100%; border: 1px solid #e0e0e0; border-radius: 8px; padding: 8px; font-size: 13px; resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.qr-input { width: 100%; height: 36px; border: 1px solid #e0e0e0; border-radius: 8px; padding: 0 8px; font-size: 13px; }
+.qr-row { display: flex; gap: 8px; margin-top: 12px; }
+.qr-field-group { flex: 1; }
+.qr-batch-result { margin-top: 12px; padding: 10px; background: #eafaf0; border-radius: 8px; font-size: 13px; color: #2d9d5c; }
+.qr-batch-id { font-size: 11px; color: #888d8f; margin-top: 4px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.qr-popup-actions { display: flex; gap: 8px; margin-top: 20px; }
+.qr-popup-actions .qr-btn { flex: 1; justify-content: center; }
+
+/* 图片预览 */
+.qr-preview { background: #fff; border-radius: 16px; padding: 20px; text-align: center; min-width: 280px; }
+.qr-preview h4 { font-size: 15px; margin-bottom: 4px; }
+.qr-preview-scene { font-size: 12px; color: #888d8f; margin-bottom: 12px; }
+.qr-preview-scene code { background: #f4f6f7; padding: 1px 6px; border-radius: 4px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
+.qr-preview-img { width: 240px; height: 240px; border-radius: 8px; background: #f4f6f7; }
+.qr-preview-empty { padding: 40px 0; color: #888d8f; font-size: 13px; }
+
+/* toast */
+.qr-toast { top: 50% !important; }
+
 .mac-info-row__main { display: flex; align-items: center; gap: 4px; min-height: 36px; padding: 6px 8px 6px 4px; }
 .mac-info-row--d1 .mac-info-row__main { padding: 7px 10px 7px 6px; }
 .mac-info-row__grip { display: inline-flex; flex-shrink: 0; padding: 3px 1px; opacity: 0.6; cursor: grab; touch-action: none; }
