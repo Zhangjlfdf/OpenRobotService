@@ -56,6 +56,13 @@ class WechatQrcode(Base):
     # ── 批量管理 ──
     batch_id = Column(String(64), nullable=True, index=True, comment="批次 ID，批量创建时同一批次共享")
 
+    # ── 项目关联 ──
+    # 一张码最多属于一个项目，一个项目可以有多张码（多台车/重印/多入口），
+    # 所以引用放在码这侧；非项目码（如「智能体入口-客服A」）为 NULL。
+    # 宽松引用 project.id（同 project_pin.project_id 口径，不加物理外键），
+    # 存在性由接口层校验（见 admin/api/qrcode.py _resolve_project_ref）。
+    project_id = Column(String(64), nullable=True, index=True, comment="所属项目ID（project.id；非项目码为 NULL）")
+
     # ── 扫码跳转配置 ──
     redirect_url = Column(String(512), nullable=True, comment="扫码后跳转 URL（覆盖默认 /app/call）")
 

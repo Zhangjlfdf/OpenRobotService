@@ -10,7 +10,8 @@ import {
   qrcodeTransition, deleteQrcode, QRCODE_STATUS_LABELS,
   type QrcodeItem, type QrcodeStats, type QrcodeType, type QrcodeStatus,
 } from '@/api/qrcode';
-import { MacChevronRight, MacPlus, MacDownload, MacCheck, MacTrash, MacRefreshCw, MacTag } from '@/shared/components/macaronIcons';
+import { getProjects, type ProjectItem } from '@/api/projects';
+import { MacChevronRight, MacPlus, MacDownload, MacCheck, MacTrash2, MacRefreshCw, MacTags } from '@/shared/components/macaronIcons';
 
 type FilterStatus = '' | QrcodeStatus;
 type FilterType = '' | QrcodeType;
@@ -44,11 +45,14 @@ export default function QrcodeManage() {
 
   const [filterStatus, setFilterStatus] = useState<FilterStatus>('');
   const [filterType, setFilterType] = useState<FilterType>('');
+  const [filterProject, setFilterProject] = useState('');
   const [keyword, setKeyword] = useState('');
+
+  // 项目下拉数据（所属项目筛选 / 批量创建关联用）
+  const [projectList, setProjectList] = useState<ProjectItem[]>([]);
 
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [popup, setPopup] = useState<null | 'batch-create' | 'batch-generate' | { qr: QrcodeItem }>(null);
-  const [toastMsg, setToastMsg] = useState<string>('');
 
   // ── 加载 ──
   const loadList = useCallback(async () => {
@@ -58,6 +62,7 @@ export default function QrcodeManage() {
         fetchQrcodes({
           status: filterStatus || undefined,
           qrcode_type: filterType || undefined,
+          project_id: filterProject || undefined,
           keyword: keyword.trim() || undefined,
           skip, limit: PAGE_SIZE,
         }),
@@ -67,17 +72,22 @@ export default function QrcodeManage() {
       setTotal(listRes.total);
       setStats(statsRes);
     } catch (e: any) {
-      setToastMsg(e?.message || '加载失败');
+      Toast({ message: e?.message || '加载失败' });
     } finally {
       setLoading(false);
     }
-  }, [filterStatus, filterType, keyword, skip]);
+  }, [filterStatus, filterType, filterProject, keyword, skip]);
 
   useEffect(() => { loadList(); }, [loadList]);
 
+  // 项目下拉数据：一次取前 500 条（当前全量 297 个），失败静默降级为「全部项目」，
+  // 不弹错——列表主流程不依赖它
+  useEffect(() => {
+    getProjects('', 0, 500).then(setProjectList).catch(() => { /* 静默降级 */ });
+  }, []);
+
   const showToast = (msg: string) => {
-    setToastMsg(msg);
-    setTimeout(() => setToastMsg(''), 2000);
+    Toast({ message: msg });
   };
 
   // ── 操作 ──
@@ -130,6 +140,7 @@ export default function QrcodeManage() {
     const [scenesText, setScenesText] = useState('');
     const [namePrefix, setNamePrefix] = useState('');
     const [qtype, setQtype] = useState<QrcodeType>('permanent');
+    const [projectId, setProjectId] = useState('');
     const [redirectUrl, setRedirectUrl] = useState('');
     const [busy, setBusy] = useState(false);
     const [result, setResult] = useState<null | { batchId: string; created: number; skipped: number }>(null);
@@ -142,6 +153,7 @@ export default function QrcodeManage() {
         const res = await batchCreateQrcodes({
           scene_list: sceneList, name_prefix: namePrefix,
           qrcode_type: qtype, redirect_url: redirectUrl || undefined,
+          project_id: projectId || undefined,
         });
         setResult({ batchId: res.batch_id, created: res.created_count, skipped: res.skipped_count });
       } catch (e: any) { showToast(e?.message || '创建失败'); }
@@ -177,7 +189,13 @@ export default function QrcodeManage() {
             </div>
           </div>
 
-          <label className="qr-field">扫码跳转 URL（选填，留空则默认 /app/call）</label>
+          <label className="qr-field">所属项目（选填，整批二维码统一关联；之后可从二维码反查项目）</label>
+          <select className="qr-input" value={projectId} onChange={(e) => setProjectId(e.target.value)}>
+            <option value="">不关联项目</option>
+            {projectList.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+          </select>
+
+          <label className="qr-field" style={{ marginTop: 12 }}>扫码跳转 URL（选填，留空则默认 /app/call）</label>
           <input className="qr-input" value={redirectUrl} onChange={(e) => setRedirectUrl(e.target.value)} placeholder="https://example.com/app/call" />
 
           {result && (
@@ -263,6 +281,7 @@ export default function QrcodeManage() {
         <div className="qr-preview">
           <h4>{qr.name}</h4>
           <div className="qr-preview-scene">scene_str = <code>{qr.scene_str}</code></div>
+          {qr.project_name && <div className="qr-preview-scene">所属项目：{qr.project_name}</div>}
           {qr.ticket ? (
             <img
               src={`${TICKET_IMAGE_BASE}${encodeURIComponent(qr.ticket)}`}
@@ -326,6 +345,13 @@ export default function QrcodeManage() {
           onChange={(e) => { setKeyword(e.target.value); setSkip(0); }}
         />
       </div>
+      {/* 项目筛选单独一行：项目名较长，挤进上一行会把三个控件都压没 */}
+      <div className="qr-filter">
+        <select className="qr-filter-select" value={filterProject} onChange={(e) => { setFilterProject(e.target.value); setSkip(0); }}>
+          <option value="">全部项目</option>
+          {projectList.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+        </select>
+      </div>
 
       {/* 批量操作 */}
       <div className="qr-toolbar">
@@ -354,15 +380,16 @@ export default function QrcodeManage() {
                   <input type="checkbox" checked={checked} onChange={() => handleToggleSelect(q.id)} />
                   <div className="qr-item-main" onClick={() => setPopup({ qr: q })}>
                     <div className="qr-item-scene">
-                      <MacTag width={14} height={14} />
+                      <MacTags size={14} />
                       <code>{q.scene_str}</code>
                       <StatusChip status={q.status as QrcodeStatus} />
                       <span className="qr-item-type">{TYPE_LABEL[q.type as QrcodeType]}</span>
                     </div>
                     <div className="qr-item-name">{q.name || '—'}</div>
+                    {q.project_name && <div className="qr-item-batch">项目：{q.project_name}</div>}
                     {q.batch_id && <div className="qr-item-batch">批次: {q.batch_id.slice(-8)}</div>}
                   </div>
-                  <MacChevronRight className="qr-item-chev" />
+                  <span className="qr-item-chev"><MacChevronRight size={16} /></span>
                 </div>
                 {q.ticket && <div className="qr-item-ticket">ticket 已生成 · {q.expire_seconds ? `${Math.round(q.expire_seconds / 86400)}天有效` : '永久'}</div>}
                 <div className="qr-item-actions">
@@ -387,7 +414,7 @@ export default function QrcodeManage() {
                   })}
                   {(q.status === 'init' || q.status === 'deprecated') && (
                     <button className="qr-action-btn qr-action-btn--danger" onClick={() => handleDelete(q.id)}>
-                      <MacTrash /> 删除
+                      <MacTrash2 size={14} /> 删除
                     </button>
                   )}
                 </div>
@@ -409,8 +436,6 @@ export default function QrcodeManage() {
       <BatchCreatePopup />
       <BatchGeneratePopup />
       <ImagePreview />
-
-      {toastMsg && <Toast className="qr-toast">{toastMsg}</Toast>}
     </div>
   );
 }

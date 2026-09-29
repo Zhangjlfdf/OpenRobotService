@@ -70,6 +70,12 @@ PATCHES = {
         ("ended_at", "DATETIME NULL COMMENT '查看结束时间（仅 VIEW 有值）'", None),
         ("duration_seconds", "INT NULL COMMENT '查看时长（秒，仅 VIEW 有值）'", None),
     ],
+    # 二维码管理：项目关联列（2026-09-29）。
+    # 表整体由启动 create_all 负责（模型已带本列）；只有「先跑过旧代码、
+    # wechat_qrcodes 表已建出来」的库才需要这里补列。
+    "wechat_qrcodes": [
+        ("project_id", "VARCHAR(64) NULL COMMENT '所属项目ID（project.id；非项目码为 NULL）'", "ix_wechat_qrcodes_project_id"),
+    ],
     # 注：project_info_node 不再需要补列兜底。2026-09 项目信息结构改造
     # （alembic 7c1e9a4b2d38）把该表整体重建为「节点定义 + 项目值」两表结构，
     # 旧列 template_node_id 已废弃，建表与索引一律由迁移负责。
@@ -86,6 +92,16 @@ def main() -> int:
     changed = False
     try:
         for table, patches in PATCHES.items():
+            # 表还不存在（比 PATCHES 清单晚引入的表，如 wechat_qrcodes）：
+            # 跳过而非报错——应用启动 create_all 会按模型整表新建，自带新列
+            cur.execute(
+                "SELECT COUNT(*) FROM information_schema.tables "
+                "WHERE table_schema = %s AND table_name = %s",
+                (cfg["database"], table),
+            )
+            if not cur.fetchone()[0]:
+                print(f"[SKIP] 表 {table} 不存在（启动 create_all 时会按模型新建，含新列）")
+                continue
             cur.execute(f"SHOW COLUMNS FROM `{table}`")
             existing_cols = {row[0] for row in cur.fetchall()}
             cur.execute(f"SHOW INDEX FROM `{table}`")

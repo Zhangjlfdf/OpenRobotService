@@ -1,5 +1,12 @@
-// 二维码管理相关 API
-import { request } from './client';
+// 二维码管理相关 API —— 对接 admin 模块 /api/admin/qrcodes*
+//
+// 注：此前本文件误用 `import { request } from './client'`（该导出不存在）且路径带了
+// `/api/v1` 前缀（后端实际挂在 /api/admin 下，settings.API_V1_STR='/api'），
+// 页面接口全不可达；现按仓库统一写法改用 createRequest(API_CONFIG.ADMIN.BASE_URL)。
+import { createRequest } from './client';
+import API_CONFIG from '@/config/api';
+
+const request = createRequest(API_CONFIG.ADMIN.BASE_URL, '二维码');
 
 export interface QrcodeItem {
   id: number;
@@ -13,6 +20,10 @@ export interface QrcodeItem {
   expire_seconds?: number;
   status: string;
   batch_id?: string;
+  /** 所属项目ID（project.id；非项目码为 null） */
+  project_id?: string | null;
+  /** 所属项目名（后端按 project_id 联查下发，便于列表直接展示） */
+  project_name?: string | null;
   redirect_url?: string;
   created_by?: string;
   published_by?: string;
@@ -50,6 +61,7 @@ export async function fetchQrcodes(params: {
   qrcode_type?: string;
   keyword?: string;
   batch_id?: string;
+  project_id?: string;
   skip?: number;
   limit?: number;
 }): Promise<QrcodeListResult> {
@@ -58,15 +70,15 @@ export async function fetchQrcodes(params: {
     if (v !== undefined && v !== null && v !== '') qs.append(k, String(v));
   });
   const query = qs.toString();
-  return request.get(`/api/v1/admin/qrcodes${query ? `?${query}` : ''}`);
+  return request(`/qrcodes${query ? `?${query}` : ''}`);
 }
 
 export async function fetchQrcode(id: number): Promise<QrcodeItem> {
-  return request.get(`/api/v1/admin/qrcodes/${id}`);
+  return request(`/qrcodes/${id}`);
 }
 
 export async function fetchQrcodeStats(): Promise<QrcodeStats> {
-  return request.get('/api/v1/admin/qrcodes/stats/summary');
+  return request('/qrcodes/stats/summary');
 }
 
 export async function createQrcode(data: {
@@ -75,8 +87,9 @@ export async function createQrcode(data: {
   description?: string;
   qrcode_type?: QrcodeType;
   redirect_url?: string;
+  project_id?: string;
 }): Promise<QrcodeItem> {
-  return request.post('/api/v1/admin/qrcodes', data);
+  return request('/qrcodes', { method: 'POST', body: JSON.stringify(data) });
 }
 
 export async function batchCreateQrcodes(data: {
@@ -84,12 +97,14 @@ export async function batchCreateQrcodes(data: {
   name_prefix?: string;
   qrcode_type?: QrcodeType;
   redirect_url?: string;
-}): Promise<{ batch_id: string; created: string[]; skipped: Array<{ scene: string; reason: string }>; created_count: number; skipped_count: number }> {
-  return request.post('/api/v1/admin/qrcodes/batch', data);
+  /** 整批统一关联的项目ID（project.id），不传则不与项目关联 */
+  project_id?: string;
+}): Promise<{ batch_id: string; created: string[]; skipped: Array<{ scene: string; reason: string }>; created_count: number; skipped_count: number; project_id?: string | null }> {
+  return request('/qrcodes/batch', { method: 'POST', body: JSON.stringify(data) });
 }
 
 export async function generateQrcodeTicket(id: number): Promise<QrcodeItem> {
-  return request.post(`/api/v1/admin/qrcodes/${id}/generate`);
+  return request(`/qrcodes/${id}/generate`, { method: 'POST' });
 }
 
 export async function batchGenerateTickets(data: {
@@ -97,21 +112,23 @@ export async function batchGenerateTickets(data: {
   qid_list?: number[];
   only_init?: boolean;
 }): Promise<{ total: number; success: Array<{ id: number; scene_str: string }>; failed: Array<{ id: number; scene_str: string; reason: string }> }> {
-  return request.post('/api/v1/admin/qrcodes/batch-generate', data);
+  return request('/qrcodes/batch-generate', { method: 'POST', body: JSON.stringify(data) });
 }
 
 export async function updateQrcode(id: number, data: {
   name?: string;
   description?: string;
   redirect_url?: string;
+  /** 传空串清除项目关联；不传则不修改 */
+  project_id?: string;
 }): Promise<QrcodeItem> {
-  return request.put(`/api/v1/admin/qrcodes/${id}`, data);
+  return request(`/qrcodes/${id}`, { method: 'PUT', body: JSON.stringify(data) });
 }
 
 export async function qrcodeTransition(id: number, action: 'confirm' | 'publish' | 'deprecate'): Promise<QrcodeItem> {
-  return request.post(`/api/v1/admin/qrcodes/${id}/${action}`);
+  return request(`/qrcodes/${id}/${action}`, { method: 'POST' });
 }
 
 export async function deleteQrcode(id: number): Promise<{ ok: boolean }> {
-  return request.delete(`/api/v1/admin/qrcodes/${id}`);
+  return request(`/qrcodes/${id}`, { method: 'DELETE' });
 }
