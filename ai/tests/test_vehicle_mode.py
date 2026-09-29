@@ -15,6 +15,13 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.pool import StaticPool
 
+# 收集阶段先 import 真包占位：test_report 的 _preload_database_module 在
+# 「sys.modules 里还没有 ai 真包」时会连假 ai/ai.core 空包一起造出来，
+# 污染后续所有 ai.api import（ImportError: get_llm_client from 'ai.core'）。
+# 真包先进 sys.modules → report 只替换 ai.core.database 模块（不造假包），
+# 该替换由下方 fixture 的运行时解析兜住。
+import ai.core.database  # noqa: F401
+
 
 # ================================================================
 # 夹具
@@ -28,13 +35,16 @@ def vehicle_db(monkeypatch):
     都是空库）且允许跨线程（_lookup_vehicle 走 asyncio.to_thread）；
     生产 MySQL 无此问题，仅 sqlite 内存库需要。
 
-    ⚠️ 一律运行时从 sys.modules 解析模块属性（不顶部 import 绑定 Base/Vehicle）：
-    同进程先跑 test_report.py 时，其 _preload_database_module 会整体替换
-    sys.modules["ai.core.database"]（独立 exec 的双实例）——顶部绑定的
-    Base/Vehicle 与 vehicle_mode 函数内 from-import 的不是同一实例，表建在
-    A 的 metadata、查询走 B 的类，双实例撕裂。运行时解析保证 fixture 与
-    被测函数永远同一模块实例。"""
-    import ai.core.database as db_mod
+    ⚠️ 一律从 sys.modules 直取模块（不走 import as 属性链）：test_report 的
+    _preload_database_module 会把 sys.modules["ai.core.database"] 换成手工副本，
+    而被测函数内是 from-import（命中 sys.modules 副本）——`import as` 走父包
+    属性链拿到的是真包旧对象，patch 它对 from-import 不生效（双实例撕裂，
+    0904 全量回归同款坑）。sys.modules.get 与 from-import 命中同一实例。"""
+    import sys
+
+    db_mod = sys.modules.get("ai.core.database")
+    if db_mod is None:
+        import ai.core.database as db_mod  # noqa: F811
 
     engine = create_engine(
         "sqlite:///:memory:",
@@ -63,9 +73,13 @@ def kb_tmp(tmp_path):
 
 def _seed_vehicle(engine, code="XQE-122", model="XQE", project="试点项目",
                   customer="试点客户", status="active"):
+    import sys
+
     from sqlalchemy import insert
 
-    import ai.core.database as db_mod
+    db_mod = sys.modules.get("ai.core.database")
+    if db_mod is None:
+        import ai.core.database as db_mod  # noqa: F811
     with engine.begin() as conn:
         conn.execute(insert(db_mod.Vehicle).values(
             vehicle_code=code, model=model, project_name=project,
