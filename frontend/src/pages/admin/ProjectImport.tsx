@@ -95,6 +95,16 @@ export default function ProjectImport() {
         </button>
       </div>
 
+      {/* 录入信息：项目信息录入入口。专属页面还没建，先指向信息表单页 /admin/project-edit，
+          页面定了以后改这一行跳转即可 */}
+      <button
+        type="button"
+        className="mac-btn mac-btn--outline mac-btn--block"
+        onClick={() => navigate('/admin/project-edit')}
+      >
+        录入信息
+      </button>
+
       {canImportAll && (
         <button
           type="button"
