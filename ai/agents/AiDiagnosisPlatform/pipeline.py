@@ -445,6 +445,35 @@ def _user_profile_block(state: "AgentState") -> str:
     return "\n".join(lines) + "\n"
 
 
+def _vehicle_mode_block(memory) -> str:
+    """【车辆】扫码定制模式块（XQE 试点，0929）。
+
+    会话经模式确认接口（/mode/confirm）注册 metadata["vehicle_mode"] 后，
+    三套 prompt（全量诊断/收集/快路径）均注入本块：车型信息已确认，
+    涉及车型的字段视为已回答不追问；引导时给编号选项。常规会话（无该键）
+    返回空串——零注入、零行为变化。
+    """
+    vm = (getattr(memory, "metadata", None) or {}).get("vehicle_mode") or {}
+    if not vm.get("model"):
+        return ""
+    seg = [f"车型 {vm['model']}"]
+    if vm.get("vehicle_code"):
+        seg.append(f"车号 {vm['vehicle_code']}")
+    if vm.get("project_name"):
+        seg.append(f"车辆所属项目「{vm['project_name']}」")
+    if vm.get("customer_name"):
+        seg.append(f"客户「{vm['customer_name']}」")
+    lines = [
+        f"【车辆】本会话已扫码绑定：{'｜'.join(seg)}",
+        "（该车的车型/车辆型号视为已知信息，涉及这些的字段不要向用户追问；"
+        "回答与排查默认围绕该车型的知识库内容展开；"
+        "用户报故障码时先在知识库按码精确查证再解释，查不到如实说明；"
+        "需要用户补充信息时可给编号选项供快速回答，选项必须来自知识库内容或"
+        "常见情况，不要编造选项）",
+    ]
+    return "\n".join(lines) + "\n"
+
+
 def _session_state_block(state: "AgentState", memory) -> str:
     """会话全局状态块（0901，主 LLM 全局视角）。
 
@@ -464,6 +493,11 @@ def _session_state_block(state: "AgentState", memory) -> str:
     _up = _user_profile_block(state)
     if _up:
         lines.extend(_up.splitlines())
+    # 车辆定制模式块（XQE 试点）：扫码绑定会话的车型事实，先于工单事实；
+    # 常规会话空串零开销
+    _vm = _vehicle_mode_block(memory)
+    if _vm:
+        lines.extend(_vm.splitlines())
     _lt = state.last_submitted_ticket or {}
     if _lt.get("ticket_id") or _lt.get("db_id"):
         _when = ""
@@ -1809,6 +1843,9 @@ class AiDiagnosisPlatform:
         # 在此提升共用——三套 prompt 同一【用户】块，LLM 确认字段/提单回复时
         # 都知道在和谁说话。无画像为空串零开销。
         _user_block = _user_profile_block(state)
+        # 车辆定制模式块（XQE 试点）：收集/快路径 prompt 不走 _session_state_block，
+        # 在此与【用户】块同位注入——三套 prompt 都知道车型已绑定
+        _vehicle_block = _vehicle_mode_block(memory)
         # 工单填写模式（对话路径 ticket_collecting / 按钮路径 prepare not_ready）
         if state.ticket_collecting:
             fields = "、".join(state.ticket_collecting)
@@ -1926,7 +1963,7 @@ class AiDiagnosisPlatform:
             return (
                 f"你是工单填写助手。用户正在补充工单所需信息，请把对话里出现的信息记录到 collected_info。\n\n"
                 f"{ticket_collecting_context}\n\n"
-                f"{_user_block}{_ref_block}{_proj_pick_block}{_amb_ask_block}{_img_info_block}\n"
+                f"{_user_block}{_vehicle_block}{_ref_block}{_proj_pick_block}{_amb_ask_block}{_img_info_block}\n"
                 f"{_proj_block}\n"
                 f"## 对话\n{conversation_text}\n\n"
                 f"---\n"
@@ -1981,7 +2018,7 @@ class AiDiagnosisPlatform:
                     )
                 return (
                     "请先判断用户本轮是否真的提出了提单诉求（转工单/提单/派单/找工程师处理）。\n\n"
-                    f"{_fast_ref}{_user_block}"
+                    f"{_fast_ref}{_user_block}{_vehicle_block}"
                     "## 对话\n"
                     f"{conversation_text}\n\n"
                     "## 任务\n"
@@ -3404,11 +3441,30 @@ class AiDiagnosisPlatform:
             logger.warning(f"检索超时/失败: session={session_id}")
         return "（知识库检索失败，请告知用户当前系统检索异常、建议稍后重试或转工单处理，不要自己编造答案。）"
 
-    async def _three_way_retrieve(self, query: str) -> list:
+    async def _vehicle_mode_domains(self, session_id: str):
+        """车辆定制模式的检索域配额；常规会话返回 None（走默认三域，行为不变）。
+
+        车型域高配额优先 + 通用域低配额兜底——车型问题车型域内容占绝对优势，
+        用户问非车型问题时仍能从通用知识回答（不硬过滤）。"""
+        try:
+            memory = await self._memory_manager.get_memory(session_id)
+            vm = (getattr(memory, "metadata", None) or {}).get("vehicle_mode") or {}
+        except Exception as e:
+            logger.debug(f"[retrieve] vehicle_mode 读取失败按常规处理: {e}")
+            return None
+        domain = str(vm.get("domain") or "").strip()
+        if not domain:
+            return None
+        return [(domain, 8), ("team", 2), ("company", 1), ("industry", 1)]
+
+    async def _three_way_retrieve(self, query: str, domains=None) -> list:
         """三路并行域检索（team/company/industry），异常降级为空列表。
         每域「稠密 top5 + 稀疏 top5 保送」进候选池——不再 RRF 早融合，
         避免只被一路命中的文档被挤出 cross-encoder 精排池
-        （锁区文档稠密第4名,RRF 后被两路命中的文档挤出 top12,精排永远看不到它）。"""
+        （锁区文档稠密第4名,RRF 后被两路命中的文档挤出 top12,精排永远看不到它）。
+
+        domains：可选 [(域, top_k)] 配额列表；None=默认 team/company/industry
+        三域（车辆定制模式由 _vehicle_mode_domains 传入车型域优先配额）。"""
         async def _one(domain: str, top_k: int):
             try:
                 dense_res, sparse_res = await asyncio.wait_for(
@@ -3424,16 +3480,15 @@ class AiDiagnosisPlatform:
                 logger.warning(f"[retrieve] {domain} 域双路检索失败: {type(e).__name__}: {str(e)[:300]}")
                 return [], []
 
-        team_t = asyncio.create_task(_one("team", 5))
-        company_t = asyncio.create_task(_one("company", 4))
-        industry_t = asyncio.create_task(_one("industry", 3))
-        gathered = await asyncio.gather(team_t, company_t, industry_t, return_exceptions=True)
+        _domains = list(domains) if domains else [("team", 5), ("company", 4), ("industry", 3)]
+        _tasks = [asyncio.create_task(_one(d, k)) for d, k in _domains]
+        gathered = await asyncio.gather(*_tasks, return_exceptions=True)
         results = []
         seen = set()
         # 每域召回汇总（稠密+稀疏条数、首条标题@分）：域 0+0 = 该域集合空/异常，
         # 有召回但标题不相关 = 知识库缺该内容，排查时先看这行分流
         _summ = []
-        for _domain, g in zip(("team", "company", "industry"), gathered):
+        for _domain, g in zip(_domains, gathered):
             if isinstance(g, BaseException):
                 _summ.append(f"{_domain} 异常")
                 continue
@@ -3524,14 +3579,19 @@ class AiDiagnosisPlatform:
             return cached["result"]
 
         logger.info(f"[retrieve] 三路域检索: query={search_query[:60]}...")
+        # 车辆定制模式（XQE 试点）：注册 vehicle_mode 的会话检索域换成车型域
+        # 优先配额；常规会话 _vm_domains=None，检索路径与旧版完全一致。
+        _vm_domains = await self._vehicle_mode_domains(session_id)
         # 双查询合并检索:改写词与原词都查,结果并集。
         # 「可以调整吗」vs「怎么调整」这类提问方式差异会让 embedding 漂移,
         # 改写后的操作句式查询把另一侧命中的文档捞回来,抹平表述差异;
         # 省略式追问也靠这条改写路径补全成可检索的完整查询。
         _rw_task = asyncio.create_task(self._rewrite_query(search_query, context_turns))
-        _domain_results = await self._three_way_retrieve(search_query)
+        _domain_results = await self._three_way_retrieve(search_query, domains=_vm_domains)
         _rw = await _rw_task
-        _rw_results = await self._three_way_retrieve(_rw) if _rw else []
+        _rw_results = (
+            await self._three_way_retrieve(_rw, domains=_vm_domains) if _rw else []
+        )
         logger.info(f"[retrieve] 三路检索完成: {round((time.perf_counter() - t0) * 1000)}ms")
         if _rw:
             _rw_ids = {r.id for r in _domain_results}

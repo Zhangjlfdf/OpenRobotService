@@ -1,0 +1,193 @@
+# -*- coding: utf-8 -*-
+"""车型定制模式：扫码入口的模式确认接口（XQE 试点）。
+
+链路：车体二维码（URL 带车型/项目/客户）→ 前端「我要摇人」界面弹信息确认
+弹窗 → 用户确认后前端调 POST /mode/confirm → 此处校验 vehicles 档案表：
+  - 有档案 → 该 session 注册为车型定制模式（memory.metadata["vehicle_mode"]），
+    返回该车型 SOP 手册文档清单（md 链接，前端拉正文渲染）
+  - 无档案 → code=1 报错拦住（实验阶段不降级常规模式）
+
+铁律：定制模式是「加法」——常规链路（不调本接口的会话）一个字节不变；
+后续 pipeline 的检索域限定 / prompt 注入 / 错误码直查全部以
+metadata["vehicle_mode"] 存在为唯一开关。
+
+幂等：同一 session 重复调用 = 覆盖重注册（前端刷新即重调，天然安全）。
+"""
+import time
+import asyncio
+from pathlib import Path
+from typing import Dict, List, Optional
+
+from pydantic import BaseModel, Field
+
+from ai.core.logging import get_logger
+from ai.core.memory import MemoryManager
+
+logger = get_logger(__name__)
+
+
+class ModeConfirmRequest(BaseModel):
+    session_id: str = Field(..., min_length=1, max_length=128, description="会话 ID（前端先建会话再调本接口绑定模式）")
+    model: str = Field(..., min_length=1, max_length=64, description="车型（如 XQE），上游 URL 带来、用户已在弹窗确认")
+    project_name: str = Field(default="", max_length=128, description="项目名（上游 URL 带来）")
+    customer_name: str = Field(default="", max_length=128, description="客户名（上游 URL 带来）")
+    vehicle_code: str = Field(default="", max_length=64, description="唯一车号（可选；传了按车号精确校验，不传按车型+项目匹配）")
+
+
+# ============================================================
+# 车辆档案表（惰性幂等建表，进程级只建一次）
+# ============================================================
+_ensure_table_lock = asyncio.Lock()
+_ensure_table_done = False
+
+
+async def _ensure_vehicle_table() -> None:
+    """幂等建 vehicles 表（AI 侧自有表，create_all 只建它自己，不碰既有表）。"""
+    global _ensure_table_done
+    if _ensure_table_done:
+        return
+    async with _ensure_table_lock:
+        if _ensure_table_done:
+            return
+        from ai.core.database import Base, Vehicle, engine  # noqa: F401
+
+        def _create() -> None:
+            Base.metadata.create_all(engine, tables=[Vehicle.__table__])
+
+        await asyncio.to_thread(_create)
+        _ensure_table_done = True
+
+
+async def _lookup_vehicle(model: str, project_name: str, vehicle_code: str):
+    """查车辆档案。返回 Vehicle 行或 None（调用方报错拦住）。
+
+    匹配规则：
+      1. vehicle_code 非空 → 按唯一车号精确匹配（最可信）
+      2. 否则 → 车型 + 项目名匹配（初版 URL 上游只带这三个字段）
+    只认 active 档案；多条命中取第一条（初版手工建档保证不重复）。
+    """
+    from ai.core.database import Vehicle, engine
+    from sqlalchemy.orm import Session as DBSession
+
+    def _query():
+        with DBSession(engine) as s:
+            q = s.query(Vehicle).filter(Vehicle.status == "active")
+            if vehicle_code:
+                q = q.filter(Vehicle.vehicle_code == vehicle_code)
+            else:
+                q = q.filter(Vehicle.model == model, Vehicle.project_name == project_name)
+            return q.first()
+
+    return await asyncio.to_thread(_query)
+
+
+# ============================================================
+# 车型 → 知识库域映射 + 手册清单
+# ============================================================
+def model_to_domain(model: str) -> str:
+    """车型 → kb 域名。XQE → xqe；未来新车型零改动（默认小写）。"""
+    return (model or "").strip().lower()
+
+
+def list_manual_docs(model: str, kb_root: Optional[Path] = None,
+                     media_prefix: str = "/api/ai/media") -> List[Dict[str, str]]:
+    """扫 kb/{domain}/manual/*.md 生成手册文档清单（title + 正文 URL）。
+
+    kb 目录/域目录不存在 → 返回空清单（手册是可选能力，不阻塞模式注册）。
+    URL 走 run.py 已挂的静态路由 {media_prefix}/kb/**（前端 fetch 后自行渲染）。
+    kb_root 参数供测试注入临时目录。
+    """
+    domain = model_to_domain(model)
+    if not domain:
+        return []
+    root = (kb_root or _default_kb_root()) / domain / "manual"
+    if not root.is_dir():
+        return []
+    docs: List[Dict[str, str]] = []
+    for f in sorted(root.glob("*.md")):
+        docs.append({
+            "title": f.stem,
+            "path": f"{domain}/manual/{f.name}",
+            "url": f"{media_prefix}/kb/{domain}/manual/{f.name}",
+        })
+    return docs
+
+
+def _default_kb_root() -> Path:
+    from ai.config import _KB_DIR
+    return _KB_DIR
+
+
+# ============================================================
+# 模式注册主流程
+# ============================================================
+async def register_mode(req: ModeConfirmRequest,
+                        memory_manager: Optional[MemoryManager] = None) -> dict:
+    """校验车辆档案 → session 注册定制模式 → 返回手册清单。
+
+    返回：{code: 0, data: {confirmed, model, domain, manual_docs}} 或 {code: 1, message}。
+    memory_manager 参数供测试注入 mock；缺省用真实 get_memory_manager()。
+    """
+    model = (req.model or "").strip()
+    project_name = (req.project_name or "").strip()
+    customer_name = (req.customer_name or "").strip()
+    vehicle_code = (req.vehicle_code or "").strip()
+
+    if not model:
+        return {"code": 1, "message": "车型不能为空"}
+
+    await _ensure_vehicle_table()
+    vehicle = await _lookup_vehicle(model, project_name, vehicle_code)
+    if vehicle is None:
+        # 实验阶段：报错拦住，不降级常规模式（前端展示报错弹窗）
+        logger.warning(
+            f"[vehicle_mode] 未建档拦截: model={model!r} project={project_name!r} "
+            f"vehicle_code={vehicle_code!r}, session={req.session_id}",
+        )
+        return {"code": 1, "message": f"车型 {model} 未建档或不在服务范围，请确认扫码信息"}
+
+    domain = model_to_domain(vehicle.model)
+    mode_info = {
+        "model": vehicle.model,
+        "domain": domain,
+        "vehicle_code": vehicle.vehicle_code,
+        "project_name": vehicle.project_name or project_name,
+        "customer_name": vehicle.customer_name or customer_name,
+        "location": vehicle.location or "",
+        "registered_at": int(time.time()),
+    }
+
+    mm = memory_manager or await _default_memory_manager()
+    memory = await mm.get_memory(req.session_id)
+    # 覆盖重注册 = 幂等（前端刷新即重调本接口）
+    memory.metadata["vehicle_mode"] = mode_info
+    await mm.save_memory(memory)
+
+    manual_docs = list_manual_docs(vehicle.model)
+    logger.info(
+        f"[vehicle_mode] 定制模式注册: session={req.session_id} model={vehicle.model} "
+        f"vehicle={vehicle.vehicle_code} domain={domain} manual={len(manual_docs)}篇",
+    )
+    return {
+        "code": 0,
+        "data": {
+            "confirmed": True,
+            "model": vehicle.model,
+            "domain": domain,
+            "manual_docs": manual_docs,
+        },
+    }
+
+
+async def _default_memory_manager() -> MemoryManager:
+    from ai.core import get_memory_manager
+    return await get_memory_manager()
+
+
+def register_vehicle_mode_routes(qa_router) -> None:
+    """把模式确认路由挂到 qa_router（router.py 一行调用，其余逻辑全部隔离在本模块）。"""
+    from starlette.concurrency import run_in_threadpool  # noqa: F401（预留同步重活用）
+
+    @qa_router.post("/mode/confirm", summary="车型定制模式确认（扫码入口：校验车辆档案并注册会话模式）")
+    async def mode_confirm(req: ModeConfirmRequest):
+        return await register_mode(req)
