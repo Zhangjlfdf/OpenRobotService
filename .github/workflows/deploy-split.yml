@@ -359,6 +359,7 @@ jobs:
     if: ${{ !cancelled() && needs.plan.result == 'success' && needs.build.result == 'success' && needs.plan.outputs.action == 'deploy' }}
     runs-on: [self-hosted, ors-verify]
     timeout-minutes: 30
+    environment: ${{ needs.plan.outputs.environment }}
     steps:
       # 自托管 runner 的 workspace 不会在两次运行之间清空，download-artifact
       # 也只覆盖同名文件。残留的上一次 tar 会被 --from-artifacts 一起展开，
@@ -555,6 +556,7 @@ jobs:
     if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.action == 'rollback' }}
     runs-on: [self-hosted, ors-verify]
     timeout-minutes: 20
+    environment: ${{ needs.plan.outputs.environment }}
     env:
       ENV_NAME: ${{ needs.plan.outputs.environment }}
       BACKUP_ID: ${{ needs.plan.outputs.backup_id }}
