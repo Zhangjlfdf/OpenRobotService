@@ -239,6 +239,10 @@ export default function TaskDetailPage() {
   const [resolutionPolling, setResolutionPolling] = useState(false);
   // AI 判定当前无解决方案（仅占位提示，不填入输入框）
   const [resolutionNoSolution, setResolutionNoSolution] = useState(false);
+
+  // 请求暂停弹窗
+  const [showPausePopup, setShowPausePopup] = useState(false);
+  const [pauseReason, setPauseReason] = useState('');
   // 标记是否已"确认完成"成功（成功后关闭弹窗不应清除草稿；取消/遮罩关闭才清除）
   const resolveConfirmedRef = useRef(false);
   // 轮询停止标志：取消/关闭时置 true，让异步轮询循环及时退出（state 无法中断 while 循环）
@@ -457,6 +461,13 @@ export default function TaskDetailPage() {
     // 拥有 backend:tasks:operate 权限的用户，对所有活跃状态工单均可见且可操作
     const canOperate = hasPermission('backend:tasks:operate');
 
+    // pending_requested：处理人已请求暂停，等待提单人确认——此时只有提单人侧（isReporter / isPrincipal）能操作
+    // 处理人和普通登录用户看不到按钮
+    if (status === 'pending_requested') {
+      if (!isReporter && !isPrincipal && !canOperate) return [];
+      // 管理员可以代替任何一方操作（运维兜底），但走和提单人侧一样的确认/驳回按钮
+    }
+
     const assigneeOnlyStatuses = ['new', 'in_progress', 'pending', 'paused'];
     if (assigneeOnlyStatuses.includes(status) && !isAssignee && !canOperate) return [];
 
@@ -469,10 +480,18 @@ export default function TaskDetailPage() {
     const actions: Record<string, { label: string; nextStatus: string; theme: string; actionType?: string; customStyle?: Record<string, string> }[]> = {
       // new 状态由处理人首次响应（协商节点时间/确认同意）自动转为 in_progress，不再提供「开始处理」按钮
       new: [],
-      in_progress: [
-        { label: '暂停任务', nextStatus: 'pending', theme: 'warning', customStyle: BTN_SECONDARY },
-        { label: '处理完成', nextStatus: 'resolved', theme: 'success', customStyle: BTN_PRIMARY },
-      ],
+      // 有步骤模板的工单 → "处理完成"由阶段性处理卡的「最末阶段结束」流程控制，顶部不再提供快捷入口
+      // 无步骤模板的工单 → 保留「处理完成」作为 fallback 解决途径
+      in_progress: detail?.curr_step_id
+        ? [
+            { label: '请求暂停', nextStatus: 'pending_requested', theme: 'warning', customStyle: BTN_SECONDARY },
+          ]
+        : [
+            { label: '请求暂停', nextStatus: 'pending_requested', theme: 'warning', customStyle: BTN_SECONDARY },
+            { label: '处理完成', nextStatus: 'resolved', theme: 'success', customStyle: BTN_PRIMARY },
+          ],
+      // 暂停请求中：确认/驳回按钮已移至「工单阶段性处理」卡内，顶部不再重复
+      pending_requested: [],
       pending: (isAssignee && isReporter)
         ? [
             // 工单退回发起人后：发起人可重新发起（继续处理）或关闭工单
@@ -490,15 +509,18 @@ export default function TaskDetailPage() {
     return actions[status] || [];
   };
 
-  const handleStatusChange = async (action: { nextStatus: string }) => {
+  const handleStatusChange = async (action: { nextStatus: string; pauseReason?: string; rejectReason?: string }) => {
     if (!detail) return;
     // 清空前次阻塞提示
     setBlockedError(null);
-    
+
     try {
+      const bodyObj: Record<string, string> = { status: action.nextStatus };
+      if (action.pauseReason) bodyObj.pause_reason = action.pauseReason;
+      if (action.rejectReason) bodyObj.reject_reason = action.rejectReason;
       await request<Ticket>(`/${detail.id}/status`, {
         method: 'PATCH',
-        body: JSON.stringify({ status: action.nextStatus }),
+        body: JSON.stringify(bodyObj),
       });
       refreshTasks();
       const statusLabel = STATUS_DISPLAY_MAP[action.nextStatus] || action.nextStatus;
@@ -513,6 +535,11 @@ export default function TaskDetailPage() {
           Toast({ message: `被 ${body.blocked.length} 个工单阻塞`, theme: 'error' });
           return;
         }
+      }
+      // 请求暂停理由必填（400）
+      if (err instanceof ApiError && err.statusCode === 400 && action.nextStatus === 'pending_requested') {
+        Toast({ message: err.message || '请填写暂停理由', theme: 'error' });
+        return;
       }
       Toast({ message: `状态更新失败: ${err instanceof Error ? err.message : ''}`, theme: 'error' });
     }
@@ -1355,6 +1382,10 @@ export default function TaskDetailPage() {
                       } else if (action.nextStatus === 'resolved') {
                         // 结束工单（→ resolved）→ 打开 "问题 + AI 解决方式" 确认弹窗
                         resolve.handleResolveClick();
+                      } else if (action.nextStatus === 'pending_requested') {
+                        // 请求暂停 → 先弹理由输入弹窗
+                        setPauseReason('');
+                        setShowPausePopup(true);
                       } else {
                         handleStatusChange(action);
                       }
@@ -1517,6 +1548,7 @@ export default function TaskDetailPage() {
             setReassignReason('');
             setShowReassignPopup(true);
           }}
+          onPauseResponse={(nextStatus, rejectReason) => handleStatusChange({ nextStatus, rejectReason })}
         />
 
         {/* 公司/部门审核入口：仅管理员可见，工单 metadata_info 含 approval_type 时展示 */}
@@ -1913,6 +1945,41 @@ export default function TaskDetailPage() {
           <div className="ticket-edit__btns">
             <Button theme="default" onClick={() => { setShowResumePopup(false); setResumeUser(null); }}>取消</Button>
             <Button theme="primary" onClick={handleResume}>确认继续</Button>
+          </div>
+        </div>
+      </Popup>
+
+      {/* 请求暂停弹窗：输入理由（提单人将看到） */}
+      <Popup visible={showPausePopup} onClose={() => { setShowPausePopup(false); setPauseReason(''); }} placement="bottom" showOverlay destroyOnClose>
+        <div className="ticket-edit">
+          <h4 className="ticket-edit__title">请求暂停工单</h4>
+          <p style={{ color: 'var(--muted-foreground)', fontSize: '13px', marginBottom: '12px', lineHeight: 1.6 }}>
+            暂停理由将展示给提单人，对方据此决定是否同意暂停。
+          </p>
+          <Form initialData={{}}>
+            <FormItem label="暂停理由" name="pauseReason" labelAlign="top" requiredMark>
+              <Textarea
+                value={pauseReason}
+                onChange={(v) => setPauseReason(String(v))}
+                placeholder="请说明为什么需要暂停工单（例如：需要外部协作 / 等待安全确认 / 资源调配中）"
+                autosize={{ minRows: 3, maxRows: 6 }}
+                maxlength={500}
+              />
+            </FormItem>
+          </Form>
+          <div className="ticket-edit__btns">
+            <Button theme="default" onClick={() => { setShowPausePopup(false); setPauseReason(''); }}>取消</Button>
+            <Button
+              theme="primary"
+              disabled={!pauseReason.trim()}
+              onClick={async () => {
+                await handleStatusChange({ nextStatus: 'pending_requested', pauseReason: pauseReason.trim() });
+                setShowPausePopup(false);
+                setPauseReason('');
+              }}
+            >
+              提交暂停请求
+            </Button>
           </div>
         </div>
       </Popup>

@@ -73,8 +73,8 @@ type AvatarMap = Map<string, number>;
 
 const pageSize = 20;
 
-// 默认选中的任务状态：待处理 / 进行中 / 已挂起 / 已解决（排除 已取消 / 已关闭）
-const DEFAULT_STATUS_VALUES: string[] = ['new', 'in_progress', 'pending', 'resolved'];
+// 默认选中的任务状态：待处理 / 进行中 / 暂停请求中 / 已挂起 / 已解决（排除 已取消 / 已关闭）
+const DEFAULT_STATUS_VALUES: string[] = ['new', 'in_progress', 'pending_requested', 'pending', 'resolved'];
 const ALL_STATUS_VALUES: string[] = Object.keys(STATUS_DISPLAY_MAP);
 // 优先级默认全选（low / medium / high / urgent）
 const ALL_PRIORITY_VALUES: string[] = Object.keys(PRIORITY_DISPLAY_MAP);

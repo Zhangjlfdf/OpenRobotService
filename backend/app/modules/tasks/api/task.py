@@ -76,6 +76,7 @@ logger_task = logging.getLogger(__name__)
 STATUS_LABEL = {
     "new": "待处理",
     "in_progress": "处理中",
+    "pending_requested": "暂停请求中",
     "pending": "已挂起",
     "resolved": "已解决",
     "canceled": "已取消",
@@ -1523,7 +1524,7 @@ async def update_task(
         if ticket_update.status:
             if ticket.status == TicketStatus.NEW and not roles.is_creator:
                 raise HTTPException(status_code=400, detail="只允许创建者开始任务！")
-            if ticket.status in [TicketStatus.PENDING, TicketStatus.IN_PROGRESS] and not roles.is_assignee:
+            if ticket.status in [TicketStatus.PENDING, TicketStatus.IN_PROGRESS, TicketStatus.PENDING_REQUESTED] and not roles.is_assignee:
                 raise HTTPException(status_code=400, detail="只允许处理人更新任务！")
             # 关单（resolved →）：决策 6 —— 由 created_by（代理人）+ 已确认被代理人 + 管理员判定，
             # customer 收敛为纯展示「联系人」，不再参与权限（修掉「新单 customer 为空导致非 admin 关不掉单」）
@@ -1844,8 +1845,8 @@ def _maybe_notify_mentions(
             try:
                 # 取工单真实状态的中文名
                 status_text_map = {
-                    "new": "待处理", "in_progress": "处理中", "pending": "已挂起",
-                    "resolved": "已解决", "closed": "已关闭", "canceled": "已取消",
+                    "new": "待处理", "in_progress": "处理中", "pending_requested": "暂停请求中",
+                    "pending": "已挂起", "resolved": "已解决", "closed": "已关闭", "canceled": "已取消",
                 }
                 raw_status = (ticket.status.value if hasattr(ticket.status, 'value')
                               else str(ticket.status or "")).lower()
@@ -2088,14 +2089,37 @@ async def update_task_status(
         if status_enum == TicketStatus.CANCELED and not is_admin and not user_matches(current_user, ticket.created_by):
             raise HTTPException(status_code=403, detail="仅提单人或管理员可撤回工单")
 
+        # ── 请求暂停（→ pending_requested）权限收窄：仅**处理人**可发起，提单人/管理员不能替处理人请求暂停 ──
+        if status_enum == TicketStatus.PENDING_REQUESTED:
+            if ticket.status != TicketStatus.IN_PROGRESS:
+                raise HTTPException(status_code=400, detail="仅处理中的工单可发起暂停请求")
+            if not _roles.is_assignee and not is_admin:
+                # 管理员可临时代处理人发起（运维兜底）
+                raise HTTPException(status_code=403, detail="仅处理人可请求暂停工单")
+
+        # ── 暂停请求后续操作权限收窄：必须由**提单人侧**（creator / principal / admin）来决定 ──
+        # pending_requested → pending  = 提单人确认暂停
+        # pending_requested → in_progress = 提单人驳回（继续处理）
+        if ticket.status == TicketStatus.PENDING_REQUESTED:
+            if not (_roles.is_creator or _roles.is_principal or is_admin):
+                raise HTTPException(status_code=403, detail="仅提单人/被代理人/管理员可处理暂停请求")
+            if status_enum not in (TicketStatus.PENDING, TicketStatus.IN_PROGRESS):
+                raise HTTPException(status_code=400, detail="暂停请求中仅可「确认暂停」或「驳回」")
+
         # ── 结束工单（→ resolved）需携带解决方式：接单人确认后提交的最终文本 ──
         resolution_summary = None
+        pause_reason = None
+        reject_reason = None
         try:
             if request:
                 body = await request.json()
                 resolution_summary = (body or {}).get("resolution_summary")
+                pause_reason = (body or {}).get("pause_reason")
+                reject_reason = (body or {}).get("reject_reason")
         except Exception:
             resolution_summary = None
+            pause_reason = None
+            reject_reason = None
 
         if status_enum == TicketStatus.RESOLVED:
             # 必填校验：去空白后非空（占位提示由前端 placeholder 控制，不入值）
@@ -2103,6 +2127,20 @@ async def update_task_status(
             if not rs:
                 raise HTTPException(status_code=400, detail="结束工单必须填写解决方式")
             resolution_summary = rs
+
+        if status_enum == TicketStatus.PENDING_REQUESTED:
+            # 请求暂停必填理由
+            pr = (pause_reason or "").strip()
+            if not pr:
+                raise HTTPException(status_code=400, detail="请求暂停必须填写理由")
+            pause_reason = pr
+
+        # 驳回暂停（pending_requested → in_progress）必填驳回理由
+        if ticket.status == TicketStatus.PENDING_REQUESTED and status_enum == TicketStatus.IN_PROGRESS:
+            rr = (reject_reason or "").strip()
+            if not rr:
+                raise HTTPException(status_code=400, detail="驳回暂停必须填写理由")
+            reject_reason = rr
 
         # ── 预加载工单关联策略（阻塞检查 + 重复同步共用一次读取） ──
         try:
@@ -2123,7 +2161,15 @@ async def update_task_status(
             )
 
         old_status = ticket.status.value if hasattr(ticket.status, 'value') else str(ticket.status)
-        updated_ticket = await TicketService.update_ticket_status(db, task_id, status_enum, token=token, operator_id=username, resolution_summary=resolution_summary)
+
+        # ── 回合累加：仅「驳回暂停」时 bump +1 ──
+        # 语义：驳回 = 双方没达成共识 → 算一次额外交涉
+        # 确认暂停（→ pending）= 达成共识，不加；请求暂停本身只是提案，等驳回再算
+        # 注意：连续多次驳回都要 +1，不检查操作方是否切换（可能始终是同一方在重复驳回）
+        if old_status.upper() == 'PENDING_REQUESTED' and status_enum == TicketStatus.IN_PROGRESS:
+            ticket.step_negotiation_round = (getattr(ticket, 'step_negotiation_round', 0) or 0) + 1
+
+        updated_ticket = await TicketService.update_ticket_status(db, task_id, status_enum, token=token, operator_id=username, resolution_summary=resolution_summary, pause_reason=pause_reason, reject_reason=reject_reason)
         # ── WS 实时广播：工单状态变更 ──
         try:
             await ws_broadcast_task_updated(task_id, updated_ticket)
@@ -2133,6 +2179,26 @@ async def update_task_status(
         # ── 记录状态变更操作日志 ──
         user_name = current_user.get('name', username) if isinstance(current_user, dict) else getattr(current_user, "name", None) or username
         _role = get_role_prefix(getattr(ticket, 'created_by', None), getattr(ticket, 'assigned_to', None), username)
+
+        # 暂停请求三态转换的定制描述（语义比通用的"状态变更为"更明确）
+        old_status_upper = old_status.upper()
+        pending_special_desc = None
+        if old_status_upper == 'IN_PROGRESS' and status_enum == TicketStatus.PENDING_REQUESTED:
+            reason_suffix = f"\n理由：{pause_reason}" if pause_reason else ""
+            pending_special_desc = f"请求暂停工单，状态变更为「暂停请求中」{reason_suffix}"
+        elif old_status_upper == 'PENDING_REQUESTED' and status_enum == TicketStatus.PENDING:
+            pending_special_desc = f"确认暂停工单请求，工单状态变更为「已挂起」"
+        elif old_status_upper == 'PENDING_REQUESTED' and status_enum == TicketStatus.IN_PROGRESS:
+            reason_suffix = f"\n驳回理由：{reject_reason}" if reject_reason else ""
+            pending_special_desc = f"驳回了暂停工单请求，工单状态变更为「处理中」{reason_suffix}"
+
+        if pending_special_desc:
+            op_log_desc = f"{_role}{user_name} {pending_special_desc}" if _role else f"{user_name} {pending_special_desc}"
+            sys_comment_text = f"{user_name} {pending_special_desc}"
+        else:
+            op_log_desc = f"{_role}{user_name} 将工单状态变更为「{STATUS_LABEL.get(status, status)}」" if _role else f"{user_name} 将工单状态变更为「{STATUS_LABEL.get(status, status)}」"
+            sys_comment_text = f"{user_name} 将工单状态变更为「{STATUS_LABEL.get(status, status)}」"
+
         await OperationLogService.log(
             db=db,
             task_id=task_id,
@@ -2141,13 +2207,13 @@ async def update_task_status(
             operator_name=user_name,
             to_status=status,
             detail={"from": old_status, "to": status},
-            description=f"{_role}{user_name} 将工单状态变更为「{STATUS_LABEL.get(status, status)}」" if _role else f"{user_name} 将工单状态变更为「{STATUS_LABEL.get(status, status)}」",
+            description=op_log_desc,
         )
 
         # ── 向讨论区添加系统评论 ──
         await _add_system_comment(
             db, task_id,
-            f"{user_name} 将工单状态变更为「{STATUS_LABEL.get(status, status)}」",
+            sys_comment_text,
             username, token,
         )
 
