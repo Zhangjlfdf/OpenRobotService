@@ -1030,25 +1030,54 @@ async def handle_subscribe_event(message: dict):
 
 
 def _send_scan_redirect_card(openid: str, scene_str: str):
-    """扫码后推送图文卡片，引导用户跳 /app/call 页面。
+    """扫码后推送图文卡片，引导用户跳转。
 
-    subscribe 事件未关注先关注 和 SCAN 事件已关注扫码 都会触发。
-    客服消息要求 48 小时内有交互，扫码本身满足条件。
+    支持每个二维码独立配置 redirect_url / name / description / picurl：
+    - wechat_qrcodes 表有记录且字段非空 → 用配置值
+    - 没记录或字段为空 → 用默认 /app/call 拼接 scene+openid
     """
     try:
         from urllib.parse import urlencode
-        call_path = f"{settings.FRONTEND_BASE_URL}/app/call"
-        params = urlencode({'scene': scene_str, 'openid': openid})
-        redirect_url = f"{call_path}?{params}"
+
+        # ── 1. 查数据库：这个 scene_str 有没有配置过 ──
+        qr_cfg = None
+        try:
+            from app.core.database import db_manager
+            from app.models.wechat_qrcode import WechatQrcode as _W
+            db = db_manager.get_db()
+            qr_cfg = db.query(_W).filter(_W.scene_str == scene_str).first()
+            db.close()
+        except Exception:
+            qr_cfg = None  # 没建表 / 没迁移过，静默回退默认
+
+        # ── 2. 拼跳转 URL ──
+        base_url = None
+        if qr_cfg and qr_cfg.redirect_url:
+            # 二维码配置了 redirect_url 就用它（可带 query，也可不带）
+            base_url = qr_cfg.redirect_url
+
+        if base_url:
+            # 如果配置的 URL 没有 ? 就附加 scene + openid 参数
+            sep = '&' if '?' in base_url else '?'
+            redirect_url = f"{base_url}{sep}{urlencode({'scene': scene_str, 'openid': openid})}"
+        else:
+            call_path = f"{settings.FRONTEND_BASE_URL}/app/call"
+            redirect_url = f"{call_path}?{urlencode({'scene': scene_str, 'openid': openid})}"
+
+        # ── 3. 卡片标题/描述/图片 ──
+        title = qr_cfg.name if qr_cfg and qr_cfg.name else "点击继续"
+        description = (qr_cfg.description if qr_cfg and qr_cfg.description
+                       else "你扫了一个带参数的二维码，点击前往对应页面")
+        picurl = qr_cfg.qrcode_image_url if qr_cfg and qr_cfg.qrcode_image_url else ''
 
         logger.info(f'推送扫码跳转卡片: openid={openid}, scene={scene_str}, url={redirect_url}')
 
         wechat_service.send_news_message_to_user(
             open_id=openid,
-            title="点击继续",
-            description="你扫了一个带参数的二维码，点击前往对应页面",
+            title=title,
+            description=description,
             url=redirect_url,
-            picurl='',
+            picurl=picurl,
         )
     except Exception as e:
         logger.error(f"推送扫码跳转卡片失败: openid={openid}, scene={scene_str}, error={e}")

@@ -121,6 +121,7 @@ const Dashboard = lazyImport(() => import('@/pages/admin/Dashboard'));
 const AdminEntries = lazyImport(() => import('@/pages/admin/AdminEntries'));
 const DispatchDev = lazyImport(() => import('@/pages/admin/DispatchDev'));
 const TaskPolicyPage = lazyImport(() => import('@/pages/admin/TaskPolicyPage'));
+const QrcodeManage = lazyImport(() => import('@/pages/admin/QrcodeManage'));
 const AdminLayout = lazyImport(() => import('@/shared/components/AdminLayout'));
 
 // 仪表盘下钻明细
@@ -233,6 +234,7 @@ const router = createBrowserRouter([
                   { path: 'operation-logs', element: <OperationLogs /> },
                   { path: 'dispatch-dev', element: <DispatchDev /> },
                   { path: 'task-policy', element: <TaskPolicyPage /> },
+                  { path: 'qrcode-manage', element: <QrcodeManage /> },
                   // { path: 'progress', element: <ProgressBoard /> },       // 已并入 ProjectProgress
                   // { path: 'personnel', element: <PersonnelBoard /> },     // 已从导航移除
                   { path: 'project-edit/:id?', element: <ProjectEdit /> },

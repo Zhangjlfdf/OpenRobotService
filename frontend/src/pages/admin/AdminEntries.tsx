@@ -83,6 +83,7 @@ const adminEntries: Entry[] = [
   { path: '/admin/assign-role', label: '分配角色', desc: '为用户在项目中分配角色', icon: <MacUserCog />, tone: 'blue-2' },
   { path: '/admin/user-setup', label: '设置用户', desc: '迁移用户数据、合并账号', icon: <MacShuffle />, tone: 'blue-3' },
   { path: '/admin/task-policy', label: '工单关联规则', desc: '阻塞开关、重复工单状态同步', icon: <MacKeyRound />, tone: 'blue-3' },
+  { path: '/admin/qrcode-manage', label: '二维码管理', desc: '带参数二维码批量创建、发布、状态流转', icon: <MacScrollText />, tone: 'blue-3' },
   { path: '/admin/operation-logs', label: '操作记录', desc: '操作日志审计与追溯', icon: <MacScrollText />, tone: 'blue-4' },
   { path: '/admin/dispatch-dev', label: '开发者模式', desc: '派单调试、界面图鉴标注', icon: <MacClipboardList />, tone: 'blue-4' },
 ];
