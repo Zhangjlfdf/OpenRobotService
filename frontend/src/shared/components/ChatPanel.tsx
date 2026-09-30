@@ -9,9 +9,9 @@ import { ArrowUp, Plus, MessageSquarePlus, TicketPlus, Paperclip, ThumbsUp, Thum
 import { DatePicker } from 'antd';
 import dayjs from 'dayjs';
 import { useAuthStore } from '@/stores/auth';
-import { useWorkbenchStore } from '@/stores/workbench';
+import { useWorkbenchStore, type VehicleContext } from '@/stores/workbench';
 import API_CONFIG from '@/config/api';
-import { qaUploadStream, generateSessionId, trackSession, fetchWithAuth, qaPrepareTicket, qaConfirmTicket, qaClearDraft, qaGetTicketSteps, type TicketDraft, type TicketStep } from '@/api/ai';
+import { qaUploadStream, generateSessionId, trackSession, fetchWithAuth, qaPrepareTicket, qaConfirmTicket, qaClearDraft, qaGetTicketSteps, qaModeConfirm, type TicketDraft, type TicketStep } from '@/api/ai';
 import ProjectSelect from '@/shared/components/ProjectSelect';
 import UserSelect from '@/shared/components/UserSelect';
 import OnBehalfSelect from '@/shared/components/OnBehalfSelect';
@@ -741,7 +741,7 @@ const convMessagesCache: Record<number, Message[]> = {};
 export default function ChatPanel({ scene, compact = false }: { scene: ChatScene; compact?: boolean }) {
 
   const { token, name, username } = useAuthStore();
-  const { chatContext, consumeChatContext, refreshTasks, tasksRefreshKey, conversationId, setConversationId, setConversationTitle, renameConversation, refreshConversations, requestNewConversation } = useWorkbenchStore();
+  const { chatContext, consumeChatContext, vehicleContext, consumeVehicleContext, refreshTasks, tasksRefreshKey, conversationId, setConversationId, setConversationTitle, renameConversation, refreshConversations, requestNewConversation } = useWorkbenchStore();
   const isCall = scene === 'call';
   const cfg = SCENE_CONFIG[scene];
   const navigate = useNavigate();
@@ -1490,6 +1490,58 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chatContext]);
 
+  // 车体扫码进入：待注册「车型定制模式」的车辆身份（确认后记账，首次发送前注册掉即清空）
+  const pendingVehicleModeRef = useRef<VehicleContext | null>(null);
+
+  // call 场景：扫码确认车辆信息后注入一条引导说明消息，并把车辆身份记下来待发送前注册。
+  // 本 effect 必须声明在 [conversationId] 那个清空对话的 effect 之后：
+  // 确认时 requestNewConversation() 与 setVehicleContext() 会被批到同一次 render，
+  // effect 按声明顺序执行——先清空对话、再追加本条引导消息，消息才不会被清空动作冲掉。
+  useEffect(() => {
+    if (!isCall) return;
+    const ctx = consumeVehicleContext();
+    if (ctx) {
+      pendingVehicleModeRef.current = ctx;
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: uid(),
+          role: 'assistant',
+          content: `已确认车辆信息：项目 ${ctx.projectName || '—'}、客户 ${ctx.customerName || '—'}、车型 ${ctx.vehicleModel || '—'}。\n接下来按该车型的引导流程协助你，直接描述现象或点下面的选项即可。`,
+          timestamp: new Date().toISOString(),
+        },
+      ]);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [vehicleContext]);
+
+  /**
+   * 发送前把会话注册为「车型定制模式」（车体扫码进入链路的后半段）。
+   *
+   * 为什么放在发送前而不是确认时：`/mode/confirm` 按 session_id 注册模式，而确认那一刻新会话的
+   * sessionId 还是空串（要等会话恢复或首次发送才确定），提前调会注册到一个随后被丢弃的孤儿
+   * session 上。挂在这里（发送路径上唯一确定 sid 的点）可结构性保证「先注册、再提问」。
+   * 注册失败（车型未建档 / 网络异常）只提示，不阻断用户提问。
+   */
+  const registerPendingVehicleMode = useCallback(async (sid: string): Promise<void> => {
+    const ctx = pendingVehicleModeRef.current;
+    if (!ctx) return;
+    pendingVehicleModeRef.current = null;
+    try {
+      const res = await qaModeConfirm({
+        session_id: sid,
+        model: ctx.vehicleModel,
+        project_name: ctx.projectName,
+        customer_name: ctx.customerName,
+      });
+      if (res?.code !== 0) {
+        Toast({ message: res?.message || '车型未建档，请确认扫码信息', theme: 'warning' });
+      }
+    } catch {
+      Toast({ message: '车型引导模式注册失败，已按常规问答继续', theme: 'warning' });
+    }
+  }, []);
+
   /** 确保 sessionId——新 AI 模块无需预先创建会话 */
   const ensureSessionId = useCallback((): string => {
     if (!sessionId) {
@@ -1586,6 +1638,8 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
 
     try {
       const sid = ensureSessionId();
+      // 扫码进入的车型定制模式：必须先注册再提问，且用同一个 sid
+      await registerPendingVehicleMode(sid);
 
       await qaUploadStream(sid, files, content, {
         onFileSaved: async (d) => {
@@ -1836,6 +1890,8 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
     };
     try {
       const sid = ensureSessionId();
+      // 扫码进入的车型定制模式：必须先注册再提问，且用同一个 sid
+      await registerPendingVehicleMode(sid);
       const wasNew = !convRef.current; // 新会话：首轮问答完成后才同步到列表
       // 持久化用户消息（首条会顺带建会话）。
       // 必须 await 落库完成后再启动流式（happens-before）：user 行先提交拿到更小的 sequence，
