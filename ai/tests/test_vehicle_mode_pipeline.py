@@ -84,13 +84,18 @@ async def test_domains_none_for_normal_session():
     assert await p._vehicle_mode_domains("s-vm") is None
 
 
-async def test_domains_xqe_priority_for_custom_session():
+async def test_domains_vehicle_filtered_company():
     p = AiDiagnosisPlatform()
     p._memory_manager = MagicMockMem(_memory(_VM))
     domains = await p._vehicle_mode_domains("s-vm")
-    assert domains[0] == ("xqe", 8)  # 车型域最高配额
-    names = [d for d, _ in domains]
-    assert names == ["xqe", "team", "company", "industry"]  # 通用域兜底保留
+    # 0930 定稿：company 域 + sub_domain 精确过滤（车型知识挂 company/{车型}/，
+    # 不建独立域）——两重隔离：不捞通用域老知识，也不捞 company 其他产品线内容
+    assert len(domains) == 1
+    assert domains[0][0] == "company" and domains[0][1] == 8
+    qfilter = domains[0][2]
+    assert qfilter is not None
+    cond = qfilter.must[0]
+    assert cond.key == "sub_domain" and cond.match.value == "XQE/manual"
 
 
 async def test_domains_none_on_memory_error():
@@ -124,12 +129,12 @@ class MagicMockMem:
 # ================================================================
 
 def _platform_with_retriever(capture):
-    """capture: list，记录 retrieve_domain_dual 的 (query, domain) 调用。"""
+    """capture: list，记录 retrieve_domain_dual 的 (query, domain, filter) 调用。"""
     p = AiDiagnosisPlatform()
     retr = type("R", (), {})()
 
-    async def retrieve_domain_dual(query, domain, top_k=8):
-        capture.append((query, domain))
+    async def retrieve_domain_dual(query, domain, top_k=8, query_filter=None):
+        capture.append((query, domain, query_filter))
         return [], []
 
     retr.retrieve_domain_dual = retrieve_domain_dual
@@ -142,15 +147,18 @@ async def test_three_way_default_domains_unchanged():
     capture = []
     p = _platform_with_retriever(capture)
     await p._three_way_retrieve("测试查询")
-    assert [d for _, d in capture] == ["team", "company", "industry"]
+    assert [(d, f) for _, d, f in capture] == [
+        ("team", None), ("company", None), ("industry", None)]
 
 
 async def test_three_way_custom_domains():
-    """定制模式传入域配额 → 按传入的域检索（含车型域）。"""
+    """定制模式传入域配额 → 按传入的域检索（二元不带 filter / 三元带 filter）。"""
     capture = []
     p = _platform_with_retriever(capture)
-    await p._three_way_retrieve("货叉不动", domains=[("xqe", 8), ("team", 2)])
-    assert [d for _, d in capture] == ["xqe", "team"]
+    _f = object()
+    await p._three_way_retrieve(
+        "货叉不动", domains=[("company", 8, _f), ("team", 2)])
+    assert [(d, f) for _, d, f in capture] == [("company", _f), ("team", None)]
 
 
 async def test_three_way_custom_domain_exception_tolerated():
@@ -158,14 +166,14 @@ async def test_three_way_custom_domain_exception_tolerated():
     p = AiDiagnosisPlatform()
     retr = type("R", (), {})()
 
-    async def dual(query, domain, top_k=8):
-        if domain == "xqe":
-            raise TimeoutError("xqe timeout")
+    async def dual(query, domain, top_k=8, query_filter=None):
+        if domain == "company":
+            raise TimeoutError("company timeout")
         return [], []
 
     retr.retrieve_domain_dual = dual
     p._retriever = retr
-    results = await p._three_way_retrieve("q", domains=[("xqe", 8), ("team", 2)])
+    results = await p._three_way_retrieve("q", domains=[("company", 8), ("team", 2)])
     assert results == []
 
 
