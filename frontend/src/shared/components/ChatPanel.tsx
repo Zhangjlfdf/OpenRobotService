@@ -17,7 +17,8 @@ import UserSelect from '@/shared/components/UserSelect';
 import OnBehalfSelect from '@/shared/components/OnBehalfSelect';
 import type { OnBehalfCandidate } from '@/api/ticket';
 import RedispatchCandidateList from '@/shared/components/RedispatchCandidateList';
-import SpecDocField, { type SpecDocDraft } from '@/shared/components/SpecDocField';
+import type { SpecDocDraft } from '@/shared/components/SpecDocField';
+import TicketShareDocSetting from '@/shared/components/TicketShareDocSetting';
 import { createTicket, reDispatchTicket, uploadCommentAttachment, fetchRedispatch, type RedispatchCandidate } from '@/api/ticket';
 
 /** 远程方式选项（摇人→转工单确认弹窗 与 系统任务新建弹窗 共用）：
@@ -3477,9 +3478,16 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
                   placeholder="问题描述"
                   rows={3}
                 />
-                {/* 问题文档（选填）：上传 .md/.doc/.docx 或在线编写，接单人可在此基础上补充 */}
-                <label className="ticket-confirm__label">完整问题文档（选填）</label>
-                <SpecDocField value={specDoc} onChange={setSpecDoc} disabled={ticketConfirm.submitting} />
+                {/* 问题共享文档设置：先选项目 → 勾选要带入的项目背景信息标签（缺信息出感叹号），
+                    缺信息时可选「补充信息 / 提单给他人补充 / 暂时跳过」；
+                    文档正文的系统段随勾选自动重算，分隔线以下的补充内容不被覆盖。 */}
+                <TicketShareDocSetting
+                  projectId={draftField('project_id')}
+                  projectName={draftField('project')}
+                  value={specDoc}
+                  onChange={setSpecDoc}
+                  disabled={ticketConfirm.submitting}
+                />
                 <label className="ticket-confirm__label">优先级</label>
                 <select
                   className="ticket-confirm__select"
