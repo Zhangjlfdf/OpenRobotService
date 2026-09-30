@@ -4,9 +4,10 @@
 //   查不到行 → 按新录入处理；没带 scene → 管理端手动新建。
 //   该行已 published（录入+确认完成）→ 不停留本页，跳「我要摇人」(/call)，
 //   scene/openid 原样带走；管理端不带 scene 的「编辑信息」链接不受影响。
-//   项目名称（表单第一位）：候选来自 project 表（下拉模糊匹配），选中带出项目编号
-//   且编号锁定只读；手改名称=新项目 → 编号解锁、手动填写，保存时由后端补进 project
-//   表（提示「保存时将自动新建项目」）。
+//   项目名称（表单第一位）：候选来自 project 表（include_pending=true，台账「待定」
+//   项目也能选；下拉模糊匹配），选中带出项目编号且编号锁定只读；直接敲出与表里完全
+//   同名的项目 → 等同选中（编号自动同步、无需点候选）；其余手改名称=新项目 → 编号
+//   解锁、手动填写，保存时由后端补进 project 表（提示「保存时将自动新建项目」）。
 //
 // 测试策略（对齐仓库既有页面测试约定，见 CallView.vehicleScan.test.tsx）：
 //   - api 层打桩：不触网
@@ -236,7 +237,7 @@ describe('InfoEntry 扫码带入项目id', () => {
 
     const nameInput = screen.getByPlaceholderText(NAME_PLACEHOLDER);
     fireEvent.focusIn(nameInput);
-    fireEvent.change(nameInput, { target: { value: '项目十' } });
+    fireEvent.change(nameInput, { target: { value: '项目' } });
 
     // 模糊匹配按子串过滤：两条都命中；点第一条 → 项目名称+项目编号一起带出
     await screen.findByText('项目十');
@@ -248,9 +249,87 @@ describe('InfoEntry 扫码带入项目id', () => {
     // 选中已有项目不提示「自动新建」
     expect(screen.queryByText('不在项目表中，保存时将自动新建项目')).not.toBeInTheDocument();
 
-    // 手动改名 = 新项目：编号解锁，交回手动填写
+    // 手动改名 = 新项目：编号解锁，并把这个从表里同步来的编号清掉
+    //（新项目沿用别的项目的编号，后端会以「已被占用」拦下）
     fireEvent.change(nameInput, { target: { value: '项目十改' } });
-    expect(screen.getByDisplayValue('CODE-10')).not.toBeDisabled();
+    const codeAfterRename = screen.getByPlaceholderText(CODE_PLACEHOLDER);
+    expect(codeAfterRename).not.toBeDisabled();
+    expect(valueOf(codeAfterRename)).toBe('');
+  });
+
+  it('编号是自己手填的（不属于 project 表里任何项目）：改项目名称不动它', async () => {
+    mockGetProjects.mockResolvedValue([{ id: 'CODE-10', project_code: 'CODE-10', name: '项目十' }]);
+    renderInfoEntry('/admin/info-entry');
+
+    const nameInput = screen.getByPlaceholderText(NAME_PLACEHOLDER);
+    fireEvent.focusIn(nameInput);
+    fireEvent.change(nameInput, { target: { value: '项目' } });
+    await screen.findByText('项目十'); // 等候选列表到位，再判断编号算不算表里的
+
+    fireEvent.change(nameInput, { target: { value: '全新项目' } });
+    fireEvent.change(screen.getByPlaceholderText(CODE_PLACEHOLDER), { target: { value: 'MY-1' } });
+    // 再改名：MY-1 不是 project 表里的编号，要原样留着
+    fireEvent.change(nameInput, { target: { value: '全新项目二' } });
+    expect(valueOf(screen.getByPlaceholderText(CODE_PLACEHOLDER))).toBe('MY-1');
+  });
+
+  it('输入的项目名称与 project 表里某个项目同名：编号自动同步带出并锁定（无需点候选）', async () => {
+    mockGetProjects.mockResolvedValue([
+      { id: '105', project_code: '105', name: '俄罗斯莫斯科IS单XCD试用项目' },
+      { id: '113', project_code: '113', name: '江苏靖江2026年双十一展销会项目' },
+    ]);
+    renderInfoEntry('/admin/info-entry');
+    // 候选一次拉全量，且带上「待定」项目（include_pending=true）
+    expect(mockGetProjects).toHaveBeenCalledWith('', 0, 1000, true);
+
+    const nameInput = screen.getByPlaceholderText(NAME_PLACEHOLDER);
+    fireEvent.focusIn(nameInput);
+    // 一个字一个字敲到全名（中途是子串匹配、最后完全同名）
+    fireEvent.change(nameInput, { target: { value: '俄罗斯莫斯科' } });
+    // 候选列表到位（子串命中先出下拉），此时还没同名，编号仍是空的
+    await screen.findByText('俄罗斯莫斯科IS单XCD试用项目');
+    expect(screen.getByPlaceholderText(CODE_PLACEHOLDER)).toHaveValue('');
+    fireEvent.change(nameInput, { target: { value: '俄罗斯莫斯科IS单XCD试用项目' } });
+
+    // 全名命中 → 编号从 project 表同步进来且锁住；此时不再列候选（编号已经带出来了）
+    const codeInput = screen.getByDisplayValue('105');
+    expect(codeInput).toBeDisabled();
+    expect(screen.queryByText('俄罗斯莫斯科IS单XCD试用项目')).not.toBeInTheDocument();
+
+    // 点保存：提交的是同步过来的编号
+    fireEvent.click(screen.getByText('保存'));
+    await waitFor(() => expect(mockCreateProjectInfo).toHaveBeenCalled());
+    expect(mockCreateProjectInfo.mock.calls[0][0]).toMatchObject({
+      project_code: '105', project_name: '俄罗斯莫斯科IS单XCD试用项目',
+    });
+  });
+
+  it('项目名称已匹配到表里的项目：点项目编号框时，把表里的编号取过来（以表为准）', async () => {
+    mockGetProjects.mockResolvedValue([{ id: '105', project_code: '105', name: '俄罗斯莫斯科IS单XCD试用项目' }]);
+    // 编辑一条旧录入行：名字就是表里的项目，但行上存的编号对不上（旧数据）
+    mockFetchQrcode.mockResolvedValue({ ...infoRow, project_name: '俄罗斯莫斯科IS单XCD试用项目', project_code: 'OLD-105' });
+    renderInfoEntry('/admin/info-entry/9');
+
+    const codeInput = await screen.findByDisplayValue('OLD-105');
+    // 行上的编号非空：页面加载不覆盖它，等用户自己来点
+    expect(valueOf(codeInput)).toBe('OLD-105');
+
+    fireEvent.focusIn(codeInput);
+    await waitFor(() => expect(valueOf(codeInput)).toBe('105'));
+  });
+
+  it('列表比手速慢：名字先打完、候选后到，编号为空则补上表里的编号（不用再点）', async () => {
+    mockGetProjects.mockResolvedValue([{ id: '105', project_code: '105', name: '俄罗斯莫斯科IS单XCD试用项目' }]);
+    renderInfoEntry('/admin/info-entry');
+
+    const nameInput = screen.getByPlaceholderText(NAME_PLACEHOLDER);
+    const codeInput = screen.getByPlaceholderText(CODE_PLACEHOLDER);
+    // 候选还没到就先打完整个名字：这次输入查不到项目，编号不会当场同步
+    fireEvent.change(nameInput, { target: { value: '俄罗斯莫斯科IS单XCD试用项目' } });
+    expect(valueOf(codeInput)).toBe('');
+
+    // 候选列表到了 → 名称与表里同名，编号补上
+    await waitFor(() => expect(valueOf(codeInput)).toBe('105'));
   });
 
   it('项目名称不在 project 表：提示保存时自动新建；编号可手填并照常提交', async () => {

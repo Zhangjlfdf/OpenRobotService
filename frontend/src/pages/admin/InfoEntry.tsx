@@ -26,12 +26,14 @@
 //   entering 时期的旧卡片、链接落回本页，则由上面的 published 判断兜底重定向。
 //
 // 规则（界面不写注解，由交互体现）：
-// - 项目名称：必填，排在第一位。下拉候选来自 project 表（一次拉全量、本地模糊匹配
-//   name/编码），选中已有项目会一并带出它的项目编号（编号随之锁住不可改）；也能直接
-//   手输——不在表里的名字保存时由后端补进 project 表（用项目编号当新项目的 id/code，
-//   见 qrcode.py _ensure_project_row）
-// - 项目编号：必填，唯一。来自 project 表（选中项目时）时只读；新项目时手动填写；
-//   与已有项目/其他录入行冲突时后端 400，detail 直接 Toast 出来
+// - 项目名称：必填，排在第一位。下拉候选来自 project 表（一次拉全量——含台账里
+//   「待定」的未承接项目，见 getProjects 的 includePending——本地模糊匹配 name/编码），
+//   选中已有项目会一并带出它的项目编号（编号随之锁住不可改）；直接手打出与表里完全
+//   同名的项目，同样按「选中」处理；也能输新名字，保存时由后端补进 project 表（用项目
+//   编号当新项目的 id/code，见 qrcode.py _ensure_project_row）
+// - 项目编号：必填，唯一。名称匹配到 project 表里的项目时，编号以表里为准（自动带出、
+//   点编号框也会取一次表里的值）；新项目时手动填写；与已有项目/其他录入行冲突时后端
+//   400，detail 直接 Toast 出来
 // - 项目地点 / 客户名称 / 车型：自由填写，可留空
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
@@ -88,30 +90,41 @@ export default function InfoEntry() {
   const [codeLocked, setCodeLocked] = useState(false);
 
   // 候选只拉一次：模糊匹配在本地做，避免每敲一个字打一次接口；
+  // includePending=true：台账里「待定」项目也要能选（后端默认只给已承接项目）；
   // 拉取失败静默降级为纯手输——后端保存时按名查重/补建（_ensure_project_row），
   // 名字已存在不会重复建项，列表漏了也不会建重。
   useEffect(() => {
-    getProjects('', 0, 1000)
+    getProjects('', 0, 1000, true)
       .then((rows) => { setProjectOptions(rows); setOptionsLoaded(true); })
       .catch(() => setProjectOptions([]));
   }, []);
 
-  // 模糊匹配项目名/编码（本地子串匹配），最多 8 条建议
+  /** 项目名称与 project 表里某个项目完全同名（去空格、忽略大小写）→ 就是那个项目 */
+  const findExactProject = useCallback((name: string): ProjectItem | null => {
+    const kw = name.trim().toLowerCase();
+    if (!kw) return null;
+    return projectOptions.find((p) => (p.name || '').trim().toLowerCase() === kw) || null;
+  }, [projectOptions]);
+
+  const matchedProject = useMemo(() => findExactProject(form.project_name), [findExactProject, form.project_name]);
+
+  // 模糊匹配项目名/编码（本地子串匹配），最多 8 条建议。
+  // 名称已经完全等于某个项目时不列候选：此时编号已同步带出，下拉只会挡住下面那行
   const projectSuggestions = useMemo(() => {
     const kw = form.project_name.trim().toLowerCase();
-    if (!kw) return [];
+    if (!kw || matchedProject) return [];
     return projectOptions
       .filter((p) =>
         (p.name || '').toLowerCase().includes(kw) || (p.project_code || '').toLowerCase().includes(kw))
       .slice(0, 8);
-  }, [form.project_name, projectOptions]);
+  }, [form.project_name, projectOptions, matchedProject]);
 
   // 手输的新名字（project 表里没有同名项目）→ 保存时后端会自动新建，给一句提示；
   // 列表没拉到时（optionsLoaded=false）不提示，避免把已有项目误报成新建
-  const isNewProjectName = useMemo(() => {
-    const kw = form.project_name.trim().toLowerCase();
-    return optionsLoaded && !!kw && !projectOptions.some((p) => (p.name || '').trim().toLowerCase() === kw);
-  }, [form.project_name, projectOptions, optionsLoaded]);
+  const isNewProjectName = useMemo(
+    () => optionsLoaded && !!form.project_name.trim() && !matchedProject,
+    [form.project_name, matchedProject, optionsLoaded],
+  );
 
   /** 选中建议项：项目名称与项目编号一起带出（编号就是它在 project 表的 id/code），编号随之锁住 */
   const pickProject = useCallback((p: ProjectItem) => {
@@ -120,11 +133,47 @@ export default function InfoEntry() {
     setSuggestOpen(false);
   }, []);
 
-  /** 手动改项目名称：不再是「选中的那个项目」，项目编号解锁、交回用户填写 */
+  /** 这个编号是不是 project 表里某个项目的编号（即从表里同步来的） */
+  const isProjectTableCode = useCallback(
+    (code: string) => !!code && projectOptions.some((p) => (p.project_code || '') === code),
+    [projectOptions],
+  );
+
+  /** 改项目名称：打出来的名字正好是 project 表里的某个项目 → 等同于选中它，项目编号
+      立刻从表里同步带出并锁住；其余情况 = 新项目，编号解锁、交回用户填写——此时若编号
+      还是从表里同步来的那个，一并清掉（新项目沿用别的项目的编号，后端必以「已被占用」
+      拦下，留着只会白填一遍）；用户自己敲的编号不动 */
   const setNameField = (value: unknown) => {
-    setForm((prev) => ({ ...prev, project_name: String(value ?? '') }));
-    setCodeLocked(false);
+    const name = String(value ?? '');
+    const hit = findExactProject(name);
+    setForm((prev) => {
+      if (hit) return { ...prev, project_name: name, project_code: hit.project_code || '' };
+      const kept = isProjectTableCode(prev.project_code) ? '' : prev.project_code;
+      return { ...prev, project_name: name, project_code: kept };
+    });
+    setCodeLocked(!!hit);
   };
+
+  /** 点进项目编号框：名称已匹配到 project 表里的项目，就把表里的编号取过来填上
+      （2026-09-30 用户口径）。两个场景要靠它兜：①候选列表比手速慢——名字先打完、
+      列表后到，那次输入没同步；②编辑旧录入行时行上的编号与表里不一致，以表为准
+      （编号只跟 project 表对名字，后端不会替我们纠正）。已锁住（disabled）时点不进来，
+      也就不会触发。 */
+  const syncCodeFromMatchedProject = () => {
+    const hit = findExactProject(form.project_name);
+    if (!hit) return;
+    const code = hit.project_code || '';
+    setForm((prev) => (prev.project_code === code ? prev : { ...prev, project_code: code }));
+  };
+
+  // 名称匹配到表里的项目、编号还空着 → 直接补上，不用等用户去点编号框
+  //（列表晚到的那次输入不算「没匹配」，这里认账；已有编号不动，编辑行时不会被覆盖）
+  useEffect(() => {
+    if (!matchedProject) return;
+    const code = matchedProject.project_code || '';
+    if (!code) return;
+    setForm((prev) => (prev.project_code ? prev : { ...prev, project_code: code }));
+  }, [matchedProject]);
 
   const fillFromRow = useCallback((row: QrcodeItem) => {
     setForm({
@@ -291,6 +340,7 @@ export default function InfoEntry() {
           <ClearableInput
             value={form.project_code}
             onChange={setField('project_code')}
+            onFocus={syncCodeFromMatchedProject}
             placeholder={codeLocked ? '' : '请输入项目编号'}
             maxlength={64}
             disabled={codeLocked}
