@@ -7,6 +7,9 @@
 - published: 对外使用中
 - deprecated: 停止使用
 
+录入信息行（project_code 非空）例外：确认即发布，entering → published 直达、不经 confirming
+（2026-09-30 用户口径，见 _allowed_targets 与 confirm 接口）。
+
 项目关联：project_id 指向 project.id（选填）。一个项目可有多张码（多台车/重印），
 引用放在码这侧；非项目码为 NULL。创建/更新时校验项目存在且未软删。
 
@@ -546,13 +549,30 @@ _STATUS_TRANSITIONS = {
 }
 
 
+def _allowed_targets(q: WechatQrcode) -> list:
+    """当前状态允许流转到的下一状态。
+
+    录入信息行（project_code 非空）在 entering 上多允许 → published：
+    扫码用户在录入信息详情页点「确认信息」= 确认即发布（2026-09-30 用户口径），
+    不经 confirming 中间态；普通码行保持原链条（确认 → confirming、发布 → published）。
+    """
+    allowed = list(_STATUS_TRANSITIONS.get(q.status, []))
+    if q.project_code and q.status == QrcodeStatus.ENTERING:
+        allowed.append(QrcodeStatus.PUBLISHED)
+    return allowed
+
+
 def _transition(db: Session, q: WechatQrcode, target: str, actor: str) -> WechatQrcode:
-    allowed = _STATUS_TRANSITIONS.get(q.status, [])
+    allowed = _allowed_targets(q)
     if target not in allowed:
         raise HTTPException(
             status_code=400,
             detail=f"状态 {q.status} 无法转到 {target}，允许: {allowed}",
         )
+    if target == QrcodeStatus.PUBLISHED and not q.ticket:
+        # published 意味着对外可扫，不能没有 ticket（原 publish 接口里的自检，
+        # 收进这里让 confirm「确认即发布」也走同一道闸，且状态机校验在前、报错更准）
+        raise HTTPException(status_code=400, detail="未生成 ticket，无法发布")
     q.status = target
     if target == QrcodeStatus.PUBLISHED:
         q.published_by = actor
@@ -563,15 +583,19 @@ def _transition(db: Session, q: WechatQrcode, target: str, actor: str) -> Wechat
     return q
 
 
-@router.post("/{qid}/confirm", summary="状态流转 → confirming")
+@router.post("/{qid}/confirm", summary="状态流转：普通码 → confirming；录入信息行确认即发布 → published")
 async def confirm_qrcode(qid: int, current_user=require_permission("frontend:admin:other:show")):
     db: Session = db_manager.get_db()
     try:
         q = db.query(WechatQrcode).filter(WechatQrcode.id == qid).first()
         if not q:
             raise HTTPException(status_code=404, detail="二维码不存在")
+        # 录入信息行（project_code 非空）：扫码用户在详情页点「确认信息」= 确认即发布，
+        # 直接进 published（2026-09-30 用户口径）；普通码行仍是 entering → confirming，
+        # 发布留在二维码管理里单独点。
+        target = QrcodeStatus.PUBLISHED if q.project_code else QrcodeStatus.CONFIRMING
         actor = current_user.get("username") if isinstance(current_user, dict) else str(current_user)
-        return _dict_with_project(db, _transition(db, q, QrcodeStatus.CONFIRMING, actor))
+        return _dict_with_project(db, _transition(db, q, target, actor))
     finally:
         db.close()
 
@@ -583,8 +607,6 @@ async def publish_qrcode(qid: int, current_user=require_permission("frontend:adm
         q = db.query(WechatQrcode).filter(WechatQrcode.id == qid).first()
         if not q:
             raise HTTPException(status_code=404, detail="二维码不存在")
-        if not q.ticket:
-            raise HTTPException(status_code=400, detail="未生成 ticket，无法发布")
         actor = current_user.get("username") if isinstance(current_user, dict) else str(current_user)
         return _dict_with_project(db, _transition(db, q, QrcodeStatus.PUBLISHED, actor))
     finally:

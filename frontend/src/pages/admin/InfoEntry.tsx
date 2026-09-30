@@ -7,7 +7,8 @@
 //
 // 扫码确认流程：该行 ticket 生成后状态是 entering，此时扫这张码会跳转到本页
 //   （后端 _send_scan_redirect_card 按状态分流），页面底部出现「确认信息」按钮，
-//   点击走 entering → confirming（同二维码管理的「确认」）。
+//   点击直接 entering → published（录入信息行「确认即发布」，2026-09-30 用户口径；
+//   不经 confirming 中间态，后端 confirm 接口按行类型分流）。
 //
 // 规则（界面不写注解，由交互体现）：
 // - 项目id：唯一；已有值时输入框锁定（不可改），企微表格同步来之前可以先留空、之后补填一次
@@ -106,14 +107,15 @@ export default function InfoEntry() {
     }
   };
 
-  // 确认信息：扫码核对无误后进入 confirming（确认后按钮消失；要回退可在二维码管理里操作）
+  // 确认信息：扫码核对无误后确认即发布（录入信息行 entering → published，
+  // 2026-09-30 用户口径；后端 confirm 接口直接给 published）。按钮随状态变化消失。
   const handleConfirm = async () => {
     if (!qid) return;
     setConfirming(true);
     try {
-      await qrcodeTransition(qid, 'confirm');
-      setStatus('confirming');
-      Toast({ message: '信息已确认', theme: 'success' });
+      const updated = await qrcodeTransition(qid, 'confirm');
+      setStatus(updated.status || 'published');
+      Toast({ message: '信息已确认，已发布', theme: 'success' });
     } catch (err) {
       Toast({ message: `确认失败：${errMsg(err, '请稍后重试')}`, theme: 'error' });
     } finally {
@@ -185,7 +187,7 @@ export default function InfoEntry() {
       </Form>
 
       {/* 扫码确认流程：状态机 entering 时（已生成 ticket、未确认）页面底部出「确认信息」，
-          点击 → confirming（同二维码管理的「确认」动作） */}
+          点击 → published（录入信息行确认即发布，不经 confirming） */}
       {qid !== null && status === 'entering' && (
         <Button
           theme="primary"

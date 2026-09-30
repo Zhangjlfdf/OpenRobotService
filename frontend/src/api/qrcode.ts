@@ -133,6 +133,8 @@ export async function updateQrcode(id: number, data: {
   return request(`/qrcodes/${id}`, { method: 'PUT', body: JSON.stringify(data) });
 }
 
+/** 状态流转动作。录入信息行（project_code 非空）点「确认」= 确认即发布，
+ *  后端直接落到 published（不经 confirming），见 InfoEntry.tsx。 */
 export async function qrcodeTransition(id: number, action: 'confirm' | 'publish' | 'deprecate'): Promise<QrcodeItem> {
   return request(`/qrcodes/${id}/${action}`, { method: 'POST' });
 }
