@@ -114,7 +114,10 @@ def test_subscribe_prefix_hits_qrcode_config(sent, db):
     }))
 
     assert len(sent) == 1
-    assert "/app/admin/info-entry/7" in sent[0]["url"]
+    # id 必须占路径（微信 OAuth 回跳会丢 query，前端 QrcodeManage/InfoEntry 契约）。
+    # 从 FRONTEND_BASE_URL 起拼、不写死 /app：部署值已带 /app 后缀，本地/CI 不带，
+    # 相对 base 断言在两种环境下都成立（曾因写死 /app 与 6465982a 的去重修正互相打架）。
+    assert f"{settings.FRONTEND_BASE_URL}/admin/info-entry/7" in sent[0]["url"]
     assert _scene_of(sent[0]) == "7"
 
 
