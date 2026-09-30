@@ -153,6 +153,7 @@ const RiskEdit = lazyImport(() => import('@/pages/admin/RiskEdit'));
 const ReportsAnalytics = lazyImport(() => import('@/pages/admin/ReportsAnalytics'));
 const UserManage = lazyImport(() => import('@/pages/admin/UserManage'));
 const ModuleTreeManage = lazyImport(() => import('@/pages/admin/ModuleTreeManage'));
+const DualTreeTrial = lazyImport(() => import('@/pages/admin/DualTreeTrial'));
 const OrgChart = lazyImport(() => import('@/pages/admin/OrgChart'));
 const RoleManage = lazyImport(() => import('@/pages/admin/RoleManage'));
 const AssignRole = lazyImport(() => import('@/pages/admin/AssignRole'));
@@ -244,6 +245,7 @@ const router = createBrowserRouter([
                   { path: 'reports', element: <ReportsAnalytics /> },
                   { path: 'users', element: <UserManage /> },
                   { path: 'module-tree', element: <ModuleTreeManage /> },
+                  { path: 'dual-tree', element: <DualTreeTrial /> },
                   { path: 'org-chart', element: <OrgChart /> },
                   { path: 'roles', element: <RoleManage /> },
                   { path: 'assign-role', element: <AssignRole /> },
