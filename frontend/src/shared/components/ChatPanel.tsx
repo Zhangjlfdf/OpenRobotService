@@ -601,9 +601,9 @@ const MessageBubble = memo(function MessageBubble({
                 );
               })()
             ) : msg.vehicle_choices && msg.vehicle_choices.length > 0 ? (
-              // 车型追问/开场引导（0930）：题面照常渲染（开场题大字），按钮组
-              // （不带序号）+ 固定提示语。点按钮=发送选项全文；答后整组禁用、
-              // 所选加深，用户打字走「其他」路径不打断按钮组展示。
+              // 车型追问/开场引导（0930）：题面照常渲染（开场题大字），胶囊
+              // 按钮组（自适应宽度，样式对齐交互模拟页）+ 固定提示语。点按钮=
+              // 发送选项全文；答后整组禁用、所选实心加深，打字走「其他」不打断。
               (() => {
                 const answeredV = vehicleAnswered ?? false;
                 return (
@@ -613,16 +613,16 @@ const MessageBubble = memo(function MessageBubble({
                     ) : (
                       <MarkdownRenderer content={msg.content} compact={compact} />
                     )}
-                    <div className="chat-proj-choices chat-veh-choices">
+                    <div className="chat-veh-choices">
                       {msg.vehicle_choices.map((c) => (
                         <button
                           key={c}
                           type="button"
-                          className={`chat-proj-choices__btn${answeredV ? (c === vehiclePicked ? ' chat-proj-choices__btn--selected' : ' chat-proj-choices__btn--done') : ''}`}
+                          className={`chat-veh-chip${answeredV ? (c === vehiclePicked ? ' chat-veh-chip--selected' : ' chat-veh-chip--done') : ''}`}
                           disabled={answeredV}
                           onClick={() => onVehicleChoice?.(msg.id, c)}
                         >
-                          <span className="chat-proj-choices__name">{c}</span>
+                          {c}
                         </button>
                       ))}
                     </div>
@@ -792,6 +792,10 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
   const navigate = useNavigate();
 
   const [messages, setMessages] = useState<Message[]>([]);
+  // 车型 SOP 外显（0930）：confirm 响应的 manual_docs（已排除分叉树/故障码表
+  // 引导设施）→ 会话顶部一排胶囊按钮，点击拉 md 在线查看
+  const [vehicleSopDocs, setVehicleSopDocs] = useState<Array<{ title: string; url: string }>>([]);
+  const [sopViewing, setSopViewing] = useState<{ title: string; content: string } | null>(null);
   // 图片预览：点击用户气泡图片 → 全屏遮罩放大查看
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [input, setInput] = useState('');
@@ -1588,6 +1592,10 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
         Toast({ message: res?.message || '车型未建档，请确认扫码信息', theme: 'warning' });
         return;
       }
+      // SOP 外显按钮（0930）：除引导设施外一个文件一个气泡，点击在线查看
+      if (res.data?.manual_docs?.length) {
+        setVehicleSopDocs(res.data.manual_docs.map((d) => ({ title: d.title, url: d.url })));
+      }
       // 开场大方向引导题：confirm 响应直出，本地渲染气泡（demo 阶段不落库，
       // 刷新后开场题不再显示，转正时再持久化）。
       const op = res.data?.opening;
@@ -2271,6 +2279,28 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
   const pickVehicleChoiceRef = useRef(pickVehicleChoice);
   pickVehicleChoiceRef.current = pickVehicleChoice;
   const handleVehicleChoice = useCallback((msgId: string, choice: string) => pickVehicleChoiceRef.current(msgId, choice), []);
+  // SOP 文档在线查看（0930）：拉 md 正文 → 全屏抽屉渲染
+  const [sopLoading, setSopLoading] = useState(false);
+  const openSopDoc = async (d: { title: string; url: string }) => {
+    if (sopLoading) return;
+    setSopLoading(true);
+    try {
+      const r = await fetch(d.url);
+      const text = r.ok ? await r.text() : '';
+      // 相对路径改写（0930）：md 里的图片/链接引用是相对同级 media/ 目录的
+      // （如 media/image109.png），补全为 KB 静态路由绝对路径，否则 404 图裂
+      const base = d.url.slice(0, d.url.lastIndexOf('/') + 1);
+      const fixed = text.replace(
+        /(\]\(|src="|src=')((?!https?:|data:|#|\/)[^)"'\s]+)/g,
+        (_m, p1: string, p2: string) => p1 + base + p2.replace(/^\.\//, ''),
+      );
+      setSopViewing({ title: d.title, content: r.ok && fixed ? fixed : '文档加载失败，请稍后重试。' });
+    } catch {
+      setSopViewing({ title: d.title, content: '文档加载失败，请稍后重试。' });
+    } finally {
+      setSopLoading(false);
+    }
+  };
   // 稳定 onEditChange / onEditCancel：内联箭头会让 MessageBubble 的 React.memo 失效（每次渲染新引用），
   // 导致流式 flush 时整列表重渲染、页面闪烁。包成 useCallback 后历史气泡可跳过重渲染。
   const handleEditChange = useCallback((id: string, v: string) => {
@@ -3319,6 +3349,21 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
           );
         })}
         <div ref={messagesEndRef} />
+        {/* SOP 文档在线查看抽屉（0930）：全屏覆盖，点遮罩/关闭退出 */}
+        {sopViewing && (
+          <div className="chat-veh-sop-viewer" onClick={() => setSopViewing(null)}>
+            <div className="chat-veh-sop-viewer__panel" onClick={(e) => e.stopPropagation()}>
+              <div className="chat-veh-sop-viewer__head">
+                <span className="chat-veh-sop-viewer__title">{sopViewing.title}</span>
+                <button type="button" className="chat-veh-sop-viewer__close"
+                  onClick={() => setSopViewing(null)}>关闭</button>
+              </div>
+              <div className="chat-veh-sop-viewer__body">
+                <MarkdownRenderer content={sopViewing.content} />
+              </div>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* 长按操作菜单：TDesign Popover（自带箭头/动画/外点关闭），代理锚点定位到被长按气泡。
@@ -3437,6 +3482,15 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
           >
             {forwardBusy ? '生成中…' : `生成转发图（${selectedIds.size} 条）`}
           </button>
+        </div>
+      )}
+      {/* 车型 SOP 快捷气泡（0930）：豆包式输入框上方小气泡横排，点击在线查看 md */}
+      {vehicleSopDocs.length > 0 && !selectMode && (
+        <div className="chat-veh-sop-bar">
+          {vehicleSopDocs.map((d) => (
+            <button key={d.url} type="button" className="chat-veh-sop-chip"
+              onClick={() => void openSopDoc(d)}>{d.title}</button>
+          ))}
         </div>
       )}
       <div
