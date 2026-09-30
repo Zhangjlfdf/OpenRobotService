@@ -172,6 +172,17 @@ class TestL1PromptHasName:
         from ai.agents.AiDiagnosisPlatform.assigner.prompts.shared import ticket_fields_block
         assert ticket_fields_block(_ticket()).rstrip() in prompt
 
+    def test_feature_stage_assists_product_or_dev(self):
+        """正常流程：需求单当前阶段写进分流，开发辅助偏向研发，正文仍优先。"""
+        prompt = LlmRecall(_cfg())._build_prompt(
+            _ticket(ticket_type="feature", curr_step_name="开发"),
+            [_eng("u-a", "甲")],
+            top_k=1,
+        )
+        assert "当前阶段：开发" in prompt
+        assert "当前阶段是「开发」，辅助偏向对口研发" in prompt
+        assert "仍以正文的 1) 2) 为准" in prompt
+
 
 class TestL1ParseReason:
     """L1 JSON 解析分数 + 原因；缺 reason 不阻断打分。"""

@@ -675,6 +675,14 @@ export default function UserManage() {
         >
           责任模块树
         </button>
+        <button
+          type="button"
+          className="mac-btn mac-btn--outline"
+          style={{ fontWeight: 400 }}
+          onClick={() => navigate('/admin/dual-tree')}
+        >
+          双树试做
+        </button>
       </div>
 
       {/* 搜索框 + 计数胶囊 */}

@@ -47,6 +47,7 @@ from ai.agents.AiDiagnosisPlatform.assigner.ranking.fallback_decision import (
     REASON_VAGUE,
 )
 from ai.agents.AiDiagnosisPlatform.assigner.filtering.candidate_tightener import CandidateTightener
+from ai.agents.AiDiagnosisPlatform.assigner.filtering.product_router import is_yaorenba_field_entry
 from ai.agents.AiDiagnosisPlatform.assigner.filtering.routing_schemas import TightenResult
 from ai.agents.AiDiagnosisPlatform.assigner.ranking.llm_decision import LlmDecision
 from ai.agents.AiDiagnosisPlatform.assigner.ranking.ranker import Ranker
@@ -244,7 +245,7 @@ class DispatchFlow:
                 candidates=engineer_profiles, ranked_scores={},
                 source="提单人指定", ltag=ltag,
             )
-            return preferred
+            return self._stamp_yaorenba_field_entry(ticket_context, preferred)
         if specified_unresolved:
             logger.info(f"{ltag} Step0 指定人未命中，记下 specified_name={specified_unresolved!r} 进入后续")
 
@@ -278,7 +279,7 @@ class DispatchFlow:
                             candidates=engineer_profiles, ranked_scores={},
                             source="倾向人连续两次确认", ltag=ltag,
                         )
-                        return direct
+                        return self._stamp_yaorenba_field_entry(ticket_context, direct)
                     logger.error(
                         f"{ltag} 倾向人连续两次确认直派失败（查库异常）{pref_raw}，降级智能派单"
                     )
@@ -555,6 +556,16 @@ class DispatchFlow:
             prof = dict(result.profile or {})
             prof["no_dept_profile"] = True
             result.profile = prof
+        return self._stamp_yaorenba_field_entry(ticket, result)
+
+    def _stamp_yaorenba_field_entry(self, ticket, result):
+        """摇人吧项目名碰上现场内容时只打提醒标记，不改派。"""
+        if not is_yaorenba_field_entry(ticket, self._config):
+            return result
+        prof = dict(result.profile or {})
+        prof["yaorenba_field_entry"] = True
+        result.profile = prof
+        logger.info(f"[派单:{getattr(ticket, 'id', '')}] 摇人吧入口与现场内容不一致，已写提醒")
         return result
 
     def _log_recall_top(self, ltag, name, scores, candidates, tag_desc, count=8):

@@ -19,7 +19,7 @@
 画像召回看人只由 `shared.engineer_brief_lines` 拼：姓名+ID、职级、部门、公司、责任模块、负责内容（责任树 keywords/anchor，有才写）、职责。  
 Step6 排名行同样带「负责内容」，口径与画像卡片一致；不恢复独立关键词/锚文本召回。  
 看人反幻觉：`shared.person_anti_hallucination`（画像召回 / Step6 共用：可推断谁能接，但不能编造其职责）。  
-需求单分流：`shared.feature_role_routing_guidance`（Step3 画像 / Step6 仲裁共用；仅当判定为需求时适用：待澄清→产品经理，已对齐可实施→对口研发；靠 prompt 语义，非关键词硬规则）。  
+需求单分流：`shared.feature_role_routing_guidance`（Step3 画像 / Step6 仲裁共用；仅当判定为需求时适用：待澄清→产品经理，已对齐可实施→对口研发；靠 prompt 语义，非关键词硬规则）。需求单若带 `curr_step_name`，按模板阶段辅助：澄清/评审/排期/设计偏向产品，开发/测试/验收/发布偏向研发；与正文相反时仍以正文为准。  
 Step6 重派身份只看排名行上的 Step2 标签；有倾向人时补一句「正常不拒绝用户选择」。  
 备注全文由 `assign_ticket` 拼进工单描述；Step6 只留一句提示，不把同一段再贴一遍。  
 名单是三路并集；总分取命中各路绝对分的最高值，不按本批拉满；每人带「来源」。  

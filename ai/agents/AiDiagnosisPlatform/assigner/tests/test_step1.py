@@ -307,3 +307,39 @@ def test_no_dept_profile_tip():
         profile={"no_dept_profile": True},
     )
     assert build_redispatch_tip(log, {"u-1": "张三"}) == "没有部门画像，请到后台补充部门职责"
+
+
+def test_yaorenba_project_with_vehicle_is_field_entry():
+    """正常流程：项目名是摇人吧，正文有车号 → 记为进错入口。"""
+    from ai.agents.AiDiagnosisPlatform.assigner.filtering.product_router import (
+        is_yaorenba_field_entry,
+    )
+
+    ticket = _ticket()
+    ticket.title = "XTD-92 放货后路径规划卡住"
+    ticket.problem_description = "现场任务下发不了"
+    assert is_yaorenba_field_entry(ticket, AssignerConfig()) is True
+
+
+def test_yaorenba_platform_bug_is_not_field_entry():
+    """正常流程：摇人吧自己的页面问题 → 不提醒。"""
+    from ai.agents.AiDiagnosisPlatform.assigner.filtering.product_router import (
+        is_yaorenba_field_entry,
+    )
+
+    ticket = _ticket()
+    ticket.title = "我要摇人页面打不开"
+    ticket.problem_description = "点派单按钮没有反应"
+    assert is_yaorenba_field_entry(ticket, AssignerConfig()) is False
+
+
+def test_usp_project_name_is_not_field_entry():
+    """正常流程：项目名本身是调度项目 → 不走这条提醒。"""
+    from ai.agents.AiDiagnosisPlatform.assigner.filtering.product_router import (
+        is_yaorenba_field_entry,
+    )
+
+    ticket = _ticket()
+    ticket.project_name = "某现场调度USP"
+    ticket.title = "XTD-92 地图保存失败"
+    assert is_yaorenba_field_entry(ticket, AssignerConfig()) is False

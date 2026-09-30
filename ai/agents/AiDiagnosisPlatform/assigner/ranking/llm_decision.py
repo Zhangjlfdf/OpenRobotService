@@ -346,8 +346,10 @@ class LlmDecision:
         return f"用户重派备注：{remark}"
 
     def _build_prompt(self, ticket, engineers, recall_result, ranked_scores, extra_hints=None, product: str = ""):
+        from ai.agents.AiDiagnosisPlatform.assigner.prompts.shared import (
+            feature_role_routing_guidance,
+        )
         from ai.agents.AiDiagnosisPlatform.assigner.prompts.step6 import (
-            FEATURE_ROLE_ROUTING,
             IRON_RULES,
             JUDGE_HINTS,
             OUTPUT_CONTRACT,
@@ -361,7 +363,7 @@ class LlmDecision:
             "",
             JUDGE_HINTS,
             "",
-            FEATURE_ROLE_ROUTING,
+            feature_role_routing_guidance(ticket),
             "",
             "【候选人排名（已含职级折扣；#1 为总分最高）】",
         ]

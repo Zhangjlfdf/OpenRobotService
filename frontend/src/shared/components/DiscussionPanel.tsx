@@ -14,8 +14,10 @@ import EmojiPicker from '@/shared/components/EmojiPicker';
 import { replaceWechatEmoji, parseStandaloneEmoji } from '@/shared/emoji/wechat';
 
 import { useAuthStore } from '@/stores/auth';
-import API_CONFIG from '@/config/api';
+import API_CONFIG, { ENV_PREFIX } from '@/config/api';
+import { createRequest } from '@/api/client';
 import { avatarUrl } from '@/api/profile';
+import { PERM_DISPATCH_DEV } from '@/shared/constants/dispatchDev';
 import { parseUtcDate } from '@/shared/utils/url';
 import { dedupeFileNames } from '@/shared/utils/uniqueFileNames';
 import { TEXT_INPUT_LIMIT, spillOverLimit, makeSpillFile, insertSpillName, appendAttachmentNames, readClipboardText, clipboardLabel } from '@/shared/utils/textOverflowAttachment';
@@ -72,6 +74,13 @@ function writeAiProgress(taskId: string | number | undefined, snap: AiProgressSn
   } catch { /* 隐私模式等写入失败忽略 */ }
 }
 
+function clearAiProgress(taskId: string | number | undefined) {
+  if (taskId == null || taskId === '') return;
+  try {
+    sessionStorage.removeItem(aiProgressKey(taskId));
+  } catch { /* ignore */ }
+}
+
 function isTeacherComment(c?: { created_by?: string; created_by_name?: string } | null): boolean {
   if (!c) return false;
   return c.created_by === 'U老师' || c.created_by_name === 'U老师';
@@ -80,15 +89,6 @@ function isTeacherComment(c?: { created_by?: string; created_by_name?: string } 
 function isProgressRunning(t: AiProgressTodo): boolean {
   if (t.phase === 'running' || t.status === 'in_progress') return true;
   return (t.children || []).some(isProgressRunning);
-}
-
-function markTodoTreeDone(t: AiProgressTodo): AiProgressTodo {
-  return {
-    ...t,
-    phase: 'done',
-    status: 'completed',
-    children: (t.children || []).map(markTodoTreeDone),
-  };
 }
 
 function countTodoNodes(todos?: AiProgressTodo[] | null): number {
@@ -122,6 +122,7 @@ const CAP_LABELS: Record<string, string> = {
   memory_store: '写入记忆',
   memory_recall: '读取记忆',
   planning: '规划排查步骤',
+  ssh_export_logs: '拉取 USP 日志',
 };
 
 function ProgressTodoItem({ t }: { t: AiProgressTodo }) {
@@ -238,8 +239,8 @@ interface DiscussionPanelProps {
   /** 评论列表（两端共用 /api/tasks/{id}/comments 数据） */
   comments: DiscussionComment[];
   /** 发送：父级处理 POST 评论 / @U老师 路由 / 附件上传；返回 true=成功（组件清空输入），false=失败（保留输入）。
-   *  options.replyTo 为引用评论ID（消息引用）。 */
-  onSend: (text: string, files: File[], options?: { replyTo?: string | number }) => Promise<boolean>;
+   *  options.replyTo 为引用评论ID；options.uspEnvId 为讨论区选中的可达 USP 环境。 */
+  onSend: (text: string, files: File[], options?: { replyTo?: string | number; uspEnvId?: number }) => Promise<boolean>;
   /** 发送中（禁用输入与按钮、按钮文案变“发送中”） */
   sending?: boolean;
   /** 整体禁用（如工单号缺失） */
@@ -280,6 +281,8 @@ interface DiscussionPanelProps {
   onInsertQueueItem?: (index: number) => Promise<boolean>;
   /** 取消排队：这条不发了 */
   onRemoveQueueItem?: (index: number) => void;
+  /** @U老师 流式正文草稿（边生成边展示；评论落库后由父级清空） */
+  aiStreamReply?: string;
   /** 进场自动定位：目标评论 id（列表卡片点引用/参与人头像跳进来时传，滚动 + is-flash 高亮） */
   focusCommentId?: string | number | null;
   /** 进场无 commentId 时，按作者 username 定位到该作者在该工单的**最近一条**评论（参与人头像跳转用） */
@@ -309,21 +312,30 @@ export default function DiscussionPanel({
   aiQueueItems = [],
   onInsertQueueItem,
   onRemoveQueueItem,
+  aiStreamReply = '',
   focusCommentId = null,
   focusAuthor = null,
 }: DiscussionPanelProps) {
-  const { username, name, avatarResourceId } = useAuthStore();
+  const { username, name, avatarResourceId, hasPermission } = useAuthStore();
+  const canUseUspEnv = hasPermission(PERM_DISPATCH_DEV);
   // 长按操作菜单的浮层由 TDesign Mobile <Popover> 承载（自带箭头/动画/外点关闭）；
   // 通过「透明、pointer-events:none 的代理锚点」定位到被长按气泡的 rect，避免覆盖气泡交互。
   // ── U老师 执行过程（Claude Code 式动态展示）──
-  // 本页回复上屏后收起；快照留在 sessionStorage，退出工单再进来仍能看到上次 todo。
+  // 本页回复上屏后收起；仅「进行中」快照在刷新/重进时灌回，已完成的不再自动展开。
   const cachedSnap = readAiProgress(taskId);
-  const [aiRunId, setAiRunId] = useState<string | undefined>(() => cachedSnap?.runId);
-  const [aiTodos, setAiTodos] = useState<AiProgressTodo[]>(() => cachedSnap?.todos || []);
-  const [aiPhase, setAiPhase] = useState<'running' | 'done'>(() => cachedSnap?.phase || 'done');
-  const aiActive = sending || optimisticAi;
+  const [aiRunId, setAiRunId] = useState<string | undefined>(() =>
+    cachedSnap?.phase === 'running' ? cachedSnap.runId : undefined,
+  );
+  const [aiTodos, setAiTodos] = useState<AiProgressTodo[]>(() =>
+    cachedSnap?.phase === 'running' ? (cachedSnap.todos || []) : [],
+  );
+  const [aiPhase, setAiPhase] = useState<'running' | 'done'>(() =>
+    cachedSnap?.phase === 'running' ? 'running' : 'done',
+  );  const aiActive = sending || optimisticAi;
   const aiActiveRef = useRef<boolean>(aiActive);
   aiActiveRef.current = aiActive;
+  const [uspEnvOptions, setUspEnvOptions] = useState<Array<{ id: number; name: string }>>([]);
+  const [uspEnvId, setUspEnvId] = useState<number | ''>('');
   const aiPhaseRef = useRef(aiPhase);
   aiPhaseRef.current = aiPhase;
   const aiRunIdRef = useRef(aiRunId);
@@ -334,23 +346,31 @@ export default function DiscussionPanel({
   const runAnchorCommentIdRef = useRef<string | number | null>(null);
   const prevAiActiveRef = useRef<boolean>(aiActive);
   const abortedRunIdsRef = useRef<Set<string>>(new Set());
-  const bestTodosRef = useRef<AiProgressTodo[]>(cachedSnap?.todos || []);
+  const bestTodosRef = useRef<AiProgressTodo[]>(
+    cachedSnap?.phase === 'running' ? (cachedSnap.todos || []) : [],
+  );
 
   const persistProgress = useCallback((phase: 'running' | 'done', todos = aiTodosRef.current, runId = aiRunIdRef.current) => {
     const best = richerTodos(todos, bestTodosRef.current);
+    if (phase === 'done') {
+      // 完成后清掉快照：刷新不应再把已关过程区顶回来
+      clearAiProgress(taskId);
+      bestTodosRef.current = [];
+      return;
+    }
     if (!best.length) return;
     bestTodosRef.current = best;
-    const next = phase === 'done' ? best.map(markTodoTreeDone) : best;
-    writeAiProgress(taskId, { runId, todos: next, phase });
+    writeAiProgress(taskId, { runId, todos: best, phase: 'running' });
   }, [taskId]);
 
   const dismissAiProcess = useCallback(() => {
-    persistProgress('done');
+    clearAiProgress(taskId);
+    bestTodosRef.current = [];
     aiTodosRef.current = [];
     setAiRunId(undefined);
     setAiTodos([]);
     setAiPhase('done');
-  }, [persistProgress]);
+  }, [taskId]);
 
   const abortShownRun = useCallback(() => {
     const rid = aiRunIdRef.current;
@@ -383,17 +403,15 @@ export default function DiscussionPanel({
       applyAiProgress(ev);
       return;
     }
-    // 本页开过这一轮（有 runAnchor）：回复上屏后过程区已收起，迟到的进度包只写快照，不要再展开。
+    // 本页开过这一轮（有 runAnchor）：回复上屏后过程区已收起，迟到的进度包只收尾清快照，不要再展开。
     const startedHere = runAnchorCommentIdRef.current != null;
     if (ev.phase === 'done') {
       persistProgress('done', ev.todos?.length ? ev.todos : aiTodosRef.current, ev.run_id || aiRunIdRef.current);
-      if (startedHere) return;
-      if (aiTodosRef.current.length > 0) {
-        const shown = readAiProgress(taskId)?.todos || [];
-        if (shown.length) {
-          setAiTodos(shown);
-          setAiPhase('done');
-        }
+      if (!startedHere && aiTodosRef.current.length > 0) {
+        // 非本页发起、但过程区还开着：收起，勿灌回已完成步骤
+        setAiRunId(undefined);
+        setAiTodos([]);
+        setAiPhase('done');
       }
       return;
     }
@@ -403,22 +421,20 @@ export default function DiscussionPanel({
 
   useEffect(() => {
     const snap = readAiProgress(taskId);
-    if (!snap) {
+    if (!snap || snap.phase !== 'running') {
+      // 已完成或无快照：不展开过程区（刷新后也不要把关上的 todo 再顶上来）
+      clearAiProgress(taskId);
       setAiRunId(undefined);
       setAiTodos([]);
       setAiPhase('done');
+      bestTodosRef.current = [];
       return;
     }
-    const last = comments[comments.length - 1];
-    const finished = snap.phase === 'done' || isTeacherComment(last);
-    const todos = finished ? snap.todos.map(markTodoTreeDone) : snap.todos;
+    // 仅灌回「进行中」的排查（刷新时仍在跑）
     setAiRunId(snap.runId);
-    setAiTodos(todos);
-    setAiPhase(finished ? 'done' : 'running');
-    bestTodosRef.current = richerTodos(todos, bestTodosRef.current);
-    if (finished && snap.phase === 'running') {
-      writeAiProgress(taskId, { runId: snap.runId, todos, phase: 'done' });
-    }
+    setAiTodos(snap.todos);
+    setAiPhase('running');
+    bestTodosRef.current = richerTodos(snap.todos, bestTodosRef.current);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [taskId]);
 
@@ -442,10 +458,11 @@ export default function DiscussionPanel({
     deletedIds,
   } = useTaskCommentsWS(taskId, comments, { currentUser: username, onTaskUpdated, onAiProgress: handleWsAiProgress });
 
-  // 有 todo 就显示（含退出工单再进来灌回的上次步骤）；本页回复上屏后会把 aiTodos 清空从而收起。
+  // 有 todo / 流式草稿就显示；本页回复上屏或整场 done 后会清空 aiTodos 收起；仅进行中刷新会灌回。
   const showAiProcess =
     aiTodos.length > 0 ||
     optimisticAi ||
+    !!aiStreamReply ||
     (sending && aiRunId !== undefined);
 
   // 乐观占位 todo：仅当 optimisticAi 且尚无真实 todo 时启用（planning+进行中）
@@ -802,6 +819,33 @@ export default function DiscussionPanel({
     if (!commentText.startsWith('@U老师 ')) setCommentText('@U老师 ' + commentText);
   };
 
+  // 讨论区可选可达 USP 环境：试验期仅开发者模式权限可见
+  useEffect(() => {
+    if (!enableAI || !canUseUspEnv) {
+      setUspEnvOptions([]);
+      setUspEnvId('');
+      return;
+    }
+    let cancelled = false;
+    const req = createRequest(`${ENV_PREFIX}/api`, 'UspEnv');
+    (async () => {
+      try {
+        const raw = await req('/usp-envs/options', { skipCache: true });
+        const data = (raw && typeof raw === 'object' && 'data' in raw)
+          ? (raw as { data: Array<{ id: number; name: string }> }).data
+          : raw;
+        if (cancelled) return;
+        const list = Array.isArray(data)
+          ? data.filter((x) => x && typeof x.id === 'number' && x.name).map((x) => ({ id: x.id, name: x.name }))
+          : [];
+        setUspEnvOptions(list);
+      } catch {
+        if (!cancelled) setUspEnvOptions([]);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [enableAI, canUseUspEnv]);
+
   // ── @mention: 过滤项目成员 ──
   // @候选池：无输入 → 项目成员（默认）；有输入（@刘）→ 项目成员 + 全部在职用户补全，可 @ 到项目外的人
   const mentionCandidates = useMemo(() => {
@@ -1086,9 +1130,14 @@ export default function DiscussionPanel({
       notifySpill();
     }
     const replyTo = quoted ? quoted.id : undefined;
+    const sendOpts: { replyTo?: string | number; uspEnvId?: number } = {};
+    if (replyTo !== undefined) sendOpts.replyTo = replyTo;
+    if (canUseUspEnv && uspEnvId !== '' && Number.isFinite(Number(uspEnvId))) {
+      sendOpts.uspEnvId = Number(uspEnvId);
+    }
     let ok = false;
     try {
-      ok = await onSend(text, files, replyTo !== undefined ? { replyTo } : undefined);
+      ok = await onSend(text, files, Object.keys(sendOpts).length ? sendOpts : undefined);
     } catch (err) {
       Toast({ message: `发送失败: ${err instanceof Error ? err.message : ''}`, theme: 'error' });
     }
@@ -1694,8 +1743,8 @@ export default function DiscussionPanel({
         )}
         {/* U老师 执行过程（Claude Code 式动态展示）：Supervisor 派发能力时逐项实时滚动，
             最终回复只写纯答复（不含此过程）；[帮我分析] 点按瞬间用乐观占位立即显示 */}
-        {enableAI && showAiProcess && displayTodos.length > 0 && (
-          <div className={`detail-chat-ai-progress${allTodosDone ? ' is-finished' : ''}`}>
+        {enableAI && showAiProcess && (displayTodos.length > 0 || !!aiStreamReply) && (
+          <div className={`detail-chat-ai-progress${allTodosDone && !aiStreamReply ? ' is-finished' : ''}`}>
             <div className="detail-chat-ai-progress__head">
               {!allTodosDone && (
                 <span className="detail-chat-ai-progress__spinner" aria-hidden="true">
@@ -1704,11 +1753,17 @@ export default function DiscussionPanel({
                   <i />
                 </span>
               )}
-              {waitingReply ? '正在生成回复' : !allTodosDone ? 'U老师 正在排查执行' : '排查执行完成'}
+              {aiStreamReply
+                ? 'U老师 正在回复'
+                : waitingReply
+                  ? '正在生成回复'
+                  : !allTodosDone
+                    ? 'U老师 正在排查执行'
+                    : '排查执行完成'}
               {aiQueueItems.length > 0 && (
                 <span className="detail-chat-ai-progress__queue">另有 {aiQueueItems.length} 条排队</span>
               )}
-              {onAbortAi && !allTodosDone && (
+              {onAbortAi && (!allTodosDone || !!aiStreamReply) && (
                 <button
                   type="button"
                   className="detail-chat-ai-progress__abort"
@@ -1721,11 +1776,18 @@ export default function DiscussionPanel({
                 </button>
               )}
             </div>
-            <ul className="detail-chat-ai-progress__list">
-              {displayTodos.map((t, i) => (
-                <ProgressTodoItem key={`${t.id ?? i}-${i}`} t={t} />
-              ))}
-            </ul>
+            {displayTodos.length > 0 && (
+              <ul className="detail-chat-ai-progress__list">
+                {displayTodos.map((t, i) => (
+                  <ProgressTodoItem key={`${t.id ?? i}-${i}`} t={t} />
+                ))}
+              </ul>
+            )}
+            {!!aiStreamReply && (
+              <div className="detail-chat-ai-stream">
+                <MarkdownRenderer content={aiStreamReply} compact />
+              </div>
+            )}
             {aiQueueItems.length > 0 && (
               <ul className="detail-chat-ai-progress__queue-list">
                 {aiQueueItems.map((q, i) => (
@@ -1760,9 +1822,30 @@ export default function DiscussionPanel({
         {(enableAI || (enableAttach && pendingFiles.length > 0)) && (
           <div className="detail-chat-toolbar">
             {enableAI && (
-              <Button size="small" theme="default" className="detail-chat-mention-btn" onClick={handleAIClick} disabled={sending || disabled}>
-                @U老师
-              </Button>
+              <>
+                <Button size="small" theme="default" className="detail-chat-mention-btn" onClick={handleAIClick} disabled={sending || disabled}>
+                  @U老师
+                </Button>
+                {canUseUspEnv && uspEnvOptions.length > 0 && (
+                  <label className="detail-chat-usp-env">
+                    环境
+                    <select
+                      value={uspEnvId === '' ? '' : String(uspEnvId)}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        setUspEnvId(v ? Number(v) : '');
+                      }}
+                      disabled={sending || disabled}
+                      aria-label="选择可达 USP 环境"
+                    >
+                      <option value="">不拉取服务器日志</option>
+                      {uspEnvOptions.map((o) => (
+                        <option key={o.id} value={o.id}>{o.name}</option>
+                      ))}
+                    </select>
+                  </label>
+                )}
+              </>
             )}
             {enableAttach && pendingFiles.length > 0 && (
               <div className="detail-chat-files">

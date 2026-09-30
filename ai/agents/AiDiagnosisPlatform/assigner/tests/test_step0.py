@@ -354,6 +354,22 @@ class TestStep0TipOutlet:
         )
         assert build_redispatch_tip(log, {"u-zhang": "张三"}) is None
 
+    def test_yaorenba_field_entry_tip(self):
+        """正常流程：挂在摇人吧但内容是现场问题 → 提醒入口选错，不说派单判错。"""
+        from app.services.redispatch_tip_service import (
+            YAORENBA_FIELD_ENTRY_TIP,
+            build_redispatch_tip,
+        )
+
+        log = SimpleNamespace(
+            assigned_id="u-zhang",
+            preferred_id=None,
+            pinyin_match=False,
+            name_collision=False,
+            profile={"yaorenba_field_entry": True, "missing": []},
+        )
+        assert build_redispatch_tip(log, {"u-zhang": "张三"}) == YAORENBA_FIELD_ENTRY_TIP
+
     def test_incomplete_tip(self):
         """正常流程：已派到指定人但画像不完整。"""
         from app.services.redispatch_tip_service import build_redispatch_tip

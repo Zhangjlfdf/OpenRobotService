@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import List
+from typing import List, Optional
 
 from ai.agents.AiDiagnosisPlatform.assigner.schemas import (
     COLLECTED_TO_TICKET,
@@ -139,10 +139,14 @@ def ticket_fields_block(ticket: TicketContext) -> str:
         extra.append(hint)
     extra_text = ("\n".join(extra) + "\n") if extra else ""
 
+    step_name = (getattr(ticket, "curr_step_name", None) or "").strip()
+    step_line = f"当前阶段：{step_name}\n" if step_name else ""
+
     return (
         "【工单】\n"
         f"工单类型：{ticket_type_key(ticket)}\n"
-        f"标题：{ticket.title or ''}\n"
+        + step_line
+        + f"标题：{ticket.title or ''}\n"
         f"描述：{ticket.problem_description or ''}\n"
         + extra_text
         + f"项目：{ticket.project_name or '无'}\n"
@@ -171,12 +175,26 @@ def ticket_type_person_guidance(ticket: TicketContext) -> str:
     )
 
 
-def feature_role_routing_guidance() -> str:
+# 需求单 task_steps 模板。前四步还在和产品对齐，后四步已经进入交付。
+_FEATURE_STAGE_SIDE = {
+    "需求澄清": "产品经理",
+    "评审": "产品经理",
+    "排期": "产品经理",
+    "设计": "产品经理",
+    "开发": "对口研发",
+    "测试": "对口研发",
+    "验收": "对口研发",
+    "发布": "对口研发",
+}
+
+
+def feature_role_routing_guidance(ticket: Optional[TicketContext] = None) -> str:
     """需求单专属：产品澄清 vs 已对齐可实施（prompt 判断，非关键词硬规则）。
 
     报障/缺陷/明显非需求时模型应忽略本段。Step3 画像与 Step6 仲裁共用。
+    提单记下的当前阶段只辅助，正文与重派备注仍然优先。
     """
-    return (
+    text = (
         "【仅需求单·产品/研发分流】（仅当判定本单是需求时适用；"
         "报障/缺陷/运维故障忽略本段，仍按现象对口研发）\n"
         "先理解正文与重派备注，判断需求处于哪个阶段，再选人——靠语义理解，"
@@ -189,6 +207,17 @@ def feature_role_routing_guidance() -> str:
         "落到具体模块实现 → 派对口研发/功能负责人，不要再甩回产品「重新讨论」。\n"
         "  3) 阶段仍模糊、名单里产品与研发都像能接 → 默认倾向产品经理做分流澄清。\n"
         "有 [倾向接单人] / 用户明确点名时，仍优先尊重用户选择（与公共铁律一致）。"
+    )
+    name = (getattr(ticket, "curr_step_name", None) or "").strip() if ticket else ""
+    side = _FEATURE_STAGE_SIDE.get(name)
+    if not side:
+        return text
+    return (
+        text
+        + f"\n提单人记下的当前阶段是「{name}」，辅助偏向{side}。"
+        "需求澄清、评审、排期、设计辅助偏向产品经理；"
+        "开发、测试、验收、发布辅助偏向对口研发。"
+        "阶段与正文相反时，仍以正文的 1) 2) 为准，不要只按阶段名硬派。"
     )
 
 
