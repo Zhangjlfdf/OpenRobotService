@@ -237,8 +237,12 @@ async def register_mode(req: ModeConfirmRequest,
         return {"code": 1, "message": f"车型 {model} 未建档或不在服务范围，请确认扫码信息"}
 
     domain = model_to_domain(vehicle.model)
+    # 车型存归一后的值（= 磁盘目录名大小写）：档案表 model 是录入串，可能小写，
+    # 而下游拿它拼检索 filter 的 sub_domain（pipeline._vehicle_mode_domains）、
+    # 渲染 prompt 里的「车型 xxx」，都要与 kb 入库同形才对得上。
+    model_key = model_to_subpath(vehicle.model)
     mode_info = {
-        "model": vehicle.model,
+        "model": model_key,
         "domain": domain,
         "vehicle_code": vehicle.vehicle_code,
         "project_name": vehicle.project_name or project_name,
@@ -261,7 +265,7 @@ async def register_mode(req: ModeConfirmRequest,
     await mm.save_memory(memory)
 
     logger.info(
-        f"[vehicle_mode] 定制模式注册: session={req.session_id} model={vehicle.model} "
+        f"[vehicle_mode] 定制模式注册: session={req.session_id} model={model_key} "
         f"vehicle={vehicle.vehicle_code} domain={domain} manual={len(manual_docs)}篇 "
         f"opening={len(opening['choices']) if opening else 0}类",
     )
@@ -269,7 +273,7 @@ async def register_mode(req: ModeConfirmRequest,
         "code": 0,
         "data": {
             "confirmed": True,
-            "model": vehicle.model,
+            "model": model_key,
             "domain": domain,
             "manual_docs": manual_docs,
             "opening": opening,

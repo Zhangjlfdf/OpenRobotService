@@ -98,6 +98,21 @@ async def test_domains_vehicle_filtered_company():
     assert cond.key == "sub_domain" and cond.match.value == "XQE/manual"
 
 
+async def test_domains_vehicle_model_case_normalized():
+    """档案表里的车型是小写录入串 → 过滤值仍须是大写 XQE/manual。
+
+    kb 侧 sub_domain 按磁盘目录名原样入库（kb_markdown 相对路径推断），目录名
+    是大写；这里不归一就拼出 xqe/manual，qdrant 命中 0（0930 实锤：company
+    域 0+0，开场类目除故障码外全部零召回，模型只能拿历史工单凑答案）。
+    """
+    p = AiDiagnosisPlatform()
+    p._memory_manager = MagicMockMem(_memory({"model": "xqe", "domain": "company"}))
+    domains = await p._vehicle_mode_domains("s-vm")
+    assert len(domains) == 1
+    cond = domains[0][2].must[0]
+    assert cond.key == "sub_domain" and cond.match.value == "XQE/manual"
+
+
 async def test_domains_none_on_memory_error():
     p = AiDiagnosisPlatform()
 

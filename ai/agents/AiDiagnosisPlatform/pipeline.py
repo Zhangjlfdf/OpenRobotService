@@ -3543,7 +3543,14 @@ class AiDiagnosisPlatform:
         if not model:
             return None
         from qdrant_client import models as qmodels
-        sub_domain = f"{model}/manual"
+
+        from ai.api.vehicle_mode import model_to_subpath
+        # 车型串归一到大写再拼 sub_domain：kb 侧 sub_domain 是按磁盘目录名原样
+        # 推出来的（kb_markdown 相对路径），目录名是大写，而档案表 model 存的是
+        # 录入串、可能小写。不归一 → 过滤成空集（0930 实锤：小写 xqe 拼出
+        # xqe/manual，qdrant 命中 0，company 域 0+0，开场类目除故障码外全部零
+        # 召回，模型只能拿历史工单凑答案）。
+        sub_domain = f"{model_to_subpath(model)}/manual"
         _filt = qmodels.Filter(must=[qmodels.FieldCondition(
             key="sub_domain", match=qmodels.MatchValue(value=sub_domain))])
         return [("company", 8, _filt)]

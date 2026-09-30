@@ -252,6 +252,24 @@ async def test_register_mode_idempotent_overwrite(vehicle_db, kb_tmp, mock_memor
     assert mem.metadata["vehicle_mode"]["vehicle_code"] == "XQE-9"
 
 
+async def test_register_mode_normalizes_model_case(vehicle_db, kb_tmp, mock_memory, monkeypatch):
+    """档案表里存小写录入串 xqe → 注册后 model 归一为 XQE（大写）。
+
+    归一不是洁癖：kb 目录名/入库 sub_domain 都是 XQE/manual，pipeline 按
+    model 拼检索 filter，小写会过滤出空集（0930 实锤：company 域 0+0）。
+    """
+    from ai.api import vehicle_mode as vm
+
+    _seed_vehicle(vehicle_db, model="xqe")
+    monkeypatch.setattr(vm, "_default_kb_root", lambda: kb_tmp)
+
+    resp = await vm.register_mode(_make_request(model="xqe"), memory_manager=mock_memory)
+    assert resp["code"] == 0
+    assert resp["data"]["model"] == "XQE"
+    mem = await mock_memory.get_memory("sess-xqe-1")
+    assert mem.metadata["vehicle_mode"]["model"] == "XQE"
+
+
 # ================================================================
 # 开场大方向引导题（0930：随机 5 + 故障码保底，服务端直出）
 # ================================================================
