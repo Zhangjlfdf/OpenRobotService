@@ -11,6 +11,7 @@ import dayjs from 'dayjs';
 import { useAuthStore } from '@/stores/auth';
 import { useWorkbenchStore, type VehicleContext } from '@/stores/workbench';
 import API_CONFIG from '@/config/api';
+import { toAppUrl } from '@/shared/utils/markdown';
 import { qaUploadStream, generateSessionId, trackSession, fetchWithAuth, qaPrepareTicket, qaConfirmTicket, qaClearDraft, qaGetTicketSteps, qaModeConfirm, type TicketDraft, type TicketStep } from '@/api/ai';
 import ProjectSelect from '@/shared/components/ProjectSelect';
 import UserSelect from '@/shared/components/UserSelect';
@@ -1572,7 +1573,15 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
       // 确认即注册（0930 调整）：本地生成 sessionId 立即绑模式——原「发送前注册」
       // 会让开场题晚到（用户首问之后才出）。confirm 按 session_id 幂等覆盖，
       // 发送前兜底重调无害；开场题在用户首问之前渲染。
-      const sid = ensureSessionId();
+      // sid 必须显式生成并回写、不能用 ensureSessionId()：同一 commit 内
+      // [conversationId] effect（新建空白会话）已排队 setSessionId('')（下一轮
+      // 渲染才生效），本 effect 闭包读到的仍是页面进入时自动恢复出的旧会话 sid。
+      // 拿旧 sid 注册 → 首问时 sessionId 已被清空、ensureSessionId 改生成新 sid，
+      // 注册与提问落在两个 session 上，车型模式对首问不可见（落默认三域检索、
+      // 老内容串味，0930 线上实锤）。同批两次 setSessionId 以最后一次为准，
+      // 发送路径复用它；全新 sid 同时保证不污染历史会话。
+      const sid = newSessionId();
+      setSessionId(sid);
       void registerVehicleModeNow(ctx, sid);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1623,16 +1632,22 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
     }
   }, []);
 
+  /** 生成并登记一个全新 session id（不读现有状态，供强制新建会话的场景使用） */
+  const newSessionId = useCallback((): string => {
+    const id = generateSessionId();
+    trackSession(id);
+    return id;
+  }, []);
+
   /** 确保 sessionId——新 AI 模块无需预先创建会话 */
   const ensureSessionId = useCallback((): string => {
     if (!sessionId) {
-      const id = generateSessionId();
+      const id = newSessionId();
       setSessionId(id);
-      trackSession(id);
       return id;
     }
     return sessionId;
-  }, [sessionId]);
+  }, [sessionId, newSessionId]);
 
   /** 确保 DB 会话存在：首条消息时创建（title 用占位「新会话」，第2轮由 AI 生成后同步），后续复用 convRef */
   const ensureConversation = async (sid: string, firstContent: string): Promise<number | null> => {
@@ -2294,10 +2309,15 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
     if (sopLoading) return;
     setSopLoading(true);
     try {
-      const r = await fetch(d.url);
+      // 服务端返回的是裸相对路径 /api/ai/media/...（不带部署环境前缀）。
+      // 页面挂在 /t/app、/p/app 下，直接 fetch 会打到网关未配置的裸 /api/ 上 404
+      // ——这正是「SOP 文档加载失败」的根因。补前缀交给统一出口 toAppUrl。
+      const r = await fetch(toAppUrl(d.url));
       const text = r.ok ? await r.text() : '';
       // 相对路径改写（0930）：md 里的图片/链接引用是相对同级 media/ 目录的
-      // （如 media/image109.png），补全为 KB 静态路由绝对路径，否则 404 图裂
+      // （如 media/image109.png），补全为 KB 静态路由路径，否则 404 图裂。
+      // 这里保持裸 /api/ 形态，环境前缀同样由 MarkdownRenderer 的
+      // appUrlTransform 在渲染时补（不重复补）。
       const base = d.url.slice(0, d.url.lastIndexOf('/') + 1);
       const fixed = text.replace(
         /(\]\(|src="|src=')((?!https?:|data:|#|\/)[^)"'\s]+)/g,

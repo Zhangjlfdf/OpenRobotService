@@ -50,11 +50,17 @@
 .share-doc__sheet-actions { display: flex; gap: 10px; margin-top: 16px; }
 .share-doc__sheet-actions .share-doc__btn { flex: 1; }
 
-/* —— 项目信息编辑抽屉（右侧侧滑；内容复用信息树编辑页的嵌入模式） —— */
+/* —— 项目信息编辑弹窗（PC 居中 / 移动端底部弹层；内容复用信息树编辑页的嵌入模式） —— */
 .info-drawer {
   display: flex; flex-direction: column;
-  width: 92vw; max-width: 560px; height: 100vh; max-height: 100vh;
+  width: 100vw; max-width: 560px; height: 88vh; max-height: 88vh;
+  border-radius: 16px 16px 0 0; overflow: hidden;
   background: var(--mac-bg, #f7f8f9);
+}
+/* PC：居中大弹窗（替代原右侧侧滑：桌面端不遮挡提单弹窗主体，点遮罩可关） */
+.info-drawer--center {
+  width: min(880px, 92vw); height: min(86vh, 760px);
+  border-radius: 14px;
 }
 .info-drawer__head {
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
