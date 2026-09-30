@@ -169,7 +169,9 @@ describe('问题共享文档设置（提单弹窗内）', () => {
     renderSetting();
     await screen.findByRole('button', { name: /车端软件/ });
 
-    fireEvent.click(screen.getByRole('button', { name: '暂时跳过' }));
+    // 提示条依赖「拿到信息树后默认全选」的第二次渲染（标签先出现、按钮后出现），
+    // 这里必须用 findBy 等按钮真正挂上，否则 CI 慢机器上会偶发找不到
+    fireEvent.click(await screen.findByRole('button', { name: '暂时跳过' }));
     await waitFor(() => expect(screen.queryByText(/当前问题缺少有效信息/)).toBeNull());
   });
 
