@@ -124,21 +124,29 @@ async def _ensure_vehicle_table() -> None:
 async def _lookup_vehicle(model: str, project_name: str, vehicle_code: str):
     """查车辆档案。返回 Vehicle 行或 None（调用方报错拦住）。
 
-    匹配规则：
-      1. vehicle_code 非空 → 按唯一车号精确匹配（最可信）
-      2. 否则 → 车型 + 项目名匹配（初版 URL 上游只带这三个字段）
+    匹配规则（0930 放宽：车型是白名单键，项目名/客户名仅展示不参与匹配——
+    车辆档案与二维码录入信息是两套数据，靠项目名字符串相等关联太脆，实锤
+    卡「未建档」）：
+      1. model 大小写归一必匹配（xqe/XQE 等价；知识库目录也按 upper 归一）
+      2. vehicle_code 非空 → 车号大小写归一精确匹配
     只认 active 档案；多条命中取第一条（初版手工建档保证不重复）。
     """
     from ai.core.database import Vehicle, engine
+    from sqlalchemy import func
     from sqlalchemy.orm import Session as DBSession
+
+    m = (model or "").strip().upper()
+    code = (vehicle_code or "").strip().upper()
+    if not m:
+        return None
 
     def _query():
         with DBSession(engine) as s:
-            q = s.query(Vehicle).filter(Vehicle.status == "active")
-            if vehicle_code:
-                q = q.filter(Vehicle.vehicle_code == vehicle_code)
-            else:
-                q = q.filter(Vehicle.model == model, Vehicle.project_name == project_name)
+            q = s.query(Vehicle).filter(
+                Vehicle.status == "active",
+                func.upper(Vehicle.model) == m)
+            if code:
+                q = q.filter(func.upper(Vehicle.vehicle_code) == code)
             return q.first()
 
     return await asyncio.to_thread(_query)

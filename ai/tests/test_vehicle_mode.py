@@ -152,8 +152,20 @@ async def test_lookup_by_model_and_project(vehicle_db):
     _seed_vehicle(vehicle_db, code="XQE-122")
     v = await _lookup_vehicle("XQE", "试点项目", "")
     assert v is not None and v.project_name == "试点项目"
-    # 项目名不匹配 → 拦（严格校验，初版不宽容匹配）
-    assert await _lookup_vehicle("XQE", "别的项目", "") is None
+    # 0930 放宽：项目名仅展示不参与匹配（车型是白名单键）——项目名不一致也放行
+    v2 = await _lookup_vehicle("XQE", "别的项目", "")
+    assert v2 is not None and v2.vehicle_code == "XQE-122"
+    # 大小写归一：小写 xqe 等价 XQE（用户实锤：录入小写被「未建档」拦）
+    assert await _lookup_vehicle("xqe", "", "") is not None
+
+
+async def test_lookup_case_insensitive_code(vehicle_db):
+    from ai.api.vehicle_mode import _lookup_vehicle
+
+    _seed_vehicle(vehicle_db, code="XQE-122")
+    # 车号大小写归一
+    v = await _lookup_vehicle("XQE", "", "xqe-122")
+    assert v is not None and v.vehicle_code == "XQE-122"
 
 
 async def test_lookup_ignores_disabled(vehicle_db):
