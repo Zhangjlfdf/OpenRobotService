@@ -241,7 +241,7 @@ export default function UspEnvPanel() {
         </div>
       </div>
       <p className="dispatch-dev__hint">
-        试验期配置写在本机 OpenRobotService_Data/usp_envs.json（不入业务库）。
+        配置保存在数据库。SSH 密码只留在服务端，页面只显示是否已填写。
         SSH 连宿主机；若 USP 在 Docker 里，填写「Docker 容器名」（如 usp_app），拉日志会自动 docker exec。
         需要 sudo docker 时勾选「docker 使用 sudo」（须已配置 NOPASSWD）。
       </p>

@@ -1,19 +1,25 @@
 """可达 USP 内网环境：开发者模式 CRUD + 讨论区选项 + AI 内取 SSH 配置。
 
-试验期：配置落在 OpenRobotService_Data/usp_envs.json，不写数据库表。
+配置写在 usp_env 表。SSH 密码以 AES-GCM 密文入库，管理接口不返回明文。
 """
 from __future__ import annotations
 
-import json
-import threading
+import base64
+import hashlib
+import secrets
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from Crypto.Cipher import AES
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
 
+from app.core.config import settings
+from app.core.db import SessionLocal, engine
 from app.integrations.api import verify_sync_api_key
+from app.models.usp_env import UspEnv
 from app.modules.admin.api.auth import require_permission
 from app.modules.admin.api.dispatch_dev import PERM, ensure_dispatch_dev_permission
 from app.modules.admin.schemas.response import DataResponse
@@ -21,10 +27,42 @@ from app.modules.admin.schemas.response import DataResponse
 admin_router = APIRouter(prefix="/dispatch-dev/usp-envs", tags=["admin-dispatch-dev-usp-envs"])
 public_router = APIRouter(prefix="/usp-envs", tags=["usp-envs"])
 
-# usp_envs.py → api/admin/modules/app/backend/OpenRobotService → sibling OpenRobotService_Data
-_REPO_ROOT = Path(__file__).resolve().parents[5]
-_STORE_PATH = (_REPO_ROOT.parent / "OpenRobotService_Data" / "usp_envs.json").resolve()
-_LOCK = threading.RLock()
+_table_ready = False
+_ENC_PREFIX = "enc1:"
+
+
+def _aes_key() -> bytes:
+    secret = (settings.SECRET_KEY or "").encode("utf-8")
+    if len(secret) < 16:
+        raise HTTPException(status_code=500, detail="服务未配置密钥，不能保存 SSH 密码")
+    return hashlib.sha256(b"usp-env-ssh-v1\0" + secret).digest()
+
+
+def _encrypt_secret(plain: Optional[str]) -> Optional[str]:
+    text = (plain or "").strip()
+    if not text:
+        return None
+    nonce = secrets.token_bytes(12)
+    cipher = AES.new(_aes_key(), AES.MODE_GCM, nonce=nonce)
+    ciphertext, tag = cipher.encrypt_and_digest(text.encode("utf-8"))
+    blob = base64.urlsafe_b64encode(nonce + ciphertext + tag).decode("ascii")
+    return _ENC_PREFIX + blob
+
+
+def _decrypt_secret(stored: Optional[str]) -> str:
+    if not stored:
+        return ""
+    if not str(stored).startswith(_ENC_PREFIX):
+        raise HTTPException(status_code=500, detail="SSH 密码无法解密，请在可达环境里重新填写")
+    try:
+        raw = base64.urlsafe_b64decode(str(stored)[len(_ENC_PREFIX):].encode("ascii"))
+        nonce, ciphertext, tag = raw[:12], raw[12:-16], raw[-16:]
+        cipher = AES.new(_aes_key(), AES.MODE_GCM, nonce=nonce)
+        return cipher.decrypt_and_verify(ciphertext, tag).decode("utf-8")
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=500, detail="SSH 密码无法解密，请在可达环境里重新填写")
 
 
 class UspEnvCreate(BaseModel):
@@ -43,7 +81,6 @@ class UspEnvCreate(BaseModel):
     export_script: str = Field(..., min_length=1, max_length=512)
     export_workdir: str = Field(..., min_length=1, max_length=512)
     log_interval_min: int = Field(15, ge=1, le=1440)
-    # 选填：SSH 进宿主机后，经 docker exec 在容器内跑脚本
     docker_container: Optional[str] = Field(None, max_length=128, description="Docker 容器名，如 usp_app")
     docker_sudo: bool = Field(False, description="宿主机执行 docker 是否加 sudo（需 NOPASSWD）")
     capabilities: Optional[List[str]] = None
@@ -71,8 +108,14 @@ class UspEnvUpdate(BaseModel):
     clear_password: bool = False
 
 
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _fmt_dt(value: Optional[datetime]) -> Optional[str]:
+    if value is None:
+        return None
+    return value.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _norm_auth(v: Optional[str]) -> str:
@@ -89,102 +132,84 @@ def _default_caps(caps: Optional[List[str]]) -> List[str]:
     return out or ["ssh_export_logs"]
 
 
-def _empty_store() -> Dict[str, Any]:
-    return {"next_id": 1, "items": []}
+def _blank(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
 
 
-def _read_store() -> Dict[str, Any]:
-    if not _STORE_PATH.is_file():
-        return _empty_store()
-    try:
-        raw = json.loads(_STORE_PATH.read_text(encoding="utf-8"))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"读取 usp_envs.json 失败: {e}") from e
-    if not isinstance(raw, dict):
-        return _empty_store()
-    items = raw.get("items")
-    if not isinstance(items, list):
-        items = []
-    next_id = raw.get("next_id")
-    try:
-        next_id = int(next_id)
-    except (TypeError, ValueError):
-        next_id = 1
-    if next_id < 1:
-        next_id = 1
-    return {"next_id": next_id, "items": [x for x in items if isinstance(x, dict)]}
+def _ensure_table() -> None:
+    global _table_ready
+    if _table_ready:
+        return
+    UspEnv.__table__.create(bind=engine, checkfirst=True)
+    _table_ready = True
 
 
-def _write_store(store: Dict[str, Any]) -> None:
-    _STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    tmp = _STORE_PATH.with_suffix(".json.tmp")
-    payload = {
-        "next_id": int(store.get("next_id") or 1),
-        "items": list(store.get("items") or []),
-        "updated_at": _now_iso(),
-    }
-    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(_STORE_PATH)
+def _open() -> Session:
+    _ensure_table()
+    return SessionLocal()
 
 
-def _find(store: Dict[str, Any], env_id: int) -> Optional[Dict[str, Any]]:
-    for row in store.get("items") or []:
-        if int(row.get("id") or 0) == int(env_id):
-            return row
-    return None
+def _caps(row: UspEnv) -> List[str]:
+    raw = row.capabilities
+    if isinstance(raw, list):
+        return [str(c) for c in raw if str(c).strip()]
+    return []
 
 
-def _public_dict(row: Dict[str, Any]) -> Dict[str, Any]:
+def _public_dict(row: UspEnv) -> Dict[str, Any]:
     return {
-        "id": int(row["id"]),
-        "name": row.get("name") or "",
-        "code": row.get("code"),
-        "enabled": bool(row.get("enabled", True)),
-        "project_id": row.get("project_id"),
-        "capabilities": list(row.get("capabilities") or []),
-        "notes": row.get("notes"),
+        "id": int(row.id),
+        "name": row.name or "",
+        "code": row.code,
+        "enabled": bool(row.enabled),
+        "project_id": row.project_id,
+        "capabilities": _caps(row),
+        "notes": row.notes,
     }
 
 
-def _admin_dict(row: Dict[str, Any]) -> Dict[str, Any]:
-    d = _public_dict(row)
-    d.update({
-        "ssh_host": row.get("ssh_host") or "",
-        "ssh_port": int(row.get("ssh_port") or 22),
-        "ssh_user": row.get("ssh_user") or "",
-        "ssh_auth_type": row.get("ssh_auth_type") or "password",
-        "ssh_private_key_path": row.get("ssh_private_key_path"),
-        "ssh_password_set": bool(row.get("ssh_password")),
-        "ssh_connect_timeout_s": float(row.get("ssh_connect_timeout_s") or 8.0),
-        "export_script": row.get("export_script") or "",
-        "export_workdir": row.get("export_workdir") or "",
-        "log_interval_min": int(row.get("log_interval_min") or 15),
-        "docker_container": row.get("docker_container") or "",
-        "docker_sudo": bool(row.get("docker_sudo", False)),
-        "created_at": row.get("created_at"),
-        "updated_at": row.get("updated_at"),
+def _admin_dict(row: UspEnv) -> Dict[str, Any]:
+    data = _public_dict(row)
+    data.update({
+        "ssh_host": row.ssh_host or "",
+        "ssh_port": int(row.ssh_port or 22),
+        "ssh_user": row.ssh_user or "",
+        "ssh_auth_type": row.ssh_auth_type or "password",
+        "ssh_private_key_path": row.ssh_private_key_path,
+        "ssh_password_set": bool(row.ssh_password),
+        "ssh_connect_timeout_s": float(row.ssh_connect_timeout_s or 8.0),
+        "export_script": row.export_script or "",
+        "export_workdir": row.export_workdir or "",
+        "log_interval_min": int(row.log_interval_min or 15),
+        "docker_container": row.docker_container or "",
+        "docker_sudo": bool(row.docker_sudo),
+        "created_at": _fmt_dt(row.created_at),
+        "updated_at": _fmt_dt(row.updated_at),
     })
-    return d
+    return data
 
 
-def _ssh_dict(row: Dict[str, Any]) -> Dict[str, Any]:
+def _ssh_dict(row: UspEnv) -> Dict[str, Any]:
     return {
-        "id": int(row["id"]),
-        "name": row.get("name") or "",
-        "enabled": bool(row.get("enabled", True)),
-        "capabilities": list(row.get("capabilities") or []),
-        "ssh_host": row.get("ssh_host") or "",
-        "ssh_port": int(row.get("ssh_port") or 22),
-        "ssh_user": row.get("ssh_user") or "",
-        "ssh_auth_type": row.get("ssh_auth_type") or "password",
-        "ssh_private_key_path": row.get("ssh_private_key_path") or "",
-        "ssh_password": row.get("ssh_password") or "",
-        "ssh_connect_timeout_s": float(row.get("ssh_connect_timeout_s") or 8.0),
-        "export_script": row.get("export_script") or "",
-        "export_workdir": row.get("export_workdir") or "",
-        "log_interval_min": int(row.get("log_interval_min") or 15),
-        "docker_container": (row.get("docker_container") or "").strip(),
-        "docker_sudo": bool(row.get("docker_sudo", False)),
+        "id": int(row.id),
+        "name": row.name or "",
+        "enabled": bool(row.enabled),
+        "capabilities": _caps(row),
+        "ssh_host": row.ssh_host or "",
+        "ssh_port": int(row.ssh_port or 22),
+        "ssh_user": row.ssh_user or "",
+        "ssh_auth_type": row.ssh_auth_type or "password",
+        "ssh_private_key_path": row.ssh_private_key_path or "",
+        "ssh_password": _decrypt_secret(row.ssh_password),
+        "ssh_connect_timeout_s": float(row.ssh_connect_timeout_s or 8.0),
+        "export_script": row.export_script or "",
+        "export_workdir": row.export_workdir or "",
+        "log_interval_min": int(row.log_interval_min or 15),
+        "docker_container": (row.docker_container or "").strip(),
+        "docker_sudo": bool(row.docker_sudo),
     }
 
 
@@ -197,6 +222,23 @@ def _validate_ssh_ready(auth: str, key_path: Optional[str], password: Optional[s
             raise HTTPException(status_code=422, detail="password 认证需要 ssh_password")
 
 
+def _code_taken(db: Session, code: str, except_id: Optional[int] = None) -> bool:
+    query = db.query(UspEnv.id).filter(UspEnv.code == code)
+    if except_id is not None:
+        query = query.filter(UspEnv.id != except_id)
+    return query.first() is not None
+
+
+def _commit(db: Session, code: Optional[str]) -> None:
+    try:
+        db.commit()
+    except IntegrityError as e:
+        db.rollback()
+        if code:
+            raise HTTPException(status_code=409, detail=f"code 已存在: {code}") from e
+        raise HTTPException(status_code=409, detail="环境保存冲突") from e
+
+
 # ── 开发者模式 CRUD ──
 
 @admin_router.get("", response_model=DataResponse, summary="USP 环境列表")
@@ -207,16 +249,18 @@ async def list_envs(
 ):
     ensure_dispatch_dev_permission()
     _ = current_user
-    with _LOCK:
-        store = _read_store()
-        rows = list(store.get("items") or [])
-    if enabled is not None:
-        rows = [r for r in rows if bool(r.get("enabled", True)) is bool(enabled)]
-    if project_id:
-        pid = project_id.strip()
-        rows = [r for r in rows if (r.get("project_id") or "") == pid]
-    rows.sort(key=lambda r: int(r.get("id") or 0), reverse=True)
-    return DataResponse(code=0, message="success", data=[_admin_dict(r) for r in rows[:200]])
+    db = _open()
+    try:
+        query = db.query(UspEnv)
+        if enabled is not None:
+            query = query.filter(UspEnv.enabled == bool(enabled))
+        if project_id and project_id.strip():
+            query = query.filter(UspEnv.project_id == project_id.strip())
+        rows = query.order_by(UspEnv.id.desc()).limit(200).all()
+        data = [_admin_dict(row) for row in rows]
+    finally:
+        db.close()
+    return DataResponse(code=0, message="success", data=data)
 
 
 @admin_router.post("", response_model=DataResponse, summary="新建 USP 环境")
@@ -228,42 +272,41 @@ async def create_env(
     _ = current_user
     auth = _norm_auth(body.ssh_auth_type)
     _validate_ssh_ready(auth, body.ssh_private_key_path, body.ssh_password, require_secret=True)
-    code = (body.code or "").strip() or None
-    now = _now_iso()
-    with _LOCK:
-        store = _read_store()
-        items = list(store.get("items") or [])
-        if code and any((r.get("code") or "") == code for r in items):
+    code = _blank(body.code)
+    now = _utcnow()
+    db = _open()
+    try:
+        if code and _code_taken(db, code):
             raise HTTPException(status_code=409, detail=f"code 已存在: {code}")
-        env_id = int(store.get("next_id") or 1)
-        row = {
-            "id": env_id,
-            "name": body.name.strip(),
-            "code": code,
-            "enabled": bool(body.enabled),
-            "notes": (body.notes or "").strip() or None,
-            "project_id": (body.project_id or "").strip() or None,
-            "ssh_host": body.ssh_host.strip(),
-            "ssh_port": int(body.ssh_port),
-            "ssh_user": body.ssh_user.strip(),
-            "ssh_auth_type": auth,
-            "ssh_private_key_path": (body.ssh_private_key_path or "").strip() or None,
-            "ssh_password": (body.ssh_password or "").strip() or None,
-            "ssh_connect_timeout_s": float(body.ssh_connect_timeout_s),
-            "export_script": body.export_script.strip(),
-            "export_workdir": body.export_workdir.strip(),
-            "log_interval_min": int(body.log_interval_min),
-            "docker_container": (body.docker_container or "").strip() or None,
-            "docker_sudo": bool(body.docker_sudo),
-            "capabilities": _default_caps(body.capabilities),
-            "created_at": now,
-            "updated_at": now,
-        }
-        items.append(row)
-        store["items"] = items
-        store["next_id"] = env_id + 1
-        _write_store(store)
-    return DataResponse(code=0, message="success", data=_admin_dict(row))
+        row = UspEnv(
+            name=body.name.strip(),
+            code=code,
+            enabled=bool(body.enabled),
+            notes=_blank(body.notes),
+            project_id=_blank(body.project_id),
+            ssh_host=body.ssh_host.strip(),
+            ssh_port=int(body.ssh_port),
+            ssh_user=body.ssh_user.strip(),
+            ssh_auth_type=auth,
+            ssh_private_key_path=_blank(body.ssh_private_key_path),
+            ssh_password=_encrypt_secret(body.ssh_password),
+            ssh_connect_timeout_s=float(body.ssh_connect_timeout_s),
+            export_script=body.export_script.strip(),
+            export_workdir=body.export_workdir.strip(),
+            log_interval_min=int(body.log_interval_min),
+            docker_container=_blank(body.docker_container),
+            docker_sudo=bool(body.docker_sudo),
+            capabilities=_default_caps(body.capabilities),
+            created_at=now,
+            updated_at=now,
+        )
+        db.add(row)
+        _commit(db, code)
+        db.refresh(row)
+        data = _admin_dict(row)
+    finally:
+        db.close()
+    return DataResponse(code=0, message="success", data=data)
 
 
 @admin_router.get("/{env_id}", response_model=DataResponse, summary="USP 环境详情")
@@ -273,11 +316,15 @@ async def get_env(
 ):
     ensure_dispatch_dev_permission()
     _ = current_user
-    with _LOCK:
-        row = _find(_read_store(), env_id)
-    if not row:
-        raise HTTPException(status_code=404, detail="环境不存在")
-    return DataResponse(code=0, message="success", data=_admin_dict(row))
+    db = _open()
+    try:
+        row = db.get(UspEnv, env_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="环境不存在")
+        data = _admin_dict(row)
+    finally:
+        db.close()
+    return DataResponse(code=0, message="success", data=data)
 
 
 @admin_router.put("/{env_id}", response_model=DataResponse, summary="更新 USP 环境")
@@ -288,50 +335,50 @@ async def update_env(
 ):
     ensure_dispatch_dev_permission()
     _ = current_user
-    data = body.model_dump(exclude_unset=True)
-    clear_password = bool(data.pop("clear_password", False))
-    if "ssh_auth_type" in data and data["ssh_auth_type"] is not None:
-        data["ssh_auth_type"] = _norm_auth(data["ssh_auth_type"])
-    with _LOCK:
-        store = _read_store()
-        row = _find(store, env_id)
+    payload = body.model_dump(exclude_unset=True)
+    clear_password = bool(payload.pop("clear_password", False))
+    if "ssh_auth_type" in payload and payload["ssh_auth_type"] is not None:
+        payload["ssh_auth_type"] = _norm_auth(payload["ssh_auth_type"])
+    db = _open()
+    try:
+        row = db.get(UspEnv, env_id)
         if not row:
             raise HTTPException(status_code=404, detail="环境不存在")
-        if "code" in data:
-            code = (data["code"] or "").strip() or None
-            if code and any(
-                int(r.get("id") or 0) != env_id and (r.get("code") or "") == code
-                for r in (store.get("items") or [])
-            ):
+        if "code" in payload:
+            code = _blank(payload["code"])
+            if code and _code_taken(db, code, except_id=env_id):
                 raise HTTPException(status_code=409, detail=f"code 已存在: {code}")
-            data["code"] = code
-        for k in ("name", "notes", "project_id", "ssh_host", "ssh_user",
-                  "ssh_private_key_path", "export_script", "export_workdir", "docker_container"):
-            if k in data and isinstance(data[k], str):
-                if k in ("notes", "project_id", "ssh_private_key_path", "docker_container"):
-                    data[k] = data[k].strip() or None
-                else:
-                    data[k] = data[k].strip()
-        if "capabilities" in data:
-            data["capabilities"] = _default_caps(data["capabilities"])
+            row.code = code
+        for key in ("name", "ssh_host", "ssh_user", "export_script", "export_workdir"):
+            if key in payload and isinstance(payload[key], str):
+                setattr(row, key, payload[key].strip())
+        for key in ("notes", "project_id", "ssh_private_key_path", "docker_container"):
+            if key in payload:
+                value = payload[key]
+                setattr(row, key, _blank(value) if isinstance(value, str) or value is None else value)
+        if "capabilities" in payload:
+            row.capabilities = _default_caps(payload["capabilities"])
+        for key in ("enabled", "ssh_port", "ssh_auth_type", "ssh_connect_timeout_s", "log_interval_min", "docker_sudo"):
+            if key in payload and payload[key] is not None:
+                setattr(row, key, payload[key])
         if clear_password:
-            data["ssh_password"] = None
-        elif "ssh_password" in data:
-            pwd = data.get("ssh_password")
-            if pwd is None or str(pwd).strip() == "":
-                data.pop("ssh_password", None)
-            else:
-                data["ssh_password"] = str(pwd).strip()
-        row.update(data)
-        row["updated_at"] = _now_iso()
-        auth = row.get("ssh_auth_type") or "password"
-        if auth == "key" and not (row.get("ssh_private_key_path") or "").strip():
+            row.ssh_password = None
+        elif "ssh_password" in payload:
+            pwd = payload.get("ssh_password")
+            if pwd is not None and str(pwd).strip():
+                row.ssh_password = _encrypt_secret(str(pwd))
+        row.updated_at = _utcnow()
+        auth = row.ssh_auth_type or "password"
+        if auth == "key" and not (row.ssh_private_key_path or "").strip():
             raise HTTPException(status_code=422, detail="key 认证需要 ssh_private_key_path")
-        if auth == "password" and not (row.get("ssh_password") or "").strip():
+        if auth == "password" and not (row.ssh_password or "").strip():
             raise HTTPException(status_code=422, detail="password 认证需要 ssh_password")
-        _write_store(store)
-        out = _admin_dict(row)
-    return DataResponse(code=0, message="success", data=out)
+        _commit(db, row.code)
+        db.refresh(row)
+        data = _admin_dict(row)
+    finally:
+        db.close()
+    return DataResponse(code=0, message="success", data=data)
 
 
 @admin_router.delete("/{env_id}", response_model=DataResponse, summary="删除 USP 环境")
@@ -341,14 +388,15 @@ async def delete_env(
 ):
     ensure_dispatch_dev_permission()
     _ = current_user
-    with _LOCK:
-        store = _read_store()
-        items = list(store.get("items") or [])
-        new_items = [r for r in items if int(r.get("id") or 0) != int(env_id)]
-        if len(new_items) == len(items):
+    db = _open()
+    try:
+        row = db.get(UspEnv, env_id)
+        if not row:
             raise HTTPException(status_code=404, detail="环境不存在")
-        store["items"] = new_items
-        _write_store(store)
+        db.delete(row)
+        db.commit()
+    finally:
+        db.close()
     return DataResponse(code=0, message="success", data={"id": env_id})
 
 
@@ -360,11 +408,14 @@ async def test_ssh(
     """开发者模式：试连 SSH 并执行 echo，不跑 export_logs。"""
     ensure_dispatch_dev_permission()
     _ = current_user
-    with _LOCK:
-        row = _find(_read_store(), env_id)
-    if not row:
-        raise HTTPException(status_code=404, detail="环境不存在")
-    cfg = _ssh_dict(row)
+    db = _open()
+    try:
+        row = db.get(UspEnv, env_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="环境不存在")
+        cfg = _ssh_dict(row)
+    finally:
+        db.close()
 
     try:
         import paramiko
@@ -447,20 +498,22 @@ async def list_options(
     """只返回已启用环境的公开字段；与开发者模式同一权限（试验期）。"""
     ensure_dispatch_dev_permission()
     _ = current_user
-    with _LOCK:
-        rows = list(_read_store().get("items") or [])
-    rows = [r for r in rows if bool(r.get("enabled", True))]
-    if project_id and project_id.strip():
-        pid = project_id.strip()
-        rows = [r for r in rows if not r.get("project_id") or r.get("project_id") == pid]
-    rows.sort(key=lambda r: (r.get("name") or "").lower())
-    out = []
-    for r in rows[:200]:
-        caps = list(r.get("capabilities") or [])
-        if "ssh_export_logs" not in caps:
-            continue
-        out.append(_public_dict(r))
-    return DataResponse(code=0, message="success", data=out)
+    db = _open()
+    try:
+        query = db.query(UspEnv).filter(UspEnv.enabled.is_(True))
+        if project_id and project_id.strip():
+            pid = project_id.strip()
+            query = query.filter((UspEnv.project_id.is_(None)) | (UspEnv.project_id == pid))
+        rows = query.order_by(UspEnv.name.asc()).limit(200).all()
+        data = []
+        for row in rows:
+            caps = _caps(row)
+            if "ssh_export_logs" not in caps:
+                continue
+            data.append(_public_dict(row))
+    finally:
+        db.close()
+    return DataResponse(code=0, message="success", data=data)
 
 
 # ── AI 内取 SSH 配置（X-API-Key）──
@@ -470,13 +523,17 @@ async def get_ssh_config(
     env_id: int,
     _: str = Depends(verify_sync_api_key),
 ):
-    with _LOCK:
-        row = _find(_read_store(), env_id)
-    if not row:
-        raise HTTPException(status_code=404, detail="环境不存在")
-    if not bool(row.get("enabled", True)):
-        raise HTTPException(status_code=409, detail="环境已停用")
-    caps = list(row.get("capabilities") or [])
-    if "ssh_export_logs" not in caps:
-        raise HTTPException(status_code=409, detail="未开通 ssh_export_logs")
-    return DataResponse(code=0, message="success", data=_ssh_dict(row))
+    db = _open()
+    try:
+        row = db.get(UspEnv, env_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="环境不存在")
+        if not bool(row.enabled):
+            raise HTTPException(status_code=409, detail="环境已停用")
+        caps = _caps(row)
+        if "ssh_export_logs" not in caps:
+            raise HTTPException(status_code=409, detail="未开通 ssh_export_logs")
+        data = _ssh_dict(row)
+    finally:
+        db.close()
+    return DataResponse(code=0, message="success", data=data)

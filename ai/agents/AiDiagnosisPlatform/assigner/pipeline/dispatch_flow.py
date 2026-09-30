@@ -1162,7 +1162,7 @@ class DispatchFlow:
         try:
             from ai.core import get_llm_client
             llm = await get_llm_client()
-            response = await llm.complete(prompt, max_tokens=120, temperature=0.1)
+            response = await llm.complete(prompt, max_tokens=250, temperature=0.1)
         except Exception as e:
             logger.warning(f"[派单:{ticket.id}] Step0 LLM 识别失败: {e}")
             return None, None
@@ -1407,13 +1407,12 @@ class DispatchFlow:
         if len(pool) == 1:
             return pool[0], "", False
 
-        cand_list = "、".join(llm_person_label(eng=e) for e in pool)
         try:
             from ai.core import get_llm_client
             llm = await get_llm_client()
             from ai.agents.AiDiagnosisPlatform.assigner.prompts.step0 import build_collision
-            prompt = build_collision(ticket, cand_list)
-            resp = await llm.complete(prompt, max_tokens=200, temperature=0.2)
+            prompt = build_collision(ticket, pool)
+            resp = await llm.complete(prompt, max_tokens=200, temperature=0.1)
             data = self._loads_llm_json(resp)
             if data:
                 # prompt 约定无法区分时输出 can_determine:false

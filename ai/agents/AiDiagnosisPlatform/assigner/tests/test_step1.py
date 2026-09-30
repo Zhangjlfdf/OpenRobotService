@@ -51,7 +51,11 @@ def test_r2_and_audit_share_ticket_fields():
     assert "车端硬件" in r2 and "机器人事业部" in r2
     assert "车端软件" in r2 and "智能移动研究院" in r2
     assert "调度USP" in r2 and "智能规划研究院" in r2
+    assert "【多义现象·证据优先级】" in r2
+    assert "NO_SOLUTION" in r2
+    assert "TRAFFIC_LOCK" in r2
     assert "【产品归属】" in audit
+    assert "【多义现象·证据优先级】" in audit
     assert "放在一起对照" in audit
     assert "不要先单独认层再判部门" in audit
     assert "报障(problem)、缺陷(bug)：看【故障现象】" in audit
@@ -275,6 +279,61 @@ def test_audit_correct_requires_070():
     assert result.signals.get("audit_redone") is True
     assert result.primary_dept == "机器人事业部"
     assert result.mode == "hard_filter"
+
+
+def test_path_planning_status_keeps_planning_dept():
+    """路径规划中不被审查改到车端，描述里的 AI 排查方向不算部门证据。"""
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    from ai.agents.AiDiagnosisPlatform.assigner.filtering.dept_router import DeptRouter
+    from ai.agents.AiDiagnosisPlatform.assigner.filtering.signals.dept_audit_signal import (
+        DeptAuditResult,
+    )
+    from ai.agents.AiDiagnosisPlatform.assigner.schemas import EngineerProfile
+
+    cfg = SimpleNamespace(
+        departments=[{"name": "智能规划研究院"}, {"name": "智能移动研究院"}],
+        departments_without_profile=[],
+        dept_profiles_missing=False,
+        dept_audit_enabled=True,
+        department_routing={
+            "thresholds": {
+                "hard_filter_score": 0.80,
+                "hard_mid_score": 0.70,
+                "hard_filter_margin": 0.20,
+                "soft_prior_score": 0.55,
+            },
+            "fusion": {},
+            "audit": {"min_confidence": 0.7},
+        },
+    )
+    router = DeptRouter(config=cfg)
+    router._llm.classify = AsyncMock(return_value={"智能规划研究院": 0.85, "智能移动研究院": 0.40})
+    router._history.aggregate = AsyncMock(return_value={})
+    router._audit.audit = AsyncMock(return_value=DeptAuditResult(
+        ok=False,
+        correct_dept="智能移动研究院",
+        confidence=0.72,
+        reason="AI排查方向说是单车定位问题",
+    ))
+    ticket = _ticket()
+    ticket.ticket_type = "problem"
+    ticket.title = "单车取货后下一任务卡路径规划中"
+    ticket.problem_description = (
+        "XNA车辆取货完成后，下一个任务一直卡在「路径规划中」。"
+        "AI排查方向（供接单工程师参考）：重点排查该车定位丢失。"
+    )
+    engs = [
+        EngineerProfile(id="u-plan", name="规划", department="智能规划研究院"),
+        EngineerProfile(id="u-veh", name="车端", department="智能移动研究院"),
+    ]
+    cands, result = asyncio.run(router.route(ticket, engs))
+    assert result.primary_dept == "智能规划研究院"
+    assert result.signals.get("path_planning_hold") is True
+    assert result.signals.get("audit_corrected") is not True
+    assert result.mode == "hard_filter"
+    assert {e.id for e in cands} == {"u-plan"}
 
 
 def test_reload_config_clears_history_sync():
