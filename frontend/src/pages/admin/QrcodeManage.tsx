@@ -18,17 +18,16 @@ type FilterType = '' | QrcodeType;
 const PAGE_SIZE = 20;
 const TICKET_IMAGE_BASE = 'https://mp.weixin.qq.com/cgi-bin/showqrcode?ticket=';
 
-const STATUS_ORDER: QrcodeStatus[] = ['init', 'entering', 'confirming', 'published', 'deprecated'];
+const STATUS_ORDER: QrcodeStatus[] = ['init', 'entering', 'published', 'deprecated'];
 const TYPE_LABEL: Record<QrcodeType, string> = { temporary: '临时', permanent: '永久' };
 
 /** 状态流转：允许谁从哪来 */
 const TRANSITIONS: Record<QrcodeStatus, Array<{ action: string; target: QrcodeStatus; label: string; needTicket?: boolean }>> = {
   init:       [{ action: 'generate',  target: 'entering',   label: '生成 ticket' }],
   entering:   [
-               { action: 'confirm',   target: 'confirming', label: '确认' },
-               { action: 'regenerate', target: 'entering', label: '重新生成', needTicket: true },
+               { action: 'publish',    target: 'published',  label: '发布' },
+               { action: 'regenerate', target: 'entering',   label: '重新生成', needTicket: true },
               ],
-  confirming: [{ action: 'publish',   target: 'published', label: '发布' }],
   published:  [{ action: 'deprecate', target: 'deprecated', label: '弃用' }],
   deprecated: [],
 };
@@ -94,8 +93,7 @@ export default function QrcodeManage() {
       setLoading(true);
       const q = await qrcodeTransition(id, action);
       setItems((prev) => prev.map((x) => (x.id === q.id ? q : x)));
-      // 结果按后端返回的状态回显：录入信息行点「确认」直接落 published（确认即发布），
-      // 普通码行落 confirming；标签本身就带「已」，不要再拼一个
+      // 结果按后端返回的状态回显：标签本身就带「已」，不要再拼一个
       showToast(QRCODE_STATUS_LABELS[q.status as QrcodeStatus]?.label || `已${action}`);
     } catch (e: any) { showToast(e?.message || '操作失败'); }
     finally { setLoading(false); }

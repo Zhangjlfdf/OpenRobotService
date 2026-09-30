@@ -20,8 +20,7 @@
 //
 // 扫码确认流程：该行 ticket 生成后状态是 entering，此时扫这张码会跳转到本页
 //   （后端 _send_scan_redirect_card 按状态分流），页面底部出现「确认信息」按钮，
-//   点击直接 entering → published（录入信息行「确认即发布」，2026-09-30 用户口径；
-//   不经 confirming 中间态，后端 confirm 接口按行类型分流）。
+//   点击直接 entering → published（录入信息行「确认即发布」，2026-09-30 用户口径）。
 //   已 published 后再扫同一张码：后端对新卡片本就分流到 /app/call；若点的是生成于
 //   entering 时期的旧卡片、链接落回本页，则由上面的 published 判断兜底重定向。
 //
