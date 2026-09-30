@@ -3,9 +3,7 @@
 把 `AiTaskAgent._retrieve_task_resolutions` 的领域逻辑包装为 `BaseCapability` 子类，
 让 Supervisor 可调度。产品无关：query 由 runtime_ctx 或调用方传入。
 
-对应设计（见 TASK_AGENT_TARGET_ARCH.md §6c / 方案甲）：
-  - 收敛 discuss_flow 的 3d 历史工单检索路径
-  - 通用内核：能力不依赖 AiTaskAgent 实例，直接用 retrieval service
+对应设计：discuss 历史工单检索收敛为可调度能力；命中 verified=confirmed 时可早停。
 
 依赖注入：
   - `retriever`：可选，从 kwargs/runtime_ctx 传入；缺失时懒加载 get_retrieval_service()
@@ -51,6 +49,19 @@ class RetrieveHistoryCapability(BaseCapability):
         "输入: query(要检索的问题)。输出: 相似历史工单的标题与方案。"
     )
     tags = ["history", "历史", "历史工单", "历史方案"]
+
+    async def after_run(self, result: CapabilityResult, **kwargs: Any) -> CapabilityResult:
+        """对命中 confirmed 的结果盖 verified 章（供合成/前端识别）。"""
+        if not result or not result.ok:
+            return result
+        meta = dict(result.meta or {})
+        confirmed = int(meta.get("confirmed") or 0)
+        if confirmed <= 0 and not result.terminate:
+            return result
+        meta["verified_stamp"] = "confirmed"
+        meta["verified_badge"] = True
+        result.meta = meta
+        return result
 
     async def run(self, **kwargs) -> CapabilityResult:
         query = _resolve_query(kwargs)

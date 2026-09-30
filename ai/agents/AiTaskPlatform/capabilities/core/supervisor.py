@@ -114,7 +114,7 @@ def _parse_decision(raw: str) -> Optional[SupervisorDecision]:
                 "goal": str(p.get("goal", "")),
                 "parallel": bool(p.get("parallel", False)),
             }
-            for extra_key in ("window_minutes", "occurred_at", "params"):
+            for extra_key in ("window_minutes", "before_minutes", "after_minutes", "occurred_at", "params"):
                 if extra_key in p and p[extra_key] is not None:
                     item[extra_key] = p[extra_key]
             clean_plan.append(item)
@@ -477,7 +477,7 @@ class Supervisor:
                     if extra:
                         kwargs["query"] = f"{kwargs['query']}\n\n工程师本轮补充:\n{extra}".strip()
                     kwargs.update(self._runtime_ctx)
-                    for extra_key in ("window_minutes", "occurred_at", "params"):
+                    for extra_key in ("window_minutes", "before_minutes", "after_minutes", "occurred_at", "params"):
                         if extra_key in step and step[extra_key] is not None:
                             kwargs[extra_key] = step[extra_key]
                     bus = self._bus()

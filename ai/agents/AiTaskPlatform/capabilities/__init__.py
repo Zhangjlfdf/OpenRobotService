@@ -39,6 +39,7 @@ from ai.agents.AiTaskPlatform.capabilities.tools.image_analyze import ImageAnaly
 from ai.agents.AiTaskPlatform.capabilities.tools.retrieve_troubleshooting import RetrieveTroubleshootingCapability
 from ai.agents.AiTaskPlatform.capabilities.tools.attachment_parse import AttachmentParseCapability
 from ai.agents.AiTaskPlatform.capabilities.tools.ticket_ref import TicketRefCapability
+from ai.agents.AiTaskPlatform.capabilities.tools.project_info import ProjectInfoCapability
 
 # 长期记忆能力：生产若未同步 memory_store/memory_recall 文件，不应拖垮整个 @U老师 讨论入口
 try:
@@ -68,6 +69,7 @@ __all__ = [
     "RetrieveTroubleshootingCapability",
     "AttachmentParseCapability",
     "TicketRefCapability",
+    "ProjectInfoCapability",
     "MemoryStoreCapability",
     "MemoryRecallCapability",
 ]

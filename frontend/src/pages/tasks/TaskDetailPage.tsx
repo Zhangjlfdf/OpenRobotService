@@ -33,7 +33,7 @@ import { TICKET_TYPE_DISPLAY_MAP, STATUS_DISPLAY_MAP, PRIORITY_DISPLAY_MAP, canE
 import { isSameUser } from '@/shared/utils/userIdentity';
 import { getDeadlineRange, makeDisabledDate, makeDisabledTime, parseDeadlineString } from '@/shared/utils/deadline';
 import { formatDateTime, formatRawDateTime } from '@/shared/utils/url';
-import { fetchWithAuth } from '@/api/ai';
+import { fetchWithAuth, taskDiscussStream } from '@/api/ai';
 import { getProjectMembers } from '@/api/projects';
 import type { ProjectMember } from '@/api/projects';
 import { dedupeFileNames } from '@/shared/utils/uniqueFileNames';
@@ -126,7 +126,7 @@ interface Ticket {
   // tasks 详情接口 GET /{id} 返回蛇形 deadline_at（见 TicketResponse）
   deadline_at?: string | null;
   // 二次派单感知增强（M3）：未派到指定人时的完整话术（详情页 redispatch.result.tip_detail）
-  // 二次派单感知增强：派单理由（为什么派给接单人，仅接单人/管理员可见 → redispatch.result.reasoning）
+  // 二次派单感知增强：派单理由（为什么派给接单人；接单人/提单人/管理员可见 → redispatch.result.reasoning）
   redispatch?: { result?: { tip_detail?: string | null; reasoning?: string | null } } | null;
   // 工单阶段性处理（协商节点）：当前节点 ID/名称/结束时间（naive UTC）
   curr_step_id?: number | null;
@@ -182,7 +182,7 @@ export default function TaskDetailPage() {
   const [detailLoading, setDetailLoading] = useState(false);
   // 二次派单感知增强（M3）：未派到指定人时的完整情商话术（详情页 redispatch.result.tip_detail）
   const [redispatchTipDetail, setRedispatchTipDetail] = useState<string>('');
-  // 二次派单感知增强：派单理由（为什么派给接单人；仅接单人/管理员可看到，详情页 redispatch.result.reasoning）
+  // 二次派单感知增强：派单理由（为什么派给接单人；接单人/提单人/管理员可看到）
   const [dispatchReason, setDispatchReason] = useState<string>('');
   const [editing, setEditing] = useState(false);
   const [editForm, setEditForm] = useState<{ title: string; description: string; priority: string; ticket_type: string; curr_step_endtime?: string }>({ title: '', description: '', priority: 'medium', ticket_type: 'problem' });
@@ -214,13 +214,14 @@ export default function TaskDetailPage() {
   const [submittingDeadline, setSubmittingDeadline] = useState(false);
   const [submittingComment, setSubmittingComment] = useState(false);
   const [askingAI, setAskingAI] = useState(false);
+  const [aiStreamReply, setAiStreamReply] = useState('');
   const aiAbortRef = useRef<AbortController | null>(null);
   const [aiEpoch, setAiEpoch] = useState(0);
   const detailRef = useRef(detail);
   detailRef.current = detail;
   const diagnosingRef = useRef(false);
   const aiBusyRef = useRef(false);
-  const discussQueueRef = useRef<Array<{ text: string; files: File[]; options?: { replyTo?: string | number } }>>([]);
+  const discussQueueRef = useRef<Array<{ text: string; files: File[]; options?: { replyTo?: string | number; uspEnvId?: number } }>>([]);
   const [aiQueueItems, setAiQueueItems] = useState<string[]>([]);
   const MAX_AI_DISCUSS_QUEUE = 3;
 
@@ -302,7 +303,7 @@ export default function TaskDetailPage() {
         setDetail(t);
         // 二次派单感知增强（M3）：未派到指定人时的完整话术
         setRedispatchTipDetail(t.redispatch?.result?.tip_detail || '');
-        // 二次派单感知增强：派单理由（后端仅对接单人/管理员返回 reasoning，非空即展示）
+        // 二次派单感知增强：派单理由（后端对接单人/提单人/管理员返回 reasoning，非空即展示）
         setDispatchReason(t.redispatch?.result?.reasoning || '');
         // 代理关系（代他人提单）：独立接口，失败不阻断详情渲染（横幅缺失而已）
         getProxyRelations(detailId)
@@ -960,7 +961,7 @@ export default function TaskDetailPage() {
   };
 
   // ── 普通评论：POST /api/tasks/{id}/comments；返回 true=成功（组件清空输入） ──
-  const handleAddComment = async (text: string, files: File[] = [], options?: { replyTo?: string | number }): Promise<boolean> => {
+  const handleAddComment = async (text: string, files: File[] = [], options?: { replyTo?: string | number; uspEnvId?: number }): Promise<boolean> => {
     if (!detail) {
       Toast({ message: '请输入评论内容', theme: 'warning' });
       return false;
@@ -1011,7 +1012,7 @@ export default function TaskDetailPage() {
   };
 
   // ── @U老师 讨论：先存用户消息 → 空闲立刻 discuss / 进行中入队；返回 true=成功 ──
-  const postDiscussUserComment = async (text: string, files: File[] = [], options?: { replyTo?: string | number }): Promise<boolean> => {
+  const postDiscussUserComment = async (text: string, files: File[] = [], options?: { replyTo?: string | number; uspEnvId?: number }): Promise<boolean> => {
     const current = detailRef.current;
     if (!current) return false;
     const tempId = generateTempId();
@@ -1044,12 +1045,12 @@ export default function TaskDetailPage() {
     void startDiscussTurn(next.text, next.files, next.options);
   };
 
-  const startDiscussTurn = async (text: string, files: File[] = [], options?: { replyTo?: string | number }): Promise<boolean> => {
+  const startDiscussTurn = async (text: string, files: File[] = [], options?: { replyTo?: string | number; uspEnvId?: number }): Promise<boolean> => {
     await postDiscussUserComment(text, files, options);
     return runDiscussHttp(text, options);
   };
 
-  const runDiscussHttp = async (text: string, options?: { replyTo?: string | number }): Promise<boolean> => {
+  const runDiscussHttp = async (text: string, options?: { replyTo?: string | number; uspEnvId?: number }): Promise<boolean> => {
     const current = detailRef.current;
     if (!current) return false;
     const controller = new AbortController();
@@ -1058,7 +1059,9 @@ export default function TaskDetailPage() {
     setDiagnosing(false);
     diagnosingRef.current = false;
     setAskingAI(true);
+    setAiStreamReply('');
     setAiEpoch((n) => n + 1);
+    let ok = false;
     try {
       const recentComments = (current.comments || []).slice(-10).map((c) => ({
         author: c.created_by_name || c.created_by || '?',
@@ -1074,26 +1077,33 @@ export default function TaskDetailPage() {
             content: quotedSrc.content,
           }
         : undefined;
-      const res = await fetchWithAuth(`${API_CONFIG.AI.BASE_URL}/task/discuss`, {
-        method: 'POST',
-        signal: controller.signal,
-        body: JSON.stringify({
+      await taskDiscussStream(
+        {
           task_id: String(current.id),
           query: text.replace(/\s*@U老师\s*/g, ' ').trim(),
           context: {
             recent_comments: recentComments,
             ...(quotedComment ? { quoted_comment: quotedComment } : {}),
             ...(options?.replyTo != null ? { reply_to: options.replyTo } : {}),
+            ...(options?.uspEnvId != null ? { usp_env_id: options.uspEnvId } : {}),
           },
-        }),
-      });
-      const data = await res.json();
-      if (data.code === 0) {
+        },
+        {
+          onToken: (tok) => {
+            if (!tok) return;
+            setAiStreamReply((prev) => prev + tok);
+          },
+          onRewrite: (full) => setAiStreamReply(full || ''),
+          onResult: () => { ok = true; },
+        },
+        controller.signal,
+      );
+      if (ok) {
         Toast({ message: 'AI 已回复', theme: 'success' });
         loadDetail();
         return true;
       }
-      Toast({ message: data.message || 'AI 回复失败', theme: 'error' });
+      Toast({ message: 'AI 回复失败', theme: 'error' });
       return false;
     } catch (err) {
       const aborted = err instanceof Error && err.name === 'AbortError';
@@ -1105,13 +1115,14 @@ export default function TaskDetailPage() {
       if (stillMine) {
         aiAbortRef.current = null;
         setAskingAI(false);
+        setAiStreamReply('');
         aiBusyRef.current = false;
         pumpDiscussQueue();
       }
     }
   };
 
-  const handleAIDiscuss = async (text: string, files: File[] = [], options?: { replyTo?: string | number }): Promise<boolean> => {
+  const handleAIDiscuss = async (text: string, files: File[] = [], options?: { replyTo?: string | number; uspEnvId?: number }): Promise<boolean> => {
     if (!detailRef.current) return false;
     if (aiBusyRef.current || diagnosingRef.current) {
       if (discussQueueRef.current.length >= MAX_AI_DISCUSS_QUEUE) {
@@ -1126,7 +1137,7 @@ export default function TaskDetailPage() {
     return startDiscussTurn(text, files, options);
   };
 
-  const handleInsertThisRound = async (text: string, files: File[] = [], options?: { replyTo?: string | number }): Promise<boolean> => {
+  const handleInsertThisRound = async (text: string, files: File[] = [], options?: { replyTo?: string | number; uspEnvId?: number }): Promise<boolean> => {
     const current = detailRef.current;
     if (!current) return false;
     if (aiBusyRef.current || diagnosingRef.current) {
@@ -1175,7 +1186,7 @@ export default function TaskDetailPage() {
   };
 
   // ── onSend：检测是否 @U老师（任意位置，前缀或句尾均触发）决定走普通评论还是 AI 讨论 ──
-  const handleSendComment = async (text: string, files: File[], options?: { replyTo?: string | number }): Promise<boolean> => {
+  const handleSendComment = async (text: string, files: File[], options?: { replyTo?: string | number; uspEnvId?: number }): Promise<boolean> => {
     // 只要文本里含 @U老师（@ 在开头/中间/结尾都算）就走 AI 讨论；
     // 兼容"说完话后句尾手动@U老师"（否则会被当成普通评论发出、AI 不回复）
     if (text.includes('@U老师')) {
@@ -1261,7 +1272,7 @@ export default function TaskDetailPage() {
         setAiSummary(typeof meta.ai_summary === 'string' ? meta.ai_summary as string : '');
         // 二次派单感知增强（M3）：未派到指定人时的完整话术（与「我要摇人」历史详情同口径）
         setRedispatchTipDetail(t.redispatch?.result?.tip_detail || '');
-        // 二次派单感知增强：派单理由（后端仅对接单人/管理员返回 reasoning，非空即展示）
+        // 二次派单感知增强：派单理由（后端对接单人/提单人/管理员返回 reasoning，非空即展示）
         setDispatchReason(t.redispatch?.result?.reasoning || '');
       })
       .catch(() => {});
@@ -1461,28 +1472,13 @@ export default function TaskDetailPage() {
             <DispatchFold label="派单提醒" text={redispatchTipDetail} variant="tip" />
           )}
 
-          {/* 
-              ┌──────────────┬─────────────┬───────────────────┬──────────────────┬──────────────┐
-              │ 查看者/场景   │ dispatchReason│ redispatchTipDetail│ isAssignee/isAdmin│ 是否显示卡片  │
-              ├──────────────┼─────────────┼───────────────────┼──────────────────┼──────────────┤
-              │ 普通接单人   │ 空/有       │ 空(后端不返回 tip) │ isAssignee ✓      │ 仅看 reason │
-              │ (有理由)     │（按后端给）  │                   │                  │   → 显示     │
-              │ 接单人但无理由│ 空          │ 空                 │ isAssignee ✓      │  → 不显示    │
-              │ 提单人==接   │ 空/有       │ 空                 │ isAssignee ✓      │  → 显示      │
-              │ 单人(无 tip) │             │                   │                  │              │
-              │ 提单人==接   │ 有          │ 有                 │ isAssignee ✓      │  → 不显示    │
-              │ 单人(有 tip) │             │                   │                  │ (只显 tip)   │
-              │ 管理员       │ 有          │ 依工单而定          │ isAdmin ✓         │ tip 空→显示  │
-              │              │             │                   │                  │ tip 有→不显示│
-              │ 其它第三方   │ 空(后端过滤)│ 空                 │ 均 ✗              │  → 不显示    │
-              │ 老后端+第三方│ 有          │ —                 │ 均 ✗              │  → 不显示    │
-              │ (前端兜底防泄│             │                   │                  │ (角色兜底拦) │
-              │  露)         │             │                   │                  │              │
-              └──────────────┴─────────────┴───────────────────┴──────────────────┴──────────────┘ */}
+          {/* 派单原因：接单人 / 提单人 / 管理员 / 工单操作权限 可见。
+              有 tip（异常提醒）时 tip 已含说明，不再重复展示 reason。 */}
           {(() => {
             if (!dispatchReason || redispatchTipDetail) return null;
-            const { isAssignee } = getCurrentUserRoles();
-            if (!isAssignee && !isAdmin) return null;
+            const { isAssignee, isReporter } = getCurrentUserRoles();
+            const canOperate = isAdmin || hasPermission('backend:tasks:operate');
+            if (!isAssignee && !isReporter && !canOperate) return null;
             return (
               <DispatchFold label="派单原因" text={dispatchReason} variant="reason" />
             );
@@ -1712,6 +1708,7 @@ export default function TaskDetailPage() {
           aiQueueItems={aiQueueItems}
           onInsertQueueItem={handleInsertQueueItem}
           onRemoveQueueItem={handleRemoveQueueItem}
+          aiStreamReply={aiStreamReply}
           enableAI
           enableAttach
           mentionUsers={projectMembers}

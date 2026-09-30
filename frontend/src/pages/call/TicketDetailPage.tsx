@@ -14,7 +14,7 @@ import { WECHAT_CONFIG } from '@/config/wechat';
 import { Folder, UserRound, Clock, AlarmClock, Download, FileImage, FileText, FileSpreadsheet, FileCode, FileArchive, Paperclip, Bell, Upload, Undo2, Pencil } from 'lucide-react';
 import PersonArrow from '@/shared/components/PersonArrow';
 import { getMyProjects, getProjectMembers, type ProjectItem, type ProjectMember } from '@/api/projects';
-import { qaGetTicket, fetchWithAuth } from '@/api/ai';
+import { qaGetTicket, fetchWithAuth, taskDiscussStream } from '@/api/ai';
 import { cancelTicket, urgeTicket, reportTicket, uploadCommentAttachment, getProxyRelations, type ProxyRelation } from '@/api/ticket';
 import {
   isTerminalTicketStatus,
@@ -180,7 +180,7 @@ export default function TicketDetailPage() {
   const focusCommentId = searchParams.get('commentId');
   const focusAuthor = searchParams.get('author');
   const request = createRequest(API_CONFIG.TASKS.BASE_URL, '工单服务');
-  const { username, userId, name, isAdmin } = useAuthStore();
+  const { username, userId, name, isAdmin, hasPermission } = useAuthStore();
 
   const [ticket, setTicket] = useState<AiTicket | null>(null);
   const [loading, setLoading] = useState(true);
@@ -189,7 +189,7 @@ export default function TicketDetailPage() {
   const [aiSummary, setAiSummary] = useState('');
   // 二次派单感知增强（M3）：未派到指定人时的完整情商话术（详情页 redispatch.result.tip_detail）
   const [redispatchTipDetail, setRedispatchTipDetail] = useState('');
-  // 二次派单感知增强：派单理由（为什么派给接单人；仅接单人/管理员可看到，详情页 redispatch.result.reasoning）
+  // 二次派单感知增强：派单理由（为什么派给接单人；接单人/提单人/管理员可看到）
   const [dispatchReason, setDispatchReason] = useState('');
   const tempIdRef = useRef<string>(typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID() : `t_${Date.now()}_${Math.random().toString(36).slice(2)}`);
   const [viewer, setViewer] = useState<AttachmentViewItem | null>(null);
@@ -199,12 +199,13 @@ export default function TicketDetailPage() {
   const [allUsers, setAllUsers] = useState<ProjectMember[]>([]);
   // @U老师 AI 讨论中标记
   const [askingAI, setAskingAI] = useState(false);
+  const [aiStreamReply, setAiStreamReply] = useState('');
   const aiAbortRef = useRef<AbortController | null>(null);
   const [aiEpoch, setAiEpoch] = useState(0);
   const ticketRef = useRef(ticket);
   ticketRef.current = ticket;
   const aiBusyRef = useRef(false);
-  const discussQueueRef = useRef<Array<{ text: string; files: File[]; options?: { replyTo?: string | number } }>>([]);
+  const discussQueueRef = useRef<Array<{ text: string; files: File[]; options?: { replyTo?: string | number; uspEnvId?: number } }>>([]);
   const [aiQueueItems, setAiQueueItems] = useState<string[]>([]);
   const MAX_AI_DISCUSS_QUEUE = 3;
   const bumpAiQueue = () => setAiQueueItems(discussQueueRef.current.map((j) => j.text));
@@ -244,7 +245,7 @@ export default function TicketDetailPage() {
         if (isStale()) return; // 已切换到别的工单，丢弃本次（旧工单）结果，避免覆盖
         // 二次派单感知增强（M3）：完整情商话术（未派到指定人时）
         setRedispatchTipDetail(taskDetail.redispatch?.result?.tip_detail || '');
-        // 二次派单感知增强：派单理由（后端仅对接单人/管理员返回 reasoning，非空即展示）
+        // 二次派单感知增强：派单理由（后端对接单人/提单人/管理员返回 reasoning，非空即展示）
         setDispatchReason(taskDetail.redispatch?.result?.reasoning || '');
         setTicket({
           ticket_id: String(dbId),
@@ -302,7 +303,7 @@ export default function TicketDetailPage() {
             if (isStale()) return; // 已切换工单：prev 可能已是新工单，不可把旧工单的 DB 字段合并进去
             // 二次派单感知增强（M3）：完整情商话术随 DB 刷新
             setRedispatchTipDetail(taskDetail.redispatch?.result?.tip_detail || '');
-            // 二次派单感知增强：派单理由（后端仅对接单人/管理员返回 reasoning，非空即展示）
+            // 二次派单感知增强：派单理由（后端对接单人/提单人/管理员返回 reasoning，非空即展示）
             setDispatchReason(taskDetail.redispatch?.result?.reasoning || '');
             // 用 DB 的 status 覆盖 AI 的 status：AI(qaGetTicket) 返回 dispatched/escalated 等 AI 内部状态，
             // DB(tasks 表) 是 new/in_progress 等标准枚举。列表(qaListTickets)也来自 DB，
@@ -669,7 +670,7 @@ export default function TicketDetailPage() {
   };
 
   // ── @U老师 讨论：先存用户消息 → 空闲立刻 discuss / 进行中入队；返回 true=成功 ──
-  const postDiscussUserComment = async (text: string, files: File[] = [], options?: { replyTo?: string | number }): Promise<boolean> => {
+  const postDiscussUserComment = async (text: string, files: File[] = [], options?: { replyTo?: string | number; uspEnvId?: number }): Promise<boolean> => {
     const current = ticketRef.current;
     if (!current?.ticket_id) return false;
     const tempId = tempIdRef.current;
@@ -703,19 +704,21 @@ export default function TicketDetailPage() {
     void startDiscussTurn(next.text, next.files, next.options);
   };
 
-  const startDiscussTurn = async (text: string, files: File[] = [], options?: { replyTo?: string | number }): Promise<boolean> => {
+  const startDiscussTurn = async (text: string, files: File[] = [], options?: { replyTo?: string | number; uspEnvId?: number }): Promise<boolean> => {
     await postDiscussUserComment(text, files, options);
     return runDiscussHttp(text, options);
   };
 
-  const runDiscussHttp = async (text: string, options?: { replyTo?: string | number }): Promise<boolean> => {
+  const runDiscussHttp = async (text: string, options?: { replyTo?: string | number; uspEnvId?: number }): Promise<boolean> => {
     const current = ticketRef.current;
     if (!current?.ticket_id) return false;
     const controller = new AbortController();
     aiAbortRef.current = controller;
     aiBusyRef.current = true;
     setAskingAI(true);
+    setAiStreamReply('');
     setAiEpoch((n) => n + 1);
+    let ok = false;
     try {
       const recentComments = (current.comments || []).slice(-10).map((c) => ({
         author: c.created_by_name || c.created_by || '?',
@@ -731,26 +734,33 @@ export default function TicketDetailPage() {
             content: quotedSrc.content,
           }
         : undefined;
-      const res = await fetchWithAuth(`${API_CONFIG.AI.BASE_URL}/task/discuss`, {
-        method: 'POST',
-        signal: controller.signal,
-        body: JSON.stringify({
+      await taskDiscussStream(
+        {
           task_id: String(current.ticket_id),
           query: text.replace(/\s*@U老师\s*/g, ' ').trim(),
           context: {
             recent_comments: recentComments,
             ...(quotedComment ? { quoted_comment: quotedComment } : {}),
             ...(options?.replyTo != null ? { reply_to: options.replyTo } : {}),
+            ...(options?.uspEnvId != null ? { usp_env_id: options.uspEnvId } : {}),
           },
-        }),
-      });
-      const data = await res.json();
-      if (data.code === 0) {
+        },
+        {
+          onToken: (tok) => {
+            if (!tok) return;
+            setAiStreamReply((prev) => prev + tok);
+          },
+          onRewrite: (full) => setAiStreamReply(full || ''),
+          onResult: () => { ok = true; },
+        },
+        controller.signal,
+      );
+      if (ok) {
         Toast({ message: 'AI 已回复', theme: 'success' });
         await fetchDetail(true);
         return true;
       }
-      Toast({ message: data.message || 'AI 回复失败', theme: 'error' });
+      Toast({ message: 'AI 回复失败', theme: 'error' });
       return false;
     } catch (err) {
       const aborted = err instanceof Error && err.name === 'AbortError';
@@ -762,13 +772,14 @@ export default function TicketDetailPage() {
       if (stillMine) {
         aiAbortRef.current = null;
         setAskingAI(false);
+        setAiStreamReply('');
         aiBusyRef.current = false;
         pumpDiscussQueue();
       }
     }
   };
 
-  const handleAIDiscuss = async (text: string, files: File[] = [], options?: { replyTo?: string | number }): Promise<boolean> => {
+  const handleAIDiscuss = async (text: string, files: File[] = [], options?: { replyTo?: string | number; uspEnvId?: number }): Promise<boolean> => {
     if (!ticketRef.current?.ticket_id) return false;
     if (aiBusyRef.current) {
       if (discussQueueRef.current.length >= MAX_AI_DISCUSS_QUEUE) {
@@ -783,7 +794,7 @@ export default function TicketDetailPage() {
     return startDiscussTurn(text, files, options);
   };
 
-  const handleInsertThisRound = async (text: string, files: File[] = [], options?: { replyTo?: string | number }): Promise<boolean> => {
+  const handleInsertThisRound = async (text: string, files: File[] = [], options?: { replyTo?: string | number; uspEnvId?: number }): Promise<boolean> => {
     const current = ticketRef.current;
     if (!current?.ticket_id) return false;
     if (aiBusyRef.current) {
@@ -833,7 +844,7 @@ export default function TicketDetailPage() {
 
   // 发送评论（附件上传 + POST /api/tasks/{ticket_id}/comments）；返回 true=成功（组件清空输入）
   // 检测 @U老师（任意位置，前缀或句尾均触发）：走 AI 讨论而非普通评论（与系统任务详情页同款逻辑）
-  const handleSendComment = async (text: string, files: File[], options?: { replyTo?: string | number }): Promise<boolean> => {
+  const handleSendComment = async (text: string, files: File[], options?: { replyTo?: string | number; uspEnvId?: number }): Promise<boolean> => {
     // 只要文本里含 @U老师（@ 在开头/中间/结尾都算）就走 AI 讨论；
     // 兼容"说完话后句尾手动@U老师"（否则会被当成普通评论发出、AI 不回复）
     if (text.includes('@U老师')) {
@@ -1063,11 +1074,12 @@ export default function TicketDetailPage() {
             {redispatchTipDetail && (
               <DispatchFold label="派单提醒" text={redispatchTipDetail} variant="tip" />
             )}
-            {/* 二次派单感知增强：派单理由（为什么派给接单人；仅接单人/管理员可见，与系统任务详情页同源） */}
+            {/* 派单原因：接单人 / 提单人 / 管理员 / 工单操作权限 可见；有 tip 时 tip 已含说明，不重复 */}
             {(() => {
               if (!dispatchReason || redispatchTipDetail) return null;
-              const { isAssignee } = getCurrentUserRoles();
-              if (!isAssignee && !isAdmin) return null;
+              const { isAssignee, isReporter } = getCurrentUserRoles();
+              const canOperate = isAdmin || hasPermission('backend:tasks:operate');
+              if (!isAssignee && !isReporter && !canOperate) return null;
               return <DispatchFold label="派单原因" text={dispatchReason} variant="reason" />;
             })()}
           </div>
@@ -1231,6 +1243,7 @@ export default function TicketDetailPage() {
           aiQueueItems={aiQueueItems}
           onInsertQueueItem={handleInsertQueueItem}
           onRemoveQueueItem={handleRemoveQueueItem}
+          aiStreamReply={aiStreamReply}
           disabled={!ticket?.ticket_id}
           enableAttach
           enableAI
