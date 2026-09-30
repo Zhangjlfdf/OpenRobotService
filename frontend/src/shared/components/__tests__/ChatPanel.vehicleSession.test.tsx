@@ -178,7 +178,7 @@ describe('ChatPanel 车体扫码：车型模式注册与首问同 session_id', (
       },
     });
     // 发送前落库：建会话（回写 aiSessionId，模拟真实 createConversation）+ 追加用户消息
-    mockCreateConversation.mockImplementation(async (p: { aiSessionId?: string }) => ({
+    mockCreateConversation.mockImplementation(async (p: { title: string; aiSessionId?: string }) => ({
       id: 99,
       title: p.title,
       metadata_: JSON.stringify({ ai_session_id: p.aiSessionId || '' }),
