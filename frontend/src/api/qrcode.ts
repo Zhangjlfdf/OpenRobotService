@@ -108,7 +108,6 @@ export async function fetchQrcodeByScene(scene: string): Promise<QrcodeItem | nu
 }
 
 export async function createQrcode(data: {
-  scene_str: string;
   name?: string;
   description?: string;
   qrcode_type?: QrcodeType;
@@ -119,13 +118,13 @@ export async function createQrcode(data: {
 }
 
 export async function batchCreateQrcodes(data: {
-  scene_list: string[];
+  count: number;
   name_prefix?: string;
   qrcode_type?: QrcodeType;
   redirect_url?: string;
   /** 整批统一关联的项目ID（project.id），不传则不与项目关联 */
   project_id?: string;
-}): Promise<{ batch_id: string; created: string[]; skipped: Array<{ scene: string; reason: string }>; created_count: number; skipped_count: number; project_id?: string | null }> {
+}): Promise<{ batch_id: string; created: number[]; created_count: number; skipped_count: number; project_id?: string | null }> {
   return request('/qrcodes/batch', { method: 'POST', body: JSON.stringify(data) });
 }
 

@@ -10,7 +10,7 @@
 永久码微信侧最多 10 万个，`is_permanent` + `batch_id` 便于管控配额。
 """
 
-from sqlalchemy import Column, Integer, String, DateTime, Boolean, Text, Index, UniqueConstraint
+from sqlalchemy import Column, Integer, String, DateTime, Text, Index
 from sqlalchemy.sql import func
 
 from app.models.base import Base
@@ -38,10 +38,9 @@ class WechatQrcode(Base):
 
     __tablename__ = "wechat_qrcodes"
 
-    id = Column(Integer, primary_key=True, autoincrement=True, comment="主键")
+    id = Column(Integer, primary_key=True, autoincrement=True, comment="主键；同时作为微信 scene_str（str(id)）")
 
     # ── 业务标识 ──
-    scene_str = Column(String(64), nullable=False, unique=True, index=True, comment="场景值 (scene_str)，扫码后微信回传 EventKey")
     name = Column(String(128), nullable=False, default="", comment="二维码名称/用途（如「智能体入口-客服A」）")
     description = Column(Text, nullable=True, comment="用途说明")
 
@@ -93,6 +92,10 @@ class WechatQrcode(Base):
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), comment="记录更新时间")
 
     __table_args__ = (
-        UniqueConstraint("scene_str", name="uq_wechat_qrcodes_scene_str"),
         Index("ix_wechat_qrcodes_status_type", "status", "type"),
     )
+
+    @property
+    def scene_str(self) -> str:
+        """微信带参数二维码的场景值，始终等于 str(id)。"""
+        return str(self.id)

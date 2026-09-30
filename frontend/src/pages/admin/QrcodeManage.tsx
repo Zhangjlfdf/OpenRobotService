@@ -137,25 +137,24 @@ export default function QrcodeManage() {
 
   // ── 批量创建弹窗 ──
   const BatchCreatePopup = () => {
-    const [scenesText, setScenesText] = useState('');
+    const [count, setCount] = useState<number>(10);
     const [namePrefix, setNamePrefix] = useState('');
     const [qtype, setQtype] = useState<QrcodeType>('permanent');
     const [projectId, setProjectId] = useState('');
     const [redirectUrl, setRedirectUrl] = useState('');
     const [busy, setBusy] = useState(false);
-    const [result, setResult] = useState<null | { batchId: string; created: number; skipped: number }>(null);
+    const [result, setResult] = useState<null | { batchId: string; created: number }>(null);
 
     const submit = async () => {
-      const sceneList = scenesText.split(/[\n,]/).map((s) => s.trim()).filter(Boolean);
-      if (sceneList.length === 0) { showToast('请输入至少一个场景值'); return; }
+      if (!count || count < 1 || count > 500) { showToast('数量 1~500'); return; }
       setBusy(true);
       try {
         const res = await batchCreateQrcodes({
-          scene_list: sceneList, name_prefix: namePrefix,
+          count, name_prefix: namePrefix,
           qrcode_type: qtype, redirect_url: redirectUrl || undefined,
           project_id: projectId || undefined,
         });
-        setResult({ batchId: res.batch_id, created: res.created_count, skipped: res.skipped_count });
+        setResult({ batchId: res.batch_id, created: res.created_count });
       } catch (e: any) { showToast(e?.message || '创建失败'); }
       finally { setBusy(false); }
     };
@@ -164,15 +163,16 @@ export default function QrcodeManage() {
       <Popup visible={popup === 'batch-create'} onVisibleChange={() => setPopup(null)} placement="bottom">
         <div className="qr-popup">
           <h3>批量创建二维码（仅落库）</h3>
-          <p className="qr-popup-hint">场景值每行一个，或用逗号分隔；创建后为 init 状态，可批量生成 ticket</p>
+          <p className="qr-popup-hint">创建后为 init 状态，scene_str 自动等于 str(id)，可批量生成 ticket</p>
 
-          <label className="qr-field">场景值列表</label>
-          <textarea
-            className="qr-textarea"
-            value={scenesText}
-            onChange={(e) => setScenesText(e.target.value)}
-            placeholder="robot_001&#10;robot_002&#10;project_online_2026"
-            rows={6}
+          <label className="qr-field">创建数量</label>
+          <input
+            className="qr-input"
+            type="number"
+            min={1}
+            max={500}
+            value={count}
+            onChange={(e) => setCount(Math.max(1, Math.min(500, Number(e.target.value) || 1)))}
           />
 
           <div className="qr-row">
@@ -200,8 +200,7 @@ export default function QrcodeManage() {
 
           {result && (
             <div className="qr-batch-result">
-              ✅ 创建 {result.created} 条，⚠️ 跳过 {result.skipped} 条
-              {result.skipped > 0 && <span>（可能已存在或场景值非法）</span>}
+              ✅ 创建 {result.created} 条
               <div className="qr-batch-id">批次：{result.batchId}</div>
             </div>
           )}
@@ -357,7 +356,7 @@ export default function QrcodeManage() {
         </select>
         <input
           className="qr-filter-input"
-          placeholder="搜索 scene / 名称"
+          placeholder="搜索名称 / ID"
           value={keyword}
           onChange={(e) => { setKeyword(e.target.value); setSkip(0); }}
         />

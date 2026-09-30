@@ -139,10 +139,15 @@ async def list_qrcodes(
             query = query.filter(WechatQrcode.project_id == project_id)
         if keyword:
             kw = f"%{keyword}%"
-            query = query.filter(or_(
-                WechatQrcode.scene_str.like(kw),
-                WechatQrcode.name.like(kw),
-            ))
+            # scene_str 已改为 str(id)，不可再 like 查询；keyword 同时匹配 name 与 id（精确）
+            try:
+                kw_id = int(keyword.strip())
+                query = query.filter(or_(
+                    WechatQrcode.name.like(kw),
+                    WechatQrcode.id == kw_id,
+                ))
+            except (ValueError, TypeError):
+                query = query.filter(WechatQrcode.name.like(kw))
 
         total = query.count()
         items = query.order_by(WechatQrcode.created_at.desc()).offset(skip).limit(limit).all()
@@ -163,7 +168,7 @@ async def get_qrcode_by_scene(
     scene: str,
     current_user=Depends(get_current_active_user_from_token),
 ):
-    """扫码进入链路：按 scene_str 精确取那一行。
+    """扫码进入链路：按 scene_str（=str(id)）精确取那一行。
 
     摇人页从跳转链接（`/app/call?scene=xxx`）拿到场景值后来这里取码信息：录入信息行
     自带 项目名/客户名/车型（_to_dict 里行自带优先），因此这一条响应就够弹确认弹窗。
@@ -171,15 +176,17 @@ async def get_qrcode_by_scene(
     设计要点：
     - 路径为双段（/by-scene/{scene}），与单段 GET /{qid} 不冲突（同 /stats/summary 先例）；
     - 权限「登录即可」而非 admin——摇人页是 C 端，普通客服没有 frontend:admin:other:show；
-    - 长度口径对齐 scene_str 列宽（1~64 字符，与 create_qrcode 同款 400 提示）；
-    - 过滤走参数化比较（== scene），不做字符串拼接；只读，不写库，可安全重复调用。
+    - scene 即 str(id)，直接解析为 int 当主键查库；
+    - 只读，不写库，可安全重复调用。
     """
-    if not scene or len(scene) > 64:
-        raise HTTPException(status_code=400, detail="scene_str 长度 1~64 字符")
+    try:
+        qid = int(scene)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="scene_str 必须是数字（= str(id)）")
 
     db: Session = db_manager.get_db()
     try:
-        q = db.query(WechatQrcode).filter(WechatQrcode.scene_str == scene).first()
+        q = db.query(WechatQrcode).filter(WechatQrcode.id == qid).first()
         if not q:
             raise HTTPException(status_code=404, detail="二维码不存在")
         return _dict_with_project(db, q)
@@ -205,7 +212,6 @@ async def get_qrcode(qid: int, current_user=require_permission("frontend:admin:o
 
 @router.post("", summary="创建二维码记录（init 状态，不调微信接口）")
 async def create_qrcode(
-    scene_str: str = Body(..., embed=True),
     name: str = Body("", embed=True),
     description: Optional[str] = Body(None, embed=True),
     qrcode_type: str = Body(QrcodeType.PERMANENT, embed=True),
@@ -215,14 +221,8 @@ async def create_qrcode(
 ):
     db: Session = db_manager.get_db()
     try:
-        if not scene_str or len(scene_str) > 64:
-            raise HTTPException(status_code=400, detail="scene_str 长度 1~64 字符")
-        if db.query(WechatQrcode).filter(WechatQrcode.scene_str == scene_str).first():
-            raise HTTPException(status_code=400, detail=f"scene_str '{scene_str}' 已存在")
-
         q = WechatQrcode(
-            scene_str=scene_str,
-            name=name or scene_str,
+            name=name or "",
             description=description,
             type=qrcode_type,
             redirect_url=redirect_url,
@@ -241,7 +241,7 @@ async def create_qrcode(
 
 @router.post("/batch", summary="批量创建二维码记录（init 状态）")
 async def batch_create_qrcodes(
-    scene_list: List[str] = Body(..., embed=True),
+    count: int = Body(..., embed=True, ge=1, le=500, description="创建数量"),
     name_prefix: str = Body("", embed=True),
     qrcode_type: str = Body(QrcodeType.PERMANENT, embed=True),
     redirect_url: Optional[str] = Body(None, embed=True),
@@ -252,23 +252,14 @@ async def batch_create_qrcodes(
     batch_id = f"batch_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
     created_by = current_user.get("username") if isinstance(current_user, dict) else str(current_user)
 
-    results = {"batch_id": batch_id, "created": [], "skipped": []}
+    results = {"batch_id": batch_id, "created": []}
 
     try:
         pid = _resolve_project_ref(db, project_id)
-        existing_scenes = {r[0] for r in db.query(WechatQrcode.scene_str).all()}
 
-        for scene in scene_list:
-            if not scene or len(scene) > 64:
-                results["skipped"].append({"scene": scene, "reason": "scene_str 长度 1~64"})
-                continue
-            if scene in existing_scenes:
-                results["skipped"].append({"scene": scene, "reason": "已存在"})
-                continue
-
+        for i in range(count):
             q = WechatQrcode(
-                scene_str=scene,
-                name=f"{name_prefix}{scene}" if name_prefix else scene,
+                name=f"{name_prefix}{i + 1}" if name_prefix else "",
                 type=qrcode_type,
                 redirect_url=redirect_url,
                 project_id=pid,
@@ -276,11 +267,11 @@ async def batch_create_qrcodes(
                 created_by=created_by,
             )
             db.add(q)
-            results["created"].append(scene)
+            results["created"].append(i + 1)
 
         db.commit()
         results["created_count"] = len(results["created"])
-        results["skipped_count"] = len(results["skipped"])
+        results["skipped_count"] = 0
         results["project_id"] = pid
         return results
     finally:
@@ -465,14 +456,6 @@ def _check_info_unique(db: Session, field: str, value: Optional[str], exclude_id
         raise HTTPException(status_code=400, detail=f"{_INFO_FIELD_LABEL[field]}已存在：{value}")
 
 
-def _gen_info_scene(db: Session) -> str:
-    """录入信息行的场景值：proj_ + 随机 hex（不承载业务含义，只需唯一）。"""
-    while True:
-        scene = f"proj_{uuid.uuid4().hex[:12]}"
-        if not db.query(WechatQrcode.id).filter(WechatQrcode.scene_str == scene).first():
-            return scene
-
-
 @router.post("/project-info", summary="录入信息：登记一条项目信息（一项目一行）")
 async def create_project_info(
     project_id: Optional[str] = Body(None, embed=True, description="项目id（唯一；可先留空后补，存过不可改）"),
@@ -496,7 +479,6 @@ async def create_project_info(
         _check_info_unique(db, "project_code", code)
 
         q = WechatQrcode(
-            scene_str=_gen_info_scene(db),
             # 码记录名跟随项目名：列表/预览不用另开字段就能看到是哪个项目
             name=name,
             type=QrcodeType.PERMANENT,
