@@ -322,37 +322,50 @@ export default function InfoEntry() {
           </div>
         </FormItem>
         <FormItem label="项目编号" requiredMark>
-          <ClearableInput
-            value={form.project_code}
-            onChange={setField('project_code')}
-            onFocus={syncCodeFromMatchedProject}
-            placeholder="请输入项目编号"
-            maxlength={64}
-          />
+          {/* 包一层 div 让 FormItem 的直接子元素不是 ClearableInput：
+              tdesign-mobile-react FormItem 对单个子元素会 cloneElement 并注入内部 store，
+              覆盖 React 受控 value；包 div 后 FormItem 把 value/onChange 注入 div，
+              div 忽略这些 props，内部 ClearableInput 正常用 React state 渲染。
+              跨字段联动（pickProject / matchedProject effect 手动 setForm）才能正确回显。 */}
+          <div>
+            <ClearableInput
+              value={form.project_code}
+              onChange={setField('project_code')}
+              onFocus={syncCodeFromMatchedProject}
+              placeholder="请输入项目编号"
+              maxlength={64}
+            />
+          </div>
         </FormItem>
         <FormItem label="项目地点" requiredMark>
-          <ClearableInput
-            value={form.project_location}
-            onChange={setField('project_location')}
-            placeholder="请输入项目地点"
-            maxlength={128}
-          />
+          <div>
+            <ClearableInput
+              value={form.project_location}
+              onChange={setField('project_location')}
+              placeholder="请输入项目地点"
+              maxlength={128}
+            />
+          </div>
         </FormItem>
         <FormItem label="客户名称" requiredMark>
-          <ClearableInput
-            value={form.customer_name}
-            onChange={setField('customer_name')}
-            placeholder="请输入客户名称"
-            maxlength={128}
-          />
+          <div>
+            <ClearableInput
+              value={form.customer_name}
+              onChange={setField('customer_name')}
+              placeholder="请输入客户名称"
+              maxlength={128}
+            />
+          </div>
         </FormItem>
         <FormItem label="车型" requiredMark>
-          <ClearableInput
-            value={form.vehicle_model}
-            onChange={setField('vehicle_model')}
-            placeholder="请输入车型"
-            maxlength={128}
-          />
+          <div>
+            <ClearableInput
+              value={form.vehicle_model}
+              onChange={setField('vehicle_model')}
+              placeholder="请输入车型"
+              maxlength={128}
+            />
+          </div>
         </FormItem>
         <FormItem>
           <Button theme="primary" block type="submit" loading={submitting}>
