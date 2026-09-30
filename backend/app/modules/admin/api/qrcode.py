@@ -491,6 +491,8 @@ async def create_project_info(
             customer_name=_clean_info_value(customer_name, "customer_name"),
             vehicle_model=_clean_info_value(vehicle_model, "vehicle_model"),
             created_by=current_user.get("username") if isinstance(current_user, dict) else str(current_user),
+            # 录入信息保存后直接发布（2026-09-30 用户口径：扫码→录入→保存即 published）
+            status=QrcodeStatus.PUBLISHED,
         )
         db.add(q)
         db.commit()
@@ -540,6 +542,10 @@ async def update_project_info(
             q.customer_name = _clean_info_value(customer_name, "customer_name")
         if vehicle_model is not None:
             q.vehicle_model = _clean_info_value(vehicle_model, "vehicle_model")
+
+        # 录入信息保存后状态变更为 published（2026-09-30 用户口径：扫码→录入→保存即发布）
+        if q.status == QrcodeStatus.ENTERING:
+            q.status = QrcodeStatus.PUBLISHED
 
         db.commit()
         db.refresh(q)
