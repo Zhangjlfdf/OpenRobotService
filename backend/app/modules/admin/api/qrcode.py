@@ -40,7 +40,6 @@ from sqlalchemy import or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.core.config import settings
 from app.core.database import db_manager
 from app.core.auth_routes import get_current_active_user_from_token
 from app.models.delivery import Project, PROJECT_DELETED
@@ -207,16 +206,18 @@ async def batch_create_qrcodes(
     count: int = Body(..., embed=True, ge=1, le=500, description="创建数量"),
     name_prefix: str = Body("", embed=True),
     qrcode_type: str = Body(QrcodeType.PERMANENT, embed=True),
-    redirect_url: Optional[str] = Body(None, embed=True, description="扫码跳转 URL；留空默认录入信息页"),
+    redirect_url: Optional[str] = Body(None, embed=True, description="扫码跳转 URL；留空由扫码链路默认跳录入信息页"),
     current_user=require_permission("frontend:admin:other:show"),
 ):
     db: Session = db_manager.get_db()
     batch_id = f"batch_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
     created_by = current_user.get("username") if isinstance(current_user, dict) else str(current_user)
-    # 留空默认跳「录入信息」页（2026-09-30 用户口径）：扫这批码就是来登记项目信息的，
-    # 扫码链路会在 URL 后追加 ?scene={id}，落到该行的录入/编辑页（见 wechat.py 分流）。
-    # 与其他扫码链接同源：都用 settings.FRONTEND_BASE_URL，跨环境不用改前端。
-    redirect_url = (redirect_url or "").strip() or f"{settings.FRONTEND_BASE_URL}/app/admin/info-entry"
+    # 留空就存 NULL，跳转交给扫码链路算（wechat.py::_send_scan_redirect_card：DB 有记录
+    # 且没配 redirect_url → /app/admin/info-entry/{id}，2026-09-30 合入的默认规则）。
+    # 这里不预填死 URL：建行时 id 还没生成，写不出带 id 的地址；而未登录扫码走微信 OAuth
+    # 回跳只保留 pathname（见前端 buildStateFromPath），带 ?scene= 的地址会丢掉行上下文、
+    # 落到空白录入页——带 id 的 path 才是 OAuth 安全的那一个。
+    redirect_url = (redirect_url or "").strip() or None
 
     results = {"batch_id": batch_id, "created": []}
 

@@ -177,8 +177,9 @@ export default function QrcodeManage() {
             </div>
           </div>
 
-          {/* 留空 = 后端默认跳「录入信息」页（2026-09-30 用户口径，见 qrcode.py batch_create_qrcodes），
-              不预填具体域名：默认值以后端 FRONTEND_BASE_URL 为准，前端不猜环境 */}
+          {/* 留空 = 存 NULL，跳转由扫码链路算：DB 有记录且没配 redirect_url →
+              /app/admin/info-entry/{id}（见 wechat.py::_send_scan_redirect_card）。
+              前端不预填域名，也不写死地址：带 id 的 path 才扛得住微信 OAuth 回跳丢 query */}
           <label className="qr-field" style={{ marginTop: 12 }}>扫码跳转 URL（选填，留空则默认跳转到录入信息页面）</label>
           <input className="qr-input" value={redirectUrl} onChange={(e) => setRedirectUrl(e.target.value)} placeholder="留空默认：录入信息页" />
 
