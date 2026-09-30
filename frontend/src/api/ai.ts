@@ -440,6 +440,13 @@ export const qaModeConfirm = (payload: VehicleModeConfirmPayload) =>
       model: string;
       domain: string;
       manual_docs: Array<{ title: string; path: string; url: string }>;
+      /** 开场大方向引导题（0930）：服务端直出（分叉树顶层随机 5 + 故障码保底），
+       *  无分叉树知识库时为 null（退化为纯输入框）。 */
+      opening?: {
+        question: string;
+        choices: Array<string>;
+        hint: string;
+      } | null;
     };
   }>('/qa/mode/confirm', payload);
 

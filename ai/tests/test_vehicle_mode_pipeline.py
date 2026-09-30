@@ -51,7 +51,20 @@ def test_vehicle_block_renders_fields():
     assert "车号 XQE-122" in out
     assert "试点项目" in out
     assert "不要向用户追问" in out
-    assert "编号选项" in out
+    # 0930 选项引导规则
+    assert "vehicle_choices" in out
+    assert "不得编造" in out
+
+
+def test_vehicle_block_last_choices():
+    # 上轮已出选项未答：注入不重复出题 + 原文还原规则
+    vm = dict(_VM, last_choices=["行驶途中停下", "在取货位停住"])
+    out = _vehicle_mode_block(_memory(vm))
+    assert "上一轮你已给出选项" in out
+    assert "不要重复给出选项" in out
+    assert "行驶途中停下" in out
+    # 无 last_choices 不注入该段
+    assert "上一轮你已给出选项" not in _vehicle_mode_block(_memory(_VM))
 
 
 def test_vehicle_block_minimal_fields():
@@ -97,9 +110,13 @@ class MagicMockMem:
 
     def __init__(self, mem):
         self._mem = mem
+        self.max_turns = 20
 
     async def get_memory(self, session_id):
         return self._mem
+
+    async def save_memory(self, mem):
+        pass
 
 
 # ================================================================
@@ -167,3 +184,64 @@ def test_session_state_normal_no_vehicle(make_state):
     state = make_state()
     out = _session_state_block(state, _memory())
     assert "【车辆】" not in out
+
+
+# ================================================================
+# vehicle_choices 校验 + last_choices 记账（0930 选项引导）
+# ================================================================
+
+def test_validate_vehicle_choices_ok():
+    p = AiDiagnosisPlatform()
+    vc = p._validate_vehicle_choices(
+        {"vehicle_choices": ["行驶途中停下", "在取货位停住"]})
+    assert vc == ["行驶途中停下", "在取货位停住"]
+    # 前后空白清洗
+    assert p._validate_vehicle_choices({"vehicle_choices": [" a ", "b"]}) == ["a", "b"]
+
+
+def test_validate_vehicle_choices_rejects():
+    # 整体丢弃制：任一不满足 → None（当普通回复处理）
+    p = AiDiagnosisPlatform()
+    bad = [
+        None, [],                       # 非法/空
+        ["只有一项"],                    # <2
+        ["a", "b", "c", "d"],           # >3
+        ["a", 123],                     # 非字符串元素
+        ["a", "   "],                   # 空串
+        ["x" * 31, "y"],                # 单条超 30 字
+        ["同", "同"],                    # 去重变少
+    ]
+    for vc in bad:
+        assert p._validate_vehicle_choices({"vehicle_choices": vc}) is None, vc
+
+
+async def test_finalize_last_choices_accounting(monkeypatch):
+    """定制会话：出题轮覆盖记录 last_choices；未出题轮清除（防陈旧选项）。"""
+    p = AiDiagnosisPlatform()
+    p._memory_manager = MagicMockMem(_memory(_VM))
+    monkeypatch.setattr(p, "_cleanup_kb_image_urls", lambda m: m)
+    monkeypatch.setattr(p, "_strip_unknown_kb_images", lambda m, sid: m)
+    from ai.agents.AiDiagnosisPlatform.pipeline import AgentState
+    state = AgentState(session_id="s-vm", phase="diagnosing", problem_summary="t")
+    state.diagnosis_rounds = 0
+    await p._finalize_diagnosis("s-vm", state, "", "ask", "好的",
+                                vehicle_choices=["行驶途中停下", "在取货位停住"])
+    mem = await p._memory_manager.get_memory("s-vm")
+    assert mem.metadata["vehicle_mode"]["last_choices"] == ["行驶途中停下", "在取货位停住"]
+    await p._finalize_diagnosis("s-vm", state, "", "ask", "好的", vehicle_choices=None)
+    assert "last_choices" not in mem.metadata["vehicle_mode"]
+
+
+async def test_finalize_normal_session_never_writes_vm(monkeypatch):
+    """铁律：常规会话（无 vehicle_mode）即使 LLM 幻觉出选项也不写任何车辆键。"""
+    p = AiDiagnosisPlatform()
+    mem0 = _memory()
+    p._memory_manager = MagicMockMem(mem0)
+    monkeypatch.setattr(p, "_cleanup_kb_image_urls", lambda m: m)
+    monkeypatch.setattr(p, "_strip_unknown_kb_images", lambda m, sid: m)
+    from ai.agents.AiDiagnosisPlatform.pipeline import AgentState
+    state = AgentState(session_id="s-vm", phase="diagnosing", problem_summary="t")
+    state.diagnosis_rounds = 0
+    await p._finalize_diagnosis("s-vm", state, "", "ask", "好的",
+                                vehicle_choices=["a", "b"])
+    assert "vehicle_mode" not in mem0.metadata
