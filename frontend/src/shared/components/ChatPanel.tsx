@@ -1573,7 +1573,15 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
       // 确认即注册（0930 调整）：本地生成 sessionId 立即绑模式——原「发送前注册」
       // 会让开场题晚到（用户首问之后才出）。confirm 按 session_id 幂等覆盖，
       // 发送前兜底重调无害；开场题在用户首问之前渲染。
-      const sid = ensureSessionId();
+      // sid 必须显式生成并回写、不能用 ensureSessionId()：同一 commit 内
+      // [conversationId] effect（新建空白会话）已排队 setSessionId('')（下一轮
+      // 渲染才生效），本 effect 闭包读到的仍是页面进入时自动恢复出的旧会话 sid。
+      // 拿旧 sid 注册 → 首问时 sessionId 已被清空、ensureSessionId 改生成新 sid，
+      // 注册与提问落在两个 session 上，车型模式对首问不可见（落默认三域检索、
+      // 老内容串味，0930 线上实锤）。同批两次 setSessionId 以最后一次为准，
+      // 发送路径复用它；全新 sid 同时保证不污染历史会话。
+      const sid = newSessionId();
+      setSessionId(sid);
       void registerVehicleModeNow(ctx, sid);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1624,16 +1632,22 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
     }
   }, []);
 
+  /** 生成并登记一个全新 session id（不读现有状态，供强制新建会话的场景使用） */
+  const newSessionId = useCallback((): string => {
+    const id = generateSessionId();
+    trackSession(id);
+    return id;
+  }, []);
+
   /** 确保 sessionId——新 AI 模块无需预先创建会话 */
   const ensureSessionId = useCallback((): string => {
     if (!sessionId) {
-      const id = generateSessionId();
+      const id = newSessionId();
       setSessionId(id);
-      trackSession(id);
       return id;
     }
     return sessionId;
-  }, [sessionId]);
+  }, [sessionId, newSessionId]);
 
   /** 确保 DB 会话存在：首条消息时创建（title 用占位「新会话」，第2轮由 AI 生成后同步），后续复用 convRef */
   const ensureConversation = async (sid: string, firstContent: string): Promise<number | null> => {
