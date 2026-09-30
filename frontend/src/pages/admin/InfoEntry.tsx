@@ -85,9 +85,6 @@ export default function InfoEntry() {
   const [projectOptions, setProjectOptions] = useState<ProjectItem[]>([]);
   const [optionsLoaded, setOptionsLoaded] = useState(false);
   const [suggestOpen, setSuggestOpen] = useState(false);
-  // 项目编号跟着项目名称走：选中已有项目 → 编号由 project 表带出且锁住不让改；
-  // 手改项目名称（= 新项目）→ 解锁，编号回到手动填写（2026-09-30 用户口径）
-  const [codeLocked, setCodeLocked] = useState(false);
 
   // 候选只拉一次：模糊匹配在本地做，避免每敲一个字打一次接口；
   // includePending=true：台账里「待定」项目也要能选（后端默认只给已承接项目）；
@@ -126,10 +123,9 @@ export default function InfoEntry() {
     [form.project_name, matchedProject, optionsLoaded],
   );
 
-  /** 选中建议项：项目名称与项目编号一起带出（编号就是它在 project 表的 id/code），编号随之锁住 */
+  /** 选中建议项：项目名称与项目编号一起带出（编号就是它在 project 表的 id/code） */
   const pickProject = useCallback((p: ProjectItem) => {
     setForm((prev) => ({ ...prev, project_name: p.name || '', project_code: p.project_code || '' }));
-    setCodeLocked(true);
     setSuggestOpen(false);
   }, []);
 
@@ -140,9 +136,8 @@ export default function InfoEntry() {
   );
 
   /** 改项目名称：打出来的名字正好是 project 表里的某个项目 → 等同于选中它，项目编号
-      立刻从表里同步带出并锁住；其余情况 = 新项目，编号解锁、交回用户填写——此时若编号
-      还是从表里同步来的那个，一并清掉（新项目沿用别的项目的编号，后端必以「已被占用」
-      拦下，留着只会白填一遍）；用户自己敲的编号不动 */
+      立刻从表里同步带出；其余情况 = 新项目，编号若是「表里某个项目的编号」就清掉
+      （新项目沿用别人的编号必被后端 400 拦下），用户自己敲的编号不动 */
   const setNameField = (value: unknown) => {
     const name = String(value ?? '');
     const hit = findExactProject(name);
@@ -151,14 +146,12 @@ export default function InfoEntry() {
       const kept = isProjectTableCode(prev.project_code) ? '' : prev.project_code;
       return { ...prev, project_name: name, project_code: kept };
     });
-    setCodeLocked(!!hit);
   };
 
   /** 点进项目编号框：名称已匹配到 project 表里的项目，就把表里的编号取过来填上
       （2026-09-30 用户口径）。两个场景要靠它兜：①候选列表比手速慢——名字先打完、
       列表后到，那次输入没同步；②编辑旧录入行时行上的编号与表里不一致，以表为准
-      （编号只跟 project 表对名字，后端不会替我们纠正）。已锁住（disabled）时点不进来，
-      也就不会触发。 */
+      （编号只跟 project 表对名字，后端不会替我们纠正）。 */
   const syncCodeFromMatchedProject = () => {
     const hit = findExactProject(form.project_name);
     if (!hit) return;
@@ -197,6 +190,13 @@ export default function InfoEntry() {
     return true;
   }, [sceneCode, navigate, searchParams]);
 
+  // /:id 路由不带 scene 时，pathId 的 fallback 查询不应触发 published 跳转
+  // （管理端「编辑信息」按钮就是这个链路，已 published 的行仍然要能编辑）
+  const toCallIfPublishedForPathId = useCallback((row: QrcodeItem): boolean => {
+    // 只在有 scene 的情况下才考虑跳转；无 scene 说明是管理端直接编辑，不跳
+    return false;
+  }, []);
+
   useEffect(() => {
     // 没带 scene 也没带 :id：管理端手动新建，空表单直接可填
     if (!sceneCode && !pathId) return;
@@ -223,7 +223,7 @@ export default function InfoEntry() {
         }
         if (pathId) {
           const row = await fetchQrcode(pathId);
-          if (toCallIfPublished(row)) return;
+          if (toCallIfPublishedForPathId(row)) return;
           fillFromRow(row);
         }
       } catch (err) {
@@ -341,10 +341,8 @@ export default function InfoEntry() {
             value={form.project_code}
             onChange={setField('project_code')}
             onFocus={syncCodeFromMatchedProject}
-            placeholder={codeLocked ? '' : '请输入项目编号'}
+            placeholder="请输入项目编号"
             maxlength={64}
-            disabled={codeLocked}
-            showClear={!codeLocked}
           />
         </FormItem>
         <FormItem label="项目地点" name="project_location">

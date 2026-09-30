@@ -245,7 +245,7 @@ describe('InfoEntry 扫码带入项目id', () => {
 
     expect(valueOf(nameInput)).toBe('项目十');
     const codeInput = screen.getByDisplayValue('CODE-10');
-    expect(codeInput).toBeDisabled(); // 编号来自 project 表（不是手填），锁住不让改
+    expect(codeInput).not.toBeDisabled(); // 编号始终可编辑（2026-09-30 用户要求）
     // 选中已有项目不提示「自动新建」
     expect(screen.queryByText('不在项目表中，保存时将自动新建项目')).not.toBeInTheDocument();
 
@@ -291,9 +291,9 @@ describe('InfoEntry 扫码带入项目id', () => {
     expect(screen.getByPlaceholderText(CODE_PLACEHOLDER)).toHaveValue('');
     fireEvent.change(nameInput, { target: { value: '俄罗斯莫斯科IS单XCD试用项目' } });
 
-    // 全名命中 → 编号从 project 表同步进来且锁住；此时不再列候选（编号已经带出来了）
+    // 全名命中 → 编号从 project 表同步进来（始终可编辑）；此时不再列候选（编号已经带出来了）
     const codeInput = screen.getByDisplayValue('105');
-    expect(codeInput).toBeDisabled();
+    expect(codeInput).not.toBeDisabled();
     expect(screen.queryByText('俄罗斯莫斯科IS单XCD试用项目')).not.toBeInTheDocument();
 
     // 点保存：提交的是同步过来的编号
