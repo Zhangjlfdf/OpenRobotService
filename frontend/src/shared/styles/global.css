@@ -9958,8 +9958,9 @@ button.dispatch-dev__rate-row { cursor: pointer; }
 /* toast */
 .qr-toast { top: 50% !important; }
 
-/* 录入信息页的项目名建议下拉（InfoEntry）：输入框下方随打随出的候选，点击即带出编号 */
-.proj-suggest { position: relative; }
+/* 录入信息页的项目名建议下拉（InfoEntry）：输入框下方随打随出的候选，点击即带出编号。
+   flex:1 必须留：内容区是 flex，不撑开的话这一格会缩成内容宽，项目名称输入框比别的短一截 */
+.proj-suggest { position: relative; flex: 1; min-width: 0; }
 .proj-suggest__panel {
   position: absolute; left: 0; right: 0; top: 100%; z-index: 20;
   margin-top: 4px; padding: 4px; max-height: 240px; overflow-y: auto;
@@ -9971,6 +9972,13 @@ button.dispatch-dev__rate-row { cursor: pointer; }
 .proj-suggest__item-name { font-size: 14px; color: var(--foreground); }
 .proj-suggest__item-code { margin-top: 2px; font-size: 12px; color: #888d8f; }
 .proj-suggest__empty { padding: 8px 10px; font-size: 12px; color: #888d8f; }
+
+/* 录入信息页版式（InfoEntry）：整页一张白卡片，标签列等宽不折行、输入框等长。
+   标签宽度由 Form 的 labelWidth=96px 统一给出（见 InfoEntry.tsx），这里只补折行保险与留白 */
+.info-entry { padding: 16px; }
+.info-entry__title { margin: 0 0 12px; font-size: 18px; font-weight: 600; line-height: 26px; color: var(--foreground); }
+.info-entry__form { border-radius: 12px; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04); }
+.info-entry .t-form__label label { white-space: nowrap; }
 
 .mac-info-row__main { display: flex; align-items: center; gap: 4px; min-height: 36px; padding: 6px 8px 6px 4px; }
 .mac-info-row--d1 .mac-info-row__main { padding: 7px 10px 7px 6px; }

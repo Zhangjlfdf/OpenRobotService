@@ -242,9 +242,20 @@ export default function InfoEntry() {
   if (loading) return <Loading text="加载中..." />;
 
   return (
-    <div style={{ padding: 16 }}>
-      <h4 style={{ marginBottom: 16 }}>{rowId ? '编辑信息' : '录入信息'}</h4>
-      <Form onSubmit={handleSubmit}>
+    <div className="info-entry">
+      <h4 className="info-entry__title">{rowId ? '编辑信息' : '录入信息'}</h4>
+      {/* 标签统一左对齐、等宽（labelAlign/labelWidth 给在 Form 上，五个字段一起生效）：
+          tdesign 默认是 right + 81px，扣掉 16px 内边距只剩 65px，四字标签加上必填星号
+          会被挤成两行；96px 后标签一行放下，输入框也随内容区缩进完全等长对齐。
+          必填星号放标签右侧（requiredMarkPosition）：放左边会把「项目名称」这类
+          带星号的标签整体推右，五个标签的左边缘就对不齐了 */}
+      <Form
+        className="info-entry__form"
+        labelAlign="left"
+        labelWidth="96px"
+        requiredMarkPosition="right"
+        onSubmit={handleSubmit}
+      >
         <FormItem label="项目名称" name="project_name" requiredMark>
           <div className="proj-suggest">
             <ClearableInput
