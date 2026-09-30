@@ -11,6 +11,9 @@
 //   - 场景值能查到行 → 就是编辑那一行，项目id 锁死（= 该行 scene_str）；
 //   - 场景值查不到行（码还没录入过）→ 仍按新录入处理，项目id 预填锁定（它必须是该码的场景值）；
 //   - 链接没带 scene（管理端手动新建）→ 项目id 可填、必填。
+//   - 该行已是 published（录入+确认都完成）→ 不停留本页，直接跳「我要摇人」（2026-09-30
+//     用户口径）：scene/openid 原样带过去，CallView 按 scene 弹车体信息确认；
+//     管理端「编辑信息」链接不带 scene，不受影响（那是修改数据的入口）。
 //   注：录入信息相关的四个接口（by-scene / 按 :id 查 / 保存 / 确认）都是「登录即可」——
 //   所有人扫码都能录入信息并确认（2026-09-30 用户口径）；管理端其余接口仍是 admin 权限。
 //
@@ -18,6 +21,8 @@
 //   （后端 _send_scan_redirect_card 按状态分流），页面底部出现「确认信息」按钮，
 //   点击直接 entering → published（录入信息行「确认即发布」，2026-09-30 用户口径；
 //   不经 confirming 中间态，后端 confirm 接口按行类型分流）。
+//   已 published 后再扫同一张码：后端对新卡片本就分流到 /app/call；若点的是生成于
+//   entering 时期的旧卡片、链接落回本页，则由上面的 published 判断兜底重定向。
 //
 // 规则（界面不写注解，由交互体现）：
 // - 项目id：必填、唯一、不可改（新建时填了就锁定；扫码进入时由 scene 带入）
@@ -84,6 +89,16 @@ export default function InfoEntry() {
     setStatus(row.status || '');
   }, []);
 
+  // 扫码进入（链接带 scene）且该行已 published：录入+确认都完成，不停留本页，
+  // 直接去「我要摇人」——scene/openid 原样带过去，CallView 会按 scene 弹车体信息确认
+  // （2026-09-30 用户口径）。管理端「编辑信息」链接不带 scene，走不到这里。
+  const toCallIfPublished = useCallback((row: QrcodeItem): boolean => {
+    if (!sceneCode || row.status !== 'published') return false;
+    const qs = searchParams.toString();
+    navigate(qs ? `/call?${qs}` : '/call', { replace: true });
+    return true;
+  }, [sceneCode, navigate, searchParams]);
+
   useEffect(() => {
     // 没带 scene 也没带 :id：管理端手动新建，空表单直接可填
     if (!sceneCode && !pathId) return;
@@ -97,6 +112,7 @@ export default function InfoEntry() {
         if (sceneCode) {
           const row = await fetchQrcodeByScene(sceneCode);
           if (row) {
+            if (toCallIfPublished(row)) return;
             fillFromRow(row);
             return;
           }
@@ -107,14 +123,18 @@ export default function InfoEntry() {
             return;
           }
         }
-        if (pathId) fillFromRow(await fetchQrcode(pathId));
+        if (pathId) {
+          const row = await fetchQrcode(pathId);
+          if (toCallIfPublished(row)) return;
+          fillFromRow(row);
+        }
       } catch (err) {
         Toast({ message: `加载失败：${errMsg(err, '请稍后重试')}`, theme: 'error' });
       } finally {
         setLoading(false);
       }
     })();
-  }, [sceneCode, pathId, fillFromRow]);
+  }, [sceneCode, pathId, fillFromRow, toCallIfPublished]);
 
   // 项目id 锁定条件：编辑已有行（id 来自链接或 scene 查到的行），或扫码带入的场景值
   const projectIdLocked = !!sceneCode || rowId !== null;

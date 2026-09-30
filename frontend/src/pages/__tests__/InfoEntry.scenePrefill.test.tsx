@@ -3,6 +3,8 @@
 //   scene_str，已无 project_id 列）——解析出来直接带入「项目id」输入框：
 //   能查到行 → 编辑那行（锁死）；查不到行 → 按新录入处理（项目id 预填锁定）；
 //   没带 scene → 管理端手动新建（可编辑、必填）。
+//   该行已 published（录入+确认完成）→ 不停留本页，跳「我要摇人」(/call)，
+//   scene/openid 原样带走；管理端不带 scene 的「编辑信息」链接不受影响。
 //
 // 测试策略（对齐仓库既有页面测试约定，见 CallView.vehicleScan.test.tsx）：
 //   - api 层打桩：不触网
@@ -12,7 +14,7 @@
 import type { ReactNode } from 'react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor, fireEvent } from '@testing-library/react';
-import { MemoryRouter, Routes, Route } from 'react-router-dom';
+import { MemoryRouter, Routes, Route, useLocation } from 'react-router-dom';
 
 const mockFetchQrcode = vi.fn();
 const mockFetchQrcodeByScene = vi.fn();
@@ -96,12 +98,24 @@ const infoRow = {
   vehicle_model: 'XQE',
 };
 
+/** 「我要摇人」落点探针：断言 published 重定向发生、query（scene/openid）原样带过去 */
+function CallProbe() {
+  const { pathname, search } = useLocation();
+  return (
+    <div data-testid="call-page">
+      {pathname}
+      {search}
+    </div>
+  );
+}
+
 const renderInfoEntry = (entry: string) =>
   render(
     <MemoryRouter initialEntries={[entry]}>
       <Routes>
         <Route path="/admin/info-entry" element={<InfoEntry />} />
         <Route path="/admin/info-entry/:id" element={<InfoEntry />} />
+        <Route path="/call" element={<CallProbe />} />
       </Routes>
     </MemoryRouter>,
   );
@@ -194,5 +208,32 @@ describe('InfoEntry 扫码带入项目id', () => {
     expect(pid).toBeDisabled();
     expect(mockFetchQrcode).toHaveBeenCalledWith(9);
     expect(mockFetchQrcodeByScene).not.toHaveBeenCalled();
+  });
+
+  it('扫码进入且该行已 published：不停留录入页，跳「我要摇人」并原样带上 scene/openid', async () => {
+    // 真实扫码链接形如 …/info-entry/{id}?scene=…&openid=…（卡片生成于 entering 时期，
+    // 点击时已有人确认过 = 状态机 published）→ 应直达 CallView（/call）
+    mockFetchQrcodeByScene.mockResolvedValue({ ...infoRow, status: 'published' });
+    renderInfoEntry(`/admin/info-entry/9?scene=${SCENE}&openid=oXk4js`);
+
+    const probe = await screen.findByTestId('call-page');
+    expect(probe.textContent).toContain(`scene=${SCENE}`);
+    expect(probe.textContent).toContain('openid=oXk4js');
+    // 不停留录入页：表单没渲染、无「确认信息」
+    expect(screen.queryByPlaceholderText('请输入项目id')).not.toBeInTheDocument();
+    expect(screen.queryByText('确认信息')).not.toBeInTheDocument();
+    // scene 命中走 by-scene（登录即可接口），跳走前不再按 id 查
+    expect(mockFetchQrcodeByScene).toHaveBeenCalledWith(SCENE);
+    expect(mockFetchQrcode).not.toHaveBeenCalled();
+  });
+
+  it('/:id 无 scene（管理端「编辑信息」）且已 published：不跳转，仍打开那行编辑', async () => {
+    mockFetchQrcode.mockResolvedValue({ ...infoRow, status: 'published' });
+    renderInfoEntry('/admin/info-entry/9');
+
+    const pid = await screen.findByPlaceholderText('请输入项目id');
+    await waitFor(() => expect(valueOf(pid)).toBe(SCENE));
+    expect(pid).toBeDisabled();
+    expect(screen.queryByTestId('call-page')).not.toBeInTheDocument();
   });
 });
