@@ -49,13 +49,12 @@ export interface QrcodeStats {
   permanent_quota_remaining: number;
 }
 
-export type QrcodeStatus = 'init' | 'entering' | 'confirming' | 'published' | 'deprecated';
+export type QrcodeStatus = 'init' | 'entering' | 'published' | 'deprecated';
 export type QrcodeType = 'temporary' | 'permanent';
 
 export const QRCODE_STATUS_LABELS: Record<QrcodeStatus, { label: string; color: string }> = {
   init:       { label: '初始化', color: '#888d8f' },
   entering:   { label: '录入中', color: '#5aa9cd' },
-  confirming: { label: '确认中', color: '#d4a843' },
   published:  { label: '已发布', color: '#2d9d5c' },
   deprecated: { label: '已弃用', color: '#c94a4a' },
 };
@@ -142,8 +141,7 @@ export async function updateQrcode(id: number, data: {
   return request(`/qrcodes/${id}`, { method: 'PUT', body: JSON.stringify(data) });
 }
 
-/** 状态流转动作。录入信息行（project_code 非空）点「确认」= 确认即发布，
- *  后端直接落到 published（不经 confirming），见 InfoEntry.tsx。 */
+/** 状态流转动作。confirm 直接发布到 published，见 InfoEntry.tsx。 */
 export async function qrcodeTransition(id: number, action: 'confirm' | 'publish' | 'deprecate'): Promise<QrcodeItem> {
   return request(`/qrcodes/${id}/${action}`, { method: 'POST' });
 }
