@@ -28,20 +28,25 @@
 // 规则（界面不写注解，由交互体现）：
 // - 项目名称：必填，排在第一位。下拉候选来自 project 表（一次拉全量——含台账里
 //   「待定」的未承接项目，见 getProjects 的 includePending——本地模糊匹配 name/编码），
-//   选中已有项目会一并带出它的项目编号（编号随之锁住不可改）；直接手打出与表里完全
-//   同名的项目，同样按「选中」处理；也能输新名字，保存时由后端补进 project 表（用项目
-//   编号当新项目的 id/code，见 qrcode.py _ensure_project_row）
+//   选中已有项目会一并带出它的项目编号；直接手打出与表里完全同名的项目，同样按
+//   「选中」处理；也能输新名字，保存时由后端补进 project 表（用项目编号当新项目的
+//   id/code，见 qrcode.py _ensure_project_row）
 // - 项目编号：必填，唯一。名称匹配到 project 表里的项目时，编号以表里为准（自动带出、
 //   点编号框也会取一次表里的值）；新项目时手动填写；与已有项目/其他录入行冲突时后端
 //   400，detail 直接 Toast 出来
-// - 项目地点 / 客户名称 / 车型：自由填写，可留空
+// - 项目地点 / 客户名称 / 车型：必填
+//
+// tdesign-mobile-react 注意：FormItem 一旦加了 name 属性，就会接管子组件的值管理
+// （从 Form 内部 store 读值、拦截 onChange 回写）。本页用手动 useState 管 form，
+// 且需要"选项目名 → 自动填项目编号"这种跨字段联动（setForm 绕过 FormItem 拦截链路），
+// 所以**所有 FormItem 都不能加 name**，否则联动出来的值会被 FormItem 的空 store 覆盖掉。
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { Button, Form, FormItem, Loading, Toast } from 'tdesign-mobile-react';
 import ClearableInput from '@/shared/components/ClearableInput';
 import { getProjects, type ProjectItem } from '@/api/projects';
 import {
-  createProjectInfo, fetchQrcode, fetchQrcodeByScene, qrcodeTransition, updateProjectInfo,
+  createProjectInfo, fetchQrcode, fetchQrcodeByScene, updateProjectInfo,
   type QrcodeItem,
 } from '@/api/qrcode';
 
@@ -77,9 +82,6 @@ export default function InfoEntry() {
   const [loading, setLoading] = useState(!!pathId || !!sceneCode);
   const [submitting, setSubmitting] = useState(false);
   const [form, setForm] = useState(emptyForm);
-  // 行状态：entering 时页面底部出「确认信息」按钮（扫码确认流程，见后端 _send_scan_redirect_card）
-  const [status, setStatus] = useState('');
-  const [confirming, setConfirming] = useState(false);
 
   // 项目名称下拉候选（project 表）与开合；optionsLoaded 区分「没拉到」和「表里真没有」
   const [projectOptions, setProjectOptions] = useState<ProjectItem[]>([]);
@@ -177,7 +179,6 @@ export default function InfoEntry() {
       vehicle_model: row.vehicle_model || '',
     });
     setRowId(row.id);
-    setStatus(row.status || '');
   }, []);
 
   // 扫码进入（链接带 scene）且该行已 published：录入+确认都完成，不停留本页，
@@ -217,7 +218,6 @@ export default function InfoEntry() {
           if (!pathId) {
             setForm(emptyForm);
             setRowId(null);
-            setStatus('');
             return;
           }
         }
@@ -240,22 +240,22 @@ export default function InfoEntry() {
   const handleSubmit = async () => {
     const code = form.project_code.trim();
     const name = form.project_name.trim();
-    // 表单顺序：项目名称在前、项目编号在后，校验也按这个顺序报
-    if (!name) {
-      Toast({ message: '请填写项目名称', theme: 'warning' });
-      return;
-    }
-    if (!code) {
-      Toast({ message: '请填写项目编号', theme: 'warning' });
-      return;
-    }
+    const location = form.project_location.trim();
+    const customer = form.customer_name.trim();
+    const vehicle = form.vehicle_model.trim();
+    // 表单顺序：校验也按界面顺序报，用户体验更顺
+    if (!name) { Toast({ message: '请填写项目名称', theme: 'warning' }); return; }
+    if (!code) { Toast({ message: '请填写项目编号', theme: 'warning' }); return; }
+    if (!location) { Toast({ message: '请填写项目地点', theme: 'warning' }); return; }
+    if (!customer) { Toast({ message: '请填写客户名称', theme: 'warning' }); return; }
+    if (!vehicle) { Toast({ message: '请填写车型', theme: 'warning' }); return; }
 
     const fields = {
       project_code: code,
       project_name: name,
-      project_location: form.project_location.trim(),
-      customer_name: form.customer_name.trim(),
-      vehicle_model: form.vehicle_model.trim(),
+      project_location: location,
+      customer_name: customer,
+      vehicle_model: vehicle,
     };
 
     setSubmitting(true);
@@ -269,22 +269,6 @@ export default function InfoEntry() {
       Toast({ message: `保存失败：${errMsg(err, '请稍后重试')}`, theme: 'error' });
     } finally {
       setSubmitting(false);
-    }
-  };
-
-  // 确认信息：扫码核对无误后确认即发布（录入信息行 entering → published，
-  // 2026-09-30 用户口径；后端 confirm 接口直接给 published）。按钮随状态变化消失。
-  const handleConfirm = async () => {
-    if (!rowId) return;
-    setConfirming(true);
-    try {
-      const updated = await qrcodeTransition(rowId, 'confirm');
-      setStatus(updated.status || 'published');
-      Toast({ message: '信息已确认，已发布', theme: 'success' });
-    } catch (err) {
-      Toast({ message: `确认失败：${errMsg(err, '请稍后重试')}`, theme: 'error' });
-    } finally {
-      setConfirming(false);
     }
   };
 
@@ -305,7 +289,8 @@ export default function InfoEntry() {
         requiredMarkPosition="right"
         onSubmit={handleSubmit}
       >
-        <FormItem label="项目名称" name="project_name" requiredMark>
+        {/* 注意：FormItem 都不能加 name——见文件开头注释。 */}
+        <FormItem label="项目名称" requiredMark>
           <div className="proj-suggest">
             <ClearableInput
               value={form.project_name}
@@ -336,7 +321,7 @@ export default function InfoEntry() {
             )}
           </div>
         </FormItem>
-        <FormItem label="项目编号" name="project_code" requiredMark>
+        <FormItem label="项目编号" requiredMark>
           <ClearableInput
             value={form.project_code}
             onChange={setField('project_code')}
@@ -345,7 +330,7 @@ export default function InfoEntry() {
             maxlength={64}
           />
         </FormItem>
-        <FormItem label="项目地点" name="project_location">
+        <FormItem label="项目地点" requiredMark>
           <ClearableInput
             value={form.project_location}
             onChange={setField('project_location')}
@@ -353,7 +338,7 @@ export default function InfoEntry() {
             maxlength={128}
           />
         </FormItem>
-        <FormItem label="客户名称" name="customer_name">
+        <FormItem label="客户名称" requiredMark>
           <ClearableInput
             value={form.customer_name}
             onChange={setField('customer_name')}
@@ -361,7 +346,7 @@ export default function InfoEntry() {
             maxlength={128}
           />
         </FormItem>
-        <FormItem label="车型" name="vehicle_model">
+        <FormItem label="车型" requiredMark>
           <ClearableInput
             value={form.vehicle_model}
             onChange={setField('vehicle_model')}
@@ -375,20 +360,6 @@ export default function InfoEntry() {
           </Button>
         </FormItem>
       </Form>
-
-      {/* 扫码确认流程：状态机 entering 时（已生成 ticket、未确认）页面底部出「确认信息」，
-          点击 → published（录入信息行确认即发布，不经 confirming） */}
-      {rowId !== null && status === 'entering' && (
-        <Button
-          theme="primary"
-          block
-          loading={confirming}
-          onClick={handleConfirm}
-          style={{ marginTop: 12 }}
-        >
-          确认信息
-        </Button>
-      )}
     </div>
   );
 }

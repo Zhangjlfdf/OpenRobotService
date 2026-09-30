@@ -1050,47 +1050,57 @@ def _send_scan_redirect_card(openid: str, scene_str: str):
     try:
         from urllib.parse import urlencode
 
-        # ── 1. 查数据库：scene_str（=str(id)）对应的码配置 ──
+        # ── 1. 查数据库：先用 scene_str 精确匹配，再 fallback 按主键 id ──
         qr_cfg = None
         try:
             from app.core.database import db_manager
             from app.models.wechat_qrcode import WechatQrcode as _W
             db = db_manager.get_db()
-            # scene_str 始终等于 str(id)，直接按 id 查询
-            try:
-                qid = int(scene_str)
-                qr_cfg = db.query(_W).filter(_W.id == qid).first()
-            except (ValueError, TypeError):
-                qr_cfg = None  # 非数字 EventKey，无 DB 记录
+            # 优先按 scene_str（微信回调原样回传的 EventKey）精确匹配——这是最稳的方式
+            qr_cfg = db.query(_W).filter(_W.scene_str == scene_str).first()
+            if not qr_cfg:
+                # 再按主键 id 查（兼容 scene_str = str(id) 的老习惯）
+                try:
+                    qid = int(scene_str)
+                    qr_cfg = db.query(_W).filter(_W.id == qid).first()
+                except (ValueError, TypeError):
+                    pass  # 非数字，跳过
             db.close()
         except Exception:
             qr_cfg = None  # 没建表 / 没迁移过，静默回退默认
 
         # ── 2. 拼跳转 URL ──
-        # 优先级：
-        #   1. DB 有记录 + redirect_url 非空 → 用 redirect_url（运营自定义跳转）
-        #   2. DB 有记录 → 默认 /app/admin/info-entry/{id}（录入信息详情页）
-        #   3. 无 DB 记录 → /app/call（最兜底的通用落地页）
+        # 录入信息行（project_code 非空）在 entering（ticket 已生成、信息未确认）时，
+        # 扫码先去录入信息详情页核对——页面上有「确认信息」按钮（录入信息行确认即发布，
+        # 直接 entering → published，2026-09-30 用户口径）；
+        # 确认过之后按常规走（redirect_url 优先，否则默认落地页）。
+        # 'entering' 即 QrcodeStatus.ENTERING（纯字符串常量，此处不额外引入）
+        is_info_entering = bool(
+            qr_cfg and qr_cfg.status == 'entering' and qr_cfg.project_code
+        )
         base_url = None
-        if qr_cfg and qr_cfg.redirect_url:
-            # 运营自定义跳转 URL 最高优先级
-            base_url = qr_cfg.redirect_url
-        elif qr_cfg:
-            # 默认：录入信息详情页（无论什么状态，扫码先进入这个页面）
+        if is_info_entering:
             base_url = f"{settings.FRONTEND_BASE_URL}/app/admin/info-entry/{qr_cfg.id}"
+        elif qr_cfg and qr_cfg.redirect_url:
+            # 二维码配置了 redirect_url 就用它（可带 query，也可不带）
+            base_url = qr_cfg.redirect_url
 
         if base_url:
             # 如果配置的 URL 没有 ? 就附加 scene + openid 参数
             sep = '&' if '?' in base_url else '?'
             redirect_url = f"{base_url}{sep}{urlencode({'scene': scene_str, 'openid': openid})}"
         else:
-            # 无 DB 记录（可能是手动发的 EventKey 或老码），兜底走 /app/call
             call_path = f"{settings.FRONTEND_BASE_URL}/app/call"
             redirect_url = f"{call_path}?{urlencode({'scene': scene_str, 'openid': openid})}"
 
         # ── 3. 卡片标题/描述/图片 ──
         title = qr_cfg.name if qr_cfg and qr_cfg.name else "点击继续"
-        description = qr_cfg.description if qr_cfg and qr_cfg.description else "你扫了一个带参数的二维码，点击前往对应页面"
+        if qr_cfg and qr_cfg.description:
+            description = qr_cfg.description
+        elif is_info_entering:
+            description = "请点击进入，核对并确认项目信息"
+        else:
+            description = "你扫了一个带参数的二维码，点击前往对应页面"
         picurl = qr_cfg.qrcode_image_url if qr_cfg and qr_cfg.qrcode_image_url else ''
 
         logger.info(f'推送扫码跳转卡片: openid={openid}, scene={scene_str}, url={redirect_url}')
