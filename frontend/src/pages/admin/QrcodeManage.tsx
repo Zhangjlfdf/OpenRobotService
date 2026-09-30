@@ -281,7 +281,15 @@ export default function QrcodeManage() {
         <div className="qr-preview">
           <h4>{qr.name}</h4>
           <div className="qr-preview-scene">scene_str = <code>{qr.scene_str}</code></div>
-          {qr.project_name && <div className="qr-preview-scene">所属项目：{qr.project_name}</div>}
+          {/* 录入信息行：项目名就是码记录名（见上方 h4），这里列出登记的项目字段；
+              普通码行只有联查出来的「所属项目」，且与自身名字不同（相同即重复，不显示） */}
+          {qr.project_name && qr.project_name !== qr.name && (
+            <div className="qr-preview-scene">所属项目：{qr.project_name}</div>
+          )}
+          {qr.project_code && <div className="qr-preview-scene">项目编号：{qr.project_code}</div>}
+          {qr.project_location && <div className="qr-preview-scene">项目地点：{qr.project_location}</div>}
+          {qr.customer_name && <div className="qr-preview-scene">客户名：{qr.customer_name}</div>}
+          {qr.vehicle_model && <div className="qr-preview-scene">车型：{qr.vehicle_model}</div>}
           {qr.ticket ? (
             <img
               src={`${TICKET_IMAGE_BASE}${encodeURIComponent(qr.ticket)}`}
@@ -290,6 +298,15 @@ export default function QrcodeManage() {
             />
           ) : (
             <div className="qr-preview-empty">未生成 ticket</div>
+          )}
+          {/* 录入信息行直接回录入页修改（项目id 锁、项目编号可改） */}
+          {qr.project_code && (
+            <button
+              className="qr-btn qr-btn--secondary"
+              onClick={() => navigate(`/admin/info-entry/${qr.id}`)}
+            >
+              编辑信息
+            </button>
           )}
           <button className="qr-btn qr-btn--ghost" onClick={() => setPopup(null)}>关闭</button>
         </div>
@@ -386,7 +403,9 @@ export default function QrcodeManage() {
                       <span className="qr-item-type">{TYPE_LABEL[q.type as QrcodeType]}</span>
                     </div>
                     <div className="qr-item-name">{q.name || '—'}</div>
-                    {q.project_name && <div className="qr-item-batch">项目：{q.project_name}</div>}
+                    {q.project_name && q.project_name !== q.name && (
+                      <div className="qr-item-batch">项目：{q.project_name}</div>
+                    )}
                     {q.batch_id && <div className="qr-item-batch">批次: {q.batch_id.slice(-8)}</div>}
                   </div>
                   <span className="qr-item-chev"><MacChevronRight size={16} /></span>

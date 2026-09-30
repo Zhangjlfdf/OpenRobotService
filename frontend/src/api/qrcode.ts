@@ -20,10 +20,18 @@ export interface QrcodeItem {
   expire_seconds?: number;
   status: string;
   batch_id?: string;
-  /** 所属项目ID（project.id；非项目码为 null） */
+  /** 所属项目ID（录入信息行：业务键；普通码行：project.id 关联；没有则为 null） */
   project_id?: string | null;
-  /** 所属项目名（后端按 project_id 联查下发，便于列表直接展示） */
+  /** 项目名：录入信息行用自己的；普通码行是后端按 project_id 联查下发的所属项目名 */
   project_name?: string | null;
+  /** 项目编号（录入信息行；普通码行为 null） */
+  project_code?: string | null;
+  /** 项目地点（录入信息行） */
+  project_location?: string | null;
+  /** 客户名（录入信息行） */
+  customer_name?: string | null;
+  /** 车型（录入信息行） */
+  vehicle_model?: string | null;
   redirect_url?: string;
   created_by?: string;
   published_by?: string;
@@ -131,4 +139,30 @@ export async function qrcodeTransition(id: number, action: 'confirm' | 'publish'
 
 export async function deleteQrcode(id: number): Promise<{ ok: boolean }> {
   return request(`/qrcodes/${id}`, { method: 'DELETE' });
+}
+
+// ── 录入信息（项目信息登记）──
+// 六个字段 = wechat_qrcodes 一行（和行 id 同行存），见 pages/admin/InfoEntry.tsx。
+// 项目id 唯一不可改（留空可后补）；项目编号唯一可改；重复/改动由后端 400 拦下。
+
+export interface ProjectInfoPayload {
+  /** 项目id（唯一；留空可后补一次，存过不可改） */
+  project_id?: string;
+  /** 项目编号（唯一，可改） */
+  project_code: string;
+  /** 项目名 */
+  project_name: string;
+  project_location?: string;
+  customer_name?: string;
+  vehicle_model?: string;
+}
+
+/** 登记一条项目信息（落成 wechat_qrcodes 新行，init 状态） */
+export async function createProjectInfo(data: ProjectInfoPayload): Promise<QrcodeItem> {
+  return request('/qrcodes/project-info', { method: 'POST', body: JSON.stringify(data) });
+}
+
+/** 更新一条项目信息（项目id 只允许「空 → 有」补填；其余字段传了才改） */
+export async function updateProjectInfo(id: number, data: Partial<ProjectInfoPayload>): Promise<QrcodeItem> {
+  return request(`/qrcodes/${id}/project-info`, { method: 'PUT', body: JSON.stringify(data) });
 }

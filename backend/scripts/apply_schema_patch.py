@@ -75,6 +75,12 @@ PATCHES = {
     # wechat_qrcodes 表已建出来」的库才需要这里补列。
     "wechat_qrcodes": [
         ("project_id", "VARCHAR(64) NULL COMMENT '所属项目ID（project.id；非项目码为 NULL）'", "ix_wechat_qrcodes_project_id"),
+        # 录入信息（其他项目登记）：一条信息一行，六个字段和行 id 同行存
+        ("project_code", "VARCHAR(64) NULL COMMENT '项目编号（录入信息行；唯一由接口层查重）'", "ix_wechat_qrcodes_project_code"),
+        ("project_name", "VARCHAR(128) NULL COMMENT '项目名（录入信息行自带）'", None),
+        ("project_location", "VARCHAR(128) NULL COMMENT '项目地点（录入信息行）'", None),
+        ("customer_name", "VARCHAR(128) NULL COMMENT '客户名（录入信息行）'", None),
+        ("vehicle_model", "VARCHAR(128) NULL COMMENT '车型（录入信息行）'", None),
     ],
     # 注：project_info_node 不再需要补列兜底。2026-09 项目信息结构改造
     # （alembic 7c1e9a4b2d38）把该表整体重建为「节点定义 + 项目值」两表结构，
