@@ -5,12 +5,14 @@
  * 同一棵树）。所有展示与统计都在前端完成，后端不需要新接口。
  *
  * 1. 一级标签 chips：勾选哪些标签的项目背景信息要带进文档；
- *    缺省过半（可填节点空值 > 50%）的标签右上角出感叹号（`projectInfoTree.computeInfoCompleteness`）。
- * 2. 缺信息的三种处理：
- *    ① 补充信息 —— 右侧侧滑抽屉直接编辑项目信息（复用编辑页的嵌入模式），改完文档自动重算；
- *    ② 提单给他人补充 —— 选人后建一张 support 工单，附「待补充节点清单」；
- *    ③ 暂时跳过 —— 本次不提醒，照常提单。
- * 3. 文档正文：系统段（项目背景信息，随勾选实时重算）+ 分隔线 + 补充段（用户自己写的不被覆盖），
+ *    缺省过半（可填节点空值 > 50%）的标签右上角出感叹号（`projectInfoTree.computeInfoCompleteness`），
+ *    标签池下方常驻一行口径说明（感叹号是什么，见 mac-info__legend，与项目信息管理页一致）。
+ * 2. 缺信息提示条 + 处理按钮：
+ *    ① 补充信息 / ② 提单给他人补充 —— 选定项目后常驻（不再只在缺信息时出现）；
+ *    ③ 暂时跳过 —— 点了本次（本组件实例）不再提示、按钮也不再显示，刷新/重进页面恢复；
+ *    缺信息提示条本身仍只在「勾选标签里有缺省过半」时出现。
+ * 3. 标签勾选默认全不选（按项目记住上次勾选，没记过 → 全不选），标签行上方提供全选 / 全部取消。
+ * 4. 文档正文：系统段（项目背景信息，随勾选实时重算）+ 分隔线 + 补充段（用户自己写的不被覆盖），
  *    见 shared/utils/shareDoc.ts；编辑入口复用既有的 SpecDocField（上传 / 在线编写）。
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -132,18 +134,18 @@ export default function TicketShareDocSetting({
     [nodes],
   );
 
-  // 首次拿到树：按本机记住的勾选恢复；没记过则默认全选（一次性，后续由用户控制）
+  // 首次拿到树：按本机记住的勾选恢复；没记过则默认全不选（一次性，后续由用户控制）
   useEffect(() => {
     if (!roots.length || initedRef.current === projectId) return;
     initedRef.current = projectId;
     const stored = loadShareDocTags(projectId);
     const valid = roots.map((root) => root.id);
     if (stored.size) {
-      const kept = valid.filter((id) => stored.has(id));
-      setSelected(new Set(kept.length ? kept : valid));
+      // 只恢复仍存在的标签（项目信息树可能改过）；记忆失效时按「没记过」处理 → 全不选
+      setSelected(new Set(valid.filter((id) => stored.has(id))));
       return;
     }
-    setSelected(new Set(valid));
+    setSelected(new Set());
   }, [roots, projectId]);
 
   const toggleTag = useCallback((id: string) => {
@@ -154,6 +156,12 @@ export default function TicketShareDocSetting({
       return next;
     });
   }, []);
+
+  const selectAllTags = useCallback(() => {
+    setSelected(new Set(roots.map((root) => root.id)));
+  }, [roots]);
+
+  const clearAllTags = useCallback(() => setSelected(new Set()), []);
 
   // 本机记住勾选（按项目隔离，与项目信息卡的筛选状态互不影响）
   useEffect(() => {
@@ -279,11 +287,28 @@ export default function TicketShareDocSetting({
   };
 
   const showWarn = !skipMissing && missing.length > 0 && !loading;
+  /** 标签区渲染条件（选定项目且信息树已拿到）：操作按钮与全选/全部取消的常驻判据 */
+  const showTags = Boolean(projectId) && !loading && roots.length > 0;
 
   return (
     <section className="share-doc">
       <h4 className="share-doc__title">问题共享文档设置</h4>
       <p className="share-doc__hint">勾选要带入文档的项目背景信息（来自所绑定项目的信息标签）。</p>
+
+      {/* 全选 / 全部取消：标签默认全不选，给一键操作（版式对齐项目信息管理页的 poolhead） */}
+      {showTags ? (
+        <div className="mac-info__poolhead">
+          <span className="mac-info__poolhead-label">问题标签</span>
+          <div className="mac-info__poolhead-ops">
+            <button type="button" className="mac-info__poolbtn" disabled={disabled} onClick={selectAllTags}>
+              全选
+            </button>
+            <button type="button" className="mac-info__poolbtn" disabled={disabled} onClick={clearAllTags}>
+              全部取消
+            </button>
+          </div>
+        </div>
+      ) : null}
 
       {!projectId ? (
         <p className="share-doc__empty">请先选择项目，再设置共享文档。</p>
@@ -317,33 +342,49 @@ export default function TicketShareDocSetting({
         </div>
       )}
 
-      {showWarn ? (
-        <>
-          <div className="share-doc__warn">
-            <span className="share-doc__warn-icon" aria-hidden="true">
+      {/* 感叹号口径说明：常驻一行图例（与项目信息管理页同一套说明，提醒用户 ! 的含义） */}
+      {showTags ? (
+        <p className="mac-info__legend">
+          <span className="mac-info__legend-item">
+            <span className="mac-tagpool__warn mac-tagpool__warn--static" aria-hidden="true">
               !
             </span>
-            <span>
-              当前问题缺少有效信息，可能影响问题定位（{missing.map((item) => item.title).join('、')}）
-            </span>
-          </div>
-          <div className="share-doc__actions">
-            <button
-              type="button"
-              className="share-doc__btn share-doc__btn--primary"
-              disabled={disabled}
-              onClick={() => setDrawerOpen(true)}
-            >
-              补充信息
-            </button>
-            <button
-              type="button"
-              className="share-doc__btn"
-              disabled={disabled}
-              onClick={() => setAssignOpen(true)}
-            >
-              提单给他人补充
-            </button>
+            标签旁的 ! = 该标签下过半信息未填写，可能影响问题定位
+          </span>
+        </p>
+      ) : null}
+
+      {showWarn ? (
+        <div className="share-doc__warn">
+          <span className="share-doc__warn-icon" aria-hidden="true">
+            !
+          </span>
+          <span>
+            当前问题缺少有效信息，可能影响问题定位（{missing.map((item) => item.title).join('、')}）
+          </span>
+        </div>
+      ) : null}
+
+      {/* 处理按钮：补充信息 / 提单给他人补充 常驻；暂时跳过点了本次不再显示（刷新/重进页面恢复） */}
+      {showTags ? (
+        <div className="share-doc__actions">
+          <button
+            type="button"
+            className="share-doc__btn share-doc__btn--primary"
+            disabled={disabled}
+            onClick={() => setDrawerOpen(true)}
+          >
+            补充信息
+          </button>
+          <button
+            type="button"
+            className="share-doc__btn"
+            disabled={disabled}
+            onClick={() => setAssignOpen(true)}
+          >
+            提单给他人补充
+          </button>
+          {!skipMissing ? (
             <button
               type="button"
               className="share-doc__btn share-doc__btn--ghost"
@@ -352,8 +393,8 @@ export default function TicketShareDocSetting({
             >
               暂时跳过
             </button>
-          </div>
-        </>
+          ) : null}
+        </div>
       ) : null}
 
       <div className="share-doc__doc">
