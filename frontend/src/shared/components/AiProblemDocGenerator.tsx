@@ -12,6 +12,8 @@
 import { useState } from 'react';
 import { Popup, Toast } from 'tdesign-mobile-react';
 import { generateProblemDoc, type ProblemDocSourceItem } from '@/api/specDoc';
+// 自带样式：提单页（TicketShareDocSetting 已 import 过，幂等）与工单详情页（SpecDocCard）都要用
+import '@/shared/styles/shareDoc.css';
 
 export interface AiProblemDocGeneratorProps {
   /** 待整理的素材（按时间正序） */
