@@ -1208,6 +1208,15 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
   const [remoteShots, setRemoteShots] = useState<{ objectPath: string; fileName: string }[]>([]);
   // 问题文档草稿（选填）：随 overrides.spec_doc 透传后端落 task_spec_doc
   const [specDoc, setSpecDoc] = useState<SpecDocDraft | null>(null);
+  // 「AI 生成问题文档」的素材 = 本次会话消息（只取有正文的，最多 60 条，避免超长 payload）
+  const shareDocSourceItems = useMemo(
+    () =>
+      messages
+        .filter((m) => !m.uploading && (m.content || '').trim())
+        .slice(-60)
+        .map((m) => ({ role: m.role, content: (m.content || '').trim(), created_at: m.timestamp })),
+    [messages],
+  );
   const [uploadingShot, setUploadingShot] = useState(false);
   const remoteShotInputRef = useRef<HTMLInputElement | null>(null);
   // 转工单信息不足引导（方案A）：prepare 返回 not_ready 时，
@@ -3648,6 +3657,7 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
                   value={specDoc}
                   onChange={setSpecDoc}
                   disabled={ticketConfirm.submitting}
+                  sourceItems={shareDocSourceItems}
                 />
                 <label className="ticket-confirm__label">优先级</label>
                 <select

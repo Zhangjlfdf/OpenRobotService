@@ -18,8 +18,10 @@ import { Popup, Toast } from 'tdesign-mobile-react';
 import { createRequest } from '@/api/client';
 import API_CONFIG from '@/config/api';
 import { createTicket } from '@/api/ticket';
+import type { ProblemDocSourceItem } from '@/api/specDoc';
 import type { UserItem } from '@/api/users';
 import UserSelect from '@/shared/components/UserSelect';
+import AiProblemDocGenerator from '@/shared/components/AiProblemDocGenerator';
 import SpecDocField, { type SpecDocDraft } from '@/shared/components/SpecDocField';
 import ProjectInfoEditDrawer from '@/shared/components/ProjectInfoEditDrawer';
 import { computeInfoCompleteness, loadInfoNodes, type ProjectInfoNode } from '@/shared/utils/projectInfoTree';
@@ -29,8 +31,10 @@ import {
   loadShareDocTags,
   mergeShareDoc,
   missingSelectedTags,
+  replaceUserSection,
   saveShareDocTags,
   SHARE_DOC_SECTION_TEMPLATE,
+  splitShareDoc,
 } from '@/shared/utils/shareDoc';
 import '@/shared/styles/shareDoc.css';
 
@@ -42,6 +46,11 @@ export interface TicketShareDocSettingProps {
   value: SpecDocDraft | null;
   onChange: (value: SpecDocDraft | null) => void;
   disabled?: boolean;
+  /**
+   * 「AI 生成问题文档」的素材（提单页传本次会话消息；讨论区场景传评论）。
+   * 不传 / 为空时不显示生成入口。
+   */
+  sourceItems?: ProblemDocSourceItem[];
 }
 
 /** 项目成员行（GET /projects/{id}/members 的最小字段） */
@@ -76,6 +85,7 @@ export default function TicketShareDocSetting({
   value,
   onChange,
   disabled = false,
+  sourceItems = [],
 }: TicketShareDocSettingProps) {
   const request = useMemo(() => createRequest(API_CONFIG.ADMIN.BASE_URL, 'Admin'), []);
 
@@ -168,6 +178,21 @@ export default function TicketShareDocSetting({
   valueRef.current = value;
   const onChangeRef = useRef(onChange);
   onChangeRef.current = onChange;
+
+  /** 补充段是否已有内容（AI 生成前要提示「这部分会被替换」） */
+  const hasUserContent = useMemo(
+    () => splitShareDoc(value?.content ?? '').user.trim().length > 0,
+    [value?.content],
+  );
+
+  /** AI 生成的结果：只替换分隔线以下的补充段，系统段（项目背景信息）原样保留 */
+  const applyGenerated = useCallback((markdown: string) => {
+    onChangeRef.current({
+      content: replaceUserSection(valueRef.current?.content ?? '', markdown),
+      source: valueRef.current?.source || 'ai_summary',
+      source_files: valueRef.current?.source_files ?? [],
+    });
+  }, []);
   useEffect(() => {
     if (!system || !selected.size) return;
     const current = valueRef.current?.content ?? '';
@@ -333,6 +358,18 @@ export default function TicketShareDocSetting({
 
       <div className="share-doc__doc">
         <p className="share-doc__label">问题共享文档（选填）</p>
+        {sourceItems.length > 0 ? (
+          <div className="share-doc__actions">
+            <AiProblemDocGenerator
+              items={sourceItems}
+              projectName={projectName}
+              scene="conversation"
+              hasUserContent={hasUserContent}
+              disabled={disabled}
+              onApply={applyGenerated}
+            />
+          </div>
+        ) : null}
         <SpecDocField value={value} onChange={onChange} disabled={disabled} />
         <p className="share-doc__tip">
           项目背景信息随勾选自动更新；分隔线以下的补充内容不会被覆盖。
