@@ -56,6 +56,27 @@ class WechatQrcode(Base):
     # ── 批量管理 ──
     batch_id = Column(String(64), nullable=True, index=True, comment="批次 ID，批量创建时同一批次共享")
 
+    # ── 项目关联 ──
+    # 一张码最多属于一个项目，一个项目可以有多张码（多台车/重印/多入口），
+    # 所以引用放在码这侧；非项目码（如「智能体入口-客服A」）为 NULL。
+    # 宽松引用 project.id（同 project_pin.project_id 口径，不加物理外键），
+    # 存在性由接口层校验（见 admin/api/qrcode.py _resolve_project_ref）。
+    project_id = Column(String(64), nullable=True, index=True, comment="所属项目ID（project.id；非项目码为 NULL）")
+
+    # ── 录入信息（其他项目登记，2026-09-29 用户口径） ──
+    # 「新建项目 → 录入信息」一条录入 = 本表一行：项目id/项目编号/项目名/项目地点/客户名/车型
+    # 六个字段和行 id 同行存（见 admin/api/qrcode.py 的 project-info 两个接口）。注意：
+    # - 这组字段里的 project_id 是业务键（后续企微表格同步过来），不是 project 表引用，
+    #   不走 _resolve_project_ref 的存在性校验（那套只服务「扫码关联 USP 项目」）；
+    # - project_code 非空 = 这是一条录入信息行。项目id/项目编号的「唯一」由接口层
+    #   只在录入信息行范围内查重（不加物理唯一索引）；普通码行这些列为 NULL，
+    #   其 project_id 仍允许多行指向同一项目（多台车/重印）。
+    project_code = Column(String(64), nullable=True, index=True, comment="项目编号（录入信息行；唯一由接口层查重）")
+    project_name = Column(String(128), nullable=True, comment="项目名（录入信息行自带）")
+    project_location = Column(String(128), nullable=True, comment="项目地点（录入信息行）")
+    customer_name = Column(String(128), nullable=True, comment="客户名（录入信息行）")
+    vehicle_model = Column(String(128), nullable=True, comment="车型（录入信息行）")
+
     # ── 扫码跳转配置 ──
     redirect_url = Column(String(512), nullable=True, comment="扫码后跳转 URL（覆盖默认 /app/call）")
 
