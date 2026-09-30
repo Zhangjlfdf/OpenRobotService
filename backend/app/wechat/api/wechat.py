@@ -1034,7 +1034,7 @@ def _send_scan_redirect_card(openid: str, scene_str: str):
 
     支持每个二维码独立配置 redirect_url / name / description / picurl：
     - wechat_qrcodes 表有记录且字段非空 → 用配置值
-    - 没记录或字段为空 → 用默认 /app/call 拼接 scene+openid
+    - 没记录或字段为空 → 用默认 /call 拼接 scene+openid
 
     scene_str 归一化在入口统一做：未关注用户扫码关注时微信推 subscribe 事件，
     EventKey 形如 `qrscene_<scene>`（微信自动加前缀）；已关注用户扫码走 SCAN
@@ -1070,17 +1070,26 @@ def _send_scan_redirect_card(openid: str, scene_str: str):
             qr_cfg = None  # 没建表 / 没迁移过，静默回退默认
 
         # ── 2. 拼跳转 URL ──
-        # 优先级：
-        #   1. DB 有记录 + redirect_url 非空 → 用 redirect_url（运营自定义跳转）
-        #   2. DB 有记录 → 默认 /admin/info-entry（录入信息详情页）
-        #   3. 无 DB 记录 → /call（最兜底的通用落地页）
-        # 注意：FRONTEND_BASE_URL 已带 /app 后缀，此处不要再拼 /app
+        # 录入信息行（project_code 非空）在 entering（ticket 已生成、信息未确认）时，
+        # 扫码先去录入信息详情页核对——页面上有「确认信息」按钮（录入信息行确认即发布，
+        # 直接 entering → published，2026-09-30 用户口径）；
+        # 确认过之后按常规走（redirect_url 优先，否则默认落地页）。
+        # 'entering' 即 QrcodeStatus.ENTERING（纯字符串常量，此处不额外引入）
+        # 路径里一律不硬拼 /app：FRONTEND_BASE_URL 部署值已带 /app 后缀
+        #（.../t/app、.../p/app），硬拼会出现 .../app/app/... 重复。
+        is_info_entering = bool(
+            qr_cfg and qr_cfg.status == 'entering' and qr_cfg.project_code
+        )
         base_url = None
-        if qr_cfg and qr_cfg.redirect_url:
-            # 运营自定义跳转 URL 最高优先级
+        if is_info_entering:
+            # id 必须占路径：微信 OAuth 回跳会丢 query，带 id 的 path 才稳
+            #（前端 QrcodeManage / InfoEntry 契约）；scene/openid 仍以 query 兜底
+            base_url = f"{settings.FRONTEND_BASE_URL}/admin/info-entry/{qr_cfg.id}"
+        elif qr_cfg and qr_cfg.redirect_url:
+            # 二维码配置了 redirect_url 就用它（可带 query，也可不带）
             base_url = qr_cfg.redirect_url
         elif qr_cfg:
-            # 默认：录入信息详情页（无论什么状态，扫码先进入这个页面）
+            # 默认：录入信息详情页（其余状态扫码先进入这个页面）
             base_url = f"{settings.FRONTEND_BASE_URL}/admin/info-entry"
 
         if base_url:
@@ -1093,7 +1102,12 @@ def _send_scan_redirect_card(openid: str, scene_str: str):
 
         # ── 3. 卡片标题/描述/图片 ──
         title = qr_cfg.name if qr_cfg and qr_cfg.name else "点击继续"
-        description = qr_cfg.description if qr_cfg and qr_cfg.description else "你扫了一个带参数的二维码，点击前往对应页面"
+        if qr_cfg and qr_cfg.description:
+            description = qr_cfg.description
+        elif is_info_entering:
+            description = "请点击进入，核对并确认项目信息"
+        else:
+            description = "你扫了一个带参数的二维码，点击前往对应页面"
         picurl = qr_cfg.qrcode_image_url if qr_cfg and qr_cfg.qrcode_image_url else ''
 
         logger.info(f'推送扫码跳转卡片: openid={openid}, scene={scene_str}, url={redirect_url}')
