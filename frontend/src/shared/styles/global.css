@@ -927,6 +927,25 @@ html, body, #root {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
 }
+/* 车型选项气泡组（0930）：与大方向短选项更相称的三列网格（开场题 5 个短词），
+   复用 __btn 全部样式与派生禁用/加深逻辑 */
+.chat-veh-choices.chat-proj-choices {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+/* 开场题大字题面（「您遇到了什么问题？」） */
+.chat-veh-q {
+  font-size: 17px;
+  font-weight: 700;
+  color: var(--card-foreground);
+  margin: 2px 0 4px;
+}
+/* 「其他」提示语行：固定渲染在按钮组下方，不入 content 不落库 */
+.chat-veh-hint {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--muted-foreground, #98a2b3);
+  line-height: 1.5;
+}
 /* 奇数个候选时最后一个独占半行右侧空缺，拉通栏补齐 */
 .chat-proj-choices > button:last-child:nth-child(odd) {
   grid-column: 1 / -1;

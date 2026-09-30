@@ -15,6 +15,8 @@ metadata["vehicle_mode"] 存在为唯一开关。
 """
 import time
 import asyncio
+import random
+import re
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -24,6 +26,65 @@ from ai.core.logging import get_logger
 from ai.core.memory import MemoryManager
 
 logger = get_logger(__name__)
+
+# ---- 开场大方向引导题（0930 定稿：服务端直出，不经 LLM）----
+OPENING_QUESTION = "您遇到了什么问题？"
+OPENING_HINT = "若是其他情况，请在下方输入框描述"
+_OPENING_KEEP_SUBSTR = "故障码"   # 保底类目（重要大类，随机时必选）
+_OPENING_LIMIT = 5
+
+
+def parse_fork_tree_choices(model: str, kb_root: Optional[Path] = None) -> List[str]:
+    """读 kb/{domain}/manual/ 下文件名含「分叉树」的 md，解析顶层 ## 标题。
+
+    顶层标题 = 大方向类目（剥「N. 」序号前缀）。文件不存在/无标题返回 []
+    （开场题是可选能力，空库自动退化为纯输入框，不阻塞模式注册）。
+    kb_root 参数供测试注入临时目录。
+    """
+    domain = model_to_domain(model)
+    if not domain:
+        return []
+    root = (kb_root or _default_kb_root()) / domain / "manual"
+    tree = None
+    if root.is_dir():
+        for f in sorted(root.glob("*.md")):
+            if "分叉树" in f.stem:
+                tree = f
+                break
+    if tree is None:
+        return []
+    try:
+        lines = tree.read_text(encoding="utf-8").splitlines()
+    except Exception as e:
+        logger.warning(f"[vehicle_mode] 分叉树读取失败: {tree.name}: {e}")
+        return []
+    out: List[str] = []
+    for ln in lines:
+        m = re.match(r"^##\s+(.+?)\s*$", ln)
+        if not m:
+            continue
+        t = re.sub(r"^[0-9一二三四五六七八九十]+[.、．]\s*", "", m.group(1)).strip()
+        if t and t not in out:
+            out.append(t)
+    return out
+
+
+def build_opening(top_levels: List[str], rng: Optional[random.Random] = None) -> Optional[Dict]:
+    """开场题数据：故障码类保底 + 其余随机抽满 5（0930 定稿）。
+
+    随机是用户拍板（固定前 5 会让其余类永无曝光）；故障码是重要大类保底
+    不随机。不足 2 类不出题（None）。
+    """
+    if not top_levels:
+        return None
+    rng = rng or random
+    keep = [c for c in top_levels if _OPENING_KEEP_SUBSTR in c]
+    rest = [c for c in top_levels if _OPENING_KEEP_SUBSTR not in c]
+    rng.shuffle(rest)
+    choices = (keep + rest)[:_OPENING_LIMIT]
+    if len(choices) < 2:
+        return None
+    return {"question": OPENING_QUESTION, "choices": choices, "hint": OPENING_HINT}
 
 
 class ModeConfirmRequest(BaseModel):
@@ -164,9 +225,11 @@ async def register_mode(req: ModeConfirmRequest,
     await mm.save_memory(memory)
 
     manual_docs = list_manual_docs(vehicle.model)
+    opening = build_opening(parse_fork_tree_choices(vehicle.model))
     logger.info(
         f"[vehicle_mode] 定制模式注册: session={req.session_id} model={vehicle.model} "
-        f"vehicle={vehicle.vehicle_code} domain={domain} manual={len(manual_docs)}篇",
+        f"vehicle={vehicle.vehicle_code} domain={domain} manual={len(manual_docs)}篇 "
+        f"opening={len(opening['choices']) if opening else 0}类",
     )
     return {
         "code": 0,
@@ -175,6 +238,7 @@ async def register_mode(req: ModeConfirmRequest,
             "model": vehicle.model,
             "domain": domain,
             "manual_docs": manual_docs,
+            "opening": opening,
         },
     }
 

@@ -26,6 +26,7 @@ logger = get_logger("AI")
 # 用户名下项目列表缓存：{username: (拉取时间戳, [{"name","code"}, ...])}
 # 仅服务提单工具循环的项目预填，TTL 5 分钟，见 AiDiagnosisPlatform._get_user_projects
 _USER_PROJECTS_CACHE: Dict[str, tuple] = {}
+_ALL_PROJECT_NAMES_CACHE: list = []  # [(expires_at, names)] 单条目
 # 最近提单项目缓存（项目选择题候选）：结构与 _USER_PROJECTS_CACHE 相同，
 # 见 AiDiagnosisPlatform._get_recent_ticket_projects
 _RECENT_TICKET_PROJECTS_CACHE: Dict[str, tuple] = {}
@@ -446,12 +447,12 @@ def _user_profile_block(state: "AgentState") -> str:
 
 
 def _vehicle_mode_block(memory) -> str:
-    """【车辆】扫码定制模式块（XQE 试点，0929）。
+    """【车辆】扫码定制模式块（XQE 试点，0929；0930 选项引导规则）。
 
     会话经模式确认接口（/mode/confirm）注册 metadata["vehicle_mode"] 后，
     三套 prompt（全量诊断/收集/快路径）均注入本块：车型信息已确认，
-    涉及车型的字段视为已回答不追问；引导时给编号选项。常规会话（无该键）
-    返回空串——零注入、零行为变化。
+    涉及车型的字段视为已回答不追问；追问选项引导规则（vehicle_choices
+    JSON 顶层字段）。常规会话（无该键）返回空串——零注入、零行为变化。
     """
     vm = (getattr(memory, "metadata", None) or {}).get("vehicle_mode") or {}
     if not vm.get("model"):
@@ -467,10 +468,22 @@ def _vehicle_mode_block(memory) -> str:
         f"【车辆】本会话已扫码绑定：{'｜'.join(seg)}",
         "（该车的车型/车辆型号视为已知信息，涉及这些的字段不要向用户追问；"
         "回答与排查默认围绕该车型的知识库内容展开；"
-        "用户报故障码时先在知识库按码精确查证再解释，查不到如实说明；"
-        "需要用户补充信息时可给编号选项供快速回答，选项必须来自知识库内容或"
-        "常见情况，不要编造选项）",
+        "用户报故障码时先在知识库按码精确查证再解释，查不到如实说明）",
     ]
+    last = vm.get("last_choices") or []
+    if last:
+        lines.append(
+            "【车辆】上一轮你已给出选项（" + "／".join(last) + "）且用户尚未回答："
+            "不要重复给出选项；用户以选项原文回应时，按该选项的含义理解并继续处理。")
+    lines.append(
+        "【车辆】选项引导：当且仅当知识库检索内容对当前问题存在明确互斥的分支、"
+        "需要确认用户属于哪种分支才能继续处理时，在输出 JSON 顶层增加 "
+        "vehicle_choices 字段（字符串数组），填 2~3 个分支的简短短语——选项必须"
+        "来自知识库检索内容，不得编造；此时 message 只写一句引导问题，不要在正文"
+        "里罗列选项或编号。以下情形一律不输出该字段：知识库内容没有明确分支、"
+        "问题可以直接回答、需要用户开放描述、应当转工单、上一轮已给出选项尚未"
+        "回答、当前在收集工单信息。用户问的是故障码时不出选项，引导其直接输入"
+        "完整故障码即可。")
     return "\n".join(lines) + "\n"
 
 
@@ -2317,6 +2330,37 @@ class AiDiagnosisPlatform:
         logger.info(f"[user_projects] username={username}, projects={len(projects)}")
         return projects
 
+    async def _get_all_project_names(self) -> List[str]:
+        """全量项目名（仅用于 [mention] 命中证据的普遍度闸，0930）。
+
+        5 分钟缓存；任何失败返回 []（闸自动失效 = 维持旧行为，不阻塞预填）。
+        """
+        now = time.time()
+        if _ALL_PROJECT_NAMES_CACHE and now < _ALL_PROJECT_NAMES_CACHE[0]:
+            return _ALL_PROJECT_NAMES_CACHE[1]
+        from ai.core.database import SessionLocal
+        from sqlalchemy import text
+        loop = asyncio.get_running_loop()
+
+        def _query():
+            session = SessionLocal()
+            try:
+                db = os.getenv("HELPDESK_DB", "helpdesk_724")
+                rows = session.execute(
+                    text(f"SELECT name FROM {db}.project")).fetchall()
+                return [r[0] for r in rows if r[0]]
+            finally:
+                session.close()
+
+        try:
+            names = await asyncio.wait_for(
+                loop.run_in_executor(None, _query), timeout=1.0)
+        except Exception as e:
+            logger.warning(f"[all_project_names] 查询失败(普遍度闸失效): {e}")
+            return []
+        _ALL_PROJECT_NAMES_CACHE[:] = [(now + 300, names)]
+        return names
+
     _USER_TICKETS_SHOW_MAX = 20
 
     @staticmethod
@@ -2570,21 +2614,25 @@ class AiDiagnosisPlatform:
         return False
 
     @staticmethod
-    def _match_project_mention(mention: str, pool: List[Dict[str, str]]) -> Optional[Dict[str, str]]:
-        """项目提及的用户原话 → 唯一匹配（0829 放宽：子串枚举 + 唯一指代）。
+    def _match_project_mention(
+            mention: str, pool: List[Dict[str, str]],
+            all_names: Optional[List[str]] = None) -> Optional[Dict[str, str]]:
+        """项目提及的用户原话 → 唯一匹配（0829 子串唯一指代 + 0930 普遍度闸）。
 
-        原「连续子串」只收「用户原话是某项目名的连续片段」（东昇 → 东昇…潜伏车
-        项目）。flash 抠出的原话常带修饰（「河南东昇那个潜伏车项目」「本川项目」），
-        连续片段接不住。放宽为：枚举用户原话所有 ≥2 字子串，在项目池里唯一子串
-        匹配，收集所有被唯一指代到的项目；**恰好 1 个**才收。≥2 个（用户原话同时
-        唯一指代多个项目，如「安吉」→ 安吉中力智芯/中力富阳/AGV-USP 都被唯一
-        指代）视为歧义 → None，由 _ambiguous_project_candidates 提供候选给反问。
+        机制：枚举用户原话所有 ≥2 字子串，在项目池里唯一子串匹配，收集所有
+        被唯一指代到的项目；**恰好 1 个**才收。≥2 个（如「安吉」→ 多个安吉
+        项目）→ 歧义 None，交 _ambiguous_project_candidates 反问。
         - 精确等于 name/code → 直接收
         - 唯一指代到 1 个项目 → 收
         - 唯一指代到 ≥2 个项目 → 歧义 None
         - 零唯一指代 → None
-        高频词（叉车/潜伏车/XQE/混场/仓储）在真实池子里不唯一，天然被拒；
-        宁可不收（闸门出题/反问），绝不收错项目。
+
+        0930 普遍度闸（数据判泛，无词表）：同事本地实锤——admin 小池仅 3
+        项目，原话「福建晋江穗柯恒安纸业叉车项目」与池内「浙江杭州国铁项目」
+        的公共子串只有「项目」二字，恰好唯一命中 → 误收。唯一性在小池里失去
+        过滤力。收紧：命中证据若在全量项目名里 ≥3 个名字都含（大路词），
+        视为池子太小造成的假唯一，拒收——泛不泛由全量数据判定，不靠枚举词表。
+        all_names 缺省 None = 闸关闭（维持旧行为）。
         """
         m = (mention or "").strip()
         if len(m) < 2 or not pool:
@@ -2595,7 +2643,22 @@ class AiDiagnosisPlatform:
             if p.get("code") and m == str(p["code"]).strip():
                 return p
         cands = AiDiagnosisPlatform._mention_unique_candidates(m, pool)
-        return cands[0] if len(cands) == 1 else None
+        if len(cands) != 1:
+            return None
+        if all_names:
+            cname = (cands[0].get("name") or "").strip()
+            evidences = {
+                m[i:j]
+                for i in range(len(m)) for j in range(i + 1, len(m) + 1)
+                if j - i >= 2 and cname and m[i:j] in cname
+                and sum(1 for p in pool if m[i:j] in (p.get("name") or "")) == 1}
+            if evidences and all(
+                    sum(1 for n in all_names if e in n) >= 3
+                    for e in evidences):
+                logger.info(f"[mention] 证据为大路词，拒收: {cands[0]['name']} "
+                            f"evidence={sorted(evidences, key=len)[:3]}")
+                return None
+        return cands[0]
 
     @staticmethod
     def _ambiguous_project_candidates(mention: str, pool: List[Dict[str, str]]) -> List[Dict[str, str]]:
@@ -2700,7 +2763,8 @@ class AiDiagnosisPlatform:
             return
         if state.ambiguous_project_candidates:
             _conf = self._match_project_mention(
-                query, state.ambiguous_project_candidates)
+                query, state.ambiguous_project_candidates,
+                all_names=await self._get_all_project_names())
             if _conf:
                 state.mentioned_project = _conf
                 state.ambiguous_project_candidates = []
@@ -2788,7 +2852,8 @@ class AiDiagnosisPlatform:
 
     async def _finalize_diagnosis(self, session_id: str, state: AgentState,
                                     thinking: str, action: str, message: str,
-                                    streaming: bool = False) -> dict:
+                                    streaming: bool = False,
+                                    vehicle_choices: Optional[List[str]] = None) -> dict:
         # 回答出口统一清洗 KB 图片 URL：LLM 偶发产出缺 /media/ 的坏 URL
         # （如 .../manual/image111.png），静态挂载 404 → 前端渲染成横线/丢图。
         # 在落盘/返回前补回 /media/，幂等且不误伤已正确的 URL。
@@ -2813,6 +2878,16 @@ class AiDiagnosisPlatform:
             # 否则这里会被内存里的旧值覆盖，collect_rounds 永远卡住、强制提单安全阀不触发。
             state.collect_rounds = max(state.collect_rounds, _existing["collect_rounds"])
         _save_agent_state(memory, state)
+        # 车型模式 last_choices 记账（0930）：本轮出了选项 → 覆盖记录（下轮
+        # prompt 注入还原/不重复出题规则）；本轮没出 → 清除（防陈旧选项长期
+        # 充当依据）。常规会话无 vehicle_mode 键，零开销。
+        _vm = memory.metadata.get("vehicle_mode") or {}
+        if _vm.get("model"):
+            if vehicle_choices:
+                _vm["last_choices"] = vehicle_choices
+            else:
+                _vm.pop("last_choices", None)
+            memory.metadata["vehicle_mode"] = _vm
         await self._memory_manager.save_memory(memory)
 
         # MySQL 双写已禁用：会话管理统一走前端 → backend /api/call/conversations
@@ -3247,7 +3322,9 @@ class AiDiagnosisPlatform:
                         logger.info(f"[mention] 项目提及歧义({len(_amb)}候选)，反问: "
                                     f"{mention_raw!r}")
                     else:
-                        _hit = self._match_project_mention(mention_raw, _pool)
+                        _hit = self._match_project_mention(
+                            mention_raw, _pool,
+                            all_names=await self._get_all_project_names())
                         if _hit:
                             state.mentioned_project = _hit
                             state.ambiguous_project_candidates = []
@@ -3258,7 +3335,8 @@ class AiDiagnosisPlatform:
                             # （用户回「中力智芯」「AGV-USP」等具体标识）→ 候选池
                             # 唯一命中即确认提升。
                             _conf = self._match_project_mention(
-                                mention_raw, state.ambiguous_project_candidates)
+                                mention_raw, state.ambiguous_project_candidates,
+                                all_names=await self._get_all_project_names())
                             if _conf:
                                 state.mentioned_project = _conf
                                 state.ambiguous_project_candidates = []
@@ -5153,6 +5231,7 @@ class AiDiagnosisPlatform:
         reset_ticket = False
         project_choice = ""
         referenced_ticket = ""
+        vehicle_choices = None
         message = text
         json_end = 0  # JSON 区域结束位置
 
@@ -5214,6 +5293,11 @@ class AiDiagnosisPlatform:
                 referenced_ticket = data.get("referenced_ticket", "") or ""
                 if not isinstance(referenced_ticket, str):
                     referenced_ticket = ""
+                # 车型追问选项（0930）：JSON 顶层 vehicle_choices，校验在调用侧
+                # （需要 action/会话态上下文，此处只收原始值）
+                vehicle_choices = data.get("vehicle_choices")
+                if not isinstance(vehicle_choices, list):
+                    vehicle_choices = None
                 if not isinstance(ticket_intent, bool):
                     ticket_intent = str(ticket_intent).lower() in ("true", "1")
                 if not isinstance(ticket_cancel, bool):
@@ -5302,7 +5386,31 @@ class AiDiagnosisPlatform:
             "reset_ticket": reset_ticket,
             "project_choice": project_choice,
             "referenced_ticket": referenced_ticket,
+            "vehicle_choices": vehicle_choices,
         }
+
+    @staticmethod
+    def _validate_vehicle_choices(parsed: dict) -> Optional[List[str]]:
+        """车型追问选项机械校验（0930）：整体丢弃制，不部分挽救。
+
+        通过条件：2~3 个非空字符串、单条 ≤30 字、去重后不变少。
+        任何不满足 → None（当普通回复处理——正文从不含选项，前端零变化）。
+        submit（话术已被服务端接管）由调用侧先行丢弃。
+        """
+        vc = parsed.get("vehicle_choices")
+        if not isinstance(vc, list) or not vc:
+            return None
+        clean = []
+        for x in vc:
+            if not isinstance(x, str):
+                return None
+            s = x.strip()
+            if not s or len(s) > 30:
+                return None
+            clean.append(s)
+        if not (2 <= len(clean) <= 3) or len(set(clean)) != len(clean):
+            return None
+        return clean
 
     # ================================================================
     # run_stream（纯 Agent）
@@ -6494,10 +6602,20 @@ class AiDiagnosisPlatform:
                     parsed["action"] = "answer"
                     parsed["message"] = "提单过程中出现异常，请稍后重试或联系管理员。"
 
+        # 车型追问选项（0930）：机械校验 + 会话态门控。合法才随 result 下发并
+        # 记 last_choices；submit（话术服务端接管）与收集轮一律丢弃。常规会话
+        # 即使 LLM 幻觉输出该字段也零附着（vehicle_mode 前置是唯一开关）。
+        _vm_meta = (getattr(memory, "metadata", None) or {}).get("vehicle_mode") or {}
+        _vc = None
+        if _vm_meta.get("model"):
+            _vc = self._validate_vehicle_choices(parsed)
+            if _vc and (parsed["action"] == "submit" or state.ticket_collecting):
+                _vc = None
+
         result_data = await self._finalize_diagnosis(
             request.session_id, state,
             parsed["thinking"], parsed["action"], parsed["message"],
-            streaming=True)
+            streaming=True, vehicle_choices=_vc)
         if ticket_data:
             result_data["ticket"] = ticket_data
         # 项目题轮：候选随 result 事件带给前端渲染可点按钮（与 prepare
@@ -6505,6 +6623,9 @@ class AiDiagnosisPlatform:
         if _gate_proj_choices:
             result_data["project_ask"] = True
             result_data["project_choices"] = _gate_proj_choices
+        # 车型追问气泡（0930）：随 result 下发，前端同位渲染可点按钮
+        if _vc:
+            result_data["vehicle_choices"] = _vc
 
         # 标题生成：第2轮对话结束后通过独立 SSE event 发送
         if result_data.get("title"):

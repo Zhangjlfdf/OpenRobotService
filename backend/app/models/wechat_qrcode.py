@@ -10,7 +10,7 @@
 永久码微信侧最多 10 万个，`is_permanent` + `batch_id` 便于管控配额。
 """
 
-from sqlalchemy import Column, Integer, String, DateTime, Boolean, Text, Index, UniqueConstraint
+from sqlalchemy import Column, Integer, String, DateTime, Text, Index
 from sqlalchemy.sql import func
 
 from app.models.base import Base
@@ -38,10 +38,9 @@ class WechatQrcode(Base):
 
     __tablename__ = "wechat_qrcodes"
 
-    id = Column(Integer, primary_key=True, autoincrement=True, comment="主键")
+    id = Column(Integer, primary_key=True, autoincrement=True, comment="主键；同时作为微信 scene_str（str(id)）")
 
     # ── 业务标识 ──
-    scene_str = Column(String(64), nullable=False, unique=True, index=True, comment="场景值 (scene_str)，扫码后微信回传 EventKey")
     name = Column(String(128), nullable=False, default="", comment="二维码名称/用途（如「智能体入口-客服A」）")
     description = Column(Text, nullable=True, comment="用途说明")
 
@@ -58,21 +57,12 @@ class WechatQrcode(Base):
     # ── 批量管理 ──
     batch_id = Column(String(64), nullable=True, index=True, comment="批次 ID，批量创建时同一批次共享")
 
-    # ── 项目关联 ──
-    # 一张码最多属于一个项目，一个项目可以有多张码（多台车/重印/多入口），
-    # 所以引用放在码这侧；非项目码（如「智能体入口-客服A」）为 NULL。
-    # 宽松引用 project.id（同 project_pin.project_id 口径，不加物理外键），
-    # 存在性由接口层校验（见 admin/api/qrcode.py _resolve_project_ref）。
-    project_id = Column(String(64), nullable=True, index=True, comment="所属项目ID（project.id；非项目码为 NULL）")
-
     # ── 录入信息（其他项目登记，2026-09-29 用户口径） ──
-    # 「新建项目 → 录入信息」一条录入 = 本表一行：项目id/项目编号/项目名/项目地点/客户名/车型
-    # 六个字段和行 id 同行存（见 admin/api/qrcode.py 的 project-info 两个接口）。注意：
-    # - 这组字段里的 project_id 是业务键（后续企微表格同步过来），不是 project 表引用，
-    #   不走 _resolve_project_ref 的存在性校验（那套只服务「扫码关联 USP 项目」）；
-    # - project_code 非空 = 这是一条录入信息行。项目id/项目编号的「唯一」由接口层
-    #   只在录入信息行范围内查重（不加物理唯一索引）；普通码行这些列为 NULL，
-    #   其 project_id 仍允许多行指向同一项目（多台车/重印）。
+    # 「新建项目 → 录入信息」一条录入 = 本表一行：项目编号/项目名/项目地点/客户名/车型
+    # 五个字段和行 id 同行存（见 admin/api/qrcode.py 的 project-info 两个接口）。
+    # 项目id 就是行 id（str(id)，2026-09-30 口径：scene 改 str(id) 自动生成，不再单独占列，
+    # 也不再有「扫码关联 USP 项目」的 project_id 列）；project_code 非空 = 这是一条
+    # 录入信息行，项目编号的「唯一」由接口层只在录入信息行范围内查重（不加物理唯一索引）。
     project_code = Column(String(64), nullable=True, index=True, comment="项目编号（录入信息行；唯一由接口层查重）")
     project_name = Column(String(128), nullable=True, comment="项目名（录入信息行自带）")
     project_location = Column(String(128), nullable=True, comment="项目地点（录入信息行）")
@@ -93,6 +83,10 @@ class WechatQrcode(Base):
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), comment="记录更新时间")
 
     __table_args__ = (
-        UniqueConstraint("scene_str", name="uq_wechat_qrcodes_scene_str"),
         Index("ix_wechat_qrcodes_status_type", "status", "type"),
     )
+
+    @property
+    def scene_str(self) -> str:
+        """微信带参数二维码的场景值，始终等于 str(id)。"""
+        return str(self.id)

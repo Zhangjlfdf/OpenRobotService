@@ -10,7 +10,6 @@ import {
   qrcodeTransition, deleteQrcode, QRCODE_STATUS_LABELS,
   type QrcodeItem, type QrcodeStats, type QrcodeType, type QrcodeStatus,
 } from '@/api/qrcode';
-import { getProjects, type ProjectItem } from '@/api/projects';
 import { MacChevronRight, MacPlus, MacDownload, MacCheck, MacTrash2, MacRefreshCw, MacTags } from '@/shared/components/macaronIcons';
 
 type FilterStatus = '' | QrcodeStatus;
@@ -45,11 +44,7 @@ export default function QrcodeManage() {
 
   const [filterStatus, setFilterStatus] = useState<FilterStatus>('');
   const [filterType, setFilterType] = useState<FilterType>('');
-  const [filterProject, setFilterProject] = useState('');
   const [keyword, setKeyword] = useState('');
-
-  // 项目下拉数据（所属项目筛选 / 批量创建关联用）
-  const [projectList, setProjectList] = useState<ProjectItem[]>([]);
 
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [popup, setPopup] = useState<null | 'batch-create' | 'batch-generate' | { qr: QrcodeItem }>(null);
@@ -62,7 +57,6 @@ export default function QrcodeManage() {
         fetchQrcodes({
           status: filterStatus || undefined,
           qrcode_type: filterType || undefined,
-          project_id: filterProject || undefined,
           keyword: keyword.trim() || undefined,
           skip, limit: PAGE_SIZE,
         }),
@@ -76,15 +70,9 @@ export default function QrcodeManage() {
     } finally {
       setLoading(false);
     }
-  }, [filterStatus, filterType, filterProject, keyword, skip]);
+  }, [filterStatus, filterType, keyword, skip]);
 
   useEffect(() => { loadList(); }, [loadList]);
-
-  // 项目下拉数据：一次取前 500 条（当前全量 297 个），失败静默降级为「全部项目」，
-  // 不弹错——列表主流程不依赖它
-  useEffect(() => {
-    getProjects('', 0, 500).then(setProjectList).catch(() => { /* 静默降级 */ });
-  }, []);
 
   const showToast = (msg: string) => {
     Toast({ message: msg });
@@ -137,25 +125,22 @@ export default function QrcodeManage() {
 
   // ── 批量创建弹窗 ──
   const BatchCreatePopup = () => {
-    const [scenesText, setScenesText] = useState('');
+    const [count, setCount] = useState<number>(10);
     const [namePrefix, setNamePrefix] = useState('');
     const [qtype, setQtype] = useState<QrcodeType>('permanent');
-    const [projectId, setProjectId] = useState('');
     const [redirectUrl, setRedirectUrl] = useState('');
     const [busy, setBusy] = useState(false);
-    const [result, setResult] = useState<null | { batchId: string; created: number; skipped: number }>(null);
+    const [result, setResult] = useState<null | { batchId: string; created: number }>(null);
 
     const submit = async () => {
-      const sceneList = scenesText.split(/[\n,]/).map((s) => s.trim()).filter(Boolean);
-      if (sceneList.length === 0) { showToast('请输入至少一个场景值'); return; }
+      if (!count || count < 1 || count > 500) { showToast('数量 1~500'); return; }
       setBusy(true);
       try {
         const res = await batchCreateQrcodes({
-          scene_list: sceneList, name_prefix: namePrefix,
+          count, name_prefix: namePrefix,
           qrcode_type: qtype, redirect_url: redirectUrl || undefined,
-          project_id: projectId || undefined,
         });
-        setResult({ batchId: res.batch_id, created: res.created_count, skipped: res.skipped_count });
+        setResult({ batchId: res.batch_id, created: res.created_count });
       } catch (e: any) { showToast(e?.message || '创建失败'); }
       finally { setBusy(false); }
     };
@@ -164,15 +149,16 @@ export default function QrcodeManage() {
       <Popup visible={popup === 'batch-create'} onVisibleChange={() => setPopup(null)} placement="bottom">
         <div className="qr-popup">
           <h3>批量创建二维码（仅落库）</h3>
-          <p className="qr-popup-hint">场景值每行一个，或用逗号分隔；创建后为 init 状态，可批量生成 ticket</p>
+          <p className="qr-popup-hint">创建后为 init 状态，scene_str 自动等于 str(id)，可批量生成 ticket</p>
 
-          <label className="qr-field">场景值列表</label>
-          <textarea
-            className="qr-textarea"
-            value={scenesText}
-            onChange={(e) => setScenesText(e.target.value)}
-            placeholder="robot_001&#10;robot_002&#10;project_online_2026"
-            rows={6}
+          <label className="qr-field">创建数量</label>
+          <input
+            className="qr-input"
+            type="number"
+            min={1}
+            max={500}
+            value={count}
+            onChange={(e) => setCount(Math.max(1, Math.min(500, Number(e.target.value) || 1)))}
           />
 
           <div className="qr-row">
@@ -189,19 +175,12 @@ export default function QrcodeManage() {
             </div>
           </div>
 
-          <label className="qr-field">所属项目（选填，整批二维码统一关联；之后可从二维码反查项目）</label>
-          <select className="qr-input" value={projectId} onChange={(e) => setProjectId(e.target.value)}>
-            <option value="">不关联项目</option>
-            {projectList.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-          </select>
-
           <label className="qr-field" style={{ marginTop: 12 }}>扫码跳转 URL（选填，留空则默认 /app/call）</label>
           <input className="qr-input" value={redirectUrl} onChange={(e) => setRedirectUrl(e.target.value)} placeholder="https://example.com/app/call" />
 
           {result && (
             <div className="qr-batch-result">
-              ✅ 创建 {result.created} 条，⚠️ 跳过 {result.skipped} 条
-              {result.skipped > 0 && <span>（可能已存在或场景值非法）</span>}
+              ✅ 创建 {result.created} 条
               <div className="qr-batch-id">批次：{result.batchId}</div>
             </div>
           )}
@@ -281,11 +260,7 @@ export default function QrcodeManage() {
         <div className="qr-preview">
           <h4>{qr.name}</h4>
           <div className="qr-preview-scene">scene_str = <code>{qr.scene_str}</code></div>
-          {/* 录入信息行：项目名就是码记录名（见上方 h4），这里列出登记的项目字段；
-              普通码行只有联查出来的「所属项目」，且与自身名字不同（相同即重复，不显示） */}
-          {qr.project_name && qr.project_name !== qr.name && (
-            <div className="qr-preview-scene">所属项目：{qr.project_name}</div>
-          )}
+          {/* 录入信息行：项目名就是码记录名（见上方 h4），这里列出登记的项目字段 */}
           {qr.project_code && <div className="qr-preview-scene">项目编号：{qr.project_code}</div>}
           {qr.project_location && <div className="qr-preview-scene">项目地点：{qr.project_location}</div>}
           {qr.customer_name && <div className="qr-preview-scene">客户名：{qr.customer_name}</div>}
@@ -299,7 +274,7 @@ export default function QrcodeManage() {
           ) : (
             <div className="qr-preview-empty">未生成 ticket</div>
           )}
-          {/* 录入信息行直接回录入页修改（项目id 锁、项目编号可改） */}
+          {/* 录入信息行直接回录入页修改（项目id=行 id 只读展示，其余字段可改） */}
           {qr.project_code && (
             <button
               className="qr-btn qr-btn--secondary"
@@ -357,17 +332,10 @@ export default function QrcodeManage() {
         </select>
         <input
           className="qr-filter-input"
-          placeholder="搜索 scene / 名称"
+          placeholder="搜索名称 / ID"
           value={keyword}
           onChange={(e) => { setKeyword(e.target.value); setSkip(0); }}
         />
-      </div>
-      {/* 项目筛选单独一行：项目名较长，挤进上一行会把三个控件都压没 */}
-      <div className="qr-filter">
-        <select className="qr-filter-select" value={filterProject} onChange={(e) => { setFilterProject(e.target.value); setSkip(0); }}>
-          <option value="">全部项目</option>
-          {projectList.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-        </select>
       </div>
 
       {/* 批量操作 */}
@@ -403,9 +371,6 @@ export default function QrcodeManage() {
                       <span className="qr-item-type">{TYPE_LABEL[q.type as QrcodeType]}</span>
                     </div>
                     <div className="qr-item-name">{q.name || '—'}</div>
-                    {q.project_name && q.project_name !== q.name && (
-                      <div className="qr-item-batch">项目：{q.project_name}</div>
-                    )}
                     {q.batch_id && <div className="qr-item-batch">批次: {q.batch_id.slice(-8)}</div>}
                   </div>
                   <span className="qr-item-chev"><MacChevronRight size={16} /></span>

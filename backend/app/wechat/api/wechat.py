@@ -1035,17 +1035,33 @@ def _send_scan_redirect_card(openid: str, scene_str: str):
     支持每个二维码独立配置 redirect_url / name / description / picurl：
     - wechat_qrcodes 表有记录且字段非空 → 用配置值
     - 没记录或字段为空 → 用默认 /app/call 拼接 scene+openid
+
+    scene_str 归一化在入口统一做：未关注用户扫码关注时微信推 subscribe 事件，
+    EventKey 形如 `qrscene_<scene>`（微信自动加前缀）；已关注用户扫码走 SCAN
+    事件，EventKey 才是纯 `<scene>`。两类事件都汇聚到本函数，不剥前缀的话
+    按 id 查库会炸、URL 也会带着 `qrscene_` 往外发，前端弹窗链路整体失效。
     """
+    # 剥 subscribe 事件的 qrscene_ 前缀；剥完为空说明没有有效场景值，无从跳转
+    if scene_str.startswith('qrscene_'):
+        scene_str = scene_str[len('qrscene_'):]
+    if not scene_str:
+        logger.info(f'扫码事件无有效场景值，跳过跳转卡片: openid={openid}')
+        return
     try:
         from urllib.parse import urlencode
 
-        # ── 1. 查数据库：这个 scene_str 有没有配置过 ──
+        # ── 1. 查数据库：scene_str（=str(id)）对应的码配置 ──
         qr_cfg = None
         try:
             from app.core.database import db_manager
             from app.models.wechat_qrcode import WechatQrcode as _W
             db = db_manager.get_db()
-            qr_cfg = db.query(_W).filter(_W.scene_str == scene_str).first()
+            # scene_str 始终等于 str(id)，直接按 id 查询
+            try:
+                qid = int(scene_str)
+                qr_cfg = db.query(_W).filter(_W.id == qid).first()
+            except (ValueError, TypeError):
+                qr_cfg = None  # 非数字 EventKey，无 DB 记录
             db.close()
         except Exception:
             qr_cfg = None  # 没建表 / 没迁移过，静默回退默认

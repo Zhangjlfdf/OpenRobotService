@@ -17,7 +17,8 @@ import { useAuthStore } from '@/stores/auth';
 /** 码记录状态「已发布」即车辆已出厂，才进入信息确认流程（其余状态一律静默不打扰） */
 const STATUS_PUBLISHED = 'published';
 
-/** 场景值白名单：后端生成的是 proj_ + 随机 hex，只含 [A-Za-z0-9_-]，长度对齐 scene_str 列宽（1~64） */
+/** 场景值白名单：2026-09-30 起 scene = str(id)（纯数字）；这里放宽为 [A-Za-z0-9_-]（1~64），
+ *  非数字 scene 由后端 by-scene 400 拦下（查不到同样静默降级，见下方 effect） */
 const SCENE_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 
 /**

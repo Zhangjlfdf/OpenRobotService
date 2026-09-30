@@ -2,15 +2,15 @@
 
 被测：`GET /api/admin/qrcodes/by-scene/{scene}`（见 app/modules/admin/api/qrcode.py）。
 
-口径：
+口径（2026-09-30：scene 改为 str(id)、project_id 列已删）：
   - 鉴权「登录即可」——用 app.core.auth_routes.get_current_active_user_from_token，
     而不是同文件其它接口的 require_permission("frontend:admin:other:show")：
     摇人页是 C 端，普通客服没有后台权限。注意 admin/api/auth.py 里另有一个同名函数
     （admin 侧自己的实现），两者不是同一个可调用对象，所以这里 override 的是 core 那个。
-  - 命中 → 200，且录入信息行自带的 项目名/客户名/车型 原样回吐；
-    录入信息行的 project_id 是业务键（后续企微同步），未必命中 project 表，
-    此时 project_name 必须回退到行自带的那个，不能变 null。
-  - 未命中 → 404；scene 为空或超 64 字符 → 400（长度口径对齐 scene_str 列宽）。
+  - scene 即 str(id)：纯数字，按主键精确查；非数字 → 400（不再是宽松的 1~64 字符白名单）。
+  - 命中 → 200，录入信息行自带的 项目名/客户名/车型 原样回吐；响应不再有 project_id 键
+    （项目id 就是行 id，由 id/scene_str 表达）。
+  - 未命中 → 404。
   - 双段路径不与单段 GET /{qid} 冲突（同 /stats/summary 先例）。
 
 一律不连真库：conftest 已把 app.core.database 换成 MagicMock，这里只替换
@@ -31,13 +31,14 @@ from app.modules.admin.api.qrcode import router as qrcode_router
 # 普通登录用户：没有任何后台权限，用于钉住「登录即可」这个口径
 LOGIN_USER = {"id": "u-1", "username": "bob", "name": "Bob", "permissions": [], "roles": {}}
 
-SCENE = "proj_abc123def456"
+ROW_ID = 9
+SCENE = str(ROW_ID)  # scene = str(id)（2026-09-30 口径）
 
 
 def _row(**over):
     """一条录入信息行的完整属性集（覆盖 _to_dict 会读到的每个字段）。"""
     fields = {
-        "id": 7,
+        "id": ROW_ID,
         "scene_str": SCENE,
         "name": "项目A",
         "description": None,
@@ -48,7 +49,6 @@ def _row(**over):
         "expire_seconds": None,
         "status": QrcodeStatus.PUBLISHED,
         "batch_id": None,
-        "project_id": None,
         "project_name": "项目A",
         "project_code": "P-0001",
         "project_location": "上海",
@@ -100,7 +100,7 @@ def anon_client(app):
 
 
 def test_published_row_returns_project_customer_model(client, db):
-    """命中即 200：弹窗要的三个字段一次拿全，状态原样带出。"""
+    """命中即 200：弹窗要的三个字段一次拿全，状态原样带出，且不带 project_id 键。"""
     db.query.return_value.filter.return_value.first.return_value = _row()
 
     response = client.get(f"/api/admin/qrcodes/by-scene/{SCENE}")
@@ -113,35 +113,36 @@ def test_published_row_returns_project_customer_model(client, db):
     assert body["customer_name"] == "客户A"
     assert body["vehicle_model"] == "XQE"
     assert body["project_code"] == "P-0001"
-    # 录入信息行的 project_id 为空 → 不该再去联查 project 表
+    # 项目id 就是行 id（str(id)），响应不再有单独的 project_id 键
+    assert "project_id" not in body
+    # 一次查询直接按主键取，无联查
     assert db.query.call_count == 1
 
 
-def test_project_name_survives_when_project_id_is_business_key(client, db):
-    """录入信息行的 project_id 是业务键，命中不了 project 表时仍要用行自带的项目名。"""
-    db.query.return_value.filter.return_value.first.return_value = _row(project_id="BIZ-9527")
-    db.query.return_value.filter.return_value.all.return_value = []  # 联查 project 表查不到
+def test_scene_parsed_to_row_id(client, db):
+    """scene 是数字字符串：解析成 int 当主键查（str(id) 口径）。"""
+    db.query.return_value.filter.return_value.first.return_value = _row()
 
     response = client.get(f"/api/admin/qrcodes/by-scene/{SCENE}")
 
     assert response.status_code == 200
-    assert response.json()["project_name"] == "项目A"
+    assert response.json()["id"] == ROW_ID
 
 
 def test_unknown_scene_returns_404(client, db):
-    """查无此码 → 404（前端据此静默降级，不打扰用户）。"""
-    response = client.get("/api/admin/qrcodes/by-scene/proj_notexist")
+    """查无此码（数字但无对应行）→ 404（前端据此静默降级，不打扰用户）。"""
+    response = client.get("/api/admin/qrcodes/by-scene/999999")
 
     assert response.status_code == 404
     assert response.json()["detail"] == "二维码不存在"
 
 
-def test_scene_too_long_rejected_before_touching_db(client, db):
-    """超长场景值直接 400，且不进库（长度口径对齐 scene_str 列宽）。"""
-    response = client.get("/api/admin/qrcodes/by-scene/" + "a" * 65)
+def test_non_numeric_scene_rejected_before_touching_db(client, db):
+    """非数字 scene（旧 proj_ 值/乱填）直接 400，且不进库。"""
+    response = client.get("/api/admin/qrcodes/by-scene/proj_notexist")
 
     assert response.status_code == 400
-    assert response.json()["detail"] == "scene_str 长度 1~64 字符"
+    assert response.json()["detail"] == "scene_str 必须是数字（= str(id)）"
     db.query.assert_not_called()
 
 
