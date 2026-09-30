@@ -281,6 +281,7 @@ class AssignmentWorker:
                         "dispatch_hint": (r.metadata_info or {}).get("dispatch_hint", "") if r.metadata_info else "",
                         "project_name": r.project_name or "",
                         "project_id": r.project_id or "",
+                        "curr_step_name": r.curr_step_name or "",
                     }
                     for r in rows
                 ]
@@ -344,6 +345,7 @@ class AssignmentWorker:
             diagnosis_problem_summary=ticket.get("diagnosis_problem_summary"),
             diagnosis_rounds=ticket.get("diagnosis_rounds"),
             dispatch_hint=ticket.get("dispatch_hint") or None,
+            curr_step_name=ticket.get("curr_step_name") or None,
         )
 
         # 派单结果写回数据库

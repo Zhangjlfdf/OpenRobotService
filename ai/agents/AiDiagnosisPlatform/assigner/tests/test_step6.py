@@ -89,6 +89,16 @@ class TestIronRulesPrompt:
         assert "不要只按精排分在产品和研发之间瞎猜" in prompt
         assert "不要只因类型改选" not in prompt
 
+    def test_feature_stage_in_step6(self):
+        """正常流程：需求单阶段进入 Step6 分流，设计辅助偏向产品。"""
+        prompt = LlmDecision(_cfg())._build_prompt(
+            _ticket(ticket_type="feature", curr_step_name="设计"),
+            [_eng("u-a", "甲")], RecallResult(), _ranked("u-a"),
+        )
+        assert "当前阶段：设计" in prompt
+        assert "当前阶段是「设计」，辅助偏向产品经理" in prompt
+        assert "不要只按阶段名硬派" in prompt
+
 
 class TestRedispatchRemarkOnly:
     """重派身份看 Step2 标签；备注不与描述全文重复。"""
