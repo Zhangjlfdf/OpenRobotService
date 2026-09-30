@@ -27,7 +27,7 @@ import logging
 from datetime import datetime
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Body
+from fastapi import APIRouter, HTTPException, Query, Body
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 

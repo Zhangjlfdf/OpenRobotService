@@ -13,7 +13,8 @@
 
 消息样式（NOTIFY_STYLE，仅企微生效；飞书始终发纯文本）：
   card      企微模板卡片 text_notice（默认）：状态色标 + 关键信息键值对 + 日志跳转
-  markdown  markdown_v2：彩色标题 + 元信息引用块 + 检查项表格
+  markdown  markdown_v2：状态图标标题 + 元信息引用块 + 检查项表格
+            （markdown_v2 不支持 <font> 彩色标签，勿引入）
   卡片被企微拒收（errcode != 0）时自动降级为 markdown_v2 重发一次，保证通知不丢。
 
 环境变量：
@@ -167,8 +168,11 @@ def build_card(c):
 
 
 def build_markdown(c):
-    """企微 markdown_v2：彩色标题 + 元信息引用块 + 检查项表格。"""
-    color = "info" if c["ok"] else "warning"
+    """企微 markdown_v2：状态图标标题 + 元信息引用块 + 检查项表格。
+
+    注意：markdown_v2 不支持旧版 markdown 的 <font color> 彩色标签，
+    状态靠图标（✅/❌/⚠️）与文字表达。
+    """
     meta = [f"**{c['env_name']}** · {c['components']}"]
     if c["git_ref"]:
         meta.append(f"分支 `{c['git_ref']}` @ `{c['sha']}`")
@@ -177,7 +181,7 @@ def build_markdown(c):
     if c["elapsed"]:
         meta.append(f"耗时 {c['elapsed']}")
 
-    lines = [f'# <font color="{color}">{c["icon"]} {c["title"]}</font>', ""]
+    lines = [f"# {c['icon']} {c['title']}", ""]
     lines += [f"> {m}" for m in meta]
 
     checks = [("测试门禁", "⚠️ 已跳过" if c["skip_gate"] else "✅ 已通过")]
