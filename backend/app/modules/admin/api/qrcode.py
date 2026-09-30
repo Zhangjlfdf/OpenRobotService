@@ -30,11 +30,12 @@ import logging
 from datetime import datetime
 from typing import List, Optional
 
-from fastapi import APIRouter, HTTPException, Query, Body
+from fastapi import APIRouter, Depends, HTTPException, Query, Body
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.core.database import db_manager
+from app.core.auth_routes import get_current_active_user_from_token
 from app.models.delivery import Project, PROJECT_DELETED
 from app.models.wechat_qrcode import WechatQrcode, QrcodeStatus, QrcodeType
 from app.modules.admin.api.auth import require_permission
@@ -151,6 +152,37 @@ async def list_qrcodes(
             "total": total,
             "items": [_to_dict(q, names.get(q.project_id)) for q in items],
         }
+    finally:
+        db.close()
+
+
+# ── 按场景值查单条（扫码落地页用） ──
+
+@router.get("/by-scene/{scene}", summary="按场景值查一条二维码（扫码落地页用：登录即可）")
+async def get_qrcode_by_scene(
+    scene: str,
+    current_user=Depends(get_current_active_user_from_token),
+):
+    """扫码进入链路：按 scene_str 精确取那一行。
+
+    摇人页从跳转链接（`/app/call?scene=xxx`）拿到场景值后来这里取码信息：录入信息行
+    自带 项目名/客户名/车型（_to_dict 里行自带优先），因此这一条响应就够弹确认弹窗。
+
+    设计要点：
+    - 路径为双段（/by-scene/{scene}），与单段 GET /{qid} 不冲突（同 /stats/summary 先例）；
+    - 权限「登录即可」而非 admin——摇人页是 C 端，普通客服没有 frontend:admin:other:show；
+    - 长度口径对齐 scene_str 列宽（1~64 字符，与 create_qrcode 同款 400 提示）；
+    - 过滤走参数化比较（== scene），不做字符串拼接；只读，不写库，可安全重复调用。
+    """
+    if not scene or len(scene) > 64:
+        raise HTTPException(status_code=400, detail="scene_str 长度 1~64 字符")
+
+    db: Session = db_manager.get_db()
+    try:
+        q = db.query(WechatQrcode).filter(WechatQrcode.scene_str == scene).first()
+        if not q:
+            raise HTTPException(status_code=404, detail="二维码不存在")
+        return _dict_with_project(db, q)
     finally:
         db.close()
 

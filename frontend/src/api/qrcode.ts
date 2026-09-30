@@ -88,6 +88,25 @@ export async function fetchQrcodeStats(): Promise<QrcodeStats> {
   return request('/qrcodes/stats/summary');
 }
 
+/**
+ * 按场景值精确查一条二维码（摇人页「扫码进入」链路，登录即可访问）。
+ *
+ * 扫码跳转链接形如 `/app/call?scene=xxx`，scene 即本表的 scene_str。
+ * 查无此码（404 / 400）或网络异常一律返回 null，调用方据此静默降级、不打扰用户。
+ *
+ * skipCache 必开：码状态（是否已发布=出厂）要求每次进入都拿最新，
+ * 走 client.ts 的 5 分钟 GET 内存缓存会拿到陈旧状态。
+ */
+export async function fetchQrcodeByScene(scene: string): Promise<QrcodeItem | null> {
+  try {
+    return await request<QrcodeItem>(`/qrcodes/by-scene/${encodeURIComponent(scene)}`, { skipCache: true });
+  } catch {
+    // 静默：查无此码 / 参数非法 / 网络异常都归为「拿不到」，由调用方决定不打扰用户。
+    // 刻意不打日志：scene 是业务标识，按脱敏口径不落明文。
+    return null;
+  }
+}
+
 export async function createQrcode(data: {
   scene_str: string;
   name?: string;
