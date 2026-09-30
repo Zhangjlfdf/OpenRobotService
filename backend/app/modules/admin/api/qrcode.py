@@ -10,13 +10,14 @@
 录入信息行（project_code 非空）例外：确认即发布，entering → published 直达、不经 confirming
 （2026-09-30 用户口径，见 _allowed_targets 与 confirm 接口）。
 
-项目关联：project_id 指向 project.id（选填）。一个项目可有多张码（多台车/重印），
-引用放在码这侧；非项目码为 NULL。创建/更新时校验项目存在且未软删。
+录入信息（「新建项目 → 录入信息」页）：项目编号/项目名/项目地点/客户名/车型
+五个字段一条信息落成本表一行（和行 id 同行存），见下方 project-info 两个接口。
+项目id 就是行 id（str(id)，2026-09-30 口径，不再单独存列）；项目编号的唯一性
+只在「录入信息行」（project_code 非空）范围内查重。
 
-录入信息（「新建项目 → 录入信息」页）：项目id/项目编号/项目名/项目地点/客户名/车型
-六字段一条信息落成本表一行（和行 id 同行存），见下方 project-info 两个接口。
-该组字段里的 project_id 是业务键（后续企微表格同步），不做 project 表存在性校验；
-项目id/项目编号的唯一性只在「录入信息行」（project_code 非空）范围内查重。
+权限：by-scene、GET /{id}、POST/PUT project-info、confirm 五个接口「登录即可」
+（2026-09-30 用户口径：所有人扫码都能录入信息并确认）；其余管理端接口仍要
+frontend:admin:other:show。
 
 权限依赖写法：current_user=require_permission(...)——require_permission 本身已经
 返回 Depends(permission_dependency)，不能再套一层 Depends(...)，否则 FastAPI 0.14x
@@ -36,7 +37,6 @@ from sqlalchemy.orm import Session
 
 from app.core.database import db_manager
 from app.core.auth_routes import get_current_active_user_from_token
-from app.models.delivery import Project, PROJECT_DELETED
 from app.models.wechat_qrcode import WechatQrcode, QrcodeStatus, QrcodeType
 from app.modules.admin.api.auth import require_permission
 from app.wechat.services.wechat_service import wechat_service
@@ -48,9 +48,10 @@ logger = logging.getLogger(__name__)
 
 # ── 请求/响应 Schema（用 dict，避免额外 schemas 文件） ──
 
-def _to_dict(q: WechatQrcode, project_name: Optional[str] = None) -> dict:
+def _to_dict(q: WechatQrcode) -> dict:
     return {
         "id": q.id,
+        # 场景值 = str(id)（2026-09-30 口径：扫码 scene 自动等于行 id）
         "scene_str": q.scene_str,
         "name": q.name,
         "description": q.description,
@@ -61,9 +62,8 @@ def _to_dict(q: WechatQrcode, project_name: Optional[str] = None) -> dict:
         "expire_seconds": q.expire_seconds,
         "status": q.status,
         "batch_id": q.batch_id,
-        "project_id": q.project_id,
-        # 录入信息行自带项目名（优先）；普通码行该列为 NULL，用联查到的所属项目名
-        "project_name": q.project_name or project_name,
+        # 项目名（录入信息行自带；普通码行该列为 NULL）
+        "project_name": q.project_name,
         "project_code": q.project_code,
         "project_location": q.project_location,
         "customer_name": q.customer_name,
@@ -78,50 +78,14 @@ def _to_dict(q: WechatQrcode, project_name: Optional[str] = None) -> dict:
     }
 
 
-def _project_name_map(db: Session, project_ids) -> dict:
-    """按 project.id 批量取项目名（列表页避免 N+1）。
-
-    不加软删过滤：码挂过的项目之后改名/软删，历史码的列表里仍要显示得出名字。
-    """
-    ids = {pid for pid in project_ids if pid}
-    if not ids:
-        return {}
-    rows = db.query(Project.id, Project.name).filter(Project.id.in_(ids)).all()
-    return {pid: name for pid, name in rows}
-
-
-def _dict_with_project(db: Session, q: WechatQrcode) -> dict:
-    """单条响应：附上项目名（一次额外查询，单条接口无 N+1 问题）。"""
-    return _to_dict(q, _project_name_map(db, {q.project_id}).get(q.project_id))
-
-
-def _resolve_project_ref(db: Session, project_id: Optional[str]) -> Optional[str]:
-    """校验并规范化项目引用。
-
-    - None → None（create=不关联；update 不用本函数语义，见该接口注释）
-    - 空串/空白 → None（清除关联）
-    - 其他 → 必须命中存在且未软删的项目，否则 400
-    """
-    if project_id is None:
-        return None
-    pid = project_id.strip()
-    if not pid:
-        return None
-    row = db.query(Project.id, Project.status).filter(Project.id == pid).first()
-    if not row or row[1] == PROJECT_DELETED:
-        raise HTTPException(status_code=400, detail=f"项目不存在或已删除: {pid}")
-    return pid
-
-
 # ── 列表 ──
 
 @router.get("", summary="获取二维码列表")
 async def list_qrcodes(
     status: Optional[str] = Query(None, description="按状态过滤"),
     qrcode_type: Optional[str] = Query(None, description="按类型过滤: temporary/permanent"),
-    keyword: Optional[str] = Query(None, description="按 scene_str / name 模糊搜索"),
+    keyword: Optional[str] = Query(None, description="按 name 模糊 / id 精确搜索"),
     batch_id: Optional[str] = Query(None, description="按批次过滤"),
-    project_id: Optional[str] = Query(None, description="按所属项目过滤（project.id）"),
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=500),
     current_user=require_permission("frontend:admin:other:show"),
@@ -135,8 +99,6 @@ async def list_qrcodes(
             query = query.filter(WechatQrcode.type == qrcode_type)
         if batch_id:
             query = query.filter(WechatQrcode.batch_id == batch_id)
-        if project_id:
-            query = query.filter(WechatQrcode.project_id == project_id)
         if keyword:
             kw = f"%{keyword}%"
             # scene_str 已改为 str(id)，不可再 like 查询；keyword 同时匹配 name 与 id（精确）
@@ -151,12 +113,7 @@ async def list_qrcodes(
 
         total = query.count()
         items = query.order_by(WechatQrcode.created_at.desc()).offset(skip).limit(limit).all()
-        names = _project_name_map(db, {q.project_id for q in items})
-
-        return {
-            "total": total,
-            "items": [_to_dict(q, names.get(q.project_id)) for q in items],
-        }
+        return {"total": total, "items": [_to_dict(q) for q in items]}
     finally:
         db.close()
 
@@ -189,7 +146,7 @@ async def get_qrcode_by_scene(
         q = db.query(WechatQrcode).filter(WechatQrcode.id == qid).first()
         if not q:
             raise HTTPException(status_code=404, detail="二维码不存在")
-        return _dict_with_project(db, q)
+        return _to_dict(q)
     finally:
         db.close()
 
@@ -197,13 +154,14 @@ async def get_qrcode_by_scene(
 # ── 单条 ──
 
 @router.get("/{qid}", summary="获取二维码详情")
-async def get_qrcode(qid: int, current_user=require_permission("frontend:admin:other:show")):
+async def get_qrcode(qid: int, current_user=Depends(get_current_active_user_from_token)):
+    # 权限「登录即可」：扫码链路（录入信息页按 :id 兜底加载、OAuth 回跳）普通用户也要用
     db: Session = db_manager.get_db()
     try:
         q = db.query(WechatQrcode).filter(WechatQrcode.id == qid).first()
         if not q:
             raise HTTPException(status_code=404, detail="二维码不存在")
-        return _dict_with_project(db, q)
+        return _to_dict(q)
     finally:
         db.close()
 
@@ -216,7 +174,6 @@ async def create_qrcode(
     description: Optional[str] = Body(None, embed=True),
     qrcode_type: str = Body(QrcodeType.PERMANENT, embed=True),
     redirect_url: Optional[str] = Body(None, embed=True),
-    project_id: Optional[str] = Body(None, embed=True, description="所属项目ID（project.id），选填"),
     current_user=require_permission("frontend:admin:other:show"),
 ):
     db: Session = db_manager.get_db()
@@ -226,13 +183,12 @@ async def create_qrcode(
             description=description,
             type=qrcode_type,
             redirect_url=redirect_url,
-            project_id=_resolve_project_ref(db, project_id),
             created_by=current_user.get("username") if isinstance(current_user, dict) else str(current_user),
         )
         db.add(q)
         db.commit()
         db.refresh(q)
-        return _dict_with_project(db, q)
+        return _to_dict(q)
     finally:
         db.close()
 
@@ -245,7 +201,6 @@ async def batch_create_qrcodes(
     name_prefix: str = Body("", embed=True),
     qrcode_type: str = Body(QrcodeType.PERMANENT, embed=True),
     redirect_url: Optional[str] = Body(None, embed=True),
-    project_id: Optional[str] = Body(None, embed=True, description="整批统一关联的项目ID，选填"),
     current_user=require_permission("frontend:admin:other:show"),
 ):
     db: Session = db_manager.get_db()
@@ -255,14 +210,11 @@ async def batch_create_qrcodes(
     results = {"batch_id": batch_id, "created": []}
 
     try:
-        pid = _resolve_project_ref(db, project_id)
-
         for i in range(count):
             q = WechatQrcode(
                 name=f"{name_prefix}{i + 1}" if name_prefix else "",
                 type=qrcode_type,
                 redirect_url=redirect_url,
-                project_id=pid,
                 batch_id=batch_id,
                 created_by=created_by,
             )
@@ -272,7 +224,6 @@ async def batch_create_qrcodes(
         db.commit()
         results["created_count"] = len(results["created"])
         results["skipped_count"] = 0
-        results["project_id"] = pid
         return results
     finally:
         db.close()
@@ -315,7 +266,7 @@ async def generate_qrcode_ticket(qid: int, current_user=require_permission("fron
         q.ticket_created_at = datetime.utcnow()
         db.commit()
         db.refresh(q)
-        return _dict_with_project(db, q)
+        return _to_dict(q)
     finally:
         db.close()
 
@@ -387,7 +338,6 @@ async def update_qrcode(
     name: Optional[str] = Body(None, embed=True),
     description: Optional[str] = Body(None, embed=True),
     redirect_url: Optional[str] = Body(None, embed=True),
-    project_id: Optional[str] = Body(None, embed=True, description="所属项目ID；传空串清除关联，不传则不修改"),
     current_user=require_permission("frontend:admin:other:show"),
 ):
     db: Session = db_manager.get_db()
@@ -402,32 +352,28 @@ async def update_qrcode(
             q.description = description
         if redirect_url is not None:
             q.redirect_url = redirect_url
-        if project_id is not None:
-            # 空串 → _resolve_project_ref 返回 None → 清除关联
-            q.project_id = _resolve_project_ref(db, project_id)
 
         db.commit()
         db.refresh(q)
-        return _dict_with_project(db, q)
+        return _to_dict(q)
     finally:
         db.close()
 
 
 # ── 录入信息（其他项目登记） ──
 #
-# 「新建项目 → 录入信息」一条录入 = wechat_qrcodes 一行：项目id/项目编号/项目名/
-# 项目地点/客户名/车型六个字段和行 id 同行存（2026-09-29 用户口径），码记录名跟随项目名。
-# 与「扫码关联 USP 项目」的区别：这里的 project_id 是业务键（后续企微表格同步过来），
-# 不做 project 表存在性校验。项目id「唯一不可改」（先可留空，之后补填一次）、
-# 项目编号「唯一可改」——唯一性只在「录入信息行」（project_code 非空）范围内查重，
-# 普通码行这些列为 NULL、其 project_id 仍允许多行指向同一项目（多台车/重印）。
+# 「新建项目 → 录入信息」一条录入 = wechat_qrcodes 一行：项目编号/项目名/项目地点/
+# 客户名/车型五个字段和行 id 同行存（2026-09-29 用户口径），码记录名跟随项目名。
+# 项目id 不再单独存列：就是行 id（str(id)，2026-09-30 口径，扫码 scene 自动等于它），
+# 也不需要唯一性校验——主键天然唯一。项目编号「唯一可改」——唯一性只在「录入信息行」
+# （project_code 非空）范围内查重；普通码行这些列为 NULL。
 
 _INFO_FIELD_MAX = {
-    "project_id": 64, "project_code": 64, "project_name": 128,
+    "project_code": 64, "project_name": 128,
     "project_location": 128, "customer_name": 128, "vehicle_model": 128,
 }
 _INFO_FIELD_LABEL = {
-    "project_id": "项目id", "project_code": "项目编号", "project_name": "项目名",
+    "project_code": "项目编号", "project_name": "项目名",
     "project_location": "项目地点", "customer_name": "客户名", "vehicle_model": "车型",
 }
 
@@ -456,33 +402,30 @@ def _check_info_unique(db: Session, field: str, value: Optional[str], exclude_id
         raise HTTPException(status_code=400, detail=f"{_INFO_FIELD_LABEL[field]}已存在：{value}")
 
 
-@router.post("/project-info", summary="录入信息：登记一条项目信息（一项目一行）")
+@router.post("/project-info", summary="录入信息：登记一条项目信息（一项目一行，登录即可）")
 async def create_project_info(
-    project_id: Optional[str] = Body(None, embed=True, description="项目id（唯一；可先留空后补，存过不可改）"),
     project_code: str = Body(..., embed=True, description="项目编号（唯一，可改）"),
     project_name: str = Body(..., embed=True, description="项目名"),
     project_location: Optional[str] = Body(None, embed=True, description="项目地点"),
     customer_name: Optional[str] = Body(None, embed=True, description="客户名"),
     vehicle_model: Optional[str] = Body(None, embed=True, description="车型"),
-    current_user=require_permission("frontend:admin:other:show"),
+    # 权限「登录即可」：扫码录入/确认链路普通用户也要用（2026-09-30 用户口径）
+    current_user=Depends(get_current_active_user_from_token),
 ):
     db: Session = db_manager.get_db()
     try:
-        pid = _clean_info_value(project_id, "project_id")
         code = _clean_info_value(project_code, "project_code")
         name = _clean_info_value(project_name, "project_name")
         if not code:
             raise HTTPException(status_code=400, detail="项目编号不能为空")
         if not name:
             raise HTTPException(status_code=400, detail="项目名不能为空")
-        _check_info_unique(db, "project_id", pid)
         _check_info_unique(db, "project_code", code)
 
         q = WechatQrcode(
             # 码记录名跟随项目名：列表/预览不用另开字段就能看到是哪个项目
             name=name,
             type=QrcodeType.PERMANENT,
-            project_id=pid,
             project_code=code,
             project_name=name,
             project_location=_clean_info_value(project_location, "project_location"),
@@ -493,36 +436,27 @@ async def create_project_info(
         db.add(q)
         db.commit()
         db.refresh(q)
-        return _dict_with_project(db, q)
+        return _to_dict(q)
     finally:
         db.close()
 
 
-@router.put("/{qid}/project-info", summary="录入信息：更新一条项目信息")
+@router.put("/{qid}/project-info", summary="录入信息：更新一条项目信息（登录即可）")
 async def update_project_info(
     qid: int,
-    project_id: Optional[str] = Body(None, embed=True, description="项目id；只在原为空时补填一次，已存过则不可改；不传不改"),
     project_code: Optional[str] = Body(None, embed=True, description="项目编号（唯一，可改）；不传不改"),
     project_name: Optional[str] = Body(None, embed=True, description="项目名；不传不改"),
     project_location: Optional[str] = Body(None, embed=True, description="项目地点；传空串清空"),
     customer_name: Optional[str] = Body(None, embed=True, description="客户名；传空串清空"),
     vehicle_model: Optional[str] = Body(None, embed=True, description="车型；传空串清空"),
-    current_user=require_permission("frontend:admin:other:show"),
+    # 权限「登录即可」：扫码录入/确认链路普通用户也要用（2026-09-30 用户口径）
+    current_user=Depends(get_current_active_user_from_token),
 ):
     db: Session = db_manager.get_db()
     try:
         q = db.query(WechatQrcode).filter(WechatQrcode.id == qid).first()
         if not q:
             raise HTTPException(status_code=404, detail="二维码不存在")
-
-        # 项目id：唯一不可改。空串视为「没填/不改」；只在原为空时允许补填一次
-        pid = _clean_info_value(project_id, "project_id")
-        if pid:
-            if q.project_id and q.project_id != pid:
-                raise HTTPException(status_code=400, detail="项目id不可修改")
-            if not q.project_id:
-                _check_info_unique(db, "project_id", pid)
-                q.project_id = pid
 
         if project_code is not None:
             code = _clean_info_value(project_code, "project_code")
@@ -547,7 +481,7 @@ async def update_project_info(
 
         db.commit()
         db.refresh(q)
-        return _dict_with_project(db, q)
+        return _to_dict(q)
     finally:
         db.close()
 
@@ -597,8 +531,9 @@ def _transition(db: Session, q: WechatQrcode, target: str, actor: str) -> Wechat
     return q
 
 
-@router.post("/{qid}/confirm", summary="状态流转：普通码 → confirming；录入信息行确认即发布 → published")
-async def confirm_qrcode(qid: int, current_user=require_permission("frontend:admin:other:show")):
+@router.post("/{qid}/confirm", summary="状态流转：普通码 → confirming；录入信息行确认即发布 → published（登录即可）")
+async def confirm_qrcode(qid: int, current_user=Depends(get_current_active_user_from_token)):
+    # 权限「登录即可」：扫码用户在录入信息详情页点「确认信息」= 确认即发布（2026-09-30 用户口径）
     db: Session = db_manager.get_db()
     try:
         q = db.query(WechatQrcode).filter(WechatQrcode.id == qid).first()
@@ -609,7 +544,7 @@ async def confirm_qrcode(qid: int, current_user=require_permission("frontend:adm
         # 发布留在二维码管理里单独点。
         target = QrcodeStatus.PUBLISHED if q.project_code else QrcodeStatus.CONFIRMING
         actor = current_user.get("username") if isinstance(current_user, dict) else str(current_user)
-        return _dict_with_project(db, _transition(db, q, target, actor))
+        return _to_dict(_transition(db, q, target, actor))
     finally:
         db.close()
 
@@ -622,7 +557,7 @@ async def publish_qrcode(qid: int, current_user=require_permission("frontend:adm
         if not q:
             raise HTTPException(status_code=404, detail="二维码不存在")
         actor = current_user.get("username") if isinstance(current_user, dict) else str(current_user)
-        return _dict_with_project(db, _transition(db, q, QrcodeStatus.PUBLISHED, actor))
+        return _to_dict(_transition(db, q, QrcodeStatus.PUBLISHED, actor))
     finally:
         db.close()
 
@@ -635,7 +570,7 @@ async def deprecate_qrcode(qid: int, current_user=require_permission("frontend:a
         if not q:
             raise HTTPException(status_code=404, detail="二维码不存在")
         actor = current_user.get("username") if isinstance(current_user, dict) else str(current_user)
-        return _dict_with_project(db, _transition(db, q, QrcodeStatus.DEPRECATED, actor))
+        return _to_dict(_transition(db, q, QrcodeStatus.DEPRECATED, actor))
     finally:
         db.close()
 

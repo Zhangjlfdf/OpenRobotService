@@ -1,16 +1,17 @@
 // 录入信息 —— 「项目管理 → 新建项目 → 录入信息」进入的项目信息登记页。
 //
-// 六个字段（2026-09-29 用户口径）：项目id / 项目编号 / 项目名 / 项目地点 / 客户名 / 车型。
-// 一条录入 = wechat_qrcodes 里的一行（六个字段和行 id 同行存）：
+// 五个字段（2026-09-29 用户口径）：项目编号 / 项目名 / 项目地点 / 客户名 / 车型。
+// 一条录入 = wechat_qrcodes 里的一行（五个字段和行 id 同行存）：
 //   创建 POST /qrcodes/project-info；点条目回到本页（/admin/info-entry/:id）修改走
 //   PUT /qrcodes/{id}/project-info。保存后该行在二维码管理里可见、可继续生成 ticket。
 //
-// 项目id = 码的场景值（2026-09-30 用户口径）：wechat_qrcodes 第二列 scene_str 就是项目id，
-// 没有单独的 project_id 列。所以扫码跳转链接（…/info-entry/{id}?scene=xxx&openid=…）里的
-// scene 参数解析出来直接带入项目id：
-//   - 场景值能查到行 → 就是编辑那一行，项目id 锁死（= 该行 scene_str）；
-//   - 场景值查不到行（码还没录入过）→ 仍按新录入处理，项目id 预填锁定（它必须是该码的场景值）；
-//   - 链接没带 scene（管理端手动新建）→ 项目id 可填、必填。
+// 项目id 就是行 id（2026-09-30 用户口径）：不再单独占列、不随表单提交——
+//   新建时保存后自动生成（表单里只读展示占位）；编辑时显示 str(id)。
+// 扫码跳转链接（…/info-entry/{id}?scene=xxx&openid=…）里的 scene 即 str(id)：
+//   - 场景值能查到行 → 就是编辑那一行；
+//   - 场景值查不到行（码还没录入过）→ 按新录入处理（项目id 保存后自动生成，
+//     不需要、也无法预填）；
+//   - 链接没带 scene（管理端手动新建）→ 同样新录入。
 //   - 该行已是 published（录入+确认都完成）→ 不停留本页，直接跳「我要摇人」（2026-09-30
 //     用户口径）：scene/openid 原样带过去，CallView 按 scene 弹车体信息确认；
 //     管理端「编辑信息」链接不带 scene，不受影响（那是修改数据的入口）。
@@ -25,7 +26,7 @@
 //   entering 时期的旧卡片、链接落回本页，则由上面的 published 判断兜底重定向。
 //
 // 规则（界面不写注解，由交互体现）：
-// - 项目id：必填、唯一、不可改（新建时填了就锁定；扫码进入时由 scene 带入）
+// - 项目id：不可编辑，= str(行 id)，保存后自动生成
 // - 项目编号：唯一，可改；与其他录入行重复时后端 400，detail 直接 Toast 出来
 // - 项目名：必填（列表/预览里码记录名跟随它）
 // - 项目地点 / 客户名 / 车型：自由填写，可留空
@@ -41,8 +42,8 @@ import {
 const errMsg = (err: unknown, fallback: string) =>
   err instanceof Error && err.message ? err.message : fallback;
 
-/** 场景值白名单（对齐后端 scene_str 列宽，同 CallView.resolveSceneCode）：只含 [A-Za-z0-9_-] */
-const SCENE_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
+/** 场景值 = str(id)（2026-09-30 口径），只认纯数字（容错路径手输的链接） */
+const SCENE_PATTERN = /^\d{1,10}$/;
 
 const emptyForm = {
   project_id: '',
@@ -60,7 +61,7 @@ export default function InfoEntry() {
   const numId = id ? Number(id) : NaN;
   const pathId = Number.isInteger(numId) && numId > 0 ? numId : null;
 
-  // 扫码进入：链接里的 scene 即项目id（不合规按没带处理，容错路径手输的链接）
+  // 扫码进入：链接里的 scene 即 str(id)（不合规按没带处理，容错路径手输的链接）
   const sceneCode = useMemo(() => {
     const raw = (searchParams.get('scene') ?? '').trim();
     return SCENE_PATTERN.test(raw) ? raw : null;
@@ -77,7 +78,7 @@ export default function InfoEntry() {
 
   const fillFromRow = useCallback((row: QrcodeItem) => {
     setForm({
-      // 项目id 就是该行的场景值（第二列）
+      // 项目id 就是行 id（后端下发的 scene_str = str(id)），只读展示
       project_id: row.scene_str || '',
       project_code: row.project_code || '',
       project_name: row.project_name || '',
@@ -106,9 +107,9 @@ export default function InfoEntry() {
 
     (async () => {
       try {
-        // 扫码进入优先按场景值查行（登录即可接口）。scene 即项目id：
+        // 扫码进入优先按场景值查行（登录即可接口）。scene 即 str(id)：
         // 查到 → 编辑那一行；查不到且链接还带 :id → 退回按 id 查（管理端场景）；
-        // 都没有 → 新录入，项目id 预填锁定（必须与码的场景值一致）
+        // 都没有 → 新录入（项目id 保存后自动生成，无需预填）
         if (sceneCode) {
           const row = await fetchQrcodeByScene(sceneCode);
           if (row) {
@@ -117,7 +118,7 @@ export default function InfoEntry() {
             return;
           }
           if (!pathId) {
-            setForm({ ...emptyForm, project_id: sceneCode });
+            setForm(emptyForm);
             setRowId(null);
             setStatus('');
             return;
@@ -136,20 +137,12 @@ export default function InfoEntry() {
     })();
   }, [sceneCode, pathId, fillFromRow, toCallIfPublished]);
 
-  // 项目id 锁定条件：编辑已有行（id 来自链接或 scene 查到的行），或扫码带入的场景值
-  const projectIdLocked = !!sceneCode || rowId !== null;
-
   const setField = (key: keyof typeof emptyForm) => (value: unknown) =>
     setForm((prev) => ({ ...prev, [key]: String(value ?? '') }));
 
   const handleSubmit = async () => {
-    const pid = form.project_id.trim();
     const code = form.project_code.trim();
     const name = form.project_name.trim();
-    if (!rowId && !pid) {
-      Toast({ message: '请填写项目id', theme: 'warning' });
-      return;
-    }
     if (!code) {
       Toast({ message: '请填写项目编号', theme: 'warning' });
       return;
@@ -169,9 +162,9 @@ export default function InfoEntry() {
 
     setSubmitting(true);
     try {
-      // 编辑已有行：项目id 不可改（= 场景值），不入参；新录入：项目id 必填（落成场景值）
+      // 项目id 不入参：编辑时 = 行 id 本身；新建时保存后由后端自动生成（str(id)）
       if (rowId) await updateProjectInfo(rowId, fields);
-      else await createProjectInfo({ project_id: pid, ...fields });
+      else await createProjectInfo(fields);
       Toast({ message: '保存成功', theme: 'success' });
       navigate(-1);
     } catch (err) {
@@ -203,14 +196,15 @@ export default function InfoEntry() {
     <div style={{ padding: 16 }}>
       <h4 style={{ marginBottom: 16 }}>{rowId ? '编辑信息' : '录入信息'}</h4>
       <Form onSubmit={handleSubmit}>
-        <FormItem label="项目id" name="project_id" requiredMark>
+        {/* 项目id = str(行 id)：恒只读——新建时保存后自动生成，编辑时显示行 id */}
+        <FormItem label="项目id" name="project_id">
           <ClearableInput
             value={form.project_id}
             onChange={setField('project_id')}
-            placeholder="请输入项目id"
+            placeholder={rowId ? '' : '保存后自动生成'}
             maxlength={64}
-            disabled={projectIdLocked}
-            showClear={!projectIdLocked}
+            disabled
+            showClear={false}
           />
         </FormItem>
         <FormItem label="项目编号" name="project_code" requiredMark>

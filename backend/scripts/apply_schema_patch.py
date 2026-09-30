@@ -74,8 +74,9 @@ PATCHES = {
     # 二维码管理：录入信息相关列（2026-09-29）。
     # 表整体由启动 create_all 负责（模型已带这些列）；只有「先跑过旧代码、
     # wechat_qrcodes 表已建出来」的库才需要这里补列。
-    # 注：project_id 列已废弃（2026-09-30 项目id 改存 scene_str），不在这里补，
-    # 存量库由下方 DROPS 负责删除（删前有数据收尾，见 _migrate_qrcode_project_id）。
+    # 注：project_id 与 scene_str 两列均已废弃（2026-09-30 口径：项目id 就是行 id
+    # str(id)，scene 由 str(id) 自动生成、不再落列），不在这里补，
+    # 存量库由下方 DROPS 负责删除（删前有 WARN 统计）。
     "wechat_qrcodes": [
         # 录入信息（其他项目登记）：一条信息一行，六个字段和行 id 同行存
         ("project_code", "VARCHAR(64) NULL COMMENT '项目编号（录入信息行；唯一由接口层查重）'", "ix_wechat_qrcodes_project_code"),
@@ -90,60 +91,42 @@ PATCHES = {
 }
 
 
-def _migrate_qrcode_project_id(cur) -> None:
-    """wechat_qrcodes.project_id 删除前的数据收尾（2026-09-30：项目id 改存 scene_str）。
+def _warn_qrcode_project_id(cur) -> None:
+    """wechat_qrcodes.project_id 删除前的提示（2026-09-30：项目id 就是行 id，不再单独占列）。
 
-    录入信息行（project_code 非空）的 scene_str 旧代码是 proj_ 随机占位，
-    现在项目id 本身就是场景值，所以删列前把项目id 搬进 scene_str：
-    - 未生成 ticket 的行：scene 还没被微信侧使用，直接改写（scene_str 有唯一约束，
-      目标值已被别的行占用时跳过并提示）；
-    - 已生成 ticket 的行：scene 与微信侧已发出的码绑定、不能改，删列后这些行的
-      项目id 无从保存，统计出来供部署时人工确认；
-    - 带 project_id 的普通码行（旧的「扫码关联项目」用法）：该功能已移除，同样只统计。
+    旧列是「扫码关联 USP 项目」的业务键（企微表格同步过来），该用法随列移除；
+    录入信息行的项目id 现在是行 id（str(id)），与本列无关，无需数据搬迁。
+    只统计带值行数供部署时人工确认。
     """
     cur.execute(
-        "SELECT id, scene_str, project_id FROM wechat_qrcodes "
-        "WHERE project_id IS NOT NULL AND project_id <> '' "
-        "AND project_code IS NOT NULL AND ticket IS NULL"
+        "SELECT COUNT(*) FROM wechat_qrcodes WHERE project_id IS NOT NULL AND project_id <> ''"
     )
+    n = cur.fetchone()[0]
+    if n:
+        print(f"[WARN] wechat_qrcodes.project_id 有值的行 {n} 条：该关联随列删除（项目id 现为行 id）")
+
+
+def _warn_qrcode_scene_str(cur) -> None:
+    """wechat_qrcodes.scene_str 删除前的提示（2026-09-30：scene 改 str(id) 自动生成、不落列）。
+
+    扫码/跳转一律用 str(id)。需注意已生成 ticket 且 scene_str ≠ str(id) 的行：
+    微信侧那张码绑定的还是旧 scene，扫码 EventKey 解析出的不是行 id、会失配，
+    统计出来供部署时人工确认这些码是否需重印。
+    """
+    cur.execute("SELECT id, scene_str, ticket FROM wechat_qrcodes")
     rows = cur.fetchall()
-    cur.execute("SELECT scene_str FROM wechat_qrcodes")
-    taken = {r[0] for r in cur.fetchall()}
-    fixed = 0
-    for row_id, scene, pid in rows:
-        if pid == scene:
-            fixed += 1  # 已经是项目id（迁移过的库重跑），无需动作
-            continue
-        if pid in taken:
-            print(f"[WARN] 行 {row_id}：项目id {pid} 已被别的行当场景值占用，scene_str 保持 {scene}")
-            continue
-        cur.execute("UPDATE wechat_qrcodes SET scene_str = %s WHERE id = %s", (pid, row_id))
-        taken.discard(scene)
-        taken.add(pid)
-        fixed += 1
-    print(f"[FIX] 录入信息行 scene_str 改写为项目id：{fixed} 行（符合条件共 {len(rows)} 行）")
-
-    cur.execute(
-        "SELECT COUNT(*) FROM wechat_qrcodes "
-        "WHERE project_id IS NOT NULL AND project_id <> '' AND ticket IS NOT NULL"
-    )
-    lost = cur.fetchone()[0]
-    if lost:
-        print(f"[WARN] 已生成 ticket 的行 {lost} 条带 project_id：scene 与微信码绑定不能改写，删列后其项目id 丢失")
-    cur.execute(
-        "SELECT COUNT(*) FROM wechat_qrcodes "
-        "WHERE project_id IS NOT NULL AND project_id <> '' AND project_code IS NULL"
-    )
-    assoc = cur.fetchone()[0]
-    if assoc:
-        print(f"[WARN] 普通码行 {assoc} 条带 project_id（旧「扫码关联项目」用法）：该关联随列删除")
+    mismatch = [(rid, s) for rid, s, t in rows if t and s and s != str(rid)]
+    if mismatch:
+        sample = ", ".join(f"{rid}(scene={s})" for rid, s in mismatch[:10])
+        print(f"[WARN] 已生成 ticket 且 scene_str≠str(id) 的行 {len(mismatch)} 条（扫码会失配，需人工确认是否重印）：{sample}")
 
 
-# 待删除的废弃列：{表: [(列名, 删前数据收尾函数或 None)]}
-# 列不存在时跳过（幂等）；收尾函数只在列存在时执行一次，跑完再 DROP。
+# 待删除的废弃列：{表: [(列名, 删前提示/收尾函数或 None)]}
+# 列不存在时跳过（幂等）；函数只在列存在时执行一次，跑完再 DROP。
 DROPS = {
     "wechat_qrcodes": [
-        ("project_id", _migrate_qrcode_project_id),
+        ("project_id", _warn_qrcode_project_id),
+        ("scene_str", _warn_qrcode_scene_str),
     ],
 }
 

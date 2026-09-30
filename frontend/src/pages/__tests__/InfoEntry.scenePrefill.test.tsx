@@ -1,8 +1,8 @@
-// 录入信息页的「扫码带入项目id」链路（2026-09-30 用户口径）：
-//   扫码跳转链接 …/info-entry?scene=xxx 里的 scene 就是项目id（wechat_qrcodes 第二列
-//   scene_str，已无 project_id 列）——解析出来直接带入「项目id」输入框：
-//   能查到行 → 编辑那行（锁死）；查不到行 → 按新录入处理（项目id 预填锁定）；
-//   没带 scene → 管理端手动新建（可编辑、必填）。
+// 录入信息页的「扫码 scene=str(id)」链路（2026-09-30 用户口径）：
+//   扫码跳转链接 …/info-entry?scene=xxx 里的 scene 即 str(id)（项目id 就是行 id，
+//   不单独占列、不随表单提交）——输入框里的「项目id」恒只读：
+//   能查到行 → 编辑那行（显示 str(id)）；查不到行 → 按新录入处理（显示空、
+//   placeholder「保存后自动生成」）；没带 scene → 管理端手动新建（同样只读空值）。
 //   该行已 published（录入+确认完成）→ 不停留本页，跳「我要摇人」(/call)，
 //   scene/openid 原样带走；管理端不带 scene 的「编辑信息」链接不受影响。
 //
@@ -85,7 +85,8 @@ vi.mock('tdesign-mobile-react', () => ({
 
 import InfoEntry from '../admin/InfoEntry';
 
-const SCENE = 'P2026001';
+// scene 即 str(id)：行 9 的场景值就是 '9'（2026-09-30 口径）
+const SCENE = '9';
 
 const infoRow = {
   id: 9,
@@ -132,12 +133,12 @@ describe('InfoEntry 扫码带入项目id', () => {
     mockToast.mockReset();
   });
 
-  it('scene 能查到行：编辑那行，项目id=scene_str 且锁定；entering 时出「确认信息」并走 confirm', async () => {
+  it('scene 能查到行：编辑那行，项目id=str(id) 且只读；entering 时出「确认信息」并走 confirm', async () => {
     mockFetchQrcodeByScene.mockResolvedValue(infoRow);
     renderInfoEntry(`/admin/info-entry?scene=${SCENE}&openid=oXk4js`);
 
-    const pid = await screen.findByPlaceholderText('请输入项目id');
-    await waitFor(() => expect(valueOf(pid)).toBe(SCENE));
+    // 项目id 只读输入框：编辑已有行时显示 str(id)（= 后端下发的 scene_str）
+    const pid = await screen.findByDisplayValue(SCENE);
     expect(pid).toBeDisabled();
     // scene 命中就走 by-scene（登录即可接口），不再按 id 查
     expect(mockFetchQrcodeByScene).toHaveBeenCalledWith(SCENE);
@@ -148,16 +149,16 @@ describe('InfoEntry 扫码带入项目id', () => {
     // entering → 「确认信息」按钮；点击走 confirm（后端：录入行确认即发布）
     fireEvent.click(screen.getByText('确认信息'));
     await waitFor(() => expect(mockTransition).toHaveBeenCalledWith(9, 'confirm'));
-    // 编辑已有行不发送 project_id（它就是 scene_str，不可改）
+    // 编辑已有行不发送 project_id（它就是行 id，不可改）
     expect(mockUpdateProjectInfo).not.toHaveBeenCalled();
   });
 
-  it('scene 查不到行：按新录入处理，项目id 预填锁定；保存时 project_id 带入', async () => {
+  it('scene 查不到行：按新录入处理，项目id 空且只读（保存后自动生成）；保存不带 project_id', async () => {
     mockFetchQrcodeByScene.mockResolvedValue(null);
     renderInfoEntry(`/admin/info-entry?scene=${SCENE}`);
 
-    const pid = await screen.findByPlaceholderText('请输入项目id');
-    await waitFor(() => expect(valueOf(pid)).toBe(SCENE));
+    const pid = await screen.findByPlaceholderText('保存后自动生成');
+    expect(valueOf(pid)).toBe('');
     expect(pid).toBeDisabled();
     // 新录入没有行可确认，不发「确认信息」按钮
     expect(screen.queryByText('确认信息')).not.toBeInTheDocument();
@@ -166,45 +167,45 @@ describe('InfoEntry 扫码带入项目id', () => {
     fireEvent.change(screen.getByPlaceholderText('请输入项目名'), { target: { value: '项目一' } });
     fireEvent.click(screen.getByText('保存'));
 
-    await waitFor(() =>
-      expect(mockCreateProjectInfo).toHaveBeenCalledWith(
-        expect.objectContaining({ project_id: SCENE, project_code: 'CODE-1', project_name: '项目一' }),
-      ),
-    );
+    await waitFor(() => expect(mockCreateProjectInfo).toHaveBeenCalled());
+    const payload = mockCreateProjectInfo.mock.calls[0][0] as Record<string, unknown>;
+    expect(payload).toMatchObject({ project_code: 'CODE-1', project_name: '项目一' });
+    expect(payload.project_id).toBeUndefined();
     expect(mockUpdateProjectInfo).not.toHaveBeenCalled();
   });
 
-  it('没带 scene（管理端新建）：项目id 空、可编辑、必填校验拦下', async () => {
+  it('没带 scene（管理端新建）：项目id 空且只读；填编号+项目名即可保存，不带 project_id', async () => {
     renderInfoEntry('/admin/info-entry');
 
-    const pid = await screen.findByPlaceholderText('请输入项目id');
+    const pid = await screen.findByPlaceholderText('保存后自动生成');
     expect(valueOf(pid)).toBe('');
-    expect(pid).not.toBeDisabled();
+    expect(pid).toBeDisabled();
     expect(mockFetchQrcodeByScene).not.toHaveBeenCalled();
 
     fireEvent.change(screen.getByPlaceholderText('请输入项目编号'), { target: { value: 'CODE-1' } });
     fireEvent.change(screen.getByPlaceholderText('请输入项目名'), { target: { value: '项目一' } });
     fireEvent.click(screen.getByText('保存'));
 
-    await waitFor(() => expect(mockToast).toHaveBeenCalledWith(expect.objectContaining({ message: '请填写项目id' })));
-    expect(mockCreateProjectInfo).not.toHaveBeenCalled();
+    await waitFor(() => expect(mockCreateProjectInfo).toHaveBeenCalled());
+    const payload = mockCreateProjectInfo.mock.calls[0][0] as Record<string, unknown>;
+    expect(payload).toMatchObject({ project_code: 'CODE-1', project_name: '项目一' });
+    expect(payload.project_id).toBeUndefined();
   });
 
-  it('非法 scene：不查接口、不预填，项目id 保持可编辑', async () => {
+  it('非法 scene：不查接口、不预填，项目id 保持空且只读', async () => {
     renderInfoEntry('/admin/info-entry?scene=../etc/passwd');
 
-    const pid = await screen.findByPlaceholderText('请输入项目id');
+    const pid = await screen.findByPlaceholderText('保存后自动生成');
     expect(valueOf(pid)).toBe('');
-    expect(pid).not.toBeDisabled();
+    expect(pid).toBeDisabled();
     expect(mockFetchQrcodeByScene).not.toHaveBeenCalled();
   });
 
-  it('/:id 无 scene（二维码管理点「编辑信息」）：按 id 查行回填，项目id 锁死', async () => {
+  it('/:id 无 scene（二维码管理点「编辑信息」）：按 id 查行回填，项目id=str(id) 只读', async () => {
     mockFetchQrcode.mockResolvedValue(infoRow);
     renderInfoEntry('/admin/info-entry/9');
 
-    const pid = await screen.findByPlaceholderText('请输入项目id');
-    await waitFor(() => expect(valueOf(pid)).toBe(SCENE));
+    const pid = await screen.findByDisplayValue(SCENE);
     expect(pid).toBeDisabled();
     expect(mockFetchQrcode).toHaveBeenCalledWith(9);
     expect(mockFetchQrcodeByScene).not.toHaveBeenCalled();
@@ -220,7 +221,7 @@ describe('InfoEntry 扫码带入项目id', () => {
     expect(probe.textContent).toContain(`scene=${SCENE}`);
     expect(probe.textContent).toContain('openid=oXk4js');
     // 不停留录入页：表单没渲染、无「确认信息」
-    expect(screen.queryByPlaceholderText('请输入项目id')).not.toBeInTheDocument();
+    expect(screen.queryByPlaceholderText('保存后自动生成')).not.toBeInTheDocument();
     expect(screen.queryByText('确认信息')).not.toBeInTheDocument();
     // scene 命中走 by-scene（登录即可接口），跳走前不再按 id 查
     expect(mockFetchQrcodeByScene).toHaveBeenCalledWith(SCENE);
@@ -231,8 +232,7 @@ describe('InfoEntry 扫码带入项目id', () => {
     mockFetchQrcode.mockResolvedValue({ ...infoRow, status: 'published' });
     renderInfoEntry('/admin/info-entry/9');
 
-    const pid = await screen.findByPlaceholderText('请输入项目id');
-    await waitFor(() => expect(valueOf(pid)).toBe(SCENE));
+    const pid = await screen.findByDisplayValue(SCENE);
     expect(pid).toBeDisabled();
     expect(screen.queryByTestId('call-page')).not.toBeInTheDocument();
   });
