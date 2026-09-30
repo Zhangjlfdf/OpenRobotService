@@ -15,7 +15,11 @@
   card      企微模板卡片 text_notice（默认）：状态色标 + 关键信息键值对 + 日志跳转
   markdown  markdown_v2：状态图标标题 + 元信息引用块 + 检查项表格
             （markdown_v2 不支持 <font> 彩色标签，勿引入）
-  卡片被企微拒收（errcode != 0）时自动降级为 markdown_v2 重发一次，保证通知不丢。
+  image     自绘卡片图（见 deploy/notify_image.py）：字号比模板卡片大 2~3 倍，
+            标题取当前分支最近一条已合并 PR，可点开看原图；
+            企微 image 消息不支持跳转，因此紧接着补一条只含 Actions 链接的文本消息。
+降级链：image → card → markdown_v2。渲染不可用（缺 Pillow / 缺中文字体 / 体积超限）
+或任一形态被企微拒收（errcode != 0）时逐级降级，保证通知不丢。
 
 环境变量：
   NOTIFY_WEBHOOKS  多群推送：`<url>|<policy>|<群名>[, ...]`（policy、群名均可省略）
@@ -41,7 +45,11 @@
   AUTO_ROLLBACK    "yes" 表示已自动回滚
   ACTOR            触发人
   RUN_URL          Actions 运行链接
+  PR_NO            部署分支上最近一条已合并 PR 的编号（plan job 解析，可空）
+  PR_TITLE         同一 PR 的标题，image 样式用它当卡片主旨（可空）
 """
+import base64
+import hashlib
 import json
 import os
 import sys
@@ -52,7 +60,7 @@ from urllib.parse import urlparse
 
 ALLOWED_HOSTS = ("qyapi.weixin.qq.com", "open.feishu.cn")
 POLICIES = ("always", "failure", "success", "off")
-STYLES = ("card", "markdown")
+STYLES = ("card", "markdown", "image")
 EVENT_LABELS = {"workflow_dispatch": "手动触发", "push": "推送触发", "schedule": "定时触发"}
 
 
@@ -121,6 +129,8 @@ def collect():
         "backup_id": env("BACKUP_ID"),
         "health": health_summary(),
         "run_url": env("RUN_URL"),
+        "pr_no": env("PR_NO"),
+        "pr_title": env("PR_TITLE"),
     }
 
 
@@ -228,6 +238,31 @@ def build_text(c):
     return "\n".join(lines)
 
 
+def render_image(c):
+    """渲染通知卡片图（PNG 字节）。
+
+    Pillow 或中文字体缺失时抛异常，由 deliver() 降级为模板卡片——通知不因环境缺失而丢。
+    """
+    import notify_image
+    return notify_image.render_png(c)
+
+
+def build_image(png):
+    """企微群机器人图片消息：base64 + md5（无需先上传素材，上限 2MB）。"""
+    return {
+        "msgtype": "image",
+        "image": {
+            "base64": base64.b64encode(png).decode("ascii"),
+            "md5": hashlib.md5(png, usedforsecurity=False).hexdigest(),
+        },
+    }
+
+
+def build_link_text(c):
+    """图片不可点击，补一条只含运行链接的文本消息。"""
+    return {"msgtype": "text", "text": {"content": f"查看运行日志：{c['run_url']}"}}
+
+
 def post(webhook, payload):
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(
@@ -244,14 +279,39 @@ def wecom_accepted(body):
         return False
 
 
+def follow_up_link(webhook, c):
+    """图片消息不能点击，补发一条只含运行链接的文本；失败只告警。"""
+    if not c["run_url"]:
+        return
+    try:
+        post(webhook, build_link_text(c))
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        print(f"  运行链接补发失败（不影响通知主体）: {exc}")
+
+
 def deliver(provider, webhook, c, style):
-    """发送；卡片被拒时自动降级 markdown_v2 重发。返回实际使用的样式。"""
+    """发送；图片/卡片被拒或渲染不可用时逐级降级（image → card → markdown）。
+    返回实际使用的样式。"""
     if provider == "feishu":
         status, body = post(webhook, {"msg_type": "text", "content": {"text": build_text(c)}})
         return "text", status, body
-    status, body = post(webhook, build_card(c) if style == "card" else build_markdown(c))
-    used = style
-    if style == "card" and not wecom_accepted(body):
+
+    if style == "image":
+        try:
+            png = render_image(c)
+        except Exception as exc:      # 缺 Pillow / 缺中文字体 / 体积超限：降级但不中断
+            print(f"  图片渲染不可用（{exc}），降级为模板卡片")
+        else:
+            status, body = post(webhook, build_image(png))
+            if wecom_accepted(body):
+                follow_up_link(webhook, c)
+                return "image", status, body
+            print(f"  图片样式被拒（{body[:120]}），降级为模板卡片")
+
+    want_card = style in ("card", "image")
+    status, body = post(webhook, build_card(c) if want_card else build_markdown(c))
+    used = "card" if want_card else "markdown"
+    if used == "card" and not wecom_accepted(body):
         print(f"  卡片样式被拒（{body[:120]}），自动降级 markdown_v2 重发")
         used = "markdown"
         status, body = post(webhook, build_markdown(c))

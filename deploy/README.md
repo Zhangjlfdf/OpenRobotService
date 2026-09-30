@@ -10,7 +10,8 @@
 
 - 流水线定义：[`.github/workflows/deploy.yml`](../.github/workflows/deploy.yml)、[`.github/workflows/rollback.yml`](../.github/workflows/rollback.yml)
 - 执行逻辑：[`deploy.py`](deploy.py)（本地 CLI 与 CI 共用同一套实现，避免两套行为漂移）
-- 通知脚本：[`notify.py`](notify.py)（企业微信 / 飞书群机器人）
+- 通知脚本：[`notify.py`](notify.py)（企业微信 / 飞书群机器人）、
+  [`notify_image.py`](notify_image.py) + [`assets/fonts`](assets/fonts)（`NOTIFY_STYLE=image` 用的自绘卡片图与字体）
 
 ## 一、首次启用（一次性）
 
@@ -30,6 +31,7 @@
 | `NOTIFY_WEBHOOKS` | Secret | 否 | 多群推送，逗号分隔，每项写 `<url>\|<policy>\|<群名>`（后两段可省）：`always`（默认，每条都发）/ `failure`（仅失败或自动回滚）/ `success`（仅成功）/ `off`（永久禁发，仅留档 URL）；群名仅作日志标签。例：`群A的url\|always\|研发群,群B的url\|failure\|运维群,群C的url\|off\|勿扰群`。<br>注意：**没写进本变量的群本来就不会收到通知**（不在名单 = 不发） |
 | `NOTIFY_WEBHOOK` | Secret | 否 | 单群 Webhook（旧变量，作为 `NOTIFY_WEBHOOKS` 的回退，等价 `always`） |
 | `NOTIFY_PROVIDER` | Variable | 否 | `wecom`（默认）/ `feishu` |
+| `NOTIFY_STYLE` | Variable | 否 | 企微通知样式：`card`（默认，模板卡片）/ `markdown`（markdown_v2）/ `image`（自绘卡片图，字号比模板卡片大 2~3 倍，主旨取「部署分支上最近一条已合并 PR」）。企微图片消息不能点击跳转，因此图片后会紧跟一条只含运行链接的文本。渲染不可用或被企微拒收时自动降级 `image → card → markdown_v2` |
 | `DEPLOY_SSH_HOST` | Variable | 否 | 缺省回退 `UI_REGRESSION_SSH_HOST` |
 | `DEPLOY_SSH_USER` | Variable | 否 | 缺省 `usp-a` |
 | `DEPLOY_SSH_PORT` | Variable | 否 | 缺省 `8802` |
@@ -39,6 +41,11 @@
 | `DEPLOY_BACKUP_KEEP` | Variable | 否 | 保留备份份数，缺省 `10` |
 
 即 **零新增配置也能直接跑**：SSH 连接信息从既有的 `UI_REGRESSION_*` 回退，健康地址内置实测默认值。
+
+`NOTIFY_STYLE=image` 的运行前提（仅该项需要）：自托管 runner 上要有 Pillow
+（`python3 -m pip install --user --break-system-packages pillow`，服务器已装）。
+中文字体不需要在服务器上安装——已随 `deploy/assets/fonts/`（Noto Sans SC 子集，OFL 许可证）打进 artifact。
+缺 Pillow / 缺字体 / 图片超 2MB / 图片被拒，都会自动降级为模板卡片，通知不会丢。
 
 ### 3. 健康检查默认地址（均已实测 HTTP 200）
 

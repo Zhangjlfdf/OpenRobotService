@@ -92,6 +92,10 @@ jobs:
     name: Resolve plan
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # 只读仓库与 PR 列表：后者用于取「部署分支上最近一条已合并 PR」当通知主旨
+    permissions:
+      contents: read
+      pull-requests: read
     outputs:
       environment: ${{ steps.resolve.outputs.environment }}
       action: ${{ steps.resolve.outputs.action }}
@@ -99,6 +103,8 @@ jobs:
       git_ref: ${{ steps.resolve.outputs.git_ref }}
       git_sha: ${{ steps.resolve.outputs.git_sha }}
       commit_msg: ${{ steps.resolve.outputs.commit_msg }}
+      pr_no: ${{ steps.resolve.outputs.pr_no }}
+      pr_title: ${{ steps.resolve.outputs.pr_title }}
       skip_gate: ${{ steps.resolve.outputs.skip_gate }}
       health_urls: ${{ steps.resolve.outputs.health_urls }}
       backup_keep: ${{ steps.resolve.outputs.backup_keep }}
@@ -123,6 +129,8 @@ jobs:
           IN_BACKUP_ID: ${{ inputs.backup_id }}
           # 验证迭代期可把该仓库变量置 true 临时跳过门禁（默认不跳过）
           FAST_GATE_SKIP: ${{ vars.SPLIT_DEPLOY_FAST }}
+          # 读 PR 列表需要 token（只用只读的 pull requests 权限）
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HEALTH_TEST: ${{ vars.DEPLOY_TEST_HEALTH_URLS }}
           HEALTH_PROD: ${{ vars.DEPLOY_PROD_HEALTH_URLS }}
           BACKUP_KEEP: ${{ vars.DEPLOY_BACKUP_KEEP }}
@@ -180,6 +188,18 @@ jobs:
             commit_msg=$(git log -1 --format=%s FETCH_HEAD 2>/dev/null || true)
           fi
 
+          # 通知主旨：该分支上「最近一条已合并的 PR」（test 环境取 base=test，prod 取 base=dev）。
+          # 拿不到（分支上还没有 PR / token 权限不足 / 网络异常）就留空，通知退回固定文案，
+          # 绝不因此阻断部署。$ref 已通过白名单校验，不会被当作选项注入。
+          pr_no=""
+          pr_title=""
+          if [ "$action" = "deploy" ]; then
+            pr_json=$(gh pr list --repo "$GITHUB_REPOSITORY" --base "$ref" --state merged \
+                        --limit 1 --json number,title 2>/dev/null || true)
+            pr_no=$(printf '%s' "$pr_json" | jq -r '.[0].number // empty' 2>/dev/null || true)
+            pr_title=$(printf '%s' "$pr_json" | jq -r '.[0].title // empty' 2>/dev/null || true)
+          fi
+
           # 回滚必须指定备份 id，否则 deploy.py 无从下手
           backup_id="$IN_BACKUP_ID"
           if [ "$action" = "rollback" ] && [ -z "$backup_id" ]; then
@@ -209,6 +229,8 @@ jobs:
             echo "git_ref=$ref"
             echo "git_sha=$sha"
             echo "commit_msg=$commit_msg"
+            echo "pr_no=$pr_no"
+            echo "pr_title=$pr_title"
             echo "skip_gate=$skip_gate"
             echo "health_urls=$health"
             echo "backup_keep=${BACKUP_KEEP:-10}"
@@ -333,11 +355,13 @@ jobs:
             -e "$ENV_NAME" -c "$COMPONENTS" \
             --git-ref "$GIT_REF" --git-commit "$GIT_SHA"
           # 部署脚本随产物一起过去：自托管 runner 无法 checkout 源码。
-          # 只带运行时真正需要的两个脚本——deploy/ 下的 OpenRobotDeploy.exe 是
+          # 只带运行时真正需要的脚本——deploy/ 下的 OpenRobotDeploy.exe 是
           # 12MB 的 Windows 打包二进制，带上只会白白拖慢 artifact 下载。
+          # notify_image.py + assets/fonts 供 NOTIFY_STYLE=image 渲染通知图（约 4.6MB 字体）。
           mkdir -p _artifacts/deploy
-          cp deploy/deploy.py deploy/notify.py _artifacts/deploy/
-          ls -lh _artifacts
+          cp deploy/deploy.py deploy/notify.py deploy/notify_image.py _artifacts/deploy/
+          cp -r deploy/assets _artifacts/deploy/assets
+          ls -lh _artifacts/deploy
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -548,6 +572,8 @@ jobs:
           NOTIFY_STYLE: ${{ vars.NOTIFY_STYLE || 'card' }}
           NOTIFY_STATUS: ${{ job.status }}
           NOTIFY_TITLE: 部署
+          PR_NO: ${{ needs.plan.outputs.pr_no }}
+          PR_TITLE: ${{ needs.plan.outputs.pr_title }}
           EVENT_NAME: ${{ github.event_name }}
           COMMIT_MSG: ${{ needs.plan.outputs.commit_msg }}
           RUN_STARTED_AT: ${{ github.run_started_at }}
