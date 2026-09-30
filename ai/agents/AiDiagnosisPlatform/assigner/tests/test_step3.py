@@ -169,6 +169,8 @@ class TestL1PromptHasName:
         assert "【仅需求单·产品/研发分流】" in prompt
         assert "待产品澄清" in prompt
         assert "产品已对齐" in prompt
+        assert "分批打分时也必须遵守同一刻度" in prompt
+        assert "Agent假设仅供参考" in prompt
         from ai.agents.AiDiagnosisPlatform.assigner.prompts.shared import ticket_fields_block
         assert ticket_fields_block(_ticket()).rstrip() in prompt
 

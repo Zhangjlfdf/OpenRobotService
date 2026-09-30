@@ -51,7 +51,11 @@ def test_r2_and_audit_share_ticket_fields():
     assert "车端硬件" in r2 and "机器人事业部" in r2
     assert "车端软件" in r2 and "智能移动研究院" in r2
     assert "调度USP" in r2 and "智能规划研究院" in r2
+    assert "【多义现象·证据优先级】" in r2
+    assert "NO_SOLUTION" in r2
+    assert "TRAFFIC_LOCK" in r2
     assert "【产品归属】" in audit
+    assert "【多义现象·证据优先级】" in audit
     assert "放在一起对照" in audit
     assert "不要先单独认层再判部门" in audit
     assert "报障(problem)、缺陷(bug)：看【故障现象】" in audit
