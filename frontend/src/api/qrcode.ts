@@ -1,12 +1,10 @@
-// 二维码管理相关 API —— 对接 admin 模块 /api/admin/qrcodes*
-//
-// 注：此前本文件误用 `import { request } from './client'`（该导出不存在）且路径带了
-// `/api/v1` 前缀（后端实际挂在 /api/admin 下，settings.API_V1_STR='/api'），
-// 页面接口全不可达；现按仓库统一写法改用 createRequest(API_CONFIG.ADMIN.BASE_URL)。
-import { createRequest } from './client';
+// 二维码管理相关 API
+// 对齐 API_CONFIG.ADMIN.BASE_URL（= /api/admin 或 /t/api/admin /p/api/admin）
+// endpoint 写相对路径 /qrcodes、/qrcodes/batch，不要重复 base
+import { createRequest } from '@/api/client';
 import API_CONFIG from '@/config/api';
 
-const request = createRequest(API_CONFIG.ADMIN.BASE_URL, '二维码');
+const request = createRequest(API_CONFIG.ADMIN.BASE_URL, 'Admin');
 
 export interface QrcodeItem {
   id: number;
@@ -78,7 +76,8 @@ export async function fetchQrcodes(params: {
     if (v !== undefined && v !== null && v !== '') qs.append(k, String(v));
   });
   const query = qs.toString();
-  return request(`/qrcodes${query ? `?${query}` : ''}`);
+  // endpoint 相对路径，不带 base（BASE_URL 已拼好 /api/admin）
+  return request(query ? `/qrcodes?${query}` : '/qrcodes');
 }
 
 export async function fetchQrcode(id: number): Promise<QrcodeItem> {

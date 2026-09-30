@@ -35,9 +35,9 @@ from app.core.database import db_manager
 from app.models.delivery import Project, PROJECT_DELETED
 from app.models.wechat_qrcode import WechatQrcode, QrcodeStatus, QrcodeType
 from app.modules.admin.api.auth import require_permission
-from app.wechat.services.wechat_service import wechat_service as get_wechat_service
+from app.wechat.services.wechat_service import wechat_service
 
-router = APIRouter(prefix="/qrcodes", tags=["admin-qrcodes"])
+router = APIRouter(prefix="/qrcodes", tags=["admin-qrcodes"], redirect_slashes=False)
 
 logger = logging.getLogger(__name__)
 
@@ -111,7 +111,7 @@ def _resolve_project_ref(db: Session, project_id: Optional[str]) -> Optional[str
 
 # ── 列表 ──
 
-@router.get("/", summary="获取二维码列表")
+@router.get("", summary="获取二维码列表")
 async def list_qrcodes(
     status: Optional[str] = Query(None, description="按状态过滤"),
     qrcode_type: Optional[str] = Query(None, description="按类型过滤: temporary/permanent"),
@@ -168,7 +168,7 @@ async def get_qrcode(qid: int, current_user=require_permission("frontend:admin:o
 
 # ── 创建（单条） ──
 
-@router.post("/", summary="创建二维码记录（init 状态，不调微信接口）")
+@router.post("", summary="创建二维码记录（init 状态，不调微信接口）")
 async def create_qrcode(
     scene_str: str = Body(..., embed=True),
     name: str = Body("", embed=True),
@@ -273,7 +273,7 @@ async def generate_qrcode_ticket(qid: int, current_user=require_permission("fron
             if perm_count >= PERMANENT_QRCODE_MAX:
                 raise HTTPException(status_code=400, detail=f"永久码已达上限 {PERMANENT_QRCODE_MAX}")
 
-        svc = get_wechat_service()
+        svc = wechat_service
         result = svc.create_qrcode_ticket(
             scene_str=q.scene_str,
             is_permanent=is_perm,
@@ -316,7 +316,7 @@ async def batch_generate_tickets(
         records = query.all()
         results = {"total": len(records), "success": [], "failed": []}
 
-        svc = get_wechat_service()
+        svc = wechat_service
         perm_count = db.query(WechatQrcode).filter(WechatQrcode.type == QrcodeType.PERMANENT).count()
 
         for q in records:
