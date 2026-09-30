@@ -1067,37 +1067,30 @@ def _send_scan_redirect_card(openid: str, scene_str: str):
             qr_cfg = None  # 没建表 / 没迁移过，静默回退默认
 
         # ── 2. 拼跳转 URL ──
-        # 录入信息行（project_code 非空）在 entering（ticket 已生成、信息未确认）时，
-        # 扫码先去录入信息详情页核对——页面上有「确认信息」按钮（录入信息行确认即发布，
-        # 直接 entering → published，2026-09-30 用户口径）；
-        # 确认过之后按常规走（redirect_url 优先，否则默认落地页）。
-        # 'entering' 即 QrcodeStatus.ENTERING（纯字符串常量，此处不额外引入）
-        is_info_entering = bool(
-            qr_cfg and qr_cfg.status == 'entering' and qr_cfg.project_code
-        )
+        # 优先级：
+        #   1. DB 有记录 + redirect_url 非空 → 用 redirect_url（运营自定义跳转）
+        #   2. DB 有记录 → 默认 /app/admin/info-entry/{id}（录入信息详情页）
+        #   3. 无 DB 记录 → /app/call（最兜底的通用落地页）
         base_url = None
-        if is_info_entering:
-            base_url = f"{settings.FRONTEND_BASE_URL}/app/admin/info-entry/{qr_cfg.id}"
-        elif qr_cfg and qr_cfg.redirect_url:
-            # 二维码配置了 redirect_url 就用它（可带 query，也可不带）
+        if qr_cfg and qr_cfg.redirect_url:
+            # 运营自定义跳转 URL 最高优先级
             base_url = qr_cfg.redirect_url
+        elif qr_cfg:
+            # 默认：录入信息详情页（无论什么状态，扫码先进入这个页面）
+            base_url = f"{settings.FRONTEND_BASE_URL}/app/admin/info-entry/{qr_cfg.id}"
 
         if base_url:
             # 如果配置的 URL 没有 ? 就附加 scene + openid 参数
             sep = '&' if '?' in base_url else '?'
             redirect_url = f"{base_url}{sep}{urlencode({'scene': scene_str, 'openid': openid})}"
         else:
+            # 无 DB 记录（可能是手动发的 EventKey 或老码），兜底走 /app/call
             call_path = f"{settings.FRONTEND_BASE_URL}/app/call"
             redirect_url = f"{call_path}?{urlencode({'scene': scene_str, 'openid': openid})}"
 
         # ── 3. 卡片标题/描述/图片 ──
         title = qr_cfg.name if qr_cfg and qr_cfg.name else "点击继续"
-        if qr_cfg and qr_cfg.description:
-            description = qr_cfg.description
-        elif is_info_entering:
-            description = "请点击进入，核对并确认项目信息"
-        else:
-            description = "你扫了一个带参数的二维码，点击前往对应页面"
+        description = qr_cfg.description if qr_cfg and qr_cfg.description else "你扫了一个带参数的二维码，点击前往对应页面"
         picurl = qr_cfg.qrcode_image_url if qr_cfg and qr_cfg.qrcode_image_url else ''
 
         logger.info(f'推送扫码跳转卡片: openid={openid}, scene={scene_str}, url={redirect_url}')
