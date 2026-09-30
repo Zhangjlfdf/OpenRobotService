@@ -253,3 +253,86 @@ async def test_finalize_normal_session_never_writes_vm(monkeypatch):
     await p._finalize_diagnosis("s-vm", state, "", "ask", "好的",
                                 vehicle_choices=["a", "b"])
     assert "vehicle_mode" not in mem0.metadata
+
+
+# ================================================================
+# 开场类目短接（0930 产品定稿：点「界面报故障码」→ 引导输码，不走诊断）
+# 真实入口 _agent_think_stream——此前零覆盖，是「测试环境点故障码仍回常规
+# 内容」的唯一可疑点，必须走真链路口径验证。
+# ================================================================
+
+_FIXED_CODE_MSG = ("故障码比较多，就不列选项啦。\n\n"
+                   "请直接把界面显示的故障码输入给我（一个或多个都行），"
+                   "我帮您查处理方法。")
+_OPEN_CATS = ["界面报故障码", "堆垛失败", "车辆停着不动"]
+
+
+async def _drive_stream(platform, sid, query):
+    """按真实入口跑一轮，返回 (token 拼接, 事件名列表)。"""
+    from ai.agents.AiDiagnosisPlatform.pipeline import AgentState
+
+    mem = await platform._memory_manager.get_memory(sid)
+    mem.metadata["vehicle_mode"] = dict(_VM, opening_choices=list(_OPEN_CATS))
+    state = AgentState(session_id=sid, phase="idle",
+                       original_query=query, problem_summary=query)
+    request = type("R", (), {})()
+    request.session_id = sid
+    request.query = query
+    request.skip_retrieval = False
+    request.created_by = "tester"
+    tokens, events = [], []
+    async for ev in platform._agent_think_stream(request, state, mem):
+        events.append(ev["event"])
+        if ev["event"] == "token":
+            data = ev["data"]
+            tokens.append(data if isinstance(data, str) else data.get("token", ""))
+    return "".join(tokens), events
+
+
+async def test_opening_fault_code_shortcut_zero_retrieval(platform):
+    """点「界面报故障码」→ 固定引导话术直出，且不碰检索/LLM。"""
+    sid = "vm-open-code"
+    platform._retriever.retrieve_domain_dual = _boom_async
+    platform._llm_client.stream = _boom_stream
+    text, events = await _drive_stream(platform, sid, "界面报故障码")
+    assert text == _FIXED_CODE_MSG
+    assert "result" in events
+
+
+async def test_opening_non_code_category_no_shortcut(platform):
+    """非故障码类目（堆垛失败，在开场选项里）不短接，仍走常规链路。"""
+    sid = "vm-open-stack"
+    hit = []
+
+    async def _dual(query, domain, top_k=8, query_filter=None):
+        hit.append(domain)
+        return [], []
+
+    platform._retriever.retrieve_domain_dual = _dual
+    text, _ = await _drive_stream(platform, sid, "堆垛失败")
+    assert text != _FIXED_CODE_MSG, "非故障码类目不得走输码引导"
+    assert hit, "非故障码类目必须仍走检索"
+
+
+async def test_opening_fault_code_not_in_choices_no_shortcut(platform):
+    """用户自己打字（不是点气泡）→ 不在开场选项内，不短接。"""
+    sid = "vm-open-typed"
+    hit = []
+
+    async def _dual(query, domain, top_k=8, query_filter=None):
+        hit.append(domain)
+        return [], []
+
+    platform._retriever.retrieve_domain_dual = _dual
+    text, _ = await _drive_stream(platform, sid, "界面报故障码 665")
+    assert text != _FIXED_CODE_MSG, "自由输入不被类目短接（原文不等）"
+    assert hit
+
+
+async def _boom_async(*a, **k):
+    raise AssertionError("故障码短接不应触发检索")
+
+
+async def _boom_stream(*a, **k):
+    raise AssertionError("故障码短接不应调用 LLM")
+    yield  # pragma: no cover

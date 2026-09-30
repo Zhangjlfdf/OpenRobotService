@@ -11,6 +11,7 @@ import dayjs from 'dayjs';
 import { useAuthStore } from '@/stores/auth';
 import { useWorkbenchStore, type VehicleContext } from '@/stores/workbench';
 import API_CONFIG from '@/config/api';
+import { toAppUrl } from '@/shared/utils/markdown';
 import { qaUploadStream, generateSessionId, trackSession, fetchWithAuth, qaPrepareTicket, qaConfirmTicket, qaClearDraft, qaGetTicketSteps, qaModeConfirm, type TicketDraft, type TicketStep } from '@/api/ai';
 import ProjectSelect from '@/shared/components/ProjectSelect';
 import UserSelect from '@/shared/components/UserSelect';
@@ -2294,10 +2295,15 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
     if (sopLoading) return;
     setSopLoading(true);
     try {
-      const r = await fetch(d.url);
+      // 服务端返回的是裸相对路径 /api/ai/media/...（不带部署环境前缀）。
+      // 页面挂在 /t/app、/p/app 下，直接 fetch 会打到网关未配置的裸 /api/ 上 404
+      // ——这正是「SOP 文档加载失败」的根因。补前缀交给统一出口 toAppUrl。
+      const r = await fetch(toAppUrl(d.url));
       const text = r.ok ? await r.text() : '';
       // 相对路径改写（0930）：md 里的图片/链接引用是相对同级 media/ 目录的
-      // （如 media/image109.png），补全为 KB 静态路由绝对路径，否则 404 图裂
+      // （如 media/image109.png），补全为 KB 静态路由路径，否则 404 图裂。
+      // 这里保持裸 /api/ 形态，环境前缀同样由 MarkdownRenderer 的
+      // appUrlTransform 在渲染时补（不重复补）。
       const base = d.url.slice(0, d.url.lastIndexOf('/') + 1);
       const fixed = text.replace(
         /(\]\(|src="|src=')((?!https?:|data:|#|\/)[^)"'\s]+)/g,
