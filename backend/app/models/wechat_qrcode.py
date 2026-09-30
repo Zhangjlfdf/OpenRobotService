@@ -4,6 +4,8 @@
 - 后端 CRUD 管理二维码生命周期
 - 批量创建时循环调微信接口，结果逐行落库
 - 状态机 5 态：init → entering → confirming → published → deprecated
+  （录入信息行例外：确认即发布，entering → published 直达、不经 confirming，
+   见 admin/api/qrcode.py 的 _allowed_targets 与 confirm 接口）
 
 永久码微信侧最多 10 万个，`is_permanent` + `batch_id` 便于管控配额。
 """
