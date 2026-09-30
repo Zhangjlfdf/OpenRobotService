@@ -361,6 +361,11 @@ jobs:
           mkdir -p _artifacts/deploy
           cp deploy/deploy.py deploy/notify.py deploy/notify_image.py _artifacts/deploy/
           cp -r deploy/assets _artifacts/deploy/assets
+          # 发布说明：prod 部署成功时通知「更新日志」卡片的内容来源（缺失不阻断构建，
+          # 此时 notify.py 会自动退回默认版面）
+          if [ -f docs/RELEASE_NOTES.md ]; then
+            cp docs/RELEASE_NOTES.md _artifacts/deploy/
+          fi
           ls -lh _artifacts/deploy
 
       - name: Upload artifacts
@@ -579,6 +584,8 @@ jobs:
           RUN_STARTED_AT: ${{ github.run_started_at }}
           HEALTH_URLS: ${{ needs.plan.outputs.health_urls }}
           ENV_NAME: ${{ needs.plan.outputs.environment }}
+          # 生产发布成功的「更新日志」卡片内容；文件随 artifact 带过来，缺失时 notify.py 自动降级
+          RELEASE_NOTES_FILE: _artifacts/deploy/RELEASE_NOTES.md
           COMPONENTS: ${{ needs.plan.outputs.components }}
           GIT_REF: ${{ needs.plan.outputs.git_ref }}
           COMMIT_SHA: ${{ needs.plan.outputs.git_sha }}
