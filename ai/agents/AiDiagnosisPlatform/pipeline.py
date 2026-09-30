@@ -26,6 +26,7 @@ logger = get_logger("AI")
 # 用户名下项目列表缓存：{username: (拉取时间戳, [{"name","code"}, ...])}
 # 仅服务提单工具循环的项目预填，TTL 5 分钟，见 AiDiagnosisPlatform._get_user_projects
 _USER_PROJECTS_CACHE: Dict[str, tuple] = {}
+_ALL_PROJECT_NAMES_CACHE: list = []  # [(expires_at, names)] 单条目
 # 最近提单项目缓存（项目选择题候选）：结构与 _USER_PROJECTS_CACHE 相同，
 # 见 AiDiagnosisPlatform._get_recent_ticket_projects
 _RECENT_TICKET_PROJECTS_CACHE: Dict[str, tuple] = {}
@@ -2317,6 +2318,37 @@ class AiDiagnosisPlatform:
         logger.info(f"[user_projects] username={username}, projects={len(projects)}")
         return projects
 
+    async def _get_all_project_names(self) -> List[str]:
+        """全量项目名（仅用于 [mention] 命中证据的普遍度闸，0930）。
+
+        5 分钟缓存；任何失败返回 []（闸自动失效 = 维持旧行为，不阻塞预填）。
+        """
+        now = time.time()
+        if _ALL_PROJECT_NAMES_CACHE and now < _ALL_PROJECT_NAMES_CACHE[0]:
+            return _ALL_PROJECT_NAMES_CACHE[1]
+        from ai.core.database import SessionLocal
+        from sqlalchemy import text
+        loop = asyncio.get_running_loop()
+
+        def _query():
+            session = SessionLocal()
+            try:
+                db = os.getenv("HELPDESK_DB", "helpdesk_724")
+                rows = session.execute(
+                    text(f"SELECT name FROM {db}.project")).fetchall()
+                return [r[0] for r in rows if r[0]]
+            finally:
+                session.close()
+
+        try:
+            names = await asyncio.wait_for(
+                loop.run_in_executor(None, _query), timeout=1.0)
+        except Exception as e:
+            logger.warning(f"[all_project_names] 查询失败(普遍度闸失效): {e}")
+            return []
+        _ALL_PROJECT_NAMES_CACHE[:] = [(now + 300, names)]
+        return names
+
     _USER_TICKETS_SHOW_MAX = 20
 
     @staticmethod
@@ -2570,21 +2602,25 @@ class AiDiagnosisPlatform:
         return False
 
     @staticmethod
-    def _match_project_mention(mention: str, pool: List[Dict[str, str]]) -> Optional[Dict[str, str]]:
-        """项目提及的用户原话 → 唯一匹配（0829 放宽：子串枚举 + 唯一指代）。
+    def _match_project_mention(
+            mention: str, pool: List[Dict[str, str]],
+            all_names: Optional[List[str]] = None) -> Optional[Dict[str, str]]:
+        """项目提及的用户原话 → 唯一匹配（0829 子串唯一指代 + 0930 普遍度闸）。
 
-        原「连续子串」只收「用户原话是某项目名的连续片段」（东昇 → 东昇…潜伏车
-        项目）。flash 抠出的原话常带修饰（「河南东昇那个潜伏车项目」「本川项目」），
-        连续片段接不住。放宽为：枚举用户原话所有 ≥2 字子串，在项目池里唯一子串
-        匹配，收集所有被唯一指代到的项目；**恰好 1 个**才收。≥2 个（用户原话同时
-        唯一指代多个项目，如「安吉」→ 安吉中力智芯/中力富阳/AGV-USP 都被唯一
-        指代）视为歧义 → None，由 _ambiguous_project_candidates 提供候选给反问。
+        机制：枚举用户原话所有 ≥2 字子串，在项目池里唯一子串匹配，收集所有
+        被唯一指代到的项目；**恰好 1 个**才收。≥2 个（如「安吉」→ 多个安吉
+        项目）→ 歧义 None，交 _ambiguous_project_candidates 反问。
         - 精确等于 name/code → 直接收
         - 唯一指代到 1 个项目 → 收
         - 唯一指代到 ≥2 个项目 → 歧义 None
         - 零唯一指代 → None
-        高频词（叉车/潜伏车/XQE/混场/仓储）在真实池子里不唯一，天然被拒；
-        宁可不收（闸门出题/反问），绝不收错项目。
+
+        0930 普遍度闸（数据判泛，无词表）：同事本地实锤——admin 小池仅 3
+        项目，原话「福建晋江穗柯恒安纸业叉车项目」与池内「浙江杭州国铁项目」
+        的公共子串只有「项目」二字，恰好唯一命中 → 误收。唯一性在小池里失去
+        过滤力。收紧：命中证据若在全量项目名里 ≥3 个名字都含（大路词），
+        视为池子太小造成的假唯一，拒收——泛不泛由全量数据判定，不靠枚举词表。
+        all_names 缺省 None = 闸关闭（维持旧行为）。
         """
         m = (mention or "").strip()
         if len(m) < 2 or not pool:
@@ -2595,7 +2631,22 @@ class AiDiagnosisPlatform:
             if p.get("code") and m == str(p["code"]).strip():
                 return p
         cands = AiDiagnosisPlatform._mention_unique_candidates(m, pool)
-        return cands[0] if len(cands) == 1 else None
+        if len(cands) != 1:
+            return None
+        if all_names:
+            cname = (cands[0].get("name") or "").strip()
+            evidences = {
+                m[i:j]
+                for i in range(len(m)) for j in range(i + 1, len(m) + 1)
+                if j - i >= 2 and cname and m[i:j] in cname
+                and sum(1 for p in pool if m[i:j] in (p.get("name") or "")) == 1}
+            if evidences and all(
+                    sum(1 for n in all_names if e in n) >= 3
+                    for e in evidences):
+                logger.info(f"[mention] 证据为大路词，拒收: {cands[0]['name']} "
+                            f"evidence={sorted(evidences, key=len)[:3]}")
+                return None
+        return cands[0]
 
     @staticmethod
     def _ambiguous_project_candidates(mention: str, pool: List[Dict[str, str]]) -> List[Dict[str, str]]:
@@ -2700,7 +2751,8 @@ class AiDiagnosisPlatform:
             return
         if state.ambiguous_project_candidates:
             _conf = self._match_project_mention(
-                query, state.ambiguous_project_candidates)
+                query, state.ambiguous_project_candidates,
+                all_names=await self._get_all_project_names())
             if _conf:
                 state.mentioned_project = _conf
                 state.ambiguous_project_candidates = []
@@ -3247,7 +3299,9 @@ class AiDiagnosisPlatform:
                         logger.info(f"[mention] 项目提及歧义({len(_amb)}候选)，反问: "
                                     f"{mention_raw!r}")
                     else:
-                        _hit = self._match_project_mention(mention_raw, _pool)
+                        _hit = self._match_project_mention(
+                            mention_raw, _pool,
+                            all_names=await self._get_all_project_names())
                         if _hit:
                             state.mentioned_project = _hit
                             state.ambiguous_project_candidates = []
@@ -3258,7 +3312,8 @@ class AiDiagnosisPlatform:
                             # （用户回「中力智芯」「AGV-USP」等具体标识）→ 候选池
                             # 唯一命中即确认提升。
                             _conf = self._match_project_mention(
-                                mention_raw, state.ambiguous_project_candidates)
+                                mention_raw, state.ambiguous_project_candidates,
+                                all_names=await self._get_all_project_names())
                             if _conf:
                                 state.mentioned_project = _conf
                                 state.ambiguous_project_candidates = []

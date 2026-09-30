@@ -1039,13 +1039,18 @@ def _send_scan_redirect_card(openid: str, scene_str: str):
     try:
         from urllib.parse import urlencode
 
-        # ── 1. 查数据库：这个 scene_str 有没有配置过 ──
+        # ── 1. 查数据库：scene_str（=str(id)）对应的码配置 ──
         qr_cfg = None
         try:
             from app.core.database import db_manager
             from app.models.wechat_qrcode import WechatQrcode as _W
             db = db_manager.get_db()
-            qr_cfg = db.query(_W).filter(_W.scene_str == scene_str).first()
+            # scene_str 始终等于 str(id)，直接按 id 查询
+            try:
+                qid = int(scene_str)
+                qr_cfg = db.query(_W).filter(_W.id == qid).first()
+            except (ValueError, TypeError):
+                qr_cfg = None  # 非数字 EventKey，无 DB 记录
             db.close()
         except Exception:
             qr_cfg = None  # 没建表 / 没迁移过，静默回退默认
