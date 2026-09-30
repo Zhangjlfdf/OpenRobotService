@@ -2,7 +2,7 @@ import { Fragment, useState, useEffect, useRef, useMemo } from 'react';
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import { Navbar, Button, Textarea, Toast, Loading, Tag, Popup, Dialog, Form, FormItem } from 'tdesign-mobile-react';
 import AppButton from '@/shared/components/AppButton';
-import { User, UserCheck, Folder, AlarmClock, Clock, RefreshCw, Building2, Store, Download, FileImage, FileText, FileSpreadsheet, FileCode, FileArchive, Paperclip, Bot } from 'lucide-react';
+import { User, UserCheck, Folder, AlarmClock, Clock, RefreshCw, Building2, Store, Download, FileImage, FileText, FileSpreadsheet, FileCode, FileArchive, Paperclip, Bot, ClipboardList } from 'lucide-react';
 import { DatePicker } from 'antd';
 import dayjs from 'dayjs';
 import ClearableInput from '@/shared/components/ClearableInput';
@@ -1603,6 +1603,50 @@ export default function TaskDetailPage() {
             </div>
           </div>
         )}
+
+        {/* 项目信息补充工单（提单人请他人补项目信息时生成）：列出待补充节点，给回项目信息树的入口。
+            数据来自建单时写入的 metadata_info.info_supplement；普通工单没有该字段，卡片不出现。 */}
+        {(() => {
+          const meta = detail.metadata_info || {};
+          const raw = meta.info_supplement as
+            | { project_id?: string; project_name?: string; nodes?: Array<{ id?: string; path?: string }> }
+            | undefined;
+          if (!raw || !Array.isArray(raw.nodes) || raw.nodes.length === 0) return null;
+          const paths = raw.nodes
+            .map((item) => (item && typeof item.path === 'string' ? item.path : ''))
+            .filter(Boolean);
+          if (!paths.length) return null;
+          const projectId = String(raw.project_id || '');
+          return (
+            <div className="detail-card">
+              <h4 className="detail-card__h" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <ClipboardList size={15} strokeWidth={2} />
+                项目信息补充
+              </h4>
+              <div style={{ fontSize: 13, color: 'var(--foreground)', lineHeight: 1.8 }}>
+                <div><strong>项目：</strong>{raw.project_name || projectId || '—'}</div>
+                <div style={{ fontSize: 12, color: 'var(--muted-foreground)', marginTop: 4 }}>
+                  待补充 {paths.length} 项，补齐后他人提单即可自动带全背景信息：
+                </div>
+                <ul style={{ margin: '6px 0 0', paddingLeft: 18 }}>
+                  {paths.map((path, index) => (
+                    <li key={`${path}-${index}`}>{path}</li>
+                  ))}
+                </ul>
+              </div>
+              {projectId ? (
+                <Button
+                  block
+                  theme="primary"
+                  style={{ borderRadius: '999px', marginTop: 12, backgroundColor: 'var(--blue-3)', color: '#fff', border: 'none' }}
+                  onClick={() => navigate(`/app/admin/project-detail/${encodeURIComponent(projectId)}/edit`)}
+                >
+                  去补充项目信息
+                </Button>
+              ) : null}
+            </div>
+          );
+        })()}
 
         <TicketDynamicsCard taskId={detailId ?? ''} />
 

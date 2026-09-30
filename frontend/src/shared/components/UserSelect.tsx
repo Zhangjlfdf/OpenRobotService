@@ -15,6 +15,8 @@ interface Props {
   pinUserId?: string | null;
   /** 置顶标注文案，默认「项目对接人」 */
   pinLabel?: string;
+  /** 批量置顶的用户 id（如本项目的成员），排在其余人员之前并标注「项目成员」 */
+  pinUserIds?: string[];
 }
 
 // 模块级缓存，5 分钟内复用，减少重复请求
@@ -28,6 +30,7 @@ export default function UserSelect({
   title = '选择人员',
   pinUserId = null,
   pinLabel = '项目对接人',
+  pinUserIds,
 }: Props) {
   const [visible, setVisible] = useState(false);
   const [users, setUsers] = useState<UserItem[]>(userCache || []);
@@ -63,13 +66,25 @@ export default function UserSelect({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible]);
 
+  /** 本项目成员：排在其余人员之前（顺序沿用列表原顺序） */
+  const memberIds = useMemo(
+    () => new Set((pinUserIds ?? []).map((id) => (id || '').trim()).filter(Boolean)),
+    [pinUserIds],
+  );
+
   const filtered = useMemo(() => {
     const kw = keyword.trim().toLowerCase();
-    const list = kw
+    const matched = kw
       ? users.filter(
           (u) => (u.name || '').toLowerCase().includes(kw) || (u.username || '').toLowerCase().includes(kw),
         )
       : [...users];
+    const list = memberIds.size
+      ? [
+          ...matched.filter((u) => memberIds.has(u.id)),
+          ...matched.filter((u) => !memberIds.has(u.id)),
+        ]
+      : matched;
     const pin = (pinUserId || '').trim();
     if (!pin) return list;
     const idx = list.findIndex((u) => u.id === pin);
@@ -89,7 +104,7 @@ export default function UserSelect({
       return [stub, ...list];
     }
     return list;
-  }, [users, keyword, pinUserId, pinLabel]);
+  }, [users, keyword, pinUserId, pinLabel, memberIds]);
 
   const handlePick = (u: UserItem) => {
     onChange?.(u);
@@ -132,6 +147,9 @@ export default function UserSelect({
               ) : (
                 filtered.map((u) => {
                   const isPinned = !!(pinUserId && u.id === pinUserId);
+                  const isMember = memberIds.has(u.id);
+                  // 对接人标注优先于「项目成员」；两者都没有则不显示角标
+                  const badge = isPinned ? pinLabel : isMember ? '项目成员' : '';
                   return (
                     <div
                       key={u.id}
@@ -140,7 +158,7 @@ export default function UserSelect({
                     >
                       <div className="user-select__item-name" style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                         <span>{u.name || u.username}</span>
-                        {isPinned && (
+                        {badge && (
                           <span
                             style={{
                               fontSize: 10,
@@ -152,12 +170,12 @@ export default function UserSelect({
                               whiteSpace: 'nowrap',
                             }}
                           >
-                            {pinLabel}
+                            {badge}
                           </span>
                         )}
                       </div>
                       <div className="user-select__item-meta">
-                        <span>{isPinned ? pinLabel : u.username}</span>
+                        <span>{badge || u.username}</span>
                         {u.status && (
                           <span className={`user-select__status user-select__status--${u.status}`}>
                             {u.status}
