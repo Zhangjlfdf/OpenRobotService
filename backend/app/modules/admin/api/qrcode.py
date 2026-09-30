@@ -10,10 +10,14 @@
 录入信息行（project_code 非空）例外：确认即发布，entering → published 直达、不经 confirming
 （2026-09-30 用户口径，见 _allowed_targets 与 confirm 接口）。
 
-录入信息（「新建项目 → 录入信息」页）：项目编号/项目名/项目地点/客户名/车型
+录入信息（「新建项目 → 录入信息」页）：项目名称/项目编号/项目地点/客户名称/车型
 五个字段一条信息落成本表一行（和行 id 同行存），见下方 project-info 两个接口。
 项目id 就是行 id（str(id)，2026-09-30 口径，不再单独存列）；项目编号的唯一性
 只在「录入信息行」（project_code 非空）范围内查重。
+
+项目名同步 project 表（2026-09-30 用户口径）：录入信息页的项目名可以从 project 表
+拉取选择、也可以直接手输——手输的新名字由 _ensure_project_row 用「项目编号」当新
+项目的 id/code 补进 project 表；编号已被占用则 400（detail 直接给前端 Toast）。
 
 权限：by-scene、GET /{id}、POST/PUT project-info、confirm 五个接口「登录即可」
 （2026-09-30 用户口径：所有人扫码都能录入信息并确认）；其余管理端接口仍要
@@ -33,10 +37,13 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Body
 from sqlalchemy import or_
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.core.database import db_manager
 from app.core.auth_routes import get_current_active_user_from_token
+from app.models.delivery import Project, PROJECT_DELETED
 from app.models.wechat_qrcode import WechatQrcode, QrcodeStatus, QrcodeType
 from app.modules.admin.api.auth import require_permission
 from app.wechat.services.wechat_service import wechat_service
@@ -200,12 +207,16 @@ async def batch_create_qrcodes(
     count: int = Body(..., embed=True, ge=1, le=500, description="创建数量"),
     name_prefix: str = Body("", embed=True),
     qrcode_type: str = Body(QrcodeType.PERMANENT, embed=True),
-    redirect_url: Optional[str] = Body(None, embed=True),
+    redirect_url: Optional[str] = Body(None, embed=True, description="扫码跳转 URL；留空默认录入信息页"),
     current_user=require_permission("frontend:admin:other:show"),
 ):
     db: Session = db_manager.get_db()
     batch_id = f"batch_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
     created_by = current_user.get("username") if isinstance(current_user, dict) else str(current_user)
+    # 留空默认跳「录入信息」页（2026-09-30 用户口径）：扫这批码就是来登记项目信息的，
+    # 扫码链路会在 URL 后追加 ?scene={id}，落到该行的录入/编辑页（见 wechat.py 分流）。
+    # 与其他扫码链接同源：都用 settings.FRONTEND_BASE_URL，跨环境不用改前端。
+    redirect_url = (redirect_url or "").strip() or f"{settings.FRONTEND_BASE_URL}/app/admin/info-entry"
 
     results = {"batch_id": batch_id, "created": []}
 
@@ -362,19 +373,20 @@ async def update_qrcode(
 
 # ── 录入信息（其他项目登记） ──
 #
-# 「新建项目 → 录入信息」一条录入 = wechat_qrcodes 一行：项目编号/项目名/项目地点/
-# 客户名/车型五个字段和行 id 同行存（2026-09-29 用户口径），码记录名跟随项目名。
+# 「新建项目 → 录入信息」一条录入 = wechat_qrcodes 一行：项目名称/项目编号/项目地点/
+# 客户名称/车型五个字段和行 id 同行存（2026-09-29 用户口径），码记录名跟随项目名。
 # 项目id 不再单独存列：就是行 id（str(id)，2026-09-30 口径，扫码 scene 自动等于它），
 # 也不需要唯一性校验——主键天然唯一。项目编号「唯一可改」——唯一性只在「录入信息行」
 # （project_code 非空）范围内查重；普通码行这些列为 NULL。
+# 项目名同时同步 project 表，见 _ensure_project_row。
 
 _INFO_FIELD_MAX = {
     "project_code": 64, "project_name": 128,
     "project_location": 128, "customer_name": 128, "vehicle_model": 128,
 }
 _INFO_FIELD_LABEL = {
-    "project_code": "项目编号", "project_name": "项目名",
-    "project_location": "项目地点", "customer_name": "客户名", "vehicle_model": "车型",
+    "project_code": "项目编号", "project_name": "项目名称",
+    "project_location": "项目地点", "customer_name": "客户名称", "vehicle_model": "车型",
 }
 
 
@@ -402,6 +414,50 @@ def _check_info_unique(db: Session, field: str, value: Optional[str], exclude_id
         raise HTTPException(status_code=400, detail=f"{_INFO_FIELD_LABEL[field]}已存在：{value}")
 
 
+def _ensure_project_row(db: Session, name: str, code: Optional[str]) -> None:
+    """录入信息保存时把「项目名」同步进 project 表（2026-09-30 用户口径）。
+
+    录入信息页的项目名支持从 project 表模糊挑选，也支持手输新名字：
+    - 名字已在 project 表（未删除）→ 直接复用，不动原行（原行可能有完整台账数据）；
+    - 名字不在表里 → 用表单「项目编号」当新项目的 id/code 建一行
+      （id 与 code 一致，见 Project 模型注释）；此时编号必填（接口层已保证非空）；
+    - 编号已被占用 → 400：软删行给「不可复用」（避免复活已删项目的编号），
+      其余给出占用它的项目名，detail 直接 Toast 给用户；
+    - 并发下同时建同名项目 → 唯一键兜底，IntegrityError 后复查，名字已落库即视为成功。
+
+    调用点已确认 name 非空；只 flush 不 commit，随调用方的事务一起提交/回滚。
+    """
+    if not name:
+        return
+    exists = (
+        db.query(Project.id)
+        .filter(Project.name == name, Project.status != PROJECT_DELETED)
+        .first()
+    )
+    if exists:
+        return
+    if not code:
+        raise HTTPException(status_code=400, detail=f"新项目「{name}」必须在 project 表登记项目编号")
+
+    taken = db.query(Project).filter(or_(Project.code == code, Project.id == code)).first()
+    if taken:
+        if taken.name == name:
+            # 同名行不是 active（如已删除）：不重建，交人工在项目台账里处理
+            raise HTTPException(status_code=400, detail=f"项目「{name}」已存在但已删除，请先恢复或改用其他项目编号")
+        if taken.status == PROJECT_DELETED:
+            raise HTTPException(status_code=400, detail=f"项目编号 {code} 属于已删除项目「{taken.name}」，不可复用")
+        raise HTTPException(status_code=400, detail=f"项目编号 {code} 已被项目「{taken.name}」占用")
+
+    try:
+        # savepoint：并发兜底失败也不能波及调用方事务里已改的其他字段（如 code/name）
+        with db.begin_nested():
+            db.add(Project(id=code, code=code, name=name, status="active"))
+    except IntegrityError:
+        # 另一请求刚建了同名/同编号项目：复查一次，名字已在即视为成功，否则原样抛
+        if not db.query(Project.id).filter(Project.name == name, Project.status != PROJECT_DELETED).first():
+            raise
+
+
 @router.post("/project-info", summary="录入信息：登记一条项目信息（一项目一行，登录即可）")
 async def create_project_info(
     project_code: str = Body(..., embed=True, description="项目编号（唯一，可改）"),
@@ -419,8 +475,10 @@ async def create_project_info(
         if not code:
             raise HTTPException(status_code=400, detail="项目编号不能为空")
         if not name:
-            raise HTTPException(status_code=400, detail="项目名不能为空")
+            raise HTTPException(status_code=400, detail="项目名称不能为空")
         _check_info_unique(db, "project_code", code)
+        # 项目名不在 project 表 → 用项目编号建一行（编号被占用则 400，见 _ensure_project_row）
+        _ensure_project_row(db, name, code)
 
         q = WechatQrcode(
             # 码记录名跟随项目名：列表/预览不用另开字段就能看到是哪个项目
@@ -468,7 +526,10 @@ async def update_project_info(
         if project_name is not None:
             name = _clean_info_value(project_name, "project_name")
             if not name:
-                raise HTTPException(status_code=400, detail="项目名不能为空")
+                raise HTTPException(status_code=400, detail="项目名称不能为空")
+            # 项目名不在 project 表 → 用（本次改后或原有的）项目编号建一行；
+            # 编号被占用则 400，见 _ensure_project_row
+            _ensure_project_row(db, name, q.project_code)
             q.project_name = name
             q.name = name  # 码记录名跟随项目名
 

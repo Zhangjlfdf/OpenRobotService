@@ -24,7 +24,7 @@ export interface QrcodeItem {
   project_code?: string | null;
   /** 项目地点（录入信息行） */
   project_location?: string | null;
-  /** 客户名（录入信息行） */
+  /** 客户名称（录入信息行） */
   customer_name?: string | null;
   /** 车型（录入信息行） */
   vehicle_model?: string | null;

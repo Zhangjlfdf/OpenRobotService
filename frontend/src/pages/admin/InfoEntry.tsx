@@ -1,12 +1,12 @@
 // 录入信息 —— 「项目管理 → 新建项目 → 录入信息」进入的项目信息登记页。
 //
-// 五个字段（2026-09-29 用户口径）：项目编号 / 项目名 / 项目地点 / 客户名 / 车型。
+// 五个字段（2026-09-30 用户口径）：项目名称 / 项目编号 / 项目地点 / 客户名称 / 车型。
 // 一条录入 = wechat_qrcodes 里的一行（五个字段和行 id 同行存）：
 //   创建 POST /qrcodes/project-info；点条目回到本页（/admin/info-entry/:id）修改走
 //   PUT /qrcodes/{id}/project-info。保存后该行在二维码管理里可见、可继续生成 ticket。
 //
-// 项目id 就是行 id（2026-09-30 用户口径）：不再单独占列、不随表单提交——
-//   新建时保存后自动生成（表单里只读展示占位）；编辑时显示 str(id)。
+// 项目id 不再显示（2026-09-30 用户口径）：它就是行 id（str(id)），不单独占列、
+//   不随表单提交——新建时保存后自动生成，编辑时也不在界面上露出。
 // 扫码跳转链接（…/info-entry/{id}?scene=xxx&openid=…）里的 scene 即 str(id)：
 //   - 场景值能查到行 → 就是编辑那一行；
 //   - 场景值查不到行（码还没录入过）→ 按新录入处理（项目id 保存后自动生成，
@@ -26,14 +26,18 @@
 //   entering 时期的旧卡片、链接落回本页，则由上面的 published 判断兜底重定向。
 //
 // 规则（界面不写注解，由交互体现）：
-// - 项目id：不可编辑，= str(行 id)，保存后自动生成
-// - 项目编号：唯一，可改；与其他录入行重复时后端 400，detail 直接 Toast 出来
-// - 项目名：必填（列表/预览里码记录名跟随它）
-// - 项目地点 / 客户名 / 车型：自由填写，可留空
+// - 项目名称：必填，排在第一位。下拉候选来自 project 表（一次拉全量、本地模糊匹配
+//   name/编码），选中已有项目会一并带出它的项目编号（编号随之锁住不可改）；也能直接
+//   手输——不在表里的名字保存时由后端补进 project 表（用项目编号当新项目的 id/code，
+//   见 qrcode.py _ensure_project_row）
+// - 项目编号：必填，唯一。来自 project 表（选中项目时）时只读；新项目时手动填写；
+//   与已有项目/其他录入行冲突时后端 400，detail 直接 Toast 出来
+// - 项目地点 / 客户名称 / 车型：自由填写，可留空
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { Button, Form, FormItem, Loading, Toast } from 'tdesign-mobile-react';
 import ClearableInput from '@/shared/components/ClearableInput';
+import { getProjects, type ProjectItem } from '@/api/projects';
 import {
   createProjectInfo, fetchQrcode, fetchQrcodeByScene, qrcodeTransition, updateProjectInfo,
   type QrcodeItem,
@@ -46,7 +50,6 @@ const errMsg = (err: unknown, fallback: string) =>
 const SCENE_PATTERN = /^\d{1,10}$/;
 
 const emptyForm = {
-  project_id: '',
   project_code: '',
   project_name: '',
   project_location: '',
@@ -76,10 +79,55 @@ export default function InfoEntry() {
   const [status, setStatus] = useState('');
   const [confirming, setConfirming] = useState(false);
 
+  // 项目名称下拉候选（project 表）与开合；optionsLoaded 区分「没拉到」和「表里真没有」
+  const [projectOptions, setProjectOptions] = useState<ProjectItem[]>([]);
+  const [optionsLoaded, setOptionsLoaded] = useState(false);
+  const [suggestOpen, setSuggestOpen] = useState(false);
+  // 项目编号跟着项目名称走：选中已有项目 → 编号由 project 表带出且锁住不让改；
+  // 手改项目名称（= 新项目）→ 解锁，编号回到手动填写（2026-09-30 用户口径）
+  const [codeLocked, setCodeLocked] = useState(false);
+
+  // 候选只拉一次：模糊匹配在本地做，避免每敲一个字打一次接口；
+  // 拉取失败静默降级为纯手输——后端保存时按名查重/补建（_ensure_project_row），
+  // 名字已存在不会重复建项，列表漏了也不会建重。
+  useEffect(() => {
+    getProjects('', 0, 1000)
+      .then((rows) => { setProjectOptions(rows); setOptionsLoaded(true); })
+      .catch(() => setProjectOptions([]));
+  }, []);
+
+  // 模糊匹配项目名/编码（本地子串匹配），最多 8 条建议
+  const projectSuggestions = useMemo(() => {
+    const kw = form.project_name.trim().toLowerCase();
+    if (!kw) return [];
+    return projectOptions
+      .filter((p) =>
+        (p.name || '').toLowerCase().includes(kw) || (p.project_code || '').toLowerCase().includes(kw))
+      .slice(0, 8);
+  }, [form.project_name, projectOptions]);
+
+  // 手输的新名字（project 表里没有同名项目）→ 保存时后端会自动新建，给一句提示；
+  // 列表没拉到时（optionsLoaded=false）不提示，避免把已有项目误报成新建
+  const isNewProjectName = useMemo(() => {
+    const kw = form.project_name.trim().toLowerCase();
+    return optionsLoaded && !!kw && !projectOptions.some((p) => (p.name || '').trim().toLowerCase() === kw);
+  }, [form.project_name, projectOptions, optionsLoaded]);
+
+  /** 选中建议项：项目名称与项目编号一起带出（编号就是它在 project 表的 id/code），编号随之锁住 */
+  const pickProject = useCallback((p: ProjectItem) => {
+    setForm((prev) => ({ ...prev, project_name: p.name || '', project_code: p.project_code || '' }));
+    setCodeLocked(true);
+    setSuggestOpen(false);
+  }, []);
+
+  /** 手动改项目名称：不再是「选中的那个项目」，项目编号解锁、交回用户填写 */
+  const setNameField = (value: unknown) => {
+    setForm((prev) => ({ ...prev, project_name: String(value ?? '') }));
+    setCodeLocked(false);
+  };
+
   const fillFromRow = useCallback((row: QrcodeItem) => {
     setForm({
-      // 项目id 就是行 id（后端下发的 scene_str = str(id)），只读展示
-      project_id: row.scene_str || '',
       project_code: row.project_code || '',
       project_name: row.project_name || '',
       project_location: row.project_location || '',
@@ -143,12 +191,13 @@ export default function InfoEntry() {
   const handleSubmit = async () => {
     const code = form.project_code.trim();
     const name = form.project_name.trim();
-    if (!code) {
-      Toast({ message: '请填写项目编号', theme: 'warning' });
+    // 表单顺序：项目名称在前、项目编号在后，校验也按这个顺序报
+    if (!name) {
+      Toast({ message: '请填写项目名称', theme: 'warning' });
       return;
     }
-    if (!name) {
-      Toast({ message: '请填写项目名', theme: 'warning' });
+    if (!code) {
+      Toast({ message: '请填写项目编号', theme: 'warning' });
       return;
     }
 
@@ -196,31 +245,45 @@ export default function InfoEntry() {
     <div style={{ padding: 16 }}>
       <h4 style={{ marginBottom: 16 }}>{rowId ? '编辑信息' : '录入信息'}</h4>
       <Form onSubmit={handleSubmit}>
-        {/* 项目id = str(行 id)：恒只读——新建时保存后自动生成，编辑时显示行 id */}
-        <FormItem label="项目id" name="project_id">
-          <ClearableInput
-            value={form.project_id}
-            onChange={setField('project_id')}
-            placeholder={rowId ? '' : '保存后自动生成'}
-            maxlength={64}
-            disabled
-            showClear={false}
-          />
+        <FormItem label="项目名称" name="project_name" requiredMark>
+          <div className="proj-suggest">
+            <ClearableInput
+              value={form.project_name}
+              onChange={setNameField}
+              onFocus={() => setSuggestOpen(true)}
+              onBlur={() => setSuggestOpen(false)}
+              placeholder="可匹配已有项目或输入新项目名称"
+              maxlength={128}
+            />
+            {suggestOpen && (projectSuggestions.length > 0 || isNewProjectName) && (
+              <div className="proj-suggest__panel">
+                {projectSuggestions.map((p) => (
+                  <div
+                    key={p.project_code || p.name}
+                    className="proj-suggest__item"
+                    // mousedown 里选：点建议项会先触发 input blur（面板随之隐藏），
+                    // click 就点不到了；preventDefault 保住焦点
+                    onMouseDown={(e) => { e.preventDefault(); pickProject(p); }}
+                  >
+                    <div className="proj-suggest__item-name">{p.name}</div>
+                    {p.project_code && <div className="proj-suggest__item-code">{p.project_code}</div>}
+                  </div>
+                ))}
+                {isNewProjectName && (
+                  <div className="proj-suggest__empty">不在项目表中，保存时将自动新建项目</div>
+                )}
+              </div>
+            )}
+          </div>
         </FormItem>
         <FormItem label="项目编号" name="project_code" requiredMark>
           <ClearableInput
             value={form.project_code}
             onChange={setField('project_code')}
-            placeholder="请输入项目编号"
+            placeholder={codeLocked ? '' : '请输入项目编号'}
             maxlength={64}
-          />
-        </FormItem>
-        <FormItem label="项目名" name="project_name" requiredMark>
-          <ClearableInput
-            value={form.project_name}
-            onChange={setField('project_name')}
-            placeholder="请输入项目名"
-            maxlength={128}
+            disabled={codeLocked}
+            showClear={!codeLocked}
           />
         </FormItem>
         <FormItem label="项目地点" name="project_location">
@@ -231,11 +294,11 @@ export default function InfoEntry() {
             maxlength={128}
           />
         </FormItem>
-        <FormItem label="客户名" name="customer_name">
+        <FormItem label="客户名称" name="customer_name">
           <ClearableInput
             value={form.customer_name}
             onChange={setField('customer_name')}
-            placeholder="请输入客户名"
+            placeholder="请输入客户名称"
             maxlength={128}
           />
         </FormItem>

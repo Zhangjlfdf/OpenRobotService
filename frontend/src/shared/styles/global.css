@@ -9756,6 +9756,20 @@ button.dispatch-dev__rate-row { cursor: pointer; }
 /* toast */
 .qr-toast { top: 50% !important; }
 
+/* 录入信息页的项目名建议下拉（InfoEntry）：输入框下方随打随出的候选，点击即带出编号 */
+.proj-suggest { position: relative; }
+.proj-suggest__panel {
+  position: absolute; left: 0; right: 0; top: 100%; z-index: 20;
+  margin-top: 4px; padding: 4px; max-height: 240px; overflow-y: auto;
+  background: #fff; border: 1px solid #e0e0e0; border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
+}
+.proj-suggest__item { padding: 8px 10px; border-radius: 6px; cursor: pointer; }
+.proj-suggest__item:active { background: #f4f6f7; }
+.proj-suggest__item-name { font-size: 14px; color: var(--foreground); }
+.proj-suggest__item-code { margin-top: 2px; font-size: 12px; color: #888d8f; }
+.proj-suggest__empty { padding: 8px 10px; font-size: 12px; color: #888d8f; }
+
 .mac-info-row__main { display: flex; align-items: center; gap: 4px; min-height: 36px; padding: 6px 8px 6px 4px; }
 .mac-info-row--d1 .mac-info-row__main { padding: 7px 10px 7px 6px; }
 .mac-info-row__grip { display: inline-flex; flex-shrink: 0; padding: 3px 1px; opacity: 0.6; cursor: grab; touch-action: none; }
