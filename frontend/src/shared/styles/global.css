@@ -3134,9 +3134,15 @@ html, body, #root {
   align-items: center;
   gap: 7px;
   min-width: 0;
+  /* 两侧（发起人 / 处理人）等宽：basis 0 + grow 1 → 各分得（可用宽 − 流线区 − 两处 gap）的一半。
+     ⚠️ 必须 basis 0 才等宽：basis 用 auto（内容宽）时，发起人挂上「代 X」胶囊会变宽，
+     把中间流线区整体推右 → 箭头不在卡片水平中心（见 ORS-818 列表胶囊联调）。 */
+  flex: 1 1 0;
 }
 .task-card2__person--assignee {
-  margin-left: auto;
+  /* 两侧等宽后无需 auto 边距分担剩余空间，内容靠右（姓名 + 头像贴右端） */
+  margin-left: 0;
+  justify-content: flex-end;
 }
 .task-card2__avatar {
   flex-shrink: 0;
@@ -3164,9 +3170,13 @@ html, body, #root {
    有堆叠时线退至底部作头像的「下划线」，堆叠头像（24px 小两号）在线上方。 */
 .task-card2__flow {
   position: relative;
-  flex: 1;
+  /* 固定一个箭头长（32px）：两侧等宽 → 流线区中心恒等于整行水平中心，
+     区内箭头（left:50% 居中）随之稳定居中，不再随两侧文字/胶囊宽度漂移。
+     ⚠️ 不可改回 flex:1：那只剩「两侧内容之后的剩余空间」，中心会随之漂移。 */
+  flex: 0 0 32px;
+  width: 32px;
   align-self: stretch;
-  min-width: 48px;
+  min-width: 32px;
 }
 .task-card2__person-arrow {
   position: absolute;
@@ -3185,13 +3195,14 @@ html, body, #root {
    箭头与堆叠都回归常规流 → 箭头宽度用 100% 直接跟随堆叠盒，
    不再依赖「相对整行 flow 求解」的绝对定位（那会把线拉成整行宽、并顶到行底）。 */
 .task-card2__flow--stacked {
-  flex: 0 1 auto; /* ⚠️ 覆盖基础类的 flex:1，否则永远撑满整行、无法跟随堆叠宽 */
-  margin-left: auto; /* 与处理人 margin-left:auto 各分剩余空间一半 → 堆叠+箭头组在发起/处理人间居中（⚠️ 不可再加 margin-right:auto，否则成三个 auto 边距三分空间、组偏左 F/6） */
+  flex: 0 1 auto; /* ⚠️ 覆盖基础类的固定宽，否则永远 32px、无法跟随堆叠宽 */
+  width: auto; /* 复位基础类 width:32px：宽度由堆叠内容决定，箭头再按 100%+12px 跟随 */
+  margin-left: 0; /* 两侧等宽已保证堆叠+箭头组居中，无需 auto 边距 */
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  min-width: 0; /* 复位基础类 min-width:48px，避免堆叠更窄时反向撑宽 */
+  min-width: 0; /* 复位基础类 min-width，避免堆叠更窄时反向撑宽 */
 }
 .task-card2__flow--stacked .task-card2__person-arrow {
   position: static; /* 归入常规流：落在堆叠下方，作其「下划线」 */
@@ -8658,15 +8669,15 @@ html, body, #root {
   align-items: center;
   gap: 8px;
   min-width: 0;
-}
-.task-card2__person--creator {
-  flex: 0 1 auto;
-  padding-right: 30px;
+  /* 两侧等宽（basis 0）：中间流线区中心 = 整行水平中心，箭头不随「代 X」胶囊漂移（与块 A 同步）。
+     ⚠️ --creator 曾有的 padding-right:30px、--assignee 曾有的 padding-left:30px 已随本方案移除：
+     那是给「固定中点箭头」留的让位空隙，现两侧等宽天然无重叠，而单边 padding 会把流线区推偏。 */
+  flex: 1 1 0;
 }
 .task-card2__person--assignee {
-  margin-left: auto;
-  flex: 0 1 auto;
-  padding-left: 30px;
+  /* 等宽后无需 auto 边距；内容靠右（姓名 + 头像贴右端） */
+  margin-left: 0;
+  justify-content: flex-end;
 }
 .task-card2__avatar {
   flex-shrink: 0;
@@ -8705,9 +8716,11 @@ html, body, #root {
 }
 .task-card2__flow {
   position: relative;
-  flex: 1;
+  /* 固定一个箭头长（32px）→ 配合两侧等宽，流线区中心恒等于整行水平中心（与块 A 同步） */
+  flex: 0 0 32px;
+  width: 32px;
   align-self: stretch;
-  min-width: 48px;
+  min-width: 32px;
 }
 .task-card2__person-arrow {
   position: absolute;
@@ -8724,8 +8737,9 @@ html, body, #root {
 }
 /* 有堆叠：流线区收缩为内容宽 + 纵向居中列（与块 A 同步） */
 .task-card2__flow--stacked {
-  flex: 0 1 auto;
-  margin-left: auto; /* 堆叠组在发起/处理人间居中（与块 A 同步，勿加 margin-right） */
+  flex: 0 1 auto; /* 覆盖基础类固定宽，宽度改由堆叠内容决定 */
+  width: auto; /* 复位基础类 width:32px */
+  margin-left: 0; /* 两侧等宽已保证居中 */
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -9661,6 +9675,86 @@ button.dispatch-dev__rate-row { cursor: pointer; }
 .mac-info-row.is-dragging { opacity: 0.7; box-shadow: 0 8px 20px rgba(80, 90, 100, 0.18); transform: scale(1.015); }
 .mac-info-row.is-drop-child { box-shadow: 0 0 0 2px var(--mac-blue-2); }
 .mac-info-row.is-drop-before::before { content: ''; position: absolute; left: 4px; right: 4px; top: -5px; height: 3px; border-radius: 2px; background: var(--mac-blue-2); }
+
+/* —— 二维码管理 —— */
+.qr-manage { padding-top: 44px; padding-bottom: 24px; max-width: 720px; margin: 0 auto; }
+.qr-manage .t-navbar { background: #fff; }
+
+/* 统计卡片 */
+.qr-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; padding: 12px 16px; }
+.qr-stat-card { background: #fff; border-radius: 10px; padding: 10px 8px; text-align: center; box-shadow: 0 1px 2px rgba(80,90,100,.05); border-top: 3px solid transparent; }
+.qr-stat-card--quota { grid-column: span 3; border-top-color: #2d9d5c; }
+.qr-stat-val { display: block; font-size: 20px; font-weight: 600; color: #2d3436; }
+.qr-stat-label { display: block; font-size: 11px; color: #888d8f; margin-top: 2px; }
+
+/* 筛选栏 */
+.qr-filter { display: flex; gap: 6px; padding: 0 16px 8px; }
+.qr-filter-select, .qr-filter-input { flex: 1; min-width: 0; height: 34px; border-radius: 8px; border: 1px solid #e0e0e0; padding: 0 8px; font-size: 13px; background: #fff; }
+
+/* 工具栏 */
+.qr-toolbar { display: flex; gap: 8px; padding: 0 16px 12px; }
+.qr-toolbar .qr-btn { flex: 1; min-width: 0; justify-content: center; }
+
+/* 按钮 */
+.qr-btn { display: inline-flex; align-items: center; gap: 4px; height: 34px; padding: 0 12px; border-radius: 8px; border: 1px solid transparent; font-size: 13px; cursor: pointer; transition: all .15s; }
+.qr-btn:disabled { opacity: .4; cursor: not-allowed; }
+.qr-btn--primary { background: #227197; color: #fff; }
+.qr-btn--primary:hover:not(:disabled) { background: #1c5e7e; }
+.qr-btn--secondary { background: #3697c3; color: #fff; }
+.qr-btn--ghost { background: #f4f6f7; color: #555; border-color: #e0e0e0; }
+.qr-btn--ghost:hover:not(:disabled) { background: #eaf0f3; }
+
+/* 列表 */
+.qr-empty { text-align: center; color: #888d8f; padding: 40px 0; font-size: 13px; }
+.qr-list { padding: 0 16px; display: flex; flex-direction: column; gap: 8px; }
+
+.qr-item { background: #fff; border-radius: 10px; padding: 10px 12px; box-shadow: 0 1px 2px rgba(80,90,100,.05); }
+.qr-item-top { display: flex; align-items: flex-start; gap: 8px; }
+.qr-item-top > input { margin-top: 4px; flex-shrink: 0; }
+.qr-item-main { flex: 1; min-width: 0; cursor: pointer; }
+.qr-item-scene { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 13px; }
+.qr-item-scene code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: #2d3436; background: #f4f6f7; padding: 1px 6px; border-radius: 4px; font-size: 12px; }
+.qr-item-name { font-size: 14px; font-weight: 500; color: #2d3436; margin-top: 2px; }
+.qr-item-type { font-size: 11px; color: #888d8f; background: #f4f6f7; padding: 1px 6px; border-radius: 4px; }
+.qr-item-batch { font-size: 11px; color: #888d8f; margin-top: 2px; }
+.qr-item-chev { color: #c9d4d9; flex-shrink: 0; margin-top: 2px; }
+.qr-item-ticket { font-size: 11px; color: #5aa9cd; margin-top: 4px; padding-left: 24px; }
+.qr-item-actions { display: flex; gap: 6px; margin-top: 8px; padding-left: 24px; flex-wrap: wrap; }
+
+.qr-status-chip { display: inline-flex; align-items: center; font-size: 11px; padding: 1px 6px; border-radius: 10px; border: 1px solid; font-weight: 500; }
+
+.qr-action-btn { display: inline-flex; align-items: center; gap: 3px; height: 26px; padding: 0 8px; border-radius: 6px; border: 1px solid #e0e0e0; background: #fff; font-size: 12px; color: #555; cursor: pointer; }
+.qr-action-btn:hover:not(:disabled) { background: #f4f6f7; color: #227197; border-color: #227197; }
+.qr-action-btn:disabled { opacity: .4; cursor: not-allowed; }
+.qr-action-btn--danger:hover:not(:disabled) { background: #fdf2f2; color: #c94a4a; border-color: #c94a4a; }
+
+/* 分页 */
+.qr-pager { display: flex; align-items: center; justify-content: center; gap: 12px; padding: 16px; color: #888d8f; font-size: 12px; }
+
+/* 弹窗 */
+.qr-popup { background: #fff; border-radius: 16px 16px 0 0; padding: 20px 16px 24px; max-height: 80vh; overflow-y: auto; }
+.qr-popup h3 { font-size: 16px; font-weight: 600; margin-bottom: 4px; }
+.qr-popup-hint { font-size: 12px; color: #888d8f; margin-bottom: 16px; }
+.qr-field { display: block; font-size: 12px; color: #555; margin-bottom: 4px; }
+.qr-textarea { width: 100%; border: 1px solid #e0e0e0; border-radius: 8px; padding: 8px; font-size: 13px; resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.qr-input { width: 100%; height: 36px; border: 1px solid #e0e0e0; border-radius: 8px; padding: 0 8px; font-size: 13px; }
+.qr-row { display: flex; gap: 8px; margin-top: 12px; }
+.qr-field-group { flex: 1; }
+.qr-batch-result { margin-top: 12px; padding: 10px; background: #eafaf0; border-radius: 8px; font-size: 13px; color: #2d9d5c; }
+.qr-batch-id { font-size: 11px; color: #888d8f; margin-top: 4px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.qr-popup-actions { display: flex; gap: 8px; margin-top: 20px; }
+.qr-popup-actions .qr-btn { flex: 1; justify-content: center; }
+
+/* 图片预览 */
+.qr-preview { background: #fff; border-radius: 16px; padding: 20px; text-align: center; min-width: 280px; }
+.qr-preview h4 { font-size: 15px; margin-bottom: 4px; }
+.qr-preview-scene { font-size: 12px; color: #888d8f; margin-bottom: 12px; }
+.qr-preview-scene code { background: #f4f6f7; padding: 1px 6px; border-radius: 4px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
+.qr-preview-img { width: 240px; height: 240px; border-radius: 8px; background: #f4f6f7; }
+.qr-preview-empty { padding: 40px 0; color: #888d8f; font-size: 13px; }
+
+/* toast */
+.qr-toast { top: 50% !important; }
 
 .mac-info-row__main { display: flex; align-items: center; gap: 4px; min-height: 36px; padding: 6px 8px 6px 4px; }
 .mac-info-row--d1 .mac-info-row__main { padding: 7px 10px 7px 6px; }

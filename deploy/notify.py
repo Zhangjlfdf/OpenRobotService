@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """部署 / 回滚结果通知（企业微信或飞书群机器人）。
 
-由 GitHub Actions 通过环境变量驱动（见 .github/workflows/deploy.yml、rollback.yml）：
+由 GitHub Actions 通过环境变量驱动（见 .github/workflows/deploy-split.yml）：
 
 - 支持同时推送到多个群：`NOTIFY_WEBHOOKS` 用逗号分隔多个 Webhook，每项可写
   `<url>|<policy>|<群名>`（后两段可省略，例 `url1|always|研发群,url2|failure|运维群`）；
@@ -11,6 +11,12 @@
 - 任何发送失败都只打印告警并以 0 退出——通知不应影响部署判定；
 - 日志只打印 Webhook 主机名，绝不回显完整 URL（其路径含机器人密钥）。
 
+消息样式（NOTIFY_STYLE，仅企微生效；飞书始终发纯文本）：
+  card      企微模板卡片 text_notice（默认）：状态色标 + 关键信息键值对 + 日志跳转
+  markdown  markdown_v2：状态图标标题 + 元信息引用块 + 检查项表格
+            （markdown_v2 不支持 <font> 彩色标签，勿引入）
+  卡片被企微拒收（errcode != 0）时自动降级为 markdown_v2 重发一次，保证通知不丢。
+
 环境变量：
   NOTIFY_WEBHOOKS  多群推送：`<url>|<policy>|<群名>[, ...]`（policy、群名均可省略）
                    policy = always（默认，每条都发）| failure（仅失败/自动回滚）
@@ -19,12 +25,18 @@
                    注：没写进本变量的群本来就不会收到通知（不在名单 = 不发）
   NOTIFY_WEBHOOK   单群 Webhook（旧变量，作为 NOTIFY_WEBHOOKS 的回退，等价于 always）
   NOTIFY_PROVIDER  wecom（默认）| feishu
+  NOTIFY_STYLE     card（默认）| markdown（仅企微）
   NOTIFY_STATUS    success | failure | cancelled（用于判定成功与否）
   NOTIFY_TITLE     动作名，如「部署」「回滚」
   ENV_NAME         目标环境 test|prod
   COMPONENTS       组件（部署时有意义）
   GIT_REF          代码分支
   COMMIT_SHA       提交号
+  COMMIT_MSG       提交标题（plan job 解析）
+  EVENT_NAME       触发方式 push | workflow_dispatch | schedule
+  RUN_STARTED_AT   run 开始时间 ISO8601（用于估算流水线耗时）
+  HEALTH_URLS      健康检查地址（逗号分隔，仅展示端点概况）
+  BACKUP_ID        回滚目标备份 id（rollback 场景）
   SKIP_GATE        "true" 表示已跳过测试门禁
   AUTO_ROLLBACK    "yes" 表示已自动回滚
   ACTOR            触发人
@@ -35,10 +47,13 @@ import os
 import sys
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 from urllib.parse import urlparse
 
 ALLOWED_HOSTS = ("qyapi.weixin.qq.com", "open.feishu.cn")
 POLICIES = ("always", "failure", "success", "off")
+STYLES = ("card", "markdown")
+EVENT_LABELS = {"workflow_dispatch": "手动触发", "push": "推送触发", "schedule": "定时触发"}
 
 
 def env(name, default=""):
@@ -51,43 +66,196 @@ def masked(url):
     return f"{parsed.scheme}://{parsed.hostname}{parsed.path[:12]}..."
 
 
-def build_message():
+def clip(text, limit):
+    """按 UTF-8 字节截断（企业微信字段长度按字节计），超长补 …。"""
+    text = " ".join((text or "").split())
+    raw = text.encode("utf-8")
+    if len(raw) <= limit:
+        return text
+    return raw[: max(limit - 3, 0)].decode("utf-8", "ignore") + "…"
+
+
+def elapsed_text():
+    """run 开始到现在的人类可读耗时；拿不到开始时间就返回空串。"""
+    started = env("RUN_STARTED_AT")
+    if not started:
+        return ""
+    try:
+        begin = datetime.strptime(started, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc)
+    except ValueError:
+        return ""
+    secs = max(int((datetime.now(timezone.utc) - begin).total_seconds()), 0)
+    if secs < 60:
+        return f"{secs} 秒"
+    return f"{secs // 60} 分 {secs % 60:02d} 秒"
+
+
+def health_summary():
+    """健康检查地址只展示端点概况，避免整串 URL 刷屏。"""
+    urls = [u.strip() for u in env("HEALTH_URLS").split(",") if u.strip()]
+    if not urls:
+        return ""
+    hosts = [urlparse(u).netloc or u for u in urls]
+    shown = "、".join(hosts[:3]) + ("…" if len(hosts) > 3 else "")
+    return f"{len(urls)} 个端点（{shown}）"
+
+
+def collect():
     ok = env("NOTIFY_STATUS", "success") == "success"
-    action = env("NOTIFY_TITLE", "部署")
-    icon = "✅" if ok else "❌"
+    event = env("EVENT_NAME")
+    return {
+        "ok": ok,
+        "icon": "✅" if ok else "❌",
+        "title": f"{env('NOTIFY_TITLE', '部署')}{'成功' if ok else '失败'}",
+        "env_name": env("ENV_NAME", "-"),
+        "components": env("COMPONENTS", "all"),
+        "git_ref": env("GIT_REF"),
+        "sha": env("COMMIT_SHA")[:8],
+        "commit_msg": env("COMMIT_MSG"),
+        "actor": env("ACTOR"),
+        "event": EVENT_LABELS.get(event, event),
+        "elapsed": elapsed_text(),
+        "skip_gate": env("SKIP_GATE") == "true",
+        "auto_rollback": env("AUTO_ROLLBACK") == "yes",
+        "backup_id": env("BACKUP_ID"),
+        "health": health_summary(),
+        "run_url": env("RUN_URL"),
+    }
 
-    scope = env("ENV_NAME") or "-"
-    if env("COMPONENTS"):
-        scope += f" / {env('COMPONENTS')}"
-    lines = [f"{icon} {action}{'成功' if ok else '失败'}（{scope}）"]
 
-    if env("GIT_REF"):
-        lines.append(f"分支: {env('GIT_REF')} @ {env('COMMIT_SHA')[:8]}")
-    if env("SKIP_GATE") == "true":
+def who(c):
+    return f"{c['actor']} · {c['event']}" if c["event"] else c["actor"]
+
+
+def build_card(c):
+    """企微模板卡片：状态色标 + 键值对（最多 6 组）+ 日志跳转。"""
+    rows = []
+    if c["auto_rollback"]:
+        rows.append(("自动回滚", "⚠️ 已触发，请人工确认服务"))
+    if not c["ok"]:
+        rows.append(("处理建议", "查看 Actions 日志定位失败原因"))
+    if c["skip_gate"]:
+        rows.append(("测试门禁", "⚠️ 已跳过（紧急发布）"))
+    if c["git_ref"]:
+        rows.append(("代码分支", clip(f"{c['git_ref']} @ {c['sha']}", 120)))
+    if c["commit_msg"]:
+        rows.append(("提交信息", clip(c["commit_msg"], 120)))
+    if c["actor"]:
+        rows.append(("操作人", clip(who(c), 120)))
+    if c["elapsed"]:
+        rows.append(("流水线耗时", c["elapsed"]))
+    if c["backup_id"]:
+        rows.append(("回滚目标", clip(c["backup_id"], 120)))
+    rows = rows[:6]
+
+    card = {
+        "card_type": "text_notice",
+        "source": {"desc": "ORS-907 发布通知", "desc_color": 3 if c["ok"] else 2},
+        "main_title": {
+            "title": clip(f"{c['icon']} {c['title']}", 60),
+            "desc": clip(f"{c['env_name']} · {c['components']}", 30),
+        },
+        "card_action": {"type": 1, "url": c["run_url"] or "https://github.com/"},
+    }
+    if rows:
+        card["horizontal_content_list"] = [{"keyname": k, "value": v} for k, v in rows]
+    if c["git_ref"]:
+        card["sub_title_text"] = clip(f"{c['git_ref']} @ {c['sha']}", 60)
+    if c["run_url"]:
+        card["jump_list"] = [{"type": 1, "url": c["run_url"], "title": "查看运行日志"}]
+    return {"msgtype": "template_card", "template_card": card}
+
+
+def build_markdown(c):
+    """企微 markdown_v2：状态图标标题 + 元信息引用块 + 检查项表格。
+
+    注意：markdown_v2 不支持旧版 markdown 的 <font color> 彩色标签，
+    状态靠图标（✅/❌/⚠️）与文字表达。
+    """
+    meta = [f"**{c['env_name']}** · {c['components']}"]
+    if c["git_ref"]:
+        meta.append(f"分支 `{c['git_ref']}` @ `{c['sha']}`")
+    if c["actor"]:
+        meta.append(f"操作人 {who(c)}")
+    if c["elapsed"]:
+        meta.append(f"耗时 {c['elapsed']}")
+
+    lines = [f"# {c['icon']} {c['title']}", ""]
+    lines += [f"> {m}" for m in meta]
+
+    checks = [("测试门禁", "⚠️ 已跳过" if c["skip_gate"] else "✅ 已通过")]
+    if c["auto_rollback"]:
+        checks.append(("自动回滚", "⚠️ 已触发，请人工确认"))
+    if c["backup_id"]:
+        checks.append(("回滚目标", clip(c["backup_id"], 60)))
+    if c["health"]:
+        checks.append(("健康检查", clip(c["health"], 80)))
+    lines += ["", "| 检查项 | 结果 |", "| --- | --- |"]
+    lines += [f"| {k} | {v} |" for k, v in checks]
+
+    if c["commit_msg"]:
+        lines += ["", f"提交：{clip(c['commit_msg'], 100)}"]
+    if not c["ok"]:
+        lines += ["", "⚠️ 请到 Actions 日志查看失败原因"]
+    if c["run_url"]:
+        lines += ["", f"[查看运行日志]({c['run_url']})"]
+    return {"msgtype": "markdown_v2", "markdown_v2": {"content": "\n".join(lines)}}
+
+
+def build_text(c):
+    """纯文本（飞书 / 兜底）。"""
+    scope = c["env_name"] if c["components"] == "all" else f"{c['env_name']} / {c['components']}"
+    lines = [f"{c['icon']} {c['title']}（{scope}）"]
+    if c["git_ref"]:
+        lines.append(f"分支: {c['git_ref']} @ {c['sha']}")
+    if c["commit_msg"]:
+        lines.append(f"提交: {clip(c['commit_msg'], 100)}")
+    if c["actor"]:
+        lines.append(f"操作人: {who(c)}")
+    if c["elapsed"]:
+        lines.append(f"耗时: {c['elapsed']}")
+    if c["skip_gate"]:
         lines.append("⚠️ 已跳过测试门禁（紧急发布，请事后补测）")
-    if env("AUTO_ROLLBACK") == "yes":
+    if c["auto_rollback"]:
         lines.append("⚠️ 健康检查未通过，已自动回滚到部署前版本，请人工确认服务状态")
-    if not ok:
+    if c["backup_id"]:
+        lines.append(f"回滚目标: {c['backup_id']}")
+    if not c["ok"]:
         lines.append("请到 Actions 日志查看失败原因")
-    if env("ACTOR"):
-        lines.append(f"操作人: {env('ACTOR')}")
-    if env("RUN_URL"):
-        lines.append(f"详情: {env('RUN_URL')}")
+    if c["run_url"]:
+        lines.append(f"详情: {c['run_url']}")
     return "\n".join(lines)
 
 
-def send(provider, webhook, text):
-    """按平台格式 POST。企业微信走 markdown，飞书走纯文本。"""
-    if provider == "feishu":
-        payload = {"msg_type": "text", "content": {"text": text}}
-    else:
-        payload = {"msgtype": "markdown", "markdown": {"content": text}}
+def post(webhook, payload):
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(
         webhook, data=data,
         headers={"Content-Type": "application/json"}, method="POST")
     with urllib.request.urlopen(req, timeout=10) as resp:
         return resp.status, resp.read(2000).decode("utf-8", "replace")
+
+
+def wecom_accepted(body):
+    try:
+        return json.loads(body).get("errcode") == 0
+    except (ValueError, AttributeError):
+        return False
+
+
+def deliver(provider, webhook, c, style):
+    """发送；卡片被拒时自动降级 markdown_v2 重发。返回实际使用的样式。"""
+    if provider == "feishu":
+        status, body = post(webhook, {"msg_type": "text", "content": {"text": build_text(c)}})
+        return "text", status, body
+    status, body = post(webhook, build_card(c) if style == "card" else build_markdown(c))
+    used = style
+    if style == "card" and not wecom_accepted(body):
+        print(f"  卡片样式被拒（{body[:120]}），自动降级 markdown_v2 重发")
+        used = "markdown"
+        status, body = post(webhook, build_markdown(c))
+    return used, status, body
 
 
 def allowed_webhook(url):
@@ -144,7 +312,12 @@ def main():
         print(f"NOTIFY_PROVIDER 取值非法（{provider}），按 wecom 处理")
         provider = "wecom"
 
-    text = build_message()
+    style = env("NOTIFY_STYLE", "card").lower()
+    if style not in STYLES:
+        print(f"NOTIFY_STYLE 取值非法（{style}），按 card 处理")
+        style = "card"
+
+    c = collect()
     sent = skipped = 0
     for index, (url, policy, label) in enumerate(targets, 1):
         name = label or f"#{index}"
@@ -163,8 +336,9 @@ def main():
             skipped += 1
             continue
         try:
-            status, body = send(provider, url, text)
-            print(f"[{name}] 已发送（{provider} → {masked(url)}）: HTTP {status} {body[:200]}")
+            used, status, body = deliver(provider, url, c, style)
+            print(f"[{name}] 已发送（{provider}/{used} → {masked(url)}）: "
+                  f"HTTP {status} {body[:200]}")
             sent += 1
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             print(f"[{name}] 发送失败（{masked(url)}，不影响部署结果）: {exc}")

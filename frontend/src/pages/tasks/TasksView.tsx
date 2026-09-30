@@ -73,8 +73,8 @@ type AvatarMap = Map<string, number>;
 
 const pageSize = 20;
 
-// 默认选中的任务状态：待处理 / 进行中 / 已挂起 / 已解决（排除 已取消 / 已关闭）
-const DEFAULT_STATUS_VALUES: string[] = ['new', 'in_progress', 'pending', 'resolved'];
+// 默认选中的任务状态：待处理 / 进行中 / 暂停请求中 / 已挂起 / 已解决（排除 已取消 / 已关闭）
+const DEFAULT_STATUS_VALUES: string[] = ['new', 'in_progress', 'pending_requested', 'pending', 'resolved'];
 const ALL_STATUS_VALUES: string[] = Object.keys(STATUS_DISPLAY_MAP);
 // 优先级默认全选（low / medium / high / urgent）
 const ALL_PRIORITY_VALUES: string[] = Object.keys(PRIORITY_DISPLAY_MAP);
@@ -374,14 +374,15 @@ const TicketCard = memo(function TicketCard({ t, onOpen, avatarMap, currentUserI
             fallback={<span className="task-card2__avatar">{creator.slice(0, 1).toUpperCase()}</span>}
           />
           <span className="task-card2__person-name">{creator}</span>
-          {/* 关系胶囊：所有视角统一「代 X 提交」（X=被代提人；未注册/未实名缺省未知用户）。
+          {/* 关系胶囊：所有视角统一「代 X」（X=被代提人；未注册/未实名缺省未知用户）。
+              列表卡片空间窄，只标「代 X」，不加「提交」二字（详情页横幅仍为「代 X 提交」）。
               视角标记作闸门防脱敏泄漏（非参与人后端不下发姓名，但 status 仍会下发）。 */}
           {(t.is_proxy_agent || t.is_principal || t.is_proxy_assignee) && t.proxy_relation_status && (
             <span
               className="proxy-card-pill proxy-card-pill--mini"
-              title={`代 ${t.proxy_principal_name || '未知用户'} 提交`}
+              title={`代 ${t.proxy_principal_name || '未知用户'}`}
             >
-              {t.proxy_principal_name ? `代 ${t.proxy_principal_name} 提交` : '代未知用户提交'}
+              {t.proxy_principal_name ? `代 ${t.proxy_principal_name}` : '代未知用户'}
             </span>
           )}
         </div>

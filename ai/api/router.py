@@ -87,6 +87,12 @@ async def _heartbeat_agen(agen, interval: float = _HEARTBEAT_SEC):
 # ============================================================
 qa_router = APIRouter(prefix="/api/ai/qa", tags=["AI诊断"])
 
+# 车型定制模式（扫码入口，XQE 试点）：/mode/confirm 路由挂载，逻辑全在
+# ai/api/vehicle_mode.py——常规链路零改动，定制模式以 session
+# metadata["vehicle_mode"] 存在为唯一开关（不调接口的会话不受任何影响）。
+from ai.api.vehicle_mode import register_vehicle_mode_routes
+register_vehicle_mode_routes(qa_router)
+
 
 class QAAskRequest(BaseModel):
     session_id: str = Field(..., min_length=1, max_length=128, description="会话 ID")
