@@ -319,24 +319,31 @@ async def ask_question_stream(
                             acc = ""
                             last_persist = time.perf_counter()
                     elif ev_type == "result":
-                        # 项目选择题：候选持久化到消息 metadata_（前端切会话/刷新后
+                        # 选择题候选持久化到消息 metadata_（前端切会话/刷新后
                         # 仍可渲染按钮；md 对话记录渲染成编号列表文字）。
+                        # project_choices=项目题（0827）/ vehicle_choices=车型
+                        # 追问气泡（0930），同一会话互斥出现。
                         # fire-and-forget：不阻塞 result 事件转发，失败仅告警。
                         # 必须用独立 session：与 _do_persist 并发共享 db 会撞
                         # SQLAlchemy session 并发限制（commit() can't be called
                         # here / _prepare_impl already in progress），0911 测试环境
                         # 出题轮 metadata 全部写入失败即此因。
-                        choices = (event.get('data') or {}).get("project_choices")
-                        if persist_msg_id is not None and isinstance(choices, list) and choices:
+                        for _meta_key in ("project_choices", "vehicle_choices"):
+                            _meta_vals = (event.get('data') or {}).get(_meta_key)
+                            if persist_msg_id is None or not (isinstance(_meta_vals, list) and _meta_vals):
+                                continue
+                            _key = _meta_key
+                            _vals = _meta_vals
+
                             async def _persist_choices_meta():
                                 session = AsyncSessionLocal()
                                 try:
                                     await MessageService.update_message(
                                         session, persist_msg_id,
-                                        MessageUpdate(metadata_={"project_choices": choices}))
+                                        MessageUpdate(metadata_={_key: _vals}))
                                 except Exception as e:
                                     logger.warning(
-                                        f"[sse] 项目题候选落 metadata 失败 "
+                                        f"[sse] {_key} 落 metadata 失败 "
                                         f"sid={qa_req.session_id[:8]} msg_id={persist_msg_id}: {e}")
                                 finally:
                                     try:

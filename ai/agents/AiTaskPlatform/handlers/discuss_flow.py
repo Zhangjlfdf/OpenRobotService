@@ -494,8 +494,9 @@ class DiscussFlow:
             "若附件只有「对话记录」md：派 attachment_parse 读取聊天内容，"
             "**不要说工单没有任何附件**，但要说清楚这不是车端日志、没法逐行分析 log。\n"
             "若问题属于知识问答（怎么操作/错误码含义/协议标准/产品介绍/排查方法）→ 派 retrieve_kb 查知识库。\n"
-            "若问题依赖本项目的车型、软件版本、外设、业务系统、人员或风险 → 派 project_info，"
-            "并在目标里写明要哪一组（目录里有的组）。不要一次把全部现场信息展开。\n"
+            "若用户要看项目信息、现场信息，或问题依赖车型、软件版本、外设、业务系统、人员、风险"
+            " → 派 project_info，目标里保留用户原话。"
+            "用户明确要「项目信息」时可以展开已填字段；只是闲聊就不要派。\n"
             "若当前轮仅@U老师无新问题，但讨论历史有未决疑问或刚提到需要分析的内容 → 仍应继续深化分析。\n"
             "若确无实质内容可派、只需总结/寒暄，则 complexity=simple 不派生任何能力。"
         )
@@ -713,6 +714,7 @@ class DiscussFlow:
                             "retrieve_history": "历史相似工单",
                             "retrieve_kb": "知识库参考",
                             "retrieve_troubleshooting": "排查树",
+                            "project_info": "项目现场信息",
                         }.get(cap_name, cap_name)
                         facultative += f"\n[{label}]\n{res['text']}\n"
                     elif isinstance(res, dict) and not res.get("ok"):

@@ -315,7 +315,7 @@ class LlmDecision:
         try:
             from ai.core import get_llm_client
             llm = await get_llm_client()
-            response = await llm.complete(prompt, max_tokens=400, temperature=0.3)
+            response = await llm.complete(prompt, max_tokens=400, temperature=0.1)
             logger.info(
                 f"[派单:{getattr(ticket,'id','?')}] Step6 LLM最终决策原始输出: {response[:500]}"
             )
@@ -477,7 +477,14 @@ class LlmDecision:
         eng = match_engineer_id_strict(raw, engineers)
         if not eng:
             return None
-        dt = (data.get("decision_type") or "fallback").strip().lower()
+        conf = round(float(data.get("confidence_score", 0.0)), 4)
+        # decision_type 按置信度校正，不信任模型自填阈值
+        if conf >= 0.8:
+            dt = "auto"
+        elif conf >= 0.5:
+            dt = "recommend"
+        else:
+            dt = "fallback"
         reason = (data.get("reasoning") or "").strip()
 
         if reason:
@@ -490,7 +497,7 @@ class LlmDecision:
 
         return AssignmentResult(
             engineer_id=eng.id, engineer_name=eng.name,
-            confidence_score=round(float(data.get("confidence_score", 0.0)), 4),
+            confidence_score=conf,
             reasoning=reason,
-            decision_type=dt if dt in ("auto", "recommend", "fallback") else "fallback",
+            decision_type=dt,
         )

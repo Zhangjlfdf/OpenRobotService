@@ -31,8 +31,9 @@ def _value(node_id, value):
 def _sample():
     nodes = [
         _node("g1", "hardware", "车型信息", node_type="group"),
-        _node("v1", "hardware.vehicle.model_1", "车型1", "g1", sort_order=10),
-        _node("v2", "hardware.vehicle.model_1.quantity", "数量", "g1", sort_order=20),
+        _node("m1", "hardware.vehicle.model_1", "车型1", "g1", node_type="group", sort_order=10),
+        _node("v1", "hardware.vehicle.model_1.name", "型号", "m1", sort_order=11),
+        _node("v2", "hardware.vehicle.model_1.quantity", "数量", "m1", sort_order=20),
         _node("r1", "network.remote.todesk", "ToDesk", node_type="group"),
         _node("r2", "network.remote.todesk.password", "密码", "r1"),
         _node("r3", "network.remote.ssh.code", "远程码", "r1"),
@@ -43,7 +44,7 @@ def _sample():
         _node("off", "hardware.vehicle.model_2", "车型2"),
         _node("cad", "environment.map_layout.cad", "CAD源文件", value_type="attachment"),
     ]
-    nodes[10]["status"] = "disabled"
+    nodes[11]["status"] = "disabled"
     values = [
         _value("v1", "XQE-6"),
         _value("v2", 12),
@@ -81,12 +82,23 @@ def test_named_group_omits_other_groups_and_secrets():
     nodes, values = _sample()
     text = render_project_info(nodes, values, "看下车型和数量")
     assert "XQE-6" in text
-    assert "12" in text
+    assert "车型1 / 数量: 12" in text
     assert "A-03" in text
     assert "通力" not in text
     assert "不应出现" not in text
     assert _SECRET not in text
     assert _SSH_CODE not in text
+    assert _IP not in text
+    assert "13800001111" not in text
+
+
+def test_project_info_request_expands_filled_groups():
+    nodes, values = _sample()
+    text = render_project_info(nodes, values, "那你给我说一下项目信息吧")
+    assert "XQE-6" in text
+    assert "通力" in text
+    assert "未指明要哪一组" not in text
+    assert _SECRET not in text
     assert _IP not in text
     assert "13800001111" not in text
 

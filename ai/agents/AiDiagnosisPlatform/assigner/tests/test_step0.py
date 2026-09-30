@@ -724,6 +724,9 @@ class TestStep0WeakPromptDistinguishesQuotedTicket:
         assert "客服说让汪海波看看" in prompt
         # 判定要点：本单 vs 另一张单
         assert "本单" in prompt and "另一张单" in prompt
+        # 补例：历史叙述不算；重派备注明确换人要认
+        assert "上次汪海波处理过" in prompt
+        assert "再派给汪海波" in prompt
 
     def test_prompt_still_keeps_all_intent_examples(self):
         """正常流程：原有典型表达清单不被削弱（重派备注场景仍要认）。"""
@@ -747,6 +750,26 @@ class TestStep0WeakPromptDistinguishesQuotedTicket:
         assert "【工单】" in prompt
         assert "调度平台报无法解析电梯所在地图" in prompt
         assert "mapId=HY_5" in prompt
+
+    def test_collision_prompt_includes_duty_cards(self):
+        """正常流程：同名抉择带责任模块/职责，不只姓名串。"""
+        from ai.agents.AiDiagnosisPlatform.assigner.prompts.step0 import build_collision
+
+        a = _complete("张三", "u-a")
+        b = EngineerProfile(
+            id="u-b",
+            name="张三",
+            department="智能移动研究院",
+            job_level=1,
+            responsibility_modules={"车端软件": {"定位": ["SLAM"]}},
+            duty_text="负责定位",
+        )
+        prompt = build_collision(_ticket("定位漂移"), [a, b])
+        assert "责任模块:" in prompt
+        assert "职责:负责前端" in prompt
+        assert "职责:负责定位" in prompt
+        assert "ID:u-a" in prompt and "ID:u-b" in prompt
+        assert "优先选责任模块" in prompt
 
     def test_everyone_single_no_collision(self):
         """正常流程：池外只有一个张三 → 不打同名。"""

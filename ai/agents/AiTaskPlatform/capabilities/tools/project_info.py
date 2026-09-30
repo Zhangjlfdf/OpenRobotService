@@ -55,8 +55,16 @@ def _norm(text: str) -> str:
     return (text or "").strip().lower().replace(" ", "")
 
 
+# 用户明确要整份现场档案时展开全部可给的组，不再停在目录。
+_OVERVIEW_PHRASES = ("项目信息", "现场信息", "项目情况", "项目档案")
+
+
 def select_groups(query: str) -> list[str]:
-    """从调度目标或用户原话里认出要哪几组。认不出就返回空，调用方只给目录。"""
+    """从调度目标或用户原话里认出要哪几组。
+
+    点了具体组就只返回那些组。说「项目信息 / 现场信息」则返回全部可给的组。
+    都没点到就返回空，调用方只给目录。
+    """
     blob = _norm(query)
     if not blob:
         return []
@@ -67,7 +75,11 @@ def select_groups(query: str) -> list[str]:
             continue
         if any(_norm(w) in blob for w in words):
             picked.append(key)
-    return picked
+    if picked:
+        return picked
+    if any(_norm(phrase) in blob for phrase in _OVERVIEW_PHRASES):
+        return [key for key, _, _ in _GROUPS]
+    return []
 
 
 def _key_secret(key: str) -> bool:
@@ -105,6 +117,9 @@ def _plain(value) -> str:
         parts = [_plain(item) for item in value[:8]]
         return "、".join(part for part in parts if part)[:_MAX_VALUE]
     if isinstance(value, dict):
+        selected = value.get("selected")
+        if selected is not None and str(selected).strip():
+            return str(selected).strip()[:_MAX_VALUE]
         label = value.get("label") or value.get("name") or value.get("filename")
         if label and not any(k in value for k in ("password", "secret", "code")):
             return str(label).strip()[:_MAX_VALUE]
@@ -137,6 +152,24 @@ def _group_of(node: dict, by_id: dict) -> str:
     return "custom"
 
 
+def _field_label(node: dict, by_id: dict) -> str:
+    """字段名带上父节点，避免两个「数量」分不清是哪一款车。"""
+    parts = []
+    current = node
+    guard = 0
+    while current and guard < 4:
+        name = str(current.get("node_name") or "").strip()
+        if name:
+            parts.append(name)
+        parent = by_id.get(current.get("parent_id"))
+        if not parent or str(parent.get("node_key") or "").count(".") == 0:
+            break
+        current = parent
+        guard += 1
+    parts.reverse()
+    return " / ".join(parts)
+
+
 def _filled_rows(nodes: Iterable[dict], values: Iterable[dict]) -> list[dict]:
     """启用节点 × 当前值。空值、停用节点不出现。"""
     by_id = {n["id"]: n for n in nodes if n.get("status", "active") == "active"}
@@ -151,6 +184,7 @@ def _filled_rows(nodes: Iterable[dict], values: Iterable[dict]) -> list[dict]:
         out.append({
             "node": node,
             "group": _group_of(node, by_id),
+            "label": _field_label(node, by_id),
             "shown": shown,
             "secret": is_secret_node(node),
             "presence": is_presence_only(node),
@@ -236,10 +270,11 @@ def _render_group(key: str, label: str, rows: list[dict]) -> str:
                 lines.append("- 公网地址已填写，具体地址不在这里提供")
                 ip_noted = True
             continue
+        label = row.get("label") or row["node"].get("node_name")
         if str(row["node"].get("value_type") or "") == "attachment":
-            lines.append(f"- {row['node'].get('node_name')}: 已上传附件")
+            lines.append(f"- {label}: 已上传附件")
         else:
-            lines.append(f"- {row['node'].get('node_name')}: {row['shown']}")
+            lines.append(f"- {label}: {row['shown']}")
         kept += 1
     if kept == 0 and not remote_noted and not ip_noted:
         return ""
