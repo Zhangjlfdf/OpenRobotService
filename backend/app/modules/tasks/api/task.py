@@ -921,12 +921,13 @@ async def get_task(
             from app.models.task_dispatch_log import TaskDispatchLog
             from sqlalchemy import select as _sel
             # 权限控制：派单理由相关属较敏感信息，按下述身份矩阵返回，避免无关查看者拿到：
-            #   - result.reasoning（"为什么派给他"）→ 仅「接单人(assigned_to) 或 管理员」可见
-            #   - result.tip_detail（重派高情商话术）→ 仅「提单人(created_by) 或 管理员」可见
+            #   - result.reasoning（"为什么派给他"）→ 「接单人 / 提单人 / 管理员 / 有 operate 权限」可见
+            #   - result.tip_detail（异常场景提醒，如未派到倾向人）→ 「提单人 / 管理员 / operate」可见
             # （接单人身份依据 _log.assigned_id（本轮真正被派单对象）判定，见下 `_viewer_assignee`）
             _viewer_user = None
             _viewer_creator = False
             _viewer_admin = False
+            _viewer_operate = False
             try:
                 from app.core.database import get_user_with_roles
                 from app.core.user_identity import user_matches, is_admin_user
@@ -939,10 +940,15 @@ async def get_task(
                         if _viewer_user:
                             _viewer_creator = user_matches(_viewer_user, getattr(ticket, "created_by", None))
                             _viewer_admin = is_admin_user(_viewer_user)
+                            _perms = _viewer_user.get("permissions") or []
+                            _viewer_operate = (
+                                _viewer_admin or "backend:tasks:operate" in _perms
+                            )
             except Exception:
                 _viewer_user = None
                 _viewer_creator = False
                 _viewer_admin = False
+                _viewer_operate = False
             _log = (await db.execute(
                 _sel(TaskDispatchLog)
                 .where(TaskDispatchLog.task_id == task_id)
@@ -957,7 +963,7 @@ async def get_task(
                 # 接单人身份：当前登录者 == 本轮真正被派单对象（_log.assigned_id）时可看「派单理由」
                 _viewer_assignee = bool(_viewer_user and user_matches(_viewer_user, _log.assigned_id))
                 # 面向用户展示的派单理由：把 reasoning 里可能残留的 users.id 替换为姓名
-                # （供 tip_detail 话术与接单人/管理员的「派单理由」共用）
+                # （供 tip_detail 话术与接单人/提单人/管理员的「派单原因」共用）
                 reasoning_display = clean_reasoning_for_display(_log.reasoning, _log, user_map)
                 # 列表 / 气泡 / 详情同一出口（未派到倾向人走详情模板，Step0 走短句）
                 tip_detail = build_redispatch_tip(_log, user_map)
@@ -978,9 +984,10 @@ async def get_task(
                         "preferred_name": pref_name,
                         "confidence": _log.confidence,
                         "decision_type": _log.decision_type,
-                        # 派单理由（为什么派给他）仅对「接单人」或「管理员」可见；其余查看者不返回
-                        # （前端据此展示给被派单工程师；提单人看 tip_detail 已含原因，无需重复）
-                        "reasoning": reasoning_display if (_viewer_assignee or _viewer_admin) else None,
+                        # 派单理由：接单人 / 提单人 / 管理员 / 工单操作权限 可见；普通第三方不返回
+                        "reasoning": reasoning_display if (
+                            _viewer_assignee or _viewer_creator or _viewer_operate
+                        ) else None,
                         "profile": {
                             "dept": prof.get("dept"),
                             "job_level": prof.get("job_level"),
@@ -992,8 +999,8 @@ async def get_task(
                         "matched_pref": _log.matched_pref,
                         "name_collision": _log.name_collision,
                         "pinyin_match": _log.pinyin_match,
-                        # 派单原因仅对提单人/管理员可见；其他查看者不返回（前端不渲染派单说明）
-                        "tip_detail": tip_detail if (_viewer_creator or _viewer_admin) else None,
+                        # 异常派单提醒：提单人 / 管理员 / 工单操作权限 可见
+                        "tip_detail": tip_detail if (_viewer_creator or _viewer_operate) else None,
                     },
                 })
             else:
