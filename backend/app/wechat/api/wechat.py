@@ -1052,7 +1052,8 @@ def _send_scan_redirect_card(openid: str, scene_str: str):
 
         # ── 2. 拼跳转 URL ──
         # 录入信息行（project_code 非空）在 entering（ticket 已生成、信息未确认）时，
-        # 扫码先去录入信息详情页核对——页面上有「确认信息」按钮（entering → confirming）；
+        # 扫码先去录入信息详情页核对——页面上有「确认信息」按钮（录入信息行确认即发布，
+        # 直接 entering → published，2026-09-30 用户口径）；
         # 确认过之后按常规走（redirect_url 优先，否则默认落地页）。
         # 'entering' 即 QrcodeStatus.ENTERING（纯字符串常量，此处不额外引入）
         is_info_entering = bool(

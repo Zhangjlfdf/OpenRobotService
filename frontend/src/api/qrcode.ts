@@ -1,12 +1,10 @@
-// 二维码管理相关 API —— 对接 admin 模块 /api/admin/qrcodes*
-//
-// 注：此前本文件误用 `import { request } from './client'`（该导出不存在）且路径带了
-// `/api/v1` 前缀（后端实际挂在 /api/admin 下，settings.API_V1_STR='/api'），
-// 页面接口全不可达；现按仓库统一写法改用 createRequest(API_CONFIG.ADMIN.BASE_URL)。
-import { createRequest } from './client';
+// 二维码管理相关 API
+// 对齐 API_CONFIG.ADMIN.BASE_URL（= /api/admin 或 /t/api/admin /p/api/admin）
+// endpoint 写相对路径 /qrcodes、/qrcodes/batch，不要重复 base
+import { createRequest } from '@/api/client';
 import API_CONFIG from '@/config/api';
 
-const request = createRequest(API_CONFIG.ADMIN.BASE_URL, '二维码');
+const request = createRequest(API_CONFIG.ADMIN.BASE_URL, 'Admin');
 
 export interface QrcodeItem {
   id: number;
@@ -78,7 +76,8 @@ export async function fetchQrcodes(params: {
     if (v !== undefined && v !== null && v !== '') qs.append(k, String(v));
   });
   const query = qs.toString();
-  return request(`/qrcodes${query ? `?${query}` : ''}`);
+  // endpoint 相对路径，不带 base（BASE_URL 已拼好 /api/admin）
+  return request(query ? `/qrcodes?${query}` : '/qrcodes');
 }
 
 export async function fetchQrcode(id: number): Promise<QrcodeItem> {
@@ -87,6 +86,25 @@ export async function fetchQrcode(id: number): Promise<QrcodeItem> {
 
 export async function fetchQrcodeStats(): Promise<QrcodeStats> {
   return request('/qrcodes/stats/summary');
+}
+
+/**
+ * 按场景值精确查一条二维码（摇人页「扫码进入」链路，登录即可访问）。
+ *
+ * 扫码跳转链接形如 `/app/call?scene=xxx`，scene 即本表的 scene_str。
+ * 查无此码（404 / 400）或网络异常一律返回 null，调用方据此静默降级、不打扰用户。
+ *
+ * skipCache 必开：码状态（是否已发布=出厂）要求每次进入都拿最新，
+ * 走 client.ts 的 5 分钟 GET 内存缓存会拿到陈旧状态。
+ */
+export async function fetchQrcodeByScene(scene: string): Promise<QrcodeItem | null> {
+  try {
+    return await request<QrcodeItem>(`/qrcodes/by-scene/${encodeURIComponent(scene)}`, { skipCache: true });
+  } catch {
+    // 静默：查无此码 / 参数非法 / 网络异常都归为「拿不到」，由调用方决定不打扰用户。
+    // 刻意不打日志：scene 是业务标识，按脱敏口径不落明文。
+    return null;
+  }
 }
 
 export async function createQrcode(data: {
@@ -133,6 +151,8 @@ export async function updateQrcode(id: number, data: {
   return request(`/qrcodes/${id}`, { method: 'PUT', body: JSON.stringify(data) });
 }
 
+/** 状态流转动作。录入信息行（project_code 非空）点「确认」= 确认即发布，
+ *  后端直接落到 published（不经 confirming），见 InfoEntry.tsx。 */
 export async function qrcodeTransition(id: number, action: 'confirm' | 'publish' | 'deprecate'): Promise<QrcodeItem> {
   return request(`/qrcodes/${id}/${action}`, { method: 'POST' });
 }

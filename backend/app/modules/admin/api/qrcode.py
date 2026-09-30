@@ -7,6 +7,9 @@
 - published: 对外使用中
 - deprecated: 停止使用
 
+录入信息行（project_code 非空）例外：确认即发布，entering → published 直达、不经 confirming
+（2026-09-30 用户口径，见 _allowed_targets 与 confirm 接口）。
+
 项目关联：project_id 指向 project.id（选填）。一个项目可有多张码（多台车/重印），
 引用放在码这侧；非项目码为 NULL。创建/更新时校验项目存在且未软删。
 
@@ -27,17 +30,18 @@ import logging
 from datetime import datetime
 from typing import List, Optional
 
-from fastapi import APIRouter, HTTPException, Query, Body
+from fastapi import APIRouter, Depends, HTTPException, Query, Body
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.core.database import db_manager
+from app.core.auth_routes import get_current_active_user_from_token
 from app.models.delivery import Project, PROJECT_DELETED
 from app.models.wechat_qrcode import WechatQrcode, QrcodeStatus, QrcodeType
 from app.modules.admin.api.auth import require_permission
-from app.wechat.services.wechat_service import wechat_service as get_wechat_service
+from app.wechat.services.wechat_service import wechat_service
 
-router = APIRouter(prefix="/qrcodes", tags=["admin-qrcodes"])
+router = APIRouter(prefix="/qrcodes", tags=["admin-qrcodes"], redirect_slashes=False)
 
 logger = logging.getLogger(__name__)
 
@@ -111,7 +115,7 @@ def _resolve_project_ref(db: Session, project_id: Optional[str]) -> Optional[str
 
 # ── 列表 ──
 
-@router.get("/", summary="获取二维码列表")
+@router.get("", summary="获取二维码列表")
 async def list_qrcodes(
     status: Optional[str] = Query(None, description="按状态过滤"),
     qrcode_type: Optional[str] = Query(None, description="按类型过滤: temporary/permanent"),
@@ -152,6 +156,37 @@ async def list_qrcodes(
         db.close()
 
 
+# ── 按场景值查单条（扫码落地页用） ──
+
+@router.get("/by-scene/{scene}", summary="按场景值查一条二维码（扫码落地页用：登录即可）")
+async def get_qrcode_by_scene(
+    scene: str,
+    current_user=Depends(get_current_active_user_from_token),
+):
+    """扫码进入链路：按 scene_str 精确取那一行。
+
+    摇人页从跳转链接（`/app/call?scene=xxx`）拿到场景值后来这里取码信息：录入信息行
+    自带 项目名/客户名/车型（_to_dict 里行自带优先），因此这一条响应就够弹确认弹窗。
+
+    设计要点：
+    - 路径为双段（/by-scene/{scene}），与单段 GET /{qid} 不冲突（同 /stats/summary 先例）；
+    - 权限「登录即可」而非 admin——摇人页是 C 端，普通客服没有 frontend:admin:other:show；
+    - 长度口径对齐 scene_str 列宽（1~64 字符，与 create_qrcode 同款 400 提示）；
+    - 过滤走参数化比较（== scene），不做字符串拼接；只读，不写库，可安全重复调用。
+    """
+    if not scene or len(scene) > 64:
+        raise HTTPException(status_code=400, detail="scene_str 长度 1~64 字符")
+
+    db: Session = db_manager.get_db()
+    try:
+        q = db.query(WechatQrcode).filter(WechatQrcode.scene_str == scene).first()
+        if not q:
+            raise HTTPException(status_code=404, detail="二维码不存在")
+        return _dict_with_project(db, q)
+    finally:
+        db.close()
+
+
 # ── 单条 ──
 
 @router.get("/{qid}", summary="获取二维码详情")
@@ -168,7 +203,7 @@ async def get_qrcode(qid: int, current_user=require_permission("frontend:admin:o
 
 # ── 创建（单条） ──
 
-@router.post("/", summary="创建二维码记录（init 状态，不调微信接口）")
+@router.post("", summary="创建二维码记录（init 状态，不调微信接口）")
 async def create_qrcode(
     scene_str: str = Body(..., embed=True),
     name: str = Body("", embed=True),
@@ -273,7 +308,7 @@ async def generate_qrcode_ticket(qid: int, current_user=require_permission("fron
             if perm_count >= PERMANENT_QRCODE_MAX:
                 raise HTTPException(status_code=400, detail=f"永久码已达上限 {PERMANENT_QRCODE_MAX}")
 
-        svc = get_wechat_service()
+        svc = wechat_service
         result = svc.create_qrcode_ticket(
             scene_str=q.scene_str,
             is_permanent=is_perm,
@@ -316,7 +351,7 @@ async def batch_generate_tickets(
         records = query.all()
         results = {"total": len(records), "success": [], "failed": []}
 
-        svc = get_wechat_service()
+        svc = wechat_service
         perm_count = db.query(WechatQrcode).filter(WechatQrcode.type == QrcodeType.PERMANENT).count()
 
         for q in records:
@@ -546,13 +581,30 @@ _STATUS_TRANSITIONS = {
 }
 
 
+def _allowed_targets(q: WechatQrcode) -> list:
+    """当前状态允许流转到的下一状态。
+
+    录入信息行（project_code 非空）在 entering 上多允许 → published：
+    扫码用户在录入信息详情页点「确认信息」= 确认即发布（2026-09-30 用户口径），
+    不经 confirming 中间态；普通码行保持原链条（确认 → confirming、发布 → published）。
+    """
+    allowed = list(_STATUS_TRANSITIONS.get(q.status, []))
+    if q.project_code and q.status == QrcodeStatus.ENTERING:
+        allowed.append(QrcodeStatus.PUBLISHED)
+    return allowed
+
+
 def _transition(db: Session, q: WechatQrcode, target: str, actor: str) -> WechatQrcode:
-    allowed = _STATUS_TRANSITIONS.get(q.status, [])
+    allowed = _allowed_targets(q)
     if target not in allowed:
         raise HTTPException(
             status_code=400,
             detail=f"状态 {q.status} 无法转到 {target}，允许: {allowed}",
         )
+    if target == QrcodeStatus.PUBLISHED and not q.ticket:
+        # published 意味着对外可扫，不能没有 ticket（原 publish 接口里的自检，
+        # 收进这里让 confirm「确认即发布」也走同一道闸，且状态机校验在前、报错更准）
+        raise HTTPException(status_code=400, detail="未生成 ticket，无法发布")
     q.status = target
     if target == QrcodeStatus.PUBLISHED:
         q.published_by = actor
@@ -563,15 +615,19 @@ def _transition(db: Session, q: WechatQrcode, target: str, actor: str) -> Wechat
     return q
 
 
-@router.post("/{qid}/confirm", summary="状态流转 → confirming")
+@router.post("/{qid}/confirm", summary="状态流转：普通码 → confirming；录入信息行确认即发布 → published")
 async def confirm_qrcode(qid: int, current_user=require_permission("frontend:admin:other:show")):
     db: Session = db_manager.get_db()
     try:
         q = db.query(WechatQrcode).filter(WechatQrcode.id == qid).first()
         if not q:
             raise HTTPException(status_code=404, detail="二维码不存在")
+        # 录入信息行（project_code 非空）：扫码用户在详情页点「确认信息」= 确认即发布，
+        # 直接进 published（2026-09-30 用户口径）；普通码行仍是 entering → confirming，
+        # 发布留在二维码管理里单独点。
+        target = QrcodeStatus.PUBLISHED if q.project_code else QrcodeStatus.CONFIRMING
         actor = current_user.get("username") if isinstance(current_user, dict) else str(current_user)
-        return _dict_with_project(db, _transition(db, q, QrcodeStatus.CONFIRMING, actor))
+        return _dict_with_project(db, _transition(db, q, target, actor))
     finally:
         db.close()
 
@@ -583,8 +639,6 @@ async def publish_qrcode(qid: int, current_user=require_permission("frontend:adm
         q = db.query(WechatQrcode).filter(WechatQrcode.id == qid).first()
         if not q:
             raise HTTPException(status_code=404, detail="二维码不存在")
-        if not q.ticket:
-            raise HTTPException(status_code=400, detail="未生成 ticket，无法发布")
         actor = current_user.get("username") if isinstance(current_user, dict) else str(current_user)
         return _dict_with_project(db, _transition(db, q, QrcodeStatus.PUBLISHED, actor))
     finally:
