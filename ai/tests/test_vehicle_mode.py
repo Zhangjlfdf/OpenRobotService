@@ -234,3 +234,91 @@ async def test_register_mode_idempotent_overwrite(vehicle_db, kb_tmp, mock_memor
 
     mem = await mock_memory.get_memory("sess-xqe-1")
     assert mem.metadata["vehicle_mode"]["vehicle_code"] == "XQE-9"
+
+
+# ================================================================
+# 开场大方向引导题（0930：随机 5 + 故障码保底，服务端直出）
+# ================================================================
+
+@pytest.fixture
+def kb_fork(tmp_path):
+    """带 9 大类顶层节点的分叉树（### 子节点不算顶层）。"""
+    manual = tmp_path / "xqe" / "manual"
+    manual.mkdir(parents=True)
+    (manual / "故障分叉树.md").write_text(
+        "# XQE 故障分叉树\n"
+        "## 1. 车辆停着不动\n### 1.1 行驶途中\n"
+        "## 2. 取货失败\n## 3. 卸货/放货异常\n## 4. 堆叠/堆垛失败\n"
+        "## 5. 界面报故障码\n## 6. 自检失败/开机异常\n## 7. 充电异常\n"
+        "## 8. 车体异常（异响/漏油）\n## 9. 多车/调度异常\n",
+        encoding="utf-8")
+    return tmp_path
+
+
+def test_parse_fork_tree_top_levels(kb_fork):
+    from ai.api.vehicle_mode import parse_fork_tree_choices
+
+    levels = parse_fork_tree_choices("XQE", kb_root=kb_fork)
+    assert len(levels) == 9
+    assert levels[0] == "车辆停着不动"
+    assert levels[4] == "界面报故障码"  # 序号前缀已剥
+    assert all("1.1" not in lv for lv in levels)  # ### 子节点不算
+
+
+def test_parse_fork_tree_missing_returns_empty(tmp_path):
+    from ai.api.vehicle_mode import parse_fork_tree_choices
+
+    # 无分叉树文件/无域目录 → 空（开场题可选，空库退化为纯输入框）
+    assert parse_fork_tree_choices("XQE", kb_root=tmp_path) == []
+    assert parse_fork_tree_choices("", kb_root=tmp_path) == []
+
+
+def test_build_opening_random5_keeps_code():
+    # 故障码保底 + 随机抽满 5；30 次内 9 类全部有出场（随机性不被固定前 5 垄断）
+    import random
+
+    from ai.api.vehicle_mode import build_opening
+
+    levels = [f"类目{i}" for i in range(9)]
+    levels[4] = "界面报故障码"
+    rng = random.Random(42)
+    seen = set()
+    for _ in range(30):
+        op = build_opening(levels, rng=rng)
+        assert op is not None and len(op["choices"]) == 5
+        assert "界面报故障码" in op["choices"]
+        assert op["question"] and op["hint"]
+        seen.update(op["choices"])
+    assert seen == set(levels)
+
+
+def test_build_opening_insufficient():
+    from ai.api.vehicle_mode import build_opening
+
+    assert build_opening([]) is None
+    assert build_opening(["只有一类"]) is None
+
+
+async def test_register_mode_returns_opening(vehicle_db, kb_fork, mock_memory, monkeypatch):
+    from ai.api import vehicle_mode as vm
+
+    _seed_vehicle(vehicle_db)
+    monkeypatch.setattr(vm, "_default_kb_root", lambda: kb_fork)
+    resp = await vm.register_mode(_make_request(), memory_manager=mock_memory)
+    assert resp["code"] == 0
+    op = resp["data"]["opening"]
+    assert op is not None
+    assert len(op["choices"]) == 5
+    assert "界面报故障码" in op["choices"]
+    assert op["hint"]
+
+
+async def test_register_mode_opening_none_without_tree(vehicle_db, kb_tmp, mock_memory, monkeypatch):
+    # 无分叉树（kb_tmp 的分叉树无 ## 顶层）→ opening=None，注册照常成功
+    from ai.api import vehicle_mode as vm
+
+    _seed_vehicle(vehicle_db)
+    monkeypatch.setattr(vm, "_default_kb_root", lambda: kb_tmp)
+    resp = await vm.register_mode(_make_request(), memory_manager=mock_memory)
+    assert resp["code"] == 0
+    assert resp["data"]["opening"] is None
