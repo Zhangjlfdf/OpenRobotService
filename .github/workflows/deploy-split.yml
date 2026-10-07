@@ -120,8 +120,11 @@ jobs:
       artifact_name: ${{ steps.resolve.outputs.artifact_name }}
       backup_id: ${{ steps.resolve.outputs.backup_id }}
     steps:
+      # 方案4：源码统一取自上游主仓（dhualai/OpenRobotService）。
+      # 让 origin 指向主仓，供下方 Validate and resolve 校验/解析主仓分支的 sha。
       - uses: actions/checkout@v4
         with:
+          repository: dhualai/OpenRobotService
           fetch-depth: 1
 
       - name: Validate and resolve
@@ -140,6 +143,8 @@ jobs:
           FAST_GATE_SKIP: ${{ vars.SPLIT_DEPLOY_FAST }}
           # 读 PR 列表需要 token（只用只读的 pull requests 权限）
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # 部署源码取自主仓，通知主旨也要取主仓的 PR（本分支是在 fork 仓触发）
+          UPSTREAM_REPO: dhualai/OpenRobotService
           HEALTH_TEST: ${{ vars.DEPLOY_TEST_HEALTH_URLS }}
           HEALTH_PROD: ${{ vars.DEPLOY_PROD_HEALTH_URLS }}
           BACKUP_KEEP: ${{ vars.DEPLOY_BACKUP_KEEP }}
@@ -169,23 +174,23 @@ jobs:
             exit 1
           fi
 
-          # 代码分支：推送事件用被推的分支，手动触发用输入值（留空则按环境取默认）
+          # 代码分支：留空则按环境取默认（test→test、prod→dev）。
+          # 方案4：源码统一取自上游主仓，推送事件不再使用被推的 fork 分支名
+          # （该分支通常不在主仓），统一走默认解析。
           ref="$IN_REF"
-          if [ "$EVENT" = "push" ]; then
-            ref="$PUSH_REF"
-          elif [ -z "$ref" ]; then
+          if [ -z "$ref" ]; then
             if [ "$env_name" = "prod" ]; then ref="dev"; else ref="test"; fi
           fi
 
-          # 安全：只允许部署「本仓库已存在的分支」，阻断 owner:branch 等跨仓库 ref，
-          # 否则触发者能把 fork 上的任意代码当作待部署代码。
+          # 安全：只允许部署「上游主仓已存在的分支」，阻断 owner:branch 等跨仓库 ref，
+          # 否则触发者能把任意代码当作待部署代码。
           case "$ref" in
             *:*) echo "::error::git_ref 不允许包含 ':'（该形式指向其他仓库的分支）"; exit 1 ;;
             [!A-Za-z0-9]*|*[!A-Za-z0-9._/-]*)
               echo "::error::git_ref 含非法字符，仅允许字母/数字/. _ / -，且需以字母或数字开头"; exit 1 ;;
           esac
           if ! git ls-remote --exit-code --heads origin "$ref" >/dev/null 2>&1; then
-            echo "::error::git_ref=$ref 不是本仓库的既有分支，已拒绝部署本仓库之外的代码"
+            echo "::error::git_ref=$ref 不是上游主仓的既有分支，已拒绝部署"
             exit 1
           fi
           sha=$(git ls-remote origin "refs/heads/$ref" | cut -f1)
@@ -197,17 +202,20 @@ jobs:
             commit_msg=$(git log -1 --format=%s FETCH_HEAD 2>/dev/null || true)
           fi
 
-          # 通知主旨：该分支上「最近一条已合并的 PR」（test 环境取 base=test，prod 取 base=dev）。
+          # 通知主旨：主仓 $ref 分支上「最近一条已合并的 PR」。
           # 拿不到（分支上还没有 PR / token 权限不足 / 网络异常）就留空，通知退回固定文案，
           # 绝不因此阻断部署。$ref 已通过白名单校验，不会被当作选项注入。
           pr_no=""
           pr_title=""
           if [ "$action" = "deploy" ]; then
-            pr_json=$(gh pr list --repo "$GITHUB_REPOSITORY" --base "$ref" --state merged \
+            pr_json=$(gh pr list --repo "$UPSTREAM_REPO" --base "$ref" --state merged \
                         --limit 1 --json number,title 2>/dev/null || true)
             pr_no=$(printf '%s' "$pr_json" | jq -r '.[0].number // empty' 2>/dev/null || true)
             pr_title=$(printf '%s' "$pr_json" | jq -r '.[0].title // empty' 2>/dev/null || true)
           fi
+          # 清洗成单行，避免标题里的换行/padding 污染 GITHUB_OUTPUT 的其他字段
+          pr_no=$(printf '%s' "$pr_no" | tr -cd '0-9')
+          pr_title=$(printf '%s' "$pr_title" | tr -d '\r' | tr '\n' ' ')
 
           # 回滚必须指定备份 id，否则 deploy.py 无从下手
           backup_id="$IN_BACKUP_ID"
@@ -273,6 +281,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          repository: dhualai/OpenRobotService
           ref: ${{ needs.plan.outputs.git_ref }}
 
       # 分支尚未包含流水线改动时给出明确指引，避免出现难以理解的参数报错
@@ -339,6 +348,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          repository: dhualai/OpenRobotService
           ref: ${{ needs.plan.outputs.git_ref }}
 
       - uses: actions/setup-python@v5
