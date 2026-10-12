@@ -26,7 +26,7 @@ logger = get_logger("AI")
 # 用户名下项目列表缓存：{username: (拉取时间戳, [{"name","code"}, ...])}
 # 仅服务提单工具循环的项目预填，TTL 5 分钟，见 AiDiagnosisPlatform._get_user_projects
 _USER_PROJECTS_CACHE: Dict[str, tuple] = {}
-_ALL_PROJECT_NAMES_CACHE: list = []  # [(expires_at, names)] 单条目
+_ALL_PROJECT_NAMES_CACHE: list = []  # [expires_at, names] 两元素（1012 修读写契约）
 # 最近提单项目缓存（项目选择题候选）：结构与 _USER_PROJECTS_CACHE 相同，
 # 见 AiDiagnosisPlatform._get_recent_ticket_projects
 _RECENT_TICKET_PROJECTS_CACHE: Dict[str, tuple] = {}
@@ -744,6 +744,32 @@ def _is_project_field(key) -> bool:
         return False
     k = key.strip()
     return _canonical_field_key(k) == "project" or k in ("project_id", "所属项目", "关联项目")
+
+
+# 需求/支持类工单不收的排障字段族（1012 bug2：同会话先聊设备故障后转功能需求，
+# decide 被旧故障叙事带偏，type=feature 仍列设备编号/位置/离线时间——类型是
+# LLM 判的，字段域一致性是采用侧的一致性检查，backfill 溯源门同纪律）。
+# 窄名单：只收键名强排障语义的（需求单出现几乎必为旧对话串味），宽泛词
+# （如含 time 的期望完成时间）不拦防误杀。
+_TROUBLESHOOT_FIELD_RE = re.compile(
+    r"device|robot|vehicle|fault_?code|error_?code|offline_?time|occurrence_?time|"
+    r"location|设备编号|车辆编号|设备位置|故障码|错误码|离线时间|发生时间", re.I)
+
+
+def _strip_troubleshoot_fields_for_demand_type(rf: dict, tt: str) -> dict:
+    """feature/support 工单剔除排障族字段（键名族匹配，1012 bug2 机械兜底）。"""
+    if tt not in ("feature", "support") or not isinstance(rf, dict):
+        return rf
+    out, dropped = {}, []
+    for k, v in rf.items():
+        if _TROUBLESHOOT_FIELD_RE.search(str(k)):
+            dropped.append(k)
+            continue
+        out[k] = v
+    if dropped:
+        logger.info(f"[decide_fields] 需求/支持类剔除排障字段（旧话题串味）: "
+                    f"{dropped}")
+    return out
 
 
 # 追问话术的项目问句模式（0828 第四次实锤：缺失清单被三道门洗得不含项目，
@@ -1918,10 +1944,12 @@ class AiDiagnosisPlatform:
                 f"即使不对应任何缺失字段，也要先**简短确认收到**（如「异响的情况记下了」），"
                 f"再继续问下一个缺失字段——这些背景会进入工单描述，"
                 f"🚫 严禁无视用户刚说的内容直接跳问别的。\n"
-                f"10. 向用户询问缺失字段时，问题末尾自然带一句**不限字段的开放邀请**："
-                f"欢迎补充其他任何有助于定位问题的信息（现象、发生时间、涉及设备、"
-                f"报错内容等，具体措辞由你组织）；用户补充的内容按规则 9 的方式确认"
-                f"收录——不锁死字段清单，用户主动给的信息往往比追问得更准。\n"
+                f"10. 向用户询问缺失字段时，是否在问句末尾自然带一句**不限字段的开放邀请**、"
+                f"邀请的具体内容与措辞，由你根据本单话题自行判断和组织——"
+                f"只要求：邀请与本单话题相关、连着的几轮之间不要重复一模一样的措辞"
+                f"（机械复读同一句会让用户觉得在对着稿子念）；"
+                f"用户补充的内容按规则 9 的方式确认收录——不锁死字段清单，"
+                f"用户主动给的信息往往比追问得更准。\n"
                 + _prev_ref_block +
                 f"⚠️ 已收集的字段不要再问。"
             )
@@ -2378,7 +2406,11 @@ class AiDiagnosisPlatform:
         except Exception as e:
             logger.warning(f"[all_project_names] 查询失败(普遍度闸失效): {e}")
             return []
-        _ALL_PROJECT_NAMES_CACHE[:] = [(now + 300, names)]
+        # 1012 修复：写入原为 [:] = [(过期, 名单)]（单元素列表装 tuple），而读取按
+        # [0]=过期时间/[1]=名单索引 → 第二次调用 float < tuple TypeError，5 分钟内
+        # 全局规划全部崩进 diagnosis 兜底（1012 生产实锤：明确提单诉求被判诊断，
+        # 回复退化成教用户走按钮）。写入改为 [过期, 名单] 两元素，与读取索引一致。
+        _ALL_PROJECT_NAMES_CACHE[:] = [now + 300, names]
         return names
 
     _USER_TICKETS_SHOW_MAX = 20
@@ -3542,8 +3574,8 @@ class AiDiagnosisPlatform:
     async def _vehicle_mode_domains(self, session_id: str):
         """车辆定制模式的检索域配额；常规会话返回 None（走默认三域，行为不变）。
 
-        0930 收紧为**车型知识库定向过滤**：车型知识挂 company 域子目录
-        （kb/company/{车型}/，payload sub_domain="{车型}/manual"），检索
+        0930 收紧为**车型知识库定向过滤**：车型知识挂 company 域车型目录
+        （kb/company/{车型}/ 平铺，payload sub_domain="{车型}"），检索
         company 域 + sub_domain 精确过滤——两重隔离：既不捞 team/cheduan
         老知识（通用域兜底已删，串味实锤），也不捞 company 域里其他产品线
         内容（xmover 等）。车型域空 = LLM 如实说手册未收录，宁缺勿串。
@@ -3564,9 +3596,10 @@ class AiDiagnosisPlatform:
         # 车型串归一到大写再拼 sub_domain：kb 侧 sub_domain 是按磁盘目录名原样
         # 推出来的（kb_markdown 相对路径），目录名是大写，而档案表 model 存的是
         # 录入串、可能小写。不归一 → 过滤成空集（0930 实锤：小写 xqe 拼出
-        # xqe/manual，qdrant 命中 0，company 域 0+0，开场类目除故障码外全部零
-        # 召回，模型只能拿历史工单凑答案）。
-        sub_domain = f"{model_to_subpath(model)}/manual"
+        # xqe/，qdrant 命中 0，company 域 0+0，开场类目除故障码外全部零
+        # 召回，模型只能拿历史工单凑答案）。1010 起车型目录平铺（无 manual 层），
+        # sub_domain 即车型串本身。
+        sub_domain = model_to_subpath(model)
         _filt = qmodels.Filter(must=[qmodels.FieldCondition(
             key="sub_domain", match=qmodels.MatchValue(value=sub_domain))])
         return [("company", 8, _filt)]
@@ -4075,6 +4108,11 @@ class AiDiagnosisPlatform:
             "（含顺带提到、换说法说过、能直接推出的）？哪些要素用户（现场人员）答得上来？\n"
             "4. 定字段：从「未说、用户能答、且与处理该问题直接相关」中挑 0-2 个核心 + 0-2 个补充；对话已把开工要素说清时一项都不挑\n\n"
             "# 红线（🔴 违反任何一条即返工）\n"
+            "- 🔴 话题归属：若对话**中前段**在处理某个话题（如设备故障排查），"
+            "而**末段**用户明确提出了另一个新的诉求/问题——本单类型与字段只从"
+            "**末段新诉求**推导；中前段旧话题出现过的信息（设备标识、故障时间、"
+            "现象等）属于旧话题，不构成本单的信息缺口，严禁照着旧话题列字段。"
+            "先确认末段诉求的类型，再围绕它找缺口\n"
             "- 🔴 对话里若出现「───── 以上对话已随上一张工单提交归档」分隔线："
             "分隔线之前是**上一张已提交工单**的旧对话，那里出现过的任何字段/问答"
             "（如上一单问过的任务编号、站点名等）与本单无关，严禁照着旧对话的"
@@ -4194,6 +4232,11 @@ class AiDiagnosisPlatform:
             if tt in ("problem", "bug", "feature", "support", "other"):
                 agent_state.ticket_type = tt
         rf = result.get("required_fields") or {}
+        # 类型-字段域一致性（1012 bug2）：生效类型为需求/支持时剔除排障族字段
+        # ——decide 与主 LLM 并行预跑，看不到主判定的类型；被旧故障对话带偏时
+        # 在采用侧机械纠偏（剔除≠替 LLM 判断，类型仍是 LLM 判的）。
+        _tt_eff = agent_state.ticket_type or result.get("ticket_type") or ""
+        rf = _strip_troubleshoot_fields_for_demand_type(rf, _tt_eff)
         # required_fields 一旦决定（包括空字典）即锁定；空清单也要采纳，
         # 否则后续轮会把“已决定”误认为 None，重复请求字段生成。
         if isinstance(rf, dict) and agent_state.required_fields is None:
