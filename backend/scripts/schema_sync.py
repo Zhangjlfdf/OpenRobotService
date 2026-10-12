@@ -16,6 +16,8 @@
       - MANUAL   ：NOT NULL 且无 server_default —— 存量表加该列会失败或写入隐式
                    默认值，必须人工迁移（含默认值回填），不自动执行。
   * 执行：--execute 时只执行 AUTOMATIC 的 ADD COLUMN / CREATE INDEX。
+ * 草稿：--draft-dir 时把 MANUAL 项写成人工迁移草稿（供人审阅执行），
+        不改变自动行为，也不影响退出码。
 
 安全边界（硬约束，改动前请先读）
 --------------------------------
@@ -32,7 +34,7 @@
 ------
   0  无缺失（或 --execute 已把 AUTOMATIC 全部补齐）
   2  存在未解决的缺失（check 模式：发现缺失即返回；execute 模式：剩余 MANUAL）
-  1  运行错误（连库失败、DDL 失败等）
+  1  运行错误（连库失败、DDL 失败、草稿写入失败等）
 
 用法
 ----
@@ -45,6 +47,9 @@
   # B：自动补列（只补 AUTOMATIC，且先干跑确认）
   python scripts/schema_sync.py --execute --dry-run
   python scripts/schema_sync.py --execute
+
+  # C：把 MANUAL 项写成人工迁移草稿（不改动 check/sync 的行为与退出码）
+  python scripts/schema_sync.py --draft-dir /tmp/ors_schema_drafts
 """
 import argparse
 import json
@@ -61,6 +66,9 @@ _DB_URL_RE = re.compile(r"mysql\+pymysql://([^:]+):([^@]+)@([^:]+):(\d+)/([^?]+)
 _LOCK_NAME = "ors_schema_sync"
 _LOCK_TIMEOUT_SECONDS = 30
 _LOCK_WAIT_TIMEOUT_SQL = "SET SESSION lock_wait_timeout = 15"
+
+# 人工迁移草稿的文件名（--draft-dir 时生成）
+_DRAFT_FILENAME = "manual_migration.sql"
 
 
 # --------------------------------------------------------------------------- #
@@ -206,7 +214,7 @@ def diff_structure(expected: dict, actual: dict) -> dict:
         for name, meta in exp["columns"].items():
             if name not in act["columns"]:
                 result["missing_columns"].append(
-                    {"table": table, "column": name, "ddl": meta["ddl"],
+                    {"table": table, "column": name, "ddl": meta["ddl"], "type": meta["type"],
                      "classification": meta["classification"], "reason": meta["reason"]}
                 )
             else:
@@ -292,6 +300,58 @@ def _emit_counts(result: dict, applied: int, database: str) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# 人工迁移草稿（MANUAL 项）
+# --------------------------------------------------------------------------- #
+def build_draft_sql(result: dict, database: str) -> str:
+    """把 MANUAL 缺失列渲染成人工迁移草稿文本。
+
+    只生成文本，不连库、不执行；每条对应 _emit_diff 里的一个 [MANUAL] 项。
+    采用「先加可空列 → 回填默认值 → 收紧为 NOT NULL」三步，避免直接给存量表加
+    NOT NULL 列（会失败，或按 MySQL 隐式默认值写满存量行）。
+
+    注意本草稿是给人工执行的，不受脚本自身「只加不减」约束的限制：第 3 步的
+    MODIFY 是人工收紧列约束的必经动作，脚本永远不会自动执行它。
+    """
+    lines = [
+        "-- 数据库结构同步 · 人工迁移草稿（由 backend/scripts/schema_sync.py 生成）",
+        f"-- 目标库：{database}",
+        "-- 适用：以下列在代码模型中为 NOT NULL 且无 server_default，存量行无值，",
+        "--       无法安全自动补列（脚本自身只自动执行 AUTOMATIC 的 ADD COLUMN / CREATE INDEX）。",
+        "-- 本草稿供人工审阅后执行；请先把 <默认值> 按业务语义替换掉再回填。",
+        "-- 若缺失项为新增主键 / 自增列，请勿直接套用下面的三步模板，需人工设计迁移。",
+        "",
+    ]
+    for item in result["missing_columns"]:
+        if item["classification"] != "MANUAL":
+            continue
+        table, column, ddl = item["table"], item["column"], item["ddl"]
+        lines += [
+            "-- " + "-" * 72,
+            f"-- {table}.{column}  {ddl}",
+            f"-- 原因：{item['reason'] or '需人工迁移'}",
+            "-- " + "-" * 72,
+            f"ALTER TABLE `{table}` ADD COLUMN `{column}` {item['type']} NULL;",
+            f"-- UPDATE `{table}` SET `{column}` = <默认值> WHERE `{column}` IS NULL;",
+            f"ALTER TABLE `{table}` MODIFY COLUMN `{column}` {ddl};",
+            "",
+        ]
+    return "\n".join(lines).rstrip("\n") + "\n"
+
+
+def write_draft(draft_dir: str, result: dict, database: str) -> str | None:
+    """把 MANUAL 项草稿写到 <draft_dir>/manual_migration.sql，返回落盘路径。
+
+    没有 MANUAL 项时不落盘并返回 None——避免留下一份与当前结构不符的过期草稿。
+    """
+    if not any(c["classification"] == "MANUAL" for c in result["missing_columns"]):
+        return None
+    target = Path(draft_dir) / _DRAFT_FILENAME
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(build_draft_sql(result, database), encoding="utf-8")
+    return str(target)
+
+
+# --------------------------------------------------------------------------- #
 # 连接与执行
 # --------------------------------------------------------------------------- #
 def resolve_db_config(env_file: str | None) -> dict:
@@ -369,6 +429,9 @@ def main() -> int:
                         help="真正执行 AUTOMATIC 的补列 / 建索引；缺省为只读校验。")
     parser.add_argument("--dry-run", dest="dry_run", action="store_true",
                         help="配合 --execute：只打印将执行的 SQL，不落库。")
+    parser.add_argument("--draft-dir", dest="draft_dir", default="",
+                        help="把 MANUAL 缺失项的补列 SQL 草稿写入该目录下的 "
+                             "manual_migration.sql（供人工迁移）；缺省不生成。")
     parser.add_argument("--snapshot-out", dest="snapshot_out", default="",
                         help="导出期望结构快照 JSON 后退出（不连库，供审阅 / 存档）。")
     args = parser.parse_args()
@@ -402,6 +465,16 @@ def main() -> int:
             actual = load_actual(cur, cfg["database"])
             result = diff_structure(expected, actual)
             _emit_diff(result, dry_run=args.dry_run or not args.execute)
+
+            if args.draft_dir:
+                try:
+                    draft = write_draft(args.draft_dir, result, cfg["database"])
+                except OSError as e:
+                    # 人工显式要了草稿却写不出：如实报错，不静默放过
+                    print(f"[错误] 草稿写入失败：{e}")
+                    return 1
+                print(f"[草稿] 已写出人工迁移草稿：{draft}" if draft
+                      else "[草稿] 无 MANUAL 项，未生成草稿")
 
             applied = 0
             if args.execute:

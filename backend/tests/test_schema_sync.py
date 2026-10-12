@@ -13,6 +13,7 @@
 import importlib.util
 import os
 import sys
+from pathlib import Path
 
 import pytest
 from sqlalchemy import Column, Integer, String, text
@@ -251,3 +252,161 @@ def test_resolve_db_config_rejects_unparsable_url(monkeypatch):
     monkeypatch.setenv("DATABASE_URL", "sqlite:///tmp/x.db")
     with pytest.raises(SystemExit):
         sync.resolve_db_config(None)
+
+
+# ── 人工迁移草稿（--draft-dir）──────────────────────────────────────────
+def _draft_result():
+    """一条 AUTOMATIC + 一条 MANUAL，用于验证草稿只收录 MANUAL。"""
+    return {
+        "missing_columns": [
+            {"table": "demo", "column": "name", "ddl": "VARCHAR(64) NULL",
+             "type": "VARCHAR(64)", "classification": "AUTOMATIC", "reason": ""},
+            {"table": "demo", "column": "required", "ddl": "VARCHAR(32) NOT NULL",
+             "type": "VARCHAR(32)", "classification": "MANUAL",
+             "reason": "NOT NULL 且无 server_default：存量行无值，需人工迁移并回填默认值"},
+        ],
+        "missing_indexes": [],
+    }
+
+
+def test_draft_written_to_single_sql_file(tmp_path):
+    """草稿落点固定为 <draft-dir>/manual_migration.sql（单文件汇总）。"""
+    path = sync.write_draft(str(tmp_path), _draft_result(), "helpdesk_test")
+    assert path == str(tmp_path / "manual_migration.sql")
+    assert (tmp_path / "manual_migration.sql").is_file()
+
+
+def test_draft_contains_only_manual_items(tmp_path):
+    path = sync.write_draft(str(tmp_path), _draft_result(), "helpdesk_test")
+    text = Path(path).read_text(encoding="utf-8")
+    assert "demo.required" in text
+    assert "ADD COLUMN `name`" not in text  # AUTOMATIC 项由脚本自动补，不进草稿
+
+
+def test_draft_gives_nullable_add_then_backfill_then_not_null(tmp_path):
+    """三步模板：先加可空列 → 回填默认值（注释）→ 收紧为 NOT NULL。"""
+    path = sync.write_draft(str(tmp_path), _draft_result(), "helpdesk_test")
+    text = Path(path).read_text(encoding="utf-8")
+    assert "ALTER TABLE `demo` ADD COLUMN `required` VARCHAR(32) NULL;" in text
+    assert "-- UPDATE `demo` SET `required` = <默认值> WHERE `required` IS NULL;" in text
+    assert "ALTER TABLE `demo` MODIFY COLUMN `required` VARCHAR(32) NOT NULL;" in text
+
+
+def test_draft_has_no_destructive_statement():
+    """草稿可执行行只允许 ALTER TABLE，绝不出现 DROP。"""
+    text = sync.build_draft_sql(_draft_result(), "helpdesk_test")
+    executable = [ln for ln in text.splitlines()
+                  if ln.strip() and not ln.lstrip().startswith("--")]
+    assert executable
+    assert all(ln.startswith("ALTER TABLE") for ln in executable)
+    assert not any("DROP" in ln.upper() for ln in executable)
+
+
+def test_draft_skipped_when_no_manual_items(tmp_path):
+    """没有 MANUAL 项时不落盘，避免留下与当前结构不符的过期草稿。"""
+    result = {"missing_columns": [{"table": "demo", "column": "name",
+                                  "ddl": "VARCHAR(64) NULL", "type": "VARCHAR(64)",
+                                  "classification": "AUTOMATIC", "reason": ""}],
+              "missing_indexes": []}
+    assert sync.write_draft(str(tmp_path), result, "helpdesk_test") is None
+    assert not (tmp_path / "manual_migration.sql").exists()
+
+
+def test_draft_creates_missing_directory(tmp_path):
+    target = tmp_path / "nested" / "drafts"
+    path = sync.write_draft(str(target), _draft_result(), "helpdesk_test")
+    assert Path(path) == target / "manual_migration.sql"
+
+
+def test_draft_from_real_diff_carries_database_and_manual_column(tmp_path):
+    """走真实 diff：演示表缺的 required 是 MANUAL，须进草稿并带上目标库名。"""
+    actual = {"demo": {"columns": {
+        "id": {"type": "bigint", "nullable": False},
+        "name": {"type": "varchar(64)", "nullable": True},
+        "counters": {"type": "int", "nullable": False},
+    }, "indexes": {}}}
+    result = sync.diff_structure(_expected_demo(), actual)
+    path = sync.write_draft(str(tmp_path), result, "helpdesk_724")
+    text = Path(path).read_text(encoding="utf-8")
+    assert "helpdesk_724" in text
+    assert "ALTER TABLE `demo` ADD COLUMN `required` VARCHAR(32) NULL;" in text
+
+
+# ── main() 接线：--draft-dir 不改变退出码 ────────────────────────────────
+class _StubCursor:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, sql, params=None):
+        pass
+
+    def fetchall(self):
+        return []
+
+
+class _StubConn:
+    def cursor(self):
+        return _StubCursor()
+
+    def commit(self):
+        pass
+
+    def rollback(self):
+        pass
+
+    def close(self):
+        pass
+
+
+def _wire_main(monkeypatch, actual):
+    """把 main() 的「连库 / 读实际结构」两处 IO 换成替身，只验接线与退出码。"""
+    monkeypatch.setattr(sync, "load_metadata", lambda root: _demo_metadata())
+    monkeypatch.setattr(sync, "resolve_db_config",
+                        lambda env: {"user": "u", "password": "p", "host": "h",
+                                     "port": 3306, "database": "helpdesk_test"})
+    monkeypatch.setattr(sync, "_connect", lambda cfg: _StubConn())
+    monkeypatch.setattr(sync, "load_actual", lambda cur, db: actual)
+
+
+def _actual_without_required():
+    return {"demo": {"columns": {
+        "id": {"type": "bigint", "nullable": False},
+        "name": {"type": "varchar(64)", "nullable": True},
+        "counters": {"type": "int", "nullable": False},
+    }, "indexes": {}}}
+
+
+def test_main_writes_draft_and_keeps_exit_code_two(tmp_path, monkeypatch, capsys):
+    """传 --draft-dir：落草稿，但 MANUAL 未解决仍是退出码 2（行为不变）。"""
+    _wire_main(monkeypatch, _actual_without_required())
+    draft_dir = tmp_path / "drafts"
+    monkeypatch.setattr(sys, "argv", ["schema_sync.py", "--draft-dir", str(draft_dir)])
+
+    assert sync.main() == 2
+    assert "[草稿] 已写出人工迁移草稿" in capsys.readouterr().out
+    text = (draft_dir / "manual_migration.sql").read_text(encoding="utf-8")
+    assert "ALTER TABLE `demo` ADD COLUMN `required` VARCHAR(32) NULL;" in text
+
+
+def test_main_without_draft_dir_writes_nothing(tmp_path, monkeypatch, capsys):
+    """不传 --draft-dir：保持零落盘（严格零改动）。"""
+    _wire_main(monkeypatch, _actual_without_required())
+    monkeypatch.setattr(sys, "argv", ["schema_sync.py", "--draft-dir", ""])
+
+    assert sync.main() == 2
+    assert "[草稿]" not in capsys.readouterr().out
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_main_returns_one_when_draft_unwritable(tmp_path, monkeypatch, capsys):
+    """显式要了草稿却写不出（目录位置被文件占住）→ 运行错误退出码 1。"""
+    _wire_main(monkeypatch, _actual_without_required())
+    blocked = tmp_path / "blocked"
+    blocked.write_text("x", encoding="utf-8")
+    monkeypatch.setattr(sys, "argv", ["schema_sync.py", "--draft-dir", str(blocked)])
+
+    assert sync.main() == 1
+    assert "[错误] 草稿写入失败" in capsys.readouterr().out
