@@ -838,6 +838,10 @@ class DiagnoseFlow:
         prog.done("llm", "诊断报告已生成", result_summary=report_md[:80] or "完成")
         await prog.finish()
 
+        # 报告不落库（有意），但留一份进程内快照：讨论区 @# 引用本工单时能拿到它
+        from ai.agents.AiTaskPlatform.runtime import report_cache
+        report_cache.put(task_id, report_md)
+
         # P3：needs_more_info 由"查漏出的缺失信息"驱动（而非仅 conf<0.5），
         # 更有意义——代表"确实有高价值信息缺失，建议补充"。
         return {
