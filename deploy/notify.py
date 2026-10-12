@@ -54,6 +54,9 @@
   BACKUP_ID        回滚目标备份 id（rollback 场景）
   SKIP_GATE        "true" 表示已跳过测试门禁
   AUTO_ROLLBACK    "yes" 表示已自动回滚
+  SCHEMA_MODE      数据库结构处理模式 off|check|sync（未涉及后端时为空）
+  SCHEMA_SUMMARY   结构校验结果摘要（库 / 缺列 / 已补 / 需人工）
+  SCHEMA_BLOCKED   "yes" 表示因库结构落后于新代码而中止部署
   ACTOR            触发人
   RUN_URL          Actions 运行链接
   PR_NO            部署分支上最近一条已合并 PR 的编号（plan job 解析，可空）
@@ -179,6 +182,17 @@ def pick_layout(ok, env_name, notes):
     return "release" if notes else "standard"
 
 
+def schema_check_text(c):
+    """数据库结构一栏的文案；未涉及后端部署时返回空串（不占版面）。"""
+    if c["schema_blocked"]:
+        return f"❌ {c['schema_summary'] or '库结构落后于代码，已中止部署'}"
+    if not c["schema_mode"]:
+        return ""
+    if c["schema_mode"] == "off":
+        return "⏭️ 已跳过（off）"
+    return f"✅ {c['schema_summary']}" if c["schema_summary"] else ""
+
+
 def collect():
     ok = env("NOTIFY_STATUS", "success") == "success"
     event = env("EVENT_NAME")
@@ -189,6 +203,11 @@ def collect():
         alerts.append("健康检查未通过，已自动回滚到部署前版本，请人工确认线上服务")
     if env("SKIP_GATE") == "true":
         alerts.append("本次发布已跳过测试门禁（紧急发布），请事后补测")
+    if env("SCHEMA_BLOCKED") == "yes":
+        alerts.append(
+            "数据库结构落后于新代码，已在部署前中止（本次未上传代码）："
+            f"{env('SCHEMA_SUMMARY')}"
+        )
     return {
         "ok": ok,
         "icon": "✅" if ok else "❌",
@@ -204,6 +223,9 @@ def collect():
         "elapsed": elapsed_text(),
         "skip_gate": env("SKIP_GATE") == "true",
         "auto_rollback": env("AUTO_ROLLBACK") == "yes",
+        "schema_mode": env("SCHEMA_MODE"),
+        "schema_summary": env("SCHEMA_SUMMARY"),
+        "schema_blocked": env("SCHEMA_BLOCKED") == "yes",
         "backup_id": env("BACKUP_ID"),
         "health": health_summary(),
         "run_url": env("RUN_URL"),
@@ -226,6 +248,9 @@ def build_card(c):
     rows = []
     if c["auto_rollback"]:
         rows.append(("自动回滚", "⚠️ 已触发，请人工确认服务"))
+    schema_text = schema_check_text(c)
+    if schema_text:
+        rows.append(("数据库结构", clip(schema_text, 120)))
     if not c["ok"]:
         rows.append(("处理建议", "查看 Actions 日志定位失败原因"))
     if c["skip_gate"]:
@@ -278,6 +303,9 @@ def build_markdown(c):
     lines += [f"> {m}" for m in meta]
 
     checks = [("测试门禁", "⚠️ 已跳过" if c["skip_gate"] else "✅ 已通过")]
+    schema_text = schema_check_text(c)
+    if schema_text:
+        checks.append(("数据库结构", clip(schema_text, 90)))
     if c["auto_rollback"]:
         checks.append(("自动回滚", "⚠️ 已触发，请人工确认"))
     if c["backup_id"]:
@@ -315,6 +343,9 @@ def build_text(c):
         lines.append(f"耗时: {c['elapsed']}")
     if c["skip_gate"]:
         lines.append("⚠️ 已跳过测试门禁（紧急发布，请事后补测）")
+    schema_text = schema_check_text(c)
+    if schema_text:
+        lines.append(f"数据库结构: {schema_text}")
     if c["auto_rollback"]:
         lines.append("⚠️ 健康检查未通过，已自动回滚到部署前版本，请人工确认服务状态")
     if c["backup_id"]:
