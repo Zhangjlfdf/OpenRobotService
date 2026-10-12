@@ -37,6 +37,7 @@ class ArchiveReportService:
         )
         existing_report = existing.scalar_one_or_none()
         if existing_report:
+            # 幂等复用未完成草稿；状态未落到 ARCHIVING 时一并回正
             if task.status != TaskStatus.ARCHIVING:
                 task.status = TaskStatus.ARCHIVING
                 await db.flush()

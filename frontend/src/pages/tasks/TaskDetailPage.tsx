@@ -647,10 +647,10 @@ export default function TaskDetailPage() {
 
   // ── 开始归档（closed → archiving）──
   const handleStartArchive = async () => {
-    if (!detail) return;
+    if (!detail || archiveLoading) return;
     setArchiveLoading(true);
     try {
-      const ticket: Ticket = await request<Ticket>(`/${detail.id}/archive-start`, { method: 'POST' });
+      const ticket: Ticket = await request<Ticket>(`/archive-report/${detail.id}/archive-start`, { method: 'POST' });
       setDetail(ticket);
       setArchiveReportContent(ticket.current_archive_report?.content || '');
       setArchiveReportRevision(ticket.current_archive_report?.revision || 1);
@@ -666,11 +666,12 @@ export default function TaskDetailPage() {
 
   // ── 保存归档草稿 ──
   const handleSaveArchiveDraft = async () => {
+    if (archiveLoading) return;
     const reportId = detail?.current_archive_report?.id;
     if (!reportId) return;
     setArchiveLoading(true);
     try {
-      const report = await request(`/archive-reports/${reportId}`, {
+      const report = await request(`/archive-report/archive-reports/${reportId}`, {
         method: 'PUT',
         body: JSON.stringify({ content: archiveReportContent, revision: archiveReportRevision }),
       });
@@ -685,19 +686,21 @@ export default function TaskDetailPage() {
 
   // ── 提交归档报告审核（审核人由系统按问题领域 + 负荷概率派审）──
   const handleSubmitArchive = async () => {
+    if (archiveLoading) return;
     const reportId = detail?.current_archive_report?.id;
     if (!reportId) {
-      Toast({ message: '归档报告未找到', theme: 'warning' });
+      Toast({ message: '归档报告未找到，请重新开始归档', theme: 'warning' });
       return;
     }
     setArchiveLoading(true);
     try {
-      const ticket: Ticket = await request(`/archive-reports/${reportId}/submit`, {
+      // submit 后端返回 ArchiveReportResponse（不是 Ticket），不调 setDetail
+      await request(`/archive-report/archive-reports/${reportId}/submit`, {
         method: 'POST',
         body: JSON.stringify({ content: archiveReportContent, revision: archiveReportRevision }),
       });
-      setDetail(ticket);
       setArchiveEditorVisible(false);
+      loadDetail();
       Toast({ message: '已提交归档报告，等待审核', theme: 'success' });
     } catch (err) {
       Toast({ message: `提交失败: ${err instanceof Error ? err.message : ''}`, theme: 'error' });
@@ -708,13 +711,15 @@ export default function TaskDetailPage() {
 
   // ── 审核通过归档 ──
   const handleArchiveApprove = async () => {
+    if (archiveLoading) return;
     const reportId = detail?.current_archive_report?.id;
     if (!reportId || !detail) return;
     setArchiveLoading(true);
     try {
-      const ticket: Ticket = await request(`/archive-reports/${reportId}/approve`, { method: 'POST' });
-      setDetail(ticket);
+      // approve 后端返回 TicketResponse，但 archive report 状态也变了，统一 loadDetail
+      await request(`/archive-report/archive-reports/${reportId}/approve`, { method: 'POST' });
       setArchiveEditorVisible(false);
+      loadDetail();
       Toast({ message: '归档审核通过', theme: 'success' });
     } catch (err) {
       Toast({ message: `操作失败: ${err instanceof Error ? err.message : ''}`, theme: 'error' });
@@ -725,6 +730,7 @@ export default function TaskDetailPage() {
 
   // ── 审核驳回归档 ──
   const handleArchiveReject = async () => {
+    if (archiveLoading) return;
     const reportId = detail?.current_archive_report?.id;
     if (!reportId || !detail) return;
     if (!archiveRejectReason.trim()) {
@@ -733,13 +739,14 @@ export default function TaskDetailPage() {
     }
     setArchiveLoading(true);
     try {
-      const ticket: Ticket = await request(`/archive-reports/${reportId}/reject`, {
+      // reject 后端返回 ArchiveReportResponse（不是 Ticket），不调 setDetail
+      await request(`/archive-report/archive-reports/${reportId}/reject`, {
         method: 'POST',
         body: JSON.stringify({ review_comment: archiveRejectReason }),
       });
-      setDetail(ticket);
       setShowArchiveRejectPopup(false);
       setArchiveRejectReason('');
+      loadDetail();
       Toast({ message: '已驳回归档报告', theme: 'success' });
     } catch (err) {
       Toast({ message: `操作失败: ${err instanceof Error ? err.message : ''}`, theme: 'error' });

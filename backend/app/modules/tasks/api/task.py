@@ -677,10 +677,11 @@ async def filter_tasks(
         auth_header = request.headers.get("Authorization")
         token = auth_header[7:] if auth_header and auth_header.startswith("Bearer ") else None
 
-        # 当前用户 username：供「我关注的」(followedBy) 过滤与列表 is_followed 回填
+        # 当前用户：username 供「我关注的」等过滤；user_id 供归档过滤（ArchiveReport.created_by/reviewer 存 user_id）
         current_username = actor_username(current_user)
+        current_user_id = str(current_user.get("id") or current_user.get("user_id") or "") if isinstance(current_user, dict) else ""
 
-        result = await TicketService.filter_tickets(db, filter_request, token, current_username)
+        result = await TicketService.filter_tickets(db, filter_request, token, current_username, current_user_id)
         logger.debug(f"复合过滤查询任务列表成功, total={result.get('total', 0)}")
         return result
     except Exception as e:
@@ -704,12 +705,13 @@ async def filter_tasks_counts(
         auth_header = request.headers.get("Authorization")
         token = auth_header[7:] if auth_header and auth_header.startswith("Bearer ") else None
 
-        # 当前用户 username：供「我关注的」(followedBy) 角标计数
+        # 当前用户：username 供「我关注的」角标；user_id 供归档角标
         current_username = actor_username(current_user)
+        current_user_id = str(current_user.get("id") or current_user.get("user_id") or "") if isinstance(current_user, dict) else ""
 
         totals = []
         for q in batch_request.queries:
-            totals.append(await TicketService.count_tickets(db, q, token, current_username))
+            totals.append(await TicketService.count_tickets(db, q, token, current_username, current_user_id))
         return totals
     except Exception as e:
         logger = logging.getLogger(__name__)
@@ -1033,15 +1035,7 @@ async def get_task(
         except Exception as contact_err:
             logger.warning(f"回填项目对接人失败 task_id={task_id}: {contact_err}")
 
-        # 归档报告：前端 archiving 态按钮依赖 current_archive_report
-        try:
-            from app.modules.tasks.services.archive_report_service import ArchiveReportService
-            _ar = await ArchiveReportService.get_latest_by_task(db, task_id)
-            setattr(ticket, "current_archive_report", _ar)
-        except Exception as archive_err:
-            logger.warning(f"回填归档报告失败 task_id={task_id}: {archive_err}")
-            setattr(ticket, "current_archive_report", None)
-
+        # current_archive_report 已由 TicketService.get_ticket_by_id 填充
         return ticket
     except HTTPException:
         raise

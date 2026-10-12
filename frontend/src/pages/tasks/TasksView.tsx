@@ -893,9 +893,15 @@ export default function TasksView() {
       }
       filters.push({ or: searchConditions });
     }
-    // 任务状态多选过滤：未全选时按 in 操作过滤，全选则不施加状态条件
+    // 任务状态多选过滤：未全选时按 in 操作过滤，全选则不施加状态条件。
+    // 归档分类（archive_mine / archive_review）自动纳入 archiving / archived 状态，
+    // 避免默认 statusFilter 只含进行中状态、把归档工单挡掉。
     if (statusFilter.length > 0 && !sameSet(statusFilter, ALL_STATUS_VALUES)) {
-      filters.push({ field: 'status', op: 'in', value: statusFilter });
+      const archiveRelated = relevanceFilter === 'archive_mine' || relevanceFilter === 'archive_review';
+      const effectiveStatus = archiveRelated
+        ? Array.from(new Set([...statusFilter, 'archiving', 'archived']))
+        : statusFilter;
+      filters.push({ field: 'status', op: 'in', value: effectiveStatus });
     }
     // 优先级多选过滤：未全选时按 in 操作过滤，全选则不施加优先级条件
     if (priorityFilter.length > 0 && !sameSet(priorityFilter, ALL_PRIORITY_VALUES)) {
@@ -1092,6 +1098,8 @@ export default function TasksView() {
       { value: 'mine', label: '待我处理' },
       { value: 'related', label: '与我相关' },
       { value: 'followed', label: '我关注的' },
+      { value: 'archive_mine', label: '我归档的' },
+      { value: 'archive_review', label: '待我审核' },
       // 代他人提单：他人代我提交、仍待我确认的单（pending）；有量时才出现，避免空分类占位
       ...(followupCount > 0 ? [{ value: 'followup', label: '待我跟进' }] : []),
     ];
@@ -1110,10 +1118,23 @@ export default function TasksView() {
       const queries = relevanceOptions.map((option) => {
         // 「全部」无权限时按项目维度计数，与列表回退口径一致
         const key = option.value === 'global' && !canViewAllTasks ? 'all' : option.value;
+
+        // archive_mine / archive_review 分类自动把 status 扩展到 archiving / archived
+        // （listExtraFilters 里 status 默认不含这两个状态，会把归档工单挡掉）
+        let extraFilters = listExtraFilters;
+        if (key === 'archive_mine' || key === 'archive_review') {
+          extraFilters = listExtraFilters.map((f) => {
+            if (f.field === 'status' && Array.isArray(f.value)) {
+              return { ...f, value: Array.from(new Set([...f.value, 'archiving', 'archived'])) };
+            }
+            return f;
+          });
+        }
+
         return {
           filters: [
             ...buildRelevanceFilters(key, userId || username, projectIds),
-            ...listExtraFilters,
+            ...extraFilters,
           ],
           sorts: [],
           page: 1,

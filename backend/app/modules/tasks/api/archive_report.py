@@ -28,12 +28,13 @@ from app.modules.tasks.schemas.archive_report import (
 )
 from app.modules.tasks.schemas.ticket import TicketResponse
 from app.modules.tasks.api.ws import ws_broadcast_task_updated
-from app.modules.tasks.api.task import _add_system_comment, _reload_ticket_with_comments
+from app.modules.tasks.api.task import _add_system_comment
+from app.modules.tasks.services.ticket_service import TicketService
 
 logger = logging.getLogger(__name__)
 
-# 无额外 prefix：与前端 /api/tasks/{id}/archive-start、/api/tasks/archive-reports/... 对齐
-router = APIRouter(tags=["archive-report"])
+# prefix=/archive-report：避免被 GET /tasks/{task_id} 抢路径；与前端 /archive-report/... 对齐
+router = APIRouter(prefix="/archive-report", tags=["archive-report"])
 
 
 async def _enrich_report_response(db: AsyncSession, report: ArchiveReport) -> ArchiveReportResponse:
@@ -56,23 +57,6 @@ async def _enrich_report_response(db: AsyncSession, report: ArchiveReport) -> Ar
         response.reviewer_name = user_map.get(report.reviewer)
 
     return response
-
-
-async def _ticket_response_with_report(
-    db: AsyncSession,
-    task_id: int,
-    report: Optional[ArchiveReport] = None,
-) -> TicketResponse:
-    """返回带 current_archive_report 的工单详情（避免 commit 后懒加载 MissingGreenlet）。"""
-    ticket = await _reload_ticket_with_comments(db, task_id)
-    if not ticket:
-        raise HTTPException(status_code=404, detail="工单未找到")
-    resp = TicketResponse.model_validate(ticket)
-    if report is None:
-        report = await ArchiveReportService.get_latest_by_task(db, task_id)
-    if report is not None:
-        resp.current_archive_report = await _enrich_report_response(db, report)
-    return resp
 
 
 async def _operator_info(current_user) -> tuple[str, str, str]:
@@ -156,8 +140,9 @@ async def archive_start(
             # 幂等路径也要 commit 可能的状态回正
             await db.commit()
 
-        # 8) 返回必须带 current_archive_report，前端靠它渲染「编辑归档报告」
-        return await _ticket_response_with_report(db, task_id, report)
+        # 8) 统一走 TicketService reload（自动带 comments + current_archive_report enrich）
+        ticket = await TicketService.get_ticket_by_id(db, task_id, load_comments=True, token=token)
+        return TicketResponse.model_validate(ticket)
     except HTTPException:
         raise
     except Exception as e:
@@ -356,7 +341,8 @@ async def approve_report(
     # WS 广播
     await ws_broadcast_task_updated(report.task_id, task_new)
 
-    return await _ticket_response_with_report(db, report.task_id, approved_report)
+    ticket = await TicketService.get_ticket_by_id(db, report.task_id, load_comments=True, token=token)
+    return TicketResponse.model_validate(ticket)
 
 
 # ==================== 审核驳回 ====================
