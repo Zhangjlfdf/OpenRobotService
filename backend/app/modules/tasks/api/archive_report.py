@@ -28,11 +28,12 @@ from app.modules.tasks.schemas.archive_report import (
 )
 from app.modules.tasks.schemas.ticket import TicketResponse
 from app.modules.tasks.api.ws import ws_broadcast_task_updated
-from app.modules.tasks.api.task import _add_system_comment
+from app.modules.tasks.api.task import _add_system_comment, _reload_ticket_with_comments
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/archive-report", tags=["archive-report"])
+# 无额外 prefix：与前端 /api/tasks/{id}/archive-start、/api/tasks/archive-reports/... 对齐
+router = APIRouter(tags=["archive-report"])
 
 
 async def _enrich_report_response(db: AsyncSession, report: ArchiveReport) -> ArchiveReportResponse:
@@ -55,6 +56,23 @@ async def _enrich_report_response(db: AsyncSession, report: ArchiveReport) -> Ar
         response.reviewer_name = user_map.get(report.reviewer)
 
     return response
+
+
+async def _ticket_response_with_report(
+    db: AsyncSession,
+    task_id: int,
+    report: Optional[ArchiveReport] = None,
+) -> TicketResponse:
+    """返回带 current_archive_report 的工单详情（避免 commit 后懒加载 MissingGreenlet）。"""
+    ticket = await _reload_ticket_with_comments(db, task_id)
+    if not ticket:
+        raise HTTPException(status_code=404, detail="工单未找到")
+    resp = TicketResponse.model_validate(ticket)
+    if report is None:
+        report = await ArchiveReportService.get_latest_by_task(db, task_id)
+    if report is not None:
+        resp.current_archive_report = await _enrich_report_response(db, report)
+    return resp
 
 
 async def _operator_info(current_user) -> tuple[str, str, str]:
@@ -103,37 +121,53 @@ async def archive_start(
     if not (roles.is_assignee or roles.is_admin or roles.can_operate):
         raise HTTPException(status_code=403, detail="无权限开始归档")
 
-    # 3) 业务调用（内部 flush）
-    task_new, report = await ArchiveReportService.start_archive(db, task_id, operator_id)
+    try:
+        # 3) 业务调用（内部 flush）；created=False 为幂等复用已有草稿
+        task_new, report, created = await ArchiveReportService.start_archive(
+            db, task_id, operator_id
+        )
 
-    # 4) 操作人显示名
-    user_name = await _user_display_name(db, operator_id) or username
+        if created:
+            # 4) 操作人显示名
+            user_name = await _user_display_name(db, operator_id) or username
 
-    # 5) 写操作日志
-    await OperationLogService.log(
-        db=db,
-        task_id=task_id,
-        op_type=OperationType.ARCHIVE_START,
-        operator=username,
-        operator_name=user_name,
-        to_status=TaskStatus.ARCHIVING.value,
-        detail={"to_report_id": report.id, "version": report.version},
-        description=f"{user_name} 开始归档工单，状态变更为「归档中」",
-    )
+            # 5) 写操作日志
+            await OperationLogService.log(
+                db=db,
+                task_id=task_id,
+                op_type=OperationType.ARCHIVE_START,
+                operator=username,
+                operator_name=user_name,
+                to_status=TaskStatus.ARCHIVING.value,
+                detail={"to_report_id": report.id, "version": report.version},
+                description=f"{user_name} 开始归档工单，状态变更为「归档中」",
+            )
 
-    # 6) _add_system_comment 内部会 commit 当前 session 的全部 pending 变更
-    await _add_system_comment(
-        db, task_id,
-        f"{user_name} 开始归档工单，状态变更为「归档中」",
-        username, token,
-    )
+            # 6) _add_system_comment 内部会 commit 当前 session 的全部 pending 变更
+            await _add_system_comment(
+                db, task_id,
+                f"{user_name} 开始归档工单，状态变更为「归档中」",
+                username, token,
+            )
 
-    # 7) WS 广播
-    await ws_broadcast_task_updated(task_id, task_new)
+            # 7) WS 广播
+            await ws_broadcast_task_updated(task_id, task_new)
+        else:
+            # 幂等路径也要 commit 可能的状态回正
+            await db.commit()
 
-    # 8) 刷新返回
-    await db.refresh(task_new)
-    return TicketResponse.model_validate(task_new)
+        # 8) 返回必须带 current_archive_report，前端靠它渲染「编辑归档报告」
+        return await _ticket_response_with_report(db, task_id, report)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("archive-start failed task_id=%s", task_id)
+        # 常见：缺 archive_reports 表 / status 枚举无 archiving / 缺 archived_* 列
+        detail = str(getattr(e, "orig", None) or e)
+        raise HTTPException(
+            status_code=500,
+            detail=f"开始归档失败（请检查库结构是否已执行 ensure_archive_schema.py）: {detail}",
+        ) from e
 
 
 # ==================== 查询 / 读取 ====================
@@ -227,29 +261,47 @@ async def submit_report(
     if not (user_matches(current_user, report.created_by) or is_admin_user(current_user)):
         raise HTTPException(status_code=403, detail="无权限提交该归档报告")
 
-    # 业务调用
-    updated_report = await ArchiveReportService.submit(
-        db, report_id, body.reviewer, body.content, body.revision, operator_id
+    # 业务调用：系统派审选审核人，只写 archive_reports.reviewer
+    updated_report, assignment = await ArchiveReportService.submit(
+        db, report_id, body.content, body.revision, operator_id
     )
 
     user_name = await _user_display_name(db, operator_id) or username
-    reviewer_name = await _user_display_name(db, body.reviewer) or body.reviewer
+    reviewer_id = updated_report.reviewer or ""
+    reviewer_name = await _user_display_name(db, reviewer_id) or reviewer_id
+    domain = getattr(assignment, "domain", None) or ""
 
-    # 操作日志
+    log_detail = {"report_id": report_id, "reviewer": reviewer_id, "domain": domain}
+    extra = getattr(assignment, "_log_detail", None)
+    if isinstance(extra, dict):
+        log_detail.update(extra)
+    else:
+        try:
+            from app.modules.tasks.services.archive_review_dispatch import assignment_log_detail
+            log_detail.update(assignment_log_detail(assignment))
+        except Exception:
+            pass
+
+    # 操作日志（含派审负荷/概率快照；不写 task_dispatch_log）
     await OperationLogService.log(
         db=db,
         task_id=report.task_id,
         op_type=OperationType.ARCHIVE_REPORT_SUBMIT,
         operator=username,
         operator_name=user_name,
-        description=f"{user_name} 提交了归档报告，指定 {reviewer_name} 为审核人",
-        detail={"report_id": report_id, "reviewer": body.reviewer},
+        description=(
+            f"{user_name} 提交了归档报告，系统派审 "
+            f"{reviewer_name} 为审核人"
+            + (f"（领域：{domain}）" if domain else "")
+        ),
+        detail=log_detail,
     )
 
     # 系统评论（内部 commit 全部 pending 变更）
     await _add_system_comment(
         db, report.task_id,
-        f"{user_name} 提交了归档报告，指定 {reviewer_name} 为审核人",
+        f"{user_name} 提交了归档报告，系统派审 {reviewer_name} 为审核人"
+        + (f"（领域：{domain}）" if domain else ""),
         username, token,
     )
 
@@ -304,8 +356,7 @@ async def approve_report(
     # WS 广播
     await ws_broadcast_task_updated(report.task_id, task_new)
 
-    await db.refresh(task_new)
-    return TicketResponse.model_validate(task_new)
+    return await _ticket_response_with_report(db, report.task_id, approved_report)
 
 
 # ==================== 审核驳回 ====================

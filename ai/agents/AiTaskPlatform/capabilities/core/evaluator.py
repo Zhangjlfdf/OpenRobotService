@@ -141,6 +141,41 @@ class Evaluator:
         )
 
     @classmethod
+    async def judge(
+        cls,
+        llm_client,
+        draft: str,
+        evidence: str = "",
+        context: str = "",
+        mode: str = "diagnose",
+    ) -> Optional[dict]:
+        """跑一次自评，返回判定 dict；调用/解析失败返回 None。
+
+        这是「判官」的唯一入口——`evaluate_and_rewrite` 走它，离线评测
+        (`eval/run_eval.py`) 也走它，保证**评测量到的就是生产在跑的那条路径**：
+        改了判据/解析，评测口径自动跟着变，不会悄悄脱钩。
+
+        Returns:
+            {"pass": bool, "issues": [...], "reasoning": str} 或 None（未解析）
+        """
+        if not draft or not llm_client:
+            return None
+        try:
+            raw = await llm_client.complete(
+                prompt=cls._build_eval_prompt(draft, evidence, context, mode=mode),
+                system_prompt=cls._EVAL_SYSTEM_PROMPT,
+                max_tokens=200,
+                temperature=0.0,
+            )
+        except Exception as e:
+            logger.warning(f"[evaluator] 自评调用失败: {e}")
+            return None
+        data = cls._parse_eval(raw)
+        if data is None:
+            logger.warning("[evaluator] 自评解析失败")
+        return data
+
+    @classmethod
     async def evaluate_and_rewrite(
         cls,
         llm_client,
@@ -167,22 +202,8 @@ class Evaluator:
                     "eval_failed": False, "advisory": False}
 
         # 1. 自评
-        eval_raw = ""
-        try:
-            eval_raw = await llm_client.complete(
-                prompt=cls._build_eval_prompt(draft, evidence, context, mode=mode),
-                system_prompt=cls._EVAL_SYSTEM_PROMPT,
-                max_tokens=200,
-                temperature=0.0,
-            )
-        except Exception as e:
-            logger.warning(f"[evaluator] 自评调用失败，直接用初稿: {e}")
-            return {"final": draft, "rewritten": False, "eval_notes": [],
-                    "eval_failed": True, "advisory": False}
-
-        eval_data = cls._parse_eval(eval_raw)
+        eval_data = await cls.judge(llm_client, draft, evidence, context, mode=mode)
         if eval_data is None:
-            logger.warning("[evaluator] 自评解析失败，直接用初稿")
             return {"final": draft, "rewritten": False, "eval_notes": [],
                     "eval_failed": True, "advisory": False}
 

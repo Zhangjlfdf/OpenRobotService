@@ -8,6 +8,8 @@ import { createRequest } from '@/api/client';
 import API_CONFIG from '@/config/api';
 import { getProfileOptions } from '@/api/profile';
 import type { ProfileFieldOptions } from '@/api/profile';
+import { DISPATCH_SKILL_SEEDS, INTERFACE_DETAIL_NAMES, applyLeafSpecialists, dropInterfaceDetails, dropRolledSpecialists, ensureSkillSeeds, skillForFunction } from './dualTreeDispatchSkills';
+import type { LeafOwner } from './dualTreeDispatchSkills';
 
 const STORAGE_KEY = 'dual-tree-trial-v2';
 
@@ -97,7 +99,25 @@ function withStarterDomains(saved: Saved | null): Saved {
   const starterNames = new Set(STARTER_DOMAINS.map((item) => item.name));
   const extras = nodes.filter((n) => n.kind === 'domain' && !starterNames.has(n.name));
   const rest = nodes.filter((n) => n.kind !== 'domain');
-  return { nodes: [...starters, ...extras, ...rest], mounts };
+  const seeded = dropInterfaceDetails(
+    ensureSkillSeeds(
+      [...starters, ...extras, ...rest],
+      '调度系统',
+      DISPATCH_SKILL_SEEDS,
+      (parentId, name, description) => ({
+        id: uid('sk'),
+        parentId,
+        kind: 'skill' as const,
+        name,
+        description,
+        vehicleModels: '',
+      }),
+    ),
+    '调度系统',
+    INTERFACE_DETAIL_NAMES,
+  );
+  const alive = new Set(seeded.map((node) => node.id));
+  return { nodes: seeded, mounts: mounts.filter((mount) => alive.has(mount.nodeId)) };
 }
 
 function companiesFromPeople(domainId: string, people: Person[], existing: TrialNode[]): TrialNode[] {
@@ -251,8 +271,31 @@ export default function DualTreeTrial() {
         if (!cancelled) Toast({ message: '公司部门名单没有加载到，仍可手写名称', theme: 'warning' });
       }
       const data = withStarterDomains(loadSaved());
+      let owners: LeafOwner[] = [];
+      try {
+        const tree = await request<Record<string, { interfaces?: { functions?: { name?: string; engineers?: string[] }[] }[] }>>('/module-tree/');
+        const product = tree?.['调度USP'];
+        owners = (product?.interfaces || []).flatMap((iface) => (
+          (iface.functions || []).flatMap((fn) => (
+            (fn.engineers || []).filter(Boolean).map((userId) => ({
+              name: skillForFunction(fn.name || ''),
+              userId,
+            }))
+          ))
+        )).filter((owner) => owner.name);
+      } catch {
+        if (!cancelled) Toast({ message: '责任模块上的负责人没有带上，技能树结构仍在', theme: 'warning' });
+      }
+      if (cancelled) return;
+      const withOwners = applyLeafSpecialists(
+        data.nodes,
+        dropRolledSpecialists(data.nodes, data.mounts, owners.map((owner) => owner.userId), '调度系统'),
+        owners,
+        '调度系统',
+        (nodeId, userId) => ({ nodeId, userId, role: 'specialist' as const }),
+      );
       setNodes(data.nodes);
-      setMounts(data.mounts);
+      setMounts(withOwners);
       const root = data.nodes.find((n) => n.kind === 'domain');
       setSelectedId(root?.id || data.nodes[0]?.id || '');
       setExpanded(firstLevelOpen(data.nodes));
@@ -808,7 +851,7 @@ export default function DualTreeTrial() {
               <div style={{ fontSize: 12, color: '#3697c3', marginBottom: 8 }}>
                 {selected.kind === 'domain' && '这是问题领域。组织树里每一级都叫组织，公司、部门、小组都可以挂，也可以再往下加。'}
                 {selected.kind === 'org' && '这一级是组织。拖左侧手柄，或在下面改上级，就能换它挂在谁下面。名称和系统里的公司或部门一致时，会列出已经在里面的人。'}
-                {selected.kind === 'skill' && '技能节点。叶子挂专人，上一级挂领导。这里的人只留在本机试做，不会写入现网责任模块。'}
+                {selected.kind === 'skill' && '调度统筹挂领导。下面是这项工作里要分开会的技能，不是把职责分成初级、中级、高级。进度长在具体技能上，不参加派单。'}
               </div>
               {orgPick && (
                 <OrgCatalog

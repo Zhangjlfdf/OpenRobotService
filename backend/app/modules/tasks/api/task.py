@@ -1033,6 +1033,15 @@ async def get_task(
         except Exception as contact_err:
             logger.warning(f"回填项目对接人失败 task_id={task_id}: {contact_err}")
 
+        # 归档报告：前端 archiving 态按钮依赖 current_archive_report
+        try:
+            from app.modules.tasks.services.archive_report_service import ArchiveReportService
+            _ar = await ArchiveReportService.get_latest_by_task(db, task_id)
+            setattr(ticket, "current_archive_report", _ar)
+        except Exception as archive_err:
+            logger.warning(f"回填归档报告失败 task_id={task_id}: {archive_err}")
+            setattr(ticket, "current_archive_report", None)
+
         return ticket
     except HTTPException:
         raise

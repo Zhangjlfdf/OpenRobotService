@@ -14,6 +14,7 @@
 | `.env` | 未纳入版本控制（`.gitignore:22`）。改了必须**手动改 + 重启 AI 服务**，`load_dotenv` 只在启动时读一次 |
 | 过程区数据契约 | 后端 [tracing/trace.py](tracing/trace.py) 的 `nest_progress_todos` 产出「分析 →（规划 + 各能力）→ 子步骤/事件」；前端 `frontend/src/shared/components/DiscussionPanel.tsx` 的 `ProgressTodoItem` **递归渲染 `children`**，后端行自带的 `status`/`phase` 优先于 span 状态 |
 | 两个 Agent 的关系 | AiTaskPlatform 与 AiDiagnosisPlatform **零交叉导入**，同一件事存在两份独立实现（见最后一章「刻意不共用」） |
+| 怎么验证 LLM 行为 | 用 [eval/](eval/)（用例集 + 准确率/误杀/漏放 + **多轮一致率**）。**单跑一次 pass/fail 不构成结论**——`temperature=0` 也能给出相反判定（见 #1–#3）。`eval/test_metrics.py` 是纯函数单测，不需要 LLM |
 
 ## 2026-10-11 讨论问答：初稿总被自评判不通过（#1–#3）
 
