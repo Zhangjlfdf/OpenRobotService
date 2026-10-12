@@ -62,12 +62,14 @@ def vehicle_db(monkeypatch):
 
 @pytest.fixture
 def kb_tmp(tmp_path):
-    """临时 kb 目录：company/XQE/manual/ 两篇 + 一个非 md 文件（应被忽略）。"""
-    manual = tmp_path / "company" / "XQE" / "manual"
-    manual.mkdir(parents=True)
-    (manual / "XQE下线调试与部署文档.md").write_text("# 手册A\n", encoding="utf-8")
-    (manual / "故障分叉树.md").write_text("# 手册B\n", encoding="utf-8")
-    (manual / "ignore.txt").write_text("not md", encoding="utf-8")
+    """临时 kb 目录：company/XQE/ 平铺两篇 + 一个非 md 文件（应被忽略）。
+
+    1010 起车型目录平铺（无 manual 层），sub_domain 即车型串。"""
+    xqe = tmp_path / "company" / "XQE"
+    xqe.mkdir(parents=True)
+    (xqe / "XQE下线调试与部署文档.md").write_text("# 手册A\n", encoding="utf-8")
+    (xqe / "故障分叉树.md").write_text("# 手册B\n", encoding="utf-8")
+    (xqe / "ignore.txt").write_text("not md", encoding="utf-8")
     return tmp_path
 
 
@@ -106,8 +108,8 @@ def test_list_manual_docs_scans_dir(kb_tmp):
     docs = list_manual_docs("XQE", kb_root=kb_tmp, media_prefix="/api/ai/media")
     titles = [d["title"] for d in docs]
     assert titles == ["XQE下线调试与部署文档", "故障分叉树"]  # sorted 序
-    assert docs[0]["url"] == "/api/ai/media/kb/company/XQE/manual/XQE下线调试与部署文档.md"
-    assert docs[0]["path"] == "company/XQE/manual/XQE下线调试与部署文档.md"
+    assert docs[0]["url"] == "/api/ai/media/kb/company/XQE/XQE下线调试与部署文档.md"
+    assert docs[0]["path"] == "company/XQE/XQE下线调试与部署文档.md"
 
 
 def test_list_manual_docs_missing_dir_returns_empty(tmp_path):
@@ -277,9 +279,9 @@ async def test_register_mode_normalizes_model_case(vehicle_db, kb_tmp, mock_memo
 @pytest.fixture
 def kb_fork(tmp_path):
     """带 9 大类顶层节点的分叉树（### 子节点不算顶层）。"""
-    manual = tmp_path / "company" / "XQE" / "manual"
-    manual.mkdir(parents=True)
-    (manual / "故障分叉树.md").write_text(
+    xqe = tmp_path / "company" / "XQE"
+    xqe.mkdir(parents=True)
+    (xqe / "故障分叉树.md").write_text(
         "# XQE 故障分叉树\n"
         "## 1. 车辆停着不动\n### 1.1 行驶途中\n"
         "## 2. 取货失败\n## 3. 卸货/放货异常\n## 4. 堆叠/堆垛失败\n"
