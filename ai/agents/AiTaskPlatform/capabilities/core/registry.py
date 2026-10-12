@@ -57,6 +57,18 @@ class CapabilityRegistry:
         return cap_cls()
 
     @classmethod
+    def limit_of(cls, name: str) -> Optional[int]:
+        """读能力类声明的「每次请求调度上限」（不实例化能力类）。None = 不限。
+
+        供 `capabilities/core/usage.py` 的配额机制使用。刻意读类属性：能力实例每次
+        新建，任何挂在实例上的计数都活不过一次调用（issues.md #10）。
+        """
+        cap_cls = cls._capabilities.get(name)
+        if cap_cls is None:
+            return None
+        return getattr(cap_cls, "max_usage_per_session", None)
+
+    @classmethod
     def match_by_tags(cls, query: str) -> list[str]:
         """按标签/描述关键词匹配能力（供 Router 用）。
 

@@ -78,7 +78,7 @@
 
 **现象**：`project_info` 与 `log_analyze` 都声明了 `max_usage_per_session = 3`（[capabilities/tools/project_info.py:395](capabilities/tools/project_info.py)、`capabilities/log_analyzer/log_analyze.py:58`），看起来是个硬上限。
 
-**根因**：计数器 `_usage_count` 是**能力实例**的属性（[capabilities/core/base.py:85](capabilities/core/base.py)），而**没有任何一条取用路径复用实例**——[capabilities/core/registry.py](capabilities/core/registry.py) 的 `get()` 明确「每次新建」（`cap_cls()`）；supervisor 每次派发前重新 `get`（[capabilities/core/supervisor.py:461](capabilities/core/supervisor.py)）；`discuss_flow` 的兜底补派也一样（[handlers/discuss_flow.py:1074](handlers/discuss_flow.py)）。实例用完即弃 → `_claim_usage()` 每次看到的 `_usage_count` 都是 0 → **上限永远达不到**。
+**根因**：计数器 `_usage_count` 曾是**能力实例**的属性（[capabilities/core/base.py](capabilities/core/base.py)，本次已删），而**没有任何一条取用路径复用实例**——[capabilities/core/registry.py](capabilities/core/registry.py) 的 `get()` 明确「每次新建」（`cap_cls()`）；supervisor 每次派发前都重新 `get`（[capabilities/core/supervisor.py](capabilities/core/supervisor.py) 的 `_run_one`）；`discuss_flow` 的兜底补派也一样（[handlers/discuss_flow.py](handlers/discuss_flow.py) 的 `_ask_reanalyze_log`）。实例用完即弃 → `_claim_usage()` 每次看到的 `_usage_count` 都是 0 → **上限永远达不到**。
 
 实测（同一份代码）：
 
@@ -93,8 +93,20 @@
 
 **遗留的错误描述（已一并更正）**：
 
-- [待做.md](待做.md) §7 写「同一轮最多调 3 次」并标为已落地——既不是「同一轮」，也**根本没生效**，已移回「还没做」；
+- [待做.md](待做.md) §7 写「同一轮最多调 3 次」并标为已落地——既不是「同一轮」，也**根本没生效**，已移回「还没做」并写明原因（本次已真收口，见下）；
 - `registry.py` 的 docstring 至今宣称有 `get_singleton()` 复用单例，**该方法全仓不存在**，已改成警告。
+
+**已修复（真收口）**：机制下沉到 supervisor 的机制层——
+
+- 新增 [capabilities/core/usage.py](capabilities/core/usage.py)：台账挂 `runtime_ctx`，**按请求**计数（不再挂实例）；
+- `registry.limit_of(name)` 直读类属性，不实例化能力；
+- 三道拦：`_guard_decision` 把超出上限的计划步骤**直接不排**；`_dispatch_group` 派发前 `claim`，用满就**不执行**；`run()` 把已用满的能力从可选集里 `drop_exhausted` 摘掉；
+- 被拦下时写一条**明确指令**进汇总正文（`_synthesize(results, notes)`），让整理答复的模型给出**有界**结论，而不是以为还有更深的分析；
+- 删掉 base.py 里那套挂在实例上的 `_usage_count` / `_claim_usage`（它不可能生效），并把「配额由谁管」写进注释，防止后人再挂回实例上。
+
+测试 [capabilities/core/test_usage_quota.py](capabilities/core/test_usage_quota.py) 7 例，其中一例专门锁「换个实例不能让计数归零」这条回归；全量 `862 passed, 27 skipped`。真实能力实测：`project_info`（上限 3）→ `[True, True, True, False]`，`drop_exhausted` 只摘它一个，说明进得了最终正文。
+
+**边界（有意）**：只管 **LLM 自主调度** 的次数。`discuss_flow` 里代码确定性的兜底调用（按用户要求补做一次日志分析）不计入——那是产品承诺，不该被配额吃掉。
 
 **教训（本条最值钱）**：把软约束写成代码，不等于它就是硬的。**声明一个上限，必须同时有一个测试能证明它会拦**——否则它只是一句写错位置的注释。诊断侧的同类教训是反方向的：prompt 里的软约束换个模型就失效，最终靠**物理移除工具**才收口（见 [../AiDiagnosisPlatform/issues.md](../AiDiagnosisPlatform/issues.md) 的「死磕保险」）。
 
