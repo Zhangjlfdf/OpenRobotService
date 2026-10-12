@@ -10,7 +10,7 @@ from sqlalchemy.orm.attributes import set_committed_value
 from starlette.concurrency import run_in_threadpool
 
 from app.modules.tasks.models.ticket import Ticket, TicketComment, TicketStatus, TicketPriority, TicketType
-from app.models.task import TaskFollower, TaskParticipant, TaskStep
+from app.models.task import TaskFollower, TaskParticipant, TaskStep, ArchiveReport
 from app.models.task_proxy_relation import TaskProxyRelation, ProxyRelationStatus
 from app.models.identity import UserDB
 from app.modules.tasks.schemas.ticket import TicketCreate, TicketUpdate, TicketCommentCreate, TicketCommentUpdate, TicketQueryParams, TicketFilterRequest, QuotedComment
@@ -719,7 +719,7 @@ class TicketService:
         }
 
     @staticmethod
-    async def _build_single_filter(query, f, FIELD_MAPPING, NUMBER_OPS, TEXT_OPS, ENUM_OPS, DATETIME_OPS, token, current_username=None):
+    async def _build_single_filter(query, f, FIELD_MAPPING, NUMBER_OPS, TEXT_OPS, ENUM_OPS, DATETIME_OPS, token, current_username=None, current_user_id=None):
         field = f.field
         op = f.op
         value = f.value
@@ -774,6 +774,27 @@ class TicketService:
             if op == 'ne':
                 return query.where(Ticket.id.notin_(rel_subq))
             return query.where(Ticket.id.in_(rel_subq))
+
+        # 「我归档的」：ArchiveReport.created_by = 当前用户（id + username 双键）
+        if field_type == 'archive_creator':
+            keys = [k for k in (current_user_id, current_username) if k]
+            if not keys:
+                return query.where(Ticket.id.is_(None))
+            archive_creator_subq = select(ArchiveReport.task_id).where(
+                ArchiveReport.created_by.in_(keys)
+            ).distinct()
+            return query.where(Ticket.id.in_(archive_creator_subq))
+
+        # 「待我审核」：ArchiveReport.reviewer = 当前用户（双键） 且 submit_status='submitted'
+        if field_type == 'archive_reviewer_pending':
+            keys = [k for k in (current_user_id, current_username) if k]
+            if not keys:
+                return query.where(Ticket.id.is_(None))
+            archive_reviewer_subq = select(ArchiveReport.task_id).where(
+                ArchiveReport.reviewer.in_(keys),
+                ArchiveReport.submit_status == 'submitted',
+            ).distinct()
+            return query.where(Ticket.id.in_(archive_reviewer_subq))
 
         if op == 'is_null':
             return query.where(column.is_(None))
@@ -859,18 +880,18 @@ class TicketService:
         return query
 
     @staticmethod
-    async def _apply_nested_filter(query, filter_item, FIELD_MAPPING, NUMBER_OPS, TEXT_OPS, ENUM_OPS, DATETIME_OPS, token, current_username=None):
+    async def _apply_nested_filter(query, filter_item, FIELD_MAPPING, NUMBER_OPS, TEXT_OPS, ENUM_OPS, DATETIME_OPS, token, current_username=None, current_user_id=None):
         if filter_item.or_conditions:
             or_conditions = []
             for or_item in filter_item.or_conditions:
                 if or_item.and_conditions:
                     and_query = select(Ticket).where(Ticket.id.isnot(None))
                     for and_item in or_item.and_conditions:
-                        and_query = await TicketService._apply_nested_filter(and_query, and_item, FIELD_MAPPING, NUMBER_OPS, TEXT_OPS, ENUM_OPS, DATETIME_OPS, token, current_username)
+                        and_query = await TicketService._apply_nested_filter(and_query, and_item, FIELD_MAPPING, NUMBER_OPS, TEXT_OPS, ENUM_OPS, DATETIME_OPS, token, current_username, current_user_id)
                     or_conditions.append(and_query.whereclause)
                 elif or_item.field:
                     simple_query = select(Ticket).where(Ticket.id.isnot(None))
-                    simple_query = await TicketService._build_single_filter(simple_query, or_item, FIELD_MAPPING, NUMBER_OPS, TEXT_OPS, ENUM_OPS, DATETIME_OPS, token, current_username)
+                    simple_query = await TicketService._build_single_filter(simple_query, or_item, FIELD_MAPPING, NUMBER_OPS, TEXT_OPS, ENUM_OPS, DATETIME_OPS, token, current_username, current_user_id)
                     if simple_query.whereclause is not None:
                         or_conditions.append(simple_query.whereclause)
             if or_conditions:
@@ -879,16 +900,16 @@ class TicketService:
 
         if filter_item.and_conditions:
             for and_item in filter_item.and_conditions:
-                query = await TicketService._apply_nested_filter(query, and_item, FIELD_MAPPING, NUMBER_OPS, TEXT_OPS, ENUM_OPS, DATETIME_OPS, token, current_username)
+                query = await TicketService._apply_nested_filter(query, and_item, FIELD_MAPPING, NUMBER_OPS, TEXT_OPS, ENUM_OPS, DATETIME_OPS, token, current_username, current_user_id)
             return query
 
         if filter_item.field:
-            return await TicketService._build_single_filter(query, filter_item, FIELD_MAPPING, NUMBER_OPS, TEXT_OPS, ENUM_OPS, DATETIME_OPS, token, current_username)
+            return await TicketService._build_single_filter(query, filter_item, FIELD_MAPPING, NUMBER_OPS, TEXT_OPS, ENUM_OPS, DATETIME_OPS, token, current_username, current_user_id)
 
         return query
 
     @staticmethod
-    async def _build_filter_query(filter_request: TicketFilterRequest, token: Optional[str] = None, current_username: Optional[str] = None):
+    async def _build_filter_query(filter_request: TicketFilterRequest, token: Optional[str] = None, current_username: Optional[str] = None, current_user_id: Optional[str] = None):
         """构建复合过滤查询（含排序），供列表查询与纯计数（角标）共用。"""
         query = select(Ticket).where(Ticket.id.isnot(None))
 
@@ -928,6 +949,10 @@ class TicketService:
             'principalBy': (None, 'principal'),
             # 代理关系状态：pending / acknowledged / declined
             'proxyRelationStatus': (None, 'proxy_status'),
+            # 「我归档的」：走 archive_reports 表子查询，created_by 双键匹配
+            'archiveCreatedBy': (None, 'archive_creator'),
+            # 「待我审核」：走 archive_reports 表子查询，reviewer 双键匹配 + submit_status='submitted'
+            'archiveReviewerPending': (None, 'archive_reviewer_pending'),
         }
         # 注意：新增字段必须进白名单（不接受任意字段名），并在此处集中校验（见 _build_single_filter）。
 
@@ -937,7 +962,7 @@ class TicketService:
         DATETIME_OPS = {'gt', 'lt', 'ge', 'le', 'eq', 'ne', 'is_null', 'not_null'}
 
         for f in filter_request.filters:
-            query = await TicketService._apply_nested_filter(query, f, FIELD_MAPPING, NUMBER_OPS, TEXT_OPS, ENUM_OPS, DATETIME_OPS, token, current_username)
+            query = await TicketService._apply_nested_filter(query, f, FIELD_MAPPING, NUMBER_OPS, TEXT_OPS, ENUM_OPS, DATETIME_OPS, token, current_username, current_user_id)
 
         if filter_request.sorts:
             for sort in filter_request.sorts:
@@ -982,14 +1007,14 @@ class TicketService:
         return total_result.scalar_one()
 
     @classmethod
-    async def count_tickets(cls, db: AsyncSession, filter_request: TicketFilterRequest, token: Optional[str] = None, current_username: Optional[str] = None) -> int:
+    async def count_tickets(cls, db: AsyncSession, filter_request: TicketFilterRequest, token: Optional[str] = None, current_username: Optional[str] = None, current_user_id: Optional[str] = None) -> int:
         """纯计数：只统计复合过滤命中的总数，不取明细、不拼用户名（批量角标接口复用）。"""
-        query = await cls._build_filter_query(filter_request, token, current_username)
+        query = await cls._build_filter_query(filter_request, token, current_username, current_user_id)
         return await cls._count_by_query(db, query)
 
     @staticmethod
-    async def filter_tickets(db: AsyncSession, filter_request: TicketFilterRequest, token: Optional[str] = None, current_username: Optional[str] = None) -> Dict[str, Any]:
-        query = await TicketService._build_filter_query(filter_request, token, current_username)
+    async def filter_tickets(db: AsyncSession, filter_request: TicketFilterRequest, token: Optional[str] = None, current_username: Optional[str] = None, current_user_id: Optional[str] = None) -> Dict[str, Any]:
+        query = await TicketService._build_filter_query(filter_request, token, current_username, current_user_id)
 
         total = await TicketService._count_by_query(db, query)
 
@@ -1129,6 +1154,41 @@ class TicketService:
         elif ticket:
             # 未请求评论时也设空列表，避免序列化时触发 lazy load → MissingGreenlet
             set_committed_value(ticket, 'comments', [])
+
+        # ── 填充 current_archive_report（用于前端 archiving 状态下显示编辑入口 / 审核入口）──
+        if ticket:
+            try:
+                report_result = await db.execute(
+                    select(ArchiveReport)
+                    .where(ArchiveReport.task_id == ticket.id)
+                    .order_by(ArchiveReport.version.desc())
+                    .limit(1)
+                )
+                latest_report = report_result.scalar_one_or_none()
+                if latest_report:
+                    from app.modules.tasks.schemas.archive_report import ArchiveReportResponse
+                    report_resp = ArchiveReportResponse.model_validate(latest_report)
+                    ids_to_lookup = {
+                        latest_report.created_by,
+                        latest_report.updated_by,
+                        latest_report.reviewer,
+                    } - {None, ""}
+                    if ids_to_lookup:
+                        user_rows = (await db.execute(
+                            select(UserDB.id, UserDB.username, UserDB.name)
+                            .where(UserDB.id.in_(ids_to_lookup))
+                        )).all()
+                        user_map = {row.id: (row.name or row.username or row.id) for row in user_rows}
+                        report_resp.created_by_name = user_map.get(latest_report.created_by)
+                        report_resp.updated_by_name = user_map.get(latest_report.updated_by)
+                        report_resp.reviewer_name = user_map.get(latest_report.reviewer)
+                    ticket.current_archive_report = report_resp
+                else:
+                    ticket.current_archive_report = None
+            except Exception as _archive_err:
+                logger.warning(f"填充 current_archive_report 失败 task_id={ticket_id}: {_archive_err}")
+                ticket.current_archive_report = None
+
         return ticket
 
     @staticmethod
