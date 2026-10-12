@@ -39,6 +39,10 @@ const FOLLOWED_KEY = 'call.history.followedOnly';
 
 const makeTicket = (over: Partial<AiTicketBrief> = {}): AiTicketBrief => ({
   id: 101,
+  // session_id 是 AiTicketBrief 的必填字段（后端 metadata_info.session_id，无会话时为空串）：
+  // 缺了它、再 spread Partial<AiTicketBrief>，会让推导出的对象类型把 session_id 放宽成可选，
+  // 于是 tsc -b 在打包阶段报 TS2322（vitest 走 esbuild 不做类型检查，拦不住）
+  session_id: 'sess-101',
   title: '机器人不动了',
   status: 'new',
   type: 'problem',
