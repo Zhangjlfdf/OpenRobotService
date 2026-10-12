@@ -29,6 +29,7 @@ from app.modules.tasks.schemas.archive_report import (
 from app.modules.tasks.schemas.ticket import TicketResponse
 from app.modules.tasks.api.ws import ws_broadcast_task_updated
 from app.modules.tasks.api.task import _add_system_comment
+from app.modules.tasks.services.ticket_service import TicketService
 
 logger = logging.getLogger(__name__)
 
@@ -131,9 +132,9 @@ async def archive_start(
     # 7) WS 广播
     await ws_broadcast_task_updated(task_id, task_new)
 
-    # 8) 刷新返回
-    await db.refresh(task_new)
-    return TicketResponse.model_validate(task_new)
+    # 8) 统一走 TicketService reload（自动带 comments + current_archive_report enrich）
+    ticket = await TicketService.get_ticket_by_id(db, task_id, load_comments=True, token=token)
+    return TicketResponse.model_validate(ticket)
 
 
 # ==================== 查询 / 读取 ====================
@@ -304,8 +305,8 @@ async def approve_report(
     # WS 广播
     await ws_broadcast_task_updated(report.task_id, task_new)
 
-    await db.refresh(task_new)
-    return TicketResponse.model_validate(task_new)
+    ticket = await TicketService.get_ticket_by_id(db, report.task_id, load_comments=True, token=token)
+    return TicketResponse.model_validate(ticket)
 
 
 # ==================== 审核驳回 ====================
