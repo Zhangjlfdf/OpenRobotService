@@ -8510,6 +8510,15 @@ html, body, #root {
   transition: all 0.2s ease;
 }
 .history-tab.is-active { background: var(--foreground); color: var(--background); border-color: transparent; font-weight: 500; }
+/* 「我关注的」开关：与状态 tab 同行但语义不同（可叠加状态筛选，不是互斥单选），
+   用星标图标 + 描边与状态 tab 区分；选中态沿用 .is-active 的黑底白字 */
+.history-tab--follow {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border-color: color-mix(in oklab, var(--border) 75%, transparent);
+}
+.history-tab--follow.is-active { border-color: transparent; }
 /* 数量角标：绝对定位到胶囊内部右上角（设计稿「右上角凸出 6px」会与外层
    .history-tickets{overflow:hidden} 冲突导致角标右边被裁切，看起来贴在胶囊右侧；
    改为紧贴胶囊右上角内侧，视觉一致且不再被裁）。pointer-events 透传点击到按钮。 */
