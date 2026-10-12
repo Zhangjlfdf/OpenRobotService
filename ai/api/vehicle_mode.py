@@ -35,7 +35,7 @@ _OPENING_LIMIT = 5
 
 
 def parse_fork_tree_choices(model: str, kb_root: Optional[Path] = None) -> List[str]:
-    """读 kb/company/{车型}/manual/ 下文件名含「分叉树」的 md，解析顶层 ## 标题。
+    """读 kb/company/{车型}/ 下文件名含「分叉树」的 md，解析顶层 ## 标题。
 
     只收**带数字序号前缀**的顶层节点（`## 1. xxx`）——分叉树大方向类目天然
     编号；「附：…」「待用户确认」等文档管理章节无序号，天然排除（v0.1 实测
@@ -46,7 +46,7 @@ def parse_fork_tree_choices(model: str, kb_root: Optional[Path] = None) -> List[
     sub = model_to_subpath(model)
     if not sub:
         return []
-    root = (kb_root or _default_kb_root()) / "company" / sub / "manual"
+    root = (kb_root or _default_kb_root()) / "company" / sub
     tree = None
     if root.is_dir():
         for f in sorted(root.glob("*.md")):
@@ -159,7 +159,7 @@ def model_to_subpath(model: str) -> str:
     """车型 → company 域下的知识库子目录名。XQE → XQE；未来新车型零改动。
 
     车型知识不建独立顶层域（0930 用户定稿）：kb/company/{车型}/ 入库归
-    company 域，payload sub_domain="{车型}/manual"，检索按此过滤。"""
+    company 域，payload sub_domain="{车型}"，检索按此过滤（车型目录平铺，无子层级）。"""
     return (model or "").strip().upper()
 
 
@@ -177,7 +177,7 @@ _GUIDE_DOC_KEYWORDS = ("分叉树", "故障码表")
 def list_manual_docs(model: str, kb_root: Optional[Path] = None,
                      media_prefix: str = "/api/ai/media",
                      exclude_guide_docs: bool = False) -> List[Dict[str, str]]:
-    """扫 kb/company/{车型}/manual/*.md 生成手册文档清单（title + 正文 URL）。
+    """扫 kb/company/{车型}/*.md 生成手册文档清单（title + 正文 URL）。
 
     exclude_guide_docs=True 时排除引导设施文档（分叉树/故障码表）——confirm
     响应的 manual_docs 用于 SOP 外显气泡，只出可在线查看的操作文档。
@@ -188,7 +188,7 @@ def list_manual_docs(model: str, kb_root: Optional[Path] = None,
     sub = model_to_subpath(model)
     if not sub:
         return []
-    root = (kb_root or _default_kb_root()) / "company" / sub / "manual"
+    root = (kb_root or _default_kb_root()) / "company" / sub
     if not root.is_dir():
         return []
     docs: List[Dict[str, str]] = []
@@ -197,8 +197,8 @@ def list_manual_docs(model: str, kb_root: Optional[Path] = None,
             continue
         docs.append({
             "title": f.stem,
-            "path": f"company/{sub}/manual/{f.name}",
-            "url": f"{media_prefix}/kb/company/{sub}/manual/{f.name}",
+            "path": f"company/{sub}/{f.name}",
+            "url": f"{media_prefix}/kb/company/{sub}/{f.name}",
         })
     return docs
 
