@@ -166,6 +166,47 @@ def test_collect_test_layout_unchanged(monkeypatch, tmp_path):
     assert c["layout"] == "standard"                     # test 保持原版面
 
 
+# ---------- 门禁非阻塞后的如实标注 ----------
+
+def test_gate_failed_steps_reads_outcomes(monkeypatch):
+    monkeypatch.delenv("PYTEST_OUTCOME", raising=False)
+    monkeypatch.delenv("VITEST_OUTCOME", raising=False)
+    assert notify.gate_failed_steps() == []               # 未跑（skipped）/ 未传都算正常
+    monkeypatch.setenv("PYTEST_OUTCOME", "success")
+    monkeypatch.setenv("VITEST_OUTCOME", "skipped")
+    assert notify.gate_failed_steps() == []
+    monkeypatch.setenv("VITEST_OUTCOME", "failure")
+    assert notify.gate_failed_steps() == ["vitest"]
+    monkeypatch.setenv("PYTEST_OUTCOME", "failure")
+    assert notify.gate_failed_steps() == ["pytest", "vitest"]
+
+
+def test_collect_marks_gate_failures_nonblocking(monkeypatch):
+    _base_env(monkeypatch)
+    monkeypatch.setenv("PYTEST_OUTCOME", "failure")
+    monkeypatch.setenv("VITEST_OUTCOME", "success")
+    monkeypatch.delenv("RELEASE_NOTES_FILE", raising=False)
+    c = notify.collect()
+    assert c["gate_failed"] == ["pytest"]
+    assert any("非阻塞放行" in a for a in c["alerts"])
+    assert "有失败用例（非阻塞放行）" in notify.build_markdown(c)["markdown_v2"]["content"]
+    assert "非阻塞放行" in notify.build_text(c)
+    card = notify.build_card(c)["template_card"]
+    keys = [row["keyname"] for row in card.get("horizontal_content_list", [])]
+    assert "测试门禁" in keys
+
+
+def test_collect_reports_gate_pass_when_clean(monkeypatch):
+    _base_env(monkeypatch)
+    monkeypatch.setenv("PYTEST_OUTCOME", "success")
+    monkeypatch.setenv("VITEST_OUTCOME", "success")
+    monkeypatch.delenv("RELEASE_NOTES_FILE", raising=False)
+    c = notify.collect()
+    assert c["gate_failed"] == []
+    md = notify.build_markdown(c)["markdown_v2"]["content"]
+    assert "✅ 已通过" in md and "有失败用例" not in md
+
+
 # ---------- 数据库结构栏（部署前置 schema 门禁的结果展示） ----------
 
 def test_schema_check_text_variants():
@@ -268,6 +309,11 @@ def test_render_failure_layout():
         "steps": list(notify.FAILURE_STEPS),
         "auto_rollback": True,
     })
+    assert png[:4] == b"\x89PNG" and len(png) <= 2 * 1024 * 1024
+
+
+def test_render_standard_layout_with_gate_failures():
+    png = _render("standard", {"gate_failed": ["pytest", "vitest"]})
     assert png[:4] == b"\x89PNG" and len(png) <= 2 * 1024 * 1024
 
 
