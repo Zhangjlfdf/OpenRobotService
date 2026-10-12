@@ -10,7 +10,6 @@
 """
 
 import re
-from typing import Optional
 
 from ai.core.logging import get_logger
 from ai.agents.AiTaskPlatform.schemas import TaskContext
