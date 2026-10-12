@@ -207,6 +207,51 @@ def test_collect_reports_gate_pass_when_clean(monkeypatch):
     assert "✅ 已通过" in md and "有失败用例" not in md
 
 
+# ---------- 数据库结构栏（部署前置 schema 门禁的结果展示） ----------
+
+def test_schema_check_text_variants():
+    base = {"schema_mode": "", "schema_summary": "", "schema_blocked": False}
+    assert notify.schema_check_text(base) == ""                    # 未涉及后端：不占版面
+    assert notify.schema_check_text({**base, "schema_mode": "off"}) == "⏭️ 已跳过（off）"
+    assert notify.schema_check_text(
+        {**base, "schema_mode": "sync", "schema_summary": "库=x 缺列=0"}) == "✅ 库=x 缺列=0"
+    assert notify.schema_check_text(                                # 因结构中止：优先红色告警文案
+        {**base, "schema_mode": "check", "schema_summary": "库=x 缺列=2", "schema_blocked": True}
+    ) == "❌ 库=x 缺列=2"
+
+
+def test_collect_schema_blocked_adds_alert(monkeypatch):
+    _base_env(monkeypatch)
+    monkeypatch.setenv("NOTIFY_STATUS", "failure")
+    monkeypatch.setenv("SCHEMA_MODE", "check")
+    monkeypatch.setenv("SCHEMA_SUMMARY", "库=helpdesk_724 缺列=1 需人工=1")
+    monkeypatch.setenv("SCHEMA_BLOCKED", "yes")
+    c = notify.collect()
+    assert c["schema_blocked"] is True
+    assert c["schema_summary"] == "库=helpdesk_724 缺列=1 需人工=1"
+    assert any("数据库结构落后于新代码" in a for a in c["alerts"])
+
+
+def test_render_standard_with_schema_row():
+    png = _render("standard", {
+        "schema_mode": "sync",
+        "schema_blocked": False,
+        "schema_summary": "库=helpdesk_test 缺列=0 缺索引=0 可自动=0 需人工=0 已补=1",
+    })
+    assert png[:4] == b"\x89PNG"
+
+
+def test_render_standard_schema_blocked():
+    png = _render("standard", {
+        "ok": False,
+        "title": "部署失败",
+        "schema_mode": "check",
+        "schema_blocked": True,
+        "schema_summary": "库=helpdesk_724 缺列=2 需人工=1",
+    })
+    assert png[:4] == b"\x89PNG"
+
+
 # ---------- markdown / 纯文本降级时附带发布说明 ----------
 
 def test_markdown_and_text_carry_notes(monkeypatch, tmp_path):

@@ -349,6 +349,8 @@ export interface AiTicketBrief {
   source?: string;
   // 二次派单感知增强（M3）：派单结果提醒一句话摘要（无提醒为 null/undefined）
   redispatch_tip?: string | null;
+  // 当前登录用户是否已关注本工单（卡片星标）：由后端按 viewer 回填，未传 viewer 时恒为 false
+  is_followed?: boolean;
   // 代他人提单（代理提单）：关系状态 + 当前用户视角标记 + 参与人姓名。
   // 视角标记由后端按 token 身份判定（前端不自行拼判定）；姓名对非参与人为 null。
   proxy_relation_status?: 'pending' | 'acknowledged' | 'declined' | null;
@@ -376,6 +378,8 @@ export interface AiTicketListFilters {
   keyword?: string;         // 模糊搜索标题/描述
   username?: string;        // 按创建者用户名过滤
   exclude_status?: string;  // 排除的状态，逗号分隔（如 closed）
+  viewer?: string;          // 当前登录用户 username：关注态回填 +「我关注的」筛选（与 username 解耦）
+  followed?: boolean;       // 只看 viewer 关注的工单（「我关注的」）
 }
 
 /** 历史工单列表（GET /api/ai/memory/tickets/all） */
@@ -386,6 +390,8 @@ export const qaListTickets = (skip = 0, limit = 50, filters?: AiTicketListFilter
   if (filters?.keyword) params.keyword = filters.keyword;
   if (filters?.username) params.username = filters.username;
   if (filters?.exclude_status) params.exclude_status = filters.exclude_status;
+  if (filters?.viewer) params.viewer = filters.viewer;
+  if (filters?.followed) params.followed = 'true';
   return aiGet<{
     code: number;
     data?: {
