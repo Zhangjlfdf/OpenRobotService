@@ -4061,6 +4061,15 @@ class AiDiagnosisPlatform:
                 if v_sq not in c_sq:
                     rejected.append((k, f"value 不在 cite 原句中: value='{v_raw[:30]}'"))
                     continue
+                # ③（1012 bug2）：value 是问题概述的子串 = 用户只说了结论没给细节
+                # （「预填异常的具体表现」答「项目预填有问题」——value 就是概述里的
+                # 短语）→ 视为未回答，字段留空走追问一轮。溯源门 ①② 挡不住这类：
+                # 原话结论句永远能过 cite 校验。误杀面：合法细节值（车辆编号等）
+                # 偶尔恰好也被概述包含——后果只是多问一轮，宁缺勿错同款纪律。
+                _ps = _squash(str(getattr(agent_state, "problem_summary", "") or ""))
+                if _ps and v_sq in _ps:
+                    rejected.append((k, f"value 是问题概述的复述（未给细节）: 「{v_raw[:40]}」"))
+                    continue
                 agent_state.collected_info[k] = v_raw
                 filled.append(k)
             for rk, rreason in rejected:
