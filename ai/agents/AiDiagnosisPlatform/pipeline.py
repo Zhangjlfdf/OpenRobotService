@@ -921,6 +921,31 @@ def _ticket_visible_to(ticket, username: str) -> bool:
     return bool(row) and str(row[0]) in (owner, assignee)
 
 
+def _format_recent_comments(comments, umap: dict, limit: int = 10,
+                            body_chars: int = 200) -> list[str]:
+    """最近 limit 条评论 → 【作者】正文（按时间正序）。
+
+    ORM 的 comments 关系是「新→旧」，这里取最近 limit 条后反转成正序，LLM 按对话顺序读。
+
+    TaskComment 模型**没有 created_by_name 列**（那是后端 API 的派生字段），必须用
+    users 映射（id/username → 姓名）自己还原；否则每条都渲染成 【】正文，
+    LLM 分不清哪句话是谁说的。
+
+    刻意不复用 AiTaskPlatform.contexts.comments.load_discussion 的渲染：两个 agent
+    零交叉依赖，且诊断入口后续可能要对人物信息脱敏，届时两边口径会分叉。umap 就是
+    这个注入点——脱敏在此变换映射即可，不必动渲染逻辑。
+    """
+    out = []
+    for c in list(comments or [])[:limit][::-1]:
+        body = re.sub(r"[ \t]+\n", "\n", str(getattr(c, "content", "") or "")).strip()
+        if not body:
+            continue
+        raw = str(getattr(c, "created_by", "") or "").strip()
+        who = (umap or {}).get(raw, raw) if raw else "?"
+        out.append(f"【{who}】{body[:body_chars]}")
+    return out
+
+
 async def _lookup_ticket_ref(ref_text: str, created_by: str = "") -> str:
     """用户指代的工单号（#595 / 工单595）→ 工单摘要（复用 backend TicketService）。
 
@@ -973,12 +998,7 @@ async def _lookup_ticket_ref(ref_text: str, created_by: str = "") -> str:
             if desc:
                 parts.append(desc[:600] + ("…" if len(desc) > 600 else ""))
             # 评论倒序返回 → 取最近 10 条反转为正序，LLM 按对话顺序读
-            for c in list(t.comments or [])[:10][::-1]:
-                body = re.sub(r"[ \t]+\n", "\n", str(c.content or "")).strip()
-                if not body:
-                    continue
-                who = str(getattr(c, "created_by_name", "") or "").strip()
-                parts.append(f"【{who}】{body[:200]}")
+            parts.extend(_format_recent_comments(t.comments, _umap))
             return "\n".join(parts)[:1800]
     except Exception as e:
         logger.warning(f"[ticket_ref] 查询用户指代的工单失败: ref={ref_text!r}, err={e}")

@@ -43,7 +43,7 @@ def load_quoted_comment(comment_id) -> dict:
             return {}
         return {
             "id": c.id,
-            "author": getattr(c, "created_by", None) or "?",
+            "author": author_display_name(getattr(c, "created_by", None)),
             "content": c.content or "",
         }
     except Exception as e:
@@ -133,6 +133,48 @@ def render_comment_lines(comments: list, *, per_comment: int | None = None) -> l
     return lines
 
 
+def _author_display_map() -> dict:
+    """created_by → 显示名映射。
+
+    TaskComment 模型没有 created_by_name 列（后端 API 的 created_by_name 是派生
+    字段），created_by 存的是 users.id 或 username；微信用户的 username 形如
+    wechat_{openid[:10]}（见 wechat/utils/crypto.generate_wechat_username），只有
+    这张映射能还原成真实姓名。复用后端 user_service 的进程内缓存（TTL 600s），
+    加载失败时降级为「不还原」，不影响讨论史读取。
+    """
+    try:
+        from app.services.user_service import user_service
+        return user_service.get_user_map() or {}
+    except Exception as e:
+        logger.warning(f"[discuss] 加载用户姓名映射失败，讨论史显示原始ID: {e}")
+        return {}
+
+
+def author_display_name(raw_author, name_map: dict | None = None) -> str:
+    """把 created_by（users.id 或 username）还原成显示名；未命中或为空则原样返回。
+
+    微信用户的 created_by 形如 wechat_{openid[:10]}，不还原就会被模型当成陌生人，
+    于是出现「应该是另一个人，可能是产品/研发」这类猜测，并可能被自评判为幻构。
+    """
+    if not raw_author:
+        return "?"
+    if name_map is None:
+        name_map = _author_display_map()
+    return name_map.get(raw_author, raw_author)
+
+
+def _rows_from_comments(comments: list, name_map: dict) -> list[dict]:
+    """ORM 评论行 → {author, content}，author 还原为真实姓名。"""
+    rows = []
+    for c in comments or []:
+        raw = getattr(c, "created_by", None) or "?"
+        rows.append({
+            "author": (name_map or {}).get(raw, raw),
+            "content": getattr(c, "content", "") or "",
+        })
+    return rows
+
+
 def load_ticket_comment_rows(task_id: str) -> list[dict]:
     """读取这张工单的全部讨论评论（从早到晚），返回原文行，不做长度裁剪。"""
     from app.models.task import TaskComment
@@ -153,13 +195,7 @@ def load_ticket_comment_rows(task_id: str) -> list[dict]:
     except Exception as e:
         logger.warning(f"[discuss] 读取工单讨论史失败 task={task_id}: {e}")
         return []
-    rows = []
-    for c in comments:
-        rows.append({
-            "author": getattr(c, "created_by_name", None) or getattr(c, "created_by", None) or "?",
-            "content": getattr(c, "content", "") or "",
-        })
-    return rows
+    return _rows_from_comments(comments, _author_display_map())
 
 
 def load_ticket_discussion(task_id: str) -> str:
@@ -187,9 +223,10 @@ def load_discussion(task_id: str, limit: int = 20) -> str:
     except Exception:
         return ""
 
+    name_map = _author_display_map()
     lines = []
     for c in comments:
-        author = getattr(c, 'created_by_name', None) or getattr(c, 'created_by', None) or "?"
+        author = author_display_name(getattr(c, 'created_by', None), name_map)
         content = str(getattr(c, 'content', "") or "")[:300]
         if not content.strip():
             continue
