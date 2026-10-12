@@ -116,6 +116,8 @@ const TicketDetailPage = lazyImport(() => import('@/pages/call/TicketDetailPage'
 const TasksView = lazyImport(() => import('@/pages/tasks/TasksView'));
 const TaskDetailPage = lazyImport(() => import('@/pages/tasks/TaskDetailPage'));
 const OperationLogsPage = lazyImport(() => import('@/pages/tasks/OperationLogsPage'));
+// 我的历史奖励（微信商家转账 · 提现入口）：直挂根路由，保留底部 Tab 可点
+const MyRewards = lazyImport(() => import('@/pages/rewards/MyRewards'));
 
 const Dashboard = lazyImport(() => import('@/pages/admin/Dashboard'));
 // 工单数据看板：工单监测/类型分布/接单人响应时间三张看板（首页「工单数据看板」小节的「其他数据统计」进入）
@@ -201,6 +203,8 @@ const router = createBrowserRouter([
           { path: 'tasks', element: <TasksView /> },
           { path: 'tasks/:id', element: <TaskDetailPage /> },
           { path: 'tasks/:id/operations', element: <OperationLogsPage /> },
+          // 我的历史奖励（微信商家转账 · 立即提现）
+          { path: 'rewards', element: <MyRewards /> },
           // 责任模块树（临时）：从系统任务入口进入，绕开依赖微信后台壳
           { path: 'module-tree', element: <ModuleTreeManage /> },
           {
