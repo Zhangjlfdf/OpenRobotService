@@ -2356,8 +2356,12 @@ class AiDiagnosisPlatform:
         5 分钟缓存；任何失败返回 []（闸自动失效 = 维持旧行为，不阻塞预填）。
         """
         now = time.time()
-        if _ALL_PROJECT_NAMES_CACHE and now < _ALL_PROJECT_NAMES_CACHE[0]:
-            return _ALL_PROJECT_NAMES_CACHE[1]
+        # 缓存是单条目列表 [(expires_at, names)]（见模块顶部声明），故时间戳是 [0][0]、
+        # 名单是 [0][1]。曾经写成 _ALL_PROJECT_NAMES_CACHE[0] 当时间戳用，拿到的是元组，
+        # `now(float) < tuple` 直接抛 TypeError——表现为进程内第一次调用正常、之后
+        # 5 分钟内每次调用都抛，被 _plan_tools 兜底成 diagnosis，意图路由与项目预填全丢。
+        if _ALL_PROJECT_NAMES_CACHE and now < _ALL_PROJECT_NAMES_CACHE[0][0]:
+            return _ALL_PROJECT_NAMES_CACHE[0][1]
         from ai.core.database import SessionLocal
         from sqlalchemy import text
         loop = asyncio.get_running_loop()
