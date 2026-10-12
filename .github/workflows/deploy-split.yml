@@ -283,7 +283,7 @@ jobs:
           set -euo pipefail
           missing=""
           for flag in --yes --remote-tmp --backup-keep --health-urls --rollback \
-                      --list-backups --build-artifacts --from-artifacts; do
+                      --list-backups --build-artifacts --from-artifacts --schema-mode; do
             grep -q -- "$flag" deploy/deploy.py || missing="$missing $flag"
           done
           if [ -n "$missing" ]; then
@@ -372,6 +372,8 @@ jobs:
           # notify_image.py + assets/fonts 供 NOTIFY_STYLE=image 渲染通知图（约 4.6MB 字体）。
           mkdir -p _artifacts/deploy
           cp deploy/deploy.py deploy/notify.py deploy/notify_image.py _artifacts/deploy/
+          # 数据库结构校验脚本：部署前置门禁由 deploy.py 从同目录调用
+          cp backend/scripts/schema_sync.py _artifacts/deploy/
           cp -r deploy/assets _artifacts/deploy/assets
           # 发布说明：prod 部署成功时通知「更新日志」卡片的内容来源（缺失不阻断构建，
           # 此时 notify.py 会自动退回默认版面）
@@ -547,8 +549,16 @@ jobs:
           GIT_SHA: ${{ needs.plan.outputs.git_sha }}
           BACKUP_KEEP: ${{ needs.plan.outputs.backup_keep }}
           HEALTH_URLS: ${{ needs.plan.outputs.health_urls }}
+          SCHEMA_MODE_OVERRIDE: ${{ vars.DEPLOY_SCHEMA_MODE }}
         run: |
           set -o pipefail
+          # 数据库结构处理模式：仓库 variable DEPLOY_SCHEMA_MODE 可覆盖（off/check/sync）。
+          # 默认 test 自动补列（sync）、prod 只读校验（check）——先观察 prod 误报率再放开。
+          schema_mode="${SCHEMA_MODE_OVERRIDE:-}"
+          if [ -z "$schema_mode" ]; then
+            if [ "$ENV_NAME" = "prod" ]; then schema_mode="check"; else schema_mode="sync"; fi
+          fi
+          echo "数据库结构模式：$schema_mode"
           python3 _artifacts/deploy/deploy.py \
             --from-artifacts _artifacts \
             -e "$ENV_NAME" -c "$COMPONENTS" \
@@ -558,14 +568,21 @@ jobs:
             --backup-keep "$BACKUP_KEEP" \
             --health-urls "$HEALTH_URLS" \
             --health-retries 20 \
-            --health-interval 3 2>&1 | tee deploy.log
+            --health-interval 3 \
+            --schema-mode "$schema_mode" 2>&1 | tee deploy.log
           rc=$?
           backup_id=$(grep -oE 'DEPLOY_BACKUP_ID=[0-9a-z-]+' deploy.log | tail -n1 | cut -d= -f2 || true)
           auto_rollback="no"
           if grep -q "已自动回滚" deploy.log; then auto_rollback="yes"; fi
+          schema_summary=$(grep -oE 'DEPLOY_SCHEMA_SUMMARY=.*' deploy.log | tail -n1 | cut -d= -f2- || true)
+          schema_blocked="no"
+          if grep -q "库结构落后于代码" deploy.log; then schema_blocked="yes"; fi
           {
             echo "DEPLOY_BACKUP_ID=$backup_id"
             echo "DEPLOY_AUTO_ROLLBACK=$auto_rollback"
+            echo "DEPLOY_SCHEMA_MODE=$schema_mode"
+            echo "DEPLOY_SCHEMA_SUMMARY=$schema_summary"
+            echo "DEPLOY_SCHEMA_BLOCKED=$schema_blocked"
           } >> "$GITHUB_ENV"
           exit "$rc"
 
@@ -586,6 +603,14 @@ jobs:
           if [ "$SKIP_GATE" = "true" ]; then gate_label="**已跳过（紧急）**"; fi
           rollback_label="否"
           if [ "$auto_rollback" = "yes" ]; then rollback_label="**是（健康检查未通过，已回滚）**"; fi
+          schema_info="${DEPLOY_SCHEMA_SUMMARY:-（本次未涉及后端）}"
+          case "${DEPLOY_SCHEMA_MODE:-}" in
+            off) schema_info="已跳过（--schema-mode off）" ;;
+            "") schema_info="（本次未涉及后端）" ;;
+          esac
+          if [ "${DEPLOY_SCHEMA_BLOCKED:-no}" = "yes" ]; then
+            schema_info="**$schema_info —— 已中止部署**"
+          fi
           {
             echo "### 部署结果：$JOB_STATUS"
             echo ""
@@ -596,6 +621,7 @@ jobs:
             echo "| 组件 | \`$COMPONENTS\` |"
             echo "| 分支 | \`$GIT_REF\` @ \`${COMMIT_SHA:0:8}\` |"
             echo "| 测试门禁 | $gate_label |"
+            echo "| 数据库结构 | $schema_info |"
             echo "| 部署前备份 | \`$backup_id\` |"
             echo "| 自动回滚 | $rollback_label |"
             echo ""
@@ -653,6 +679,10 @@ jobs:
           COMMIT_SHA: ${{ needs.plan.outputs.git_sha }}
           SKIP_GATE: ${{ needs.plan.outputs.skip_gate }}
           AUTO_ROLLBACK: ${{ env.DEPLOY_AUTO_ROLLBACK }}
+          # 数据库结构处理结果：通知卡片据此展示「自动补列 / 已中止」等状态
+          SCHEMA_MODE: ${{ env.DEPLOY_SCHEMA_MODE }}
+          SCHEMA_SUMMARY: ${{ env.DEPLOY_SCHEMA_SUMMARY }}
+          SCHEMA_BLOCKED: ${{ env.DEPLOY_SCHEMA_BLOCKED }}
           ACTOR: ${{ github.actor }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: python3 _artifacts/deploy/notify.py
