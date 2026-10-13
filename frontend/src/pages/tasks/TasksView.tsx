@@ -927,23 +927,10 @@ export default function TasksView() {
   // 关系图构建（graph 内已做 number→string id 归一、DONE 终态判断）
   // flatRefs 只用于扁平视图，用当前页 tickets；rows 用于关系视图，all + visible 都用合并后的 allTickets
   const flatRefs = useMemo(() => buildFlatRefs(tickets, tickets), [tickets]);
-  const rows = useMemo(() => {
-    const r = buildRelationRows(allTickets, allTickets, collapsed);
-    // eslint-disable-next-line no-console
-    console.log('[RelationList] rows:', r.map((x) => ({
-      id: x.ticket.id, parent_id: x.ticket.parent_id, depth: x.depth,
-      childCount: x.childCount, childDone: x.childDone, arrowFromPrev: x.arrowFromPrev,
-      dep: x.ref ? {
-        prev: x.ref.prev ? x.ref.prev.id : null,
-        prevMore: x.ref.prevMore,
-        next: x.ref.next ? x.ref.next.id : null,
-        nextMore: x.ref.nextMore,
-      } : null,
-      predecessor_ids: x.ticket.predecessor_ids,
-    })));
-    console.log('[RelationList] allTickets ids:', allTickets.map((t) => `${t.id}(parent=${t.parent_id ?? 'null'}, pred=[${(t.predecessor_ids ?? []).join(',')}])`));
-    return r;
-  }, [allTickets, collapsed]);
+  const rows = useMemo(
+    () => buildRelationRows(allTickets, allTickets, collapsed),
+    [allTickets, collapsed],
+  );
 
   // username / user_id → avatar_resource_id 查找表：用于工单卡片创建人/处理人头像渲染。
   // 缺失权限（backend:user:base:read）或网络失败时静默回退为首字母头像。
