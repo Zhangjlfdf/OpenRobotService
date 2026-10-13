@@ -120,12 +120,19 @@ const parseFilterFromUrl = (params: URLSearchParams) => {
     const parsed = rawType.split(',').map((s) => s.trim()).filter(Boolean);
     typeFilter = parsed.length > 0 ? parsed : [...ALL_TYPE_VALUES];
   }
+  // 归档分类在 URL 中出现时，也默认覆盖 statusFilter，与面板行为一致
+  const rawRelevance = params.get('relevance') || 'mine';
+  if (rawRelevance === 'archive_mine' && rawStatus === null) {
+    statusFilter = ['archiving', 'archived'];
+  } else if (rawRelevance === 'archive_review' && rawStatus === null) {
+    statusFilter = ['archiving'];
+  }
   return {
     search: params.get('q') || '',
     statusFilter,
     priorityFilter,
     typeFilter,
-    relevanceFilter: params.get('relevance') || 'mine',
+    relevanceFilter: rawRelevance,
     // 项目过滤：空数组表示「全部」（不过滤）；URL 为逗号分隔项目 id（兼容旧的单 id）
     projectFilter: (params.get('project') || '').split(',').map((s) => s.trim()).filter(Boolean),
     // 处理人过滤：空字符串表示「全部」（不过滤）；值为处理人 username
@@ -1368,7 +1375,18 @@ export default function TasksView() {
   ];
 
   const handleRelevanceChange = (value: string) => {
+    const prevArchiveRelated = relevanceFilter === 'archive_mine' || relevanceFilter === 'archive_review';
+    const nextArchiveRelated = value === 'archive_mine' || value === 'archive_review';
     setRelevanceFilter(value);
+    // 归档分类同步覆盖状态筛选，保持筛选面板状态与查询一致
+    if (value === 'archive_mine') {
+      setStatusFilter(['archiving', 'archived']);
+    } else if (value === 'archive_review') {
+      setStatusFilter(['archiving']);
+    } else if (prevArchiveRelated && !nextArchiveRelated) {
+      // 从归档分类切回普通分类时，恢复默认状态筛选，避免归档状态把普通查询结果清空
+      setStatusFilter([...DEFAULT_STATUS_VALUES]);
+    }
     setPage(1);
   };
 
