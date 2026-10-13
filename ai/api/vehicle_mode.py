@@ -34,6 +34,27 @@ _OPENING_KEEP_SUBSTR = "故障码"   # 保底类目（重要大类，随机时�
 _OPENING_LIMIT = 5
 
 
+def parse_vehicle_intro_options(model: str, kb_root: Optional[Path] = None) -> List[str]:
+    """扫 kb/company/{车型}/ 下的车型详情页（XQE122.md / XQE151.md 形态），
+    生成开场「车型介绍」选项文案（如「XQE122 车型介绍」）。
+
+    新增型号详情页文件即自动出现在开场引导，零代码改动。无详情页 → []
+    （开场题自动退化为纯故障类引导）。kb_root 参数供测试注入临时目录。
+    """
+    sub = model_to_subpath(model)
+    if not sub:
+        return []
+    root = (kb_root or _default_kb_root()) / "company" / sub
+    if not root.is_dir():
+        return []
+    out = []
+    for f in sorted(root.glob("*.md")):
+        m = re.fullmatch(r"([A-Z]+\d+)", f.stem)
+        if m:
+            out.append(f"{m.group(1)} 车型介绍")
+    return out
+
+
 def parse_fork_tree_choices(model: str, kb_root: Optional[Path] = None) -> List[str]:
     """读 kb/company/{车型}/ 下文件名含「分叉树」的 md，解析顶层 ## 标题。
 
@@ -71,19 +92,23 @@ def parse_fork_tree_choices(model: str, kb_root: Optional[Path] = None) -> List[
     return out
 
 
-def build_opening(top_levels: List[str], rng: Optional[random.Random] = None) -> Optional[Dict]:
-    """开场题数据：故障码类保底 + 其余随机抽满 5（0930 定稿）。
+def build_opening(top_levels: List[str], intro_options: Optional[List[str]] = None,
+                  rng: Optional[random.Random] = None) -> Optional[Dict]:
+    """开场题数据：车型介绍选项固定保底 + 故障码类保底 + 其余随机抽满 5（1012）。
 
-    随机是用户拍板（固定前 5 会让其余类永无曝光）；故障码是重要大类保底
-    不随机。不足 2 类不出题（None）。
+    intro_options（如「XQE122 车型介绍」）是车型基础信息引导入口，固定出现
+    不随机、排最前（车型引导是定制会话的基础能力，用户拍板 1012）；故障码是
+    重要大类保底不随机；其余类随机（固定前 5 会让其余类永无曝光，0930 拍板）。
+    可用选项（intro+类目）不足 2 不出题（None）。
     """
-    if not top_levels:
+    if not top_levels and not intro_options:
         return None
     rng = rng or random
+    intro = list(intro_options or [])
     keep = [c for c in top_levels if _OPENING_KEEP_SUBSTR in c]
     rest = [c for c in top_levels if _OPENING_KEEP_SUBSTR not in c]
     rng.shuffle(rest)
-    choices = (keep + rest)[:_OPENING_LIMIT]
+    choices = (intro + keep + rest)[:_OPENING_LIMIT]
     if len(choices) < 2:
         return None
     return {"question": OPENING_QUESTION, "choices": choices, "hint": OPENING_HINT}
@@ -255,7 +280,8 @@ async def register_mode(req: ModeConfirmRequest,
     memory = await mm.get_memory(req.session_id)
     # SOP 外显清单：排除引导设施文档（分叉树/故障码表的入口在对话里）
     manual_docs = list_manual_docs(vehicle.model, exclude_guide_docs=True)
-    opening = build_opening(parse_fork_tree_choices(vehicle.model))
+    opening = build_opening(parse_fork_tree_choices(vehicle.model),
+                            parse_vehicle_intro_options(vehicle.model))
     if opening:
         # 开场类目随模式入 metadata：pipeline 识别「用户点开场气泡」（query
         # == 类目原文）做零 LLM 短接，不必再读分叉树文件

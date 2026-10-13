@@ -358,3 +358,43 @@ async def test_register_mode_opening_none_without_tree(vehicle_db, kb_tmp, mock_
     resp = await vm.register_mode(_make_request(), memory_manager=mock_memory)
     assert resp["code"] == 0
     assert resp["data"]["opening"] is None
+
+
+# ================================================================
+# 车型介绍开场选项（1012）
+# ================================================================
+
+def test_parse_intro_options_scans_model_pages(tmp_path):
+    from ai.api.vehicle_mode import parse_vehicle_intro_options
+
+    xqe = tmp_path / "company" / "XQE"
+    xqe.mkdir(parents=True)
+    (xqe / "XQE122.md").write_text("# x", encoding="utf-8")
+    (xqe / "XQE151.md").write_text("# x", encoding="utf-8")
+    (xqe / "05_车型概览.md").write_text("# x", encoding="utf-8")   # 非型号页排除
+    (xqe / "90_问题清单分类.md").write_text("# x", encoding="utf-8")
+
+    assert parse_vehicle_intro_options("XQE", kb_root=tmp_path) == \
+        ["XQE122 车型介绍", "XQE151 车型介绍"]
+    assert parse_vehicle_intro_options("XQE", kb_root=tmp_path / "nope") == []
+
+
+def test_build_opening_intro_fixed_first():
+    from ai.api.vehicle_mode import build_opening
+
+    cats = ["1. 界面报故障码"] + [f"{i}. 类目{i}" for i in range(2, 9)]
+    op = build_opening(cats, intro_options=["XQE122 车型介绍", "XQE151 车型介绍"],
+                       rng=__import__("random").Random(1))
+    # 车型介绍固定排最前且必出现（引导期主推）
+    assert op["choices"][:2] == ["XQE122 车型介绍", "XQE151 车型介绍"]
+    assert "故障码" in op["choices"][2]              # 故障码保底次之
+    assert len(op["choices"]) == 5
+
+
+def test_build_opening_no_intro_behavior_unchanged():
+    from ai.api.vehicle_mode import build_opening
+
+    cats = ["1. 故障码", "2. 取货失败", "3. 卸货异常", "4. 堆叠失败", "5. 充电异常", "6. 车体异常"]
+    op = build_opening(cats, rng=__import__("random").Random(1))
+    assert op["choices"][0] == "1. 故障码"            # 无 intro 时故障码保底排首（原行为）
+    assert len(op["choices"]) == 5
