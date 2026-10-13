@@ -10,10 +10,10 @@ from sqlalchemy.orm.attributes import set_committed_value
 from starlette.concurrency import run_in_threadpool
 
 from app.modules.tasks.models.ticket import Ticket, TicketComment, TicketStatus, TicketPriority, TicketType
-from app.models.task import TaskFollower, TaskParticipant, TaskStep, ArchiveReport
+from app.models.task import TaskFollower, TaskParticipant, TaskRelation, RelationType, TaskStep, ArchiveReport
 from app.models.task_proxy_relation import TaskProxyRelation, ProxyRelationStatus
 from app.models.identity import UserDB
-from app.modules.tasks.schemas.ticket import TicketCreate, TicketUpdate, TicketCommentCreate, TicketCommentUpdate, TicketQueryParams, TicketFilterRequest, QuotedComment
+from app.modules.tasks.schemas.ticket import TicketCreate, TicketUpdate, TicketCommentCreate, TicketCommentUpdate, TicketQueryParams, TicketFilterRequest, TicketListItemResponse, QuotedComment
 from app.core.config import settings
 from app.utils.notification_utils import NotificationUtils
 from app.utils.image_processor import ImageProcessor
@@ -708,6 +708,13 @@ class TicketService:
         for ticket in tickets:
             setattr(ticket, "redispatch_tip", tip_map.get(ticket.id))
 
+        # 父子工单 / 前置依赖关系：批量注入 parent_id、predecessor_ids、child_count、child_done
+        extra_tickets = await TicketService._attach_relation_fields(
+            db, tickets, with_relations=query_params.with_relations, user_map=user_map, token=token,
+        )
+
+        related_items = [TicketListItemResponse.model_validate(t) for t in extra_tickets]
+
         pages = (total + size - 1) // size
 
         return {
@@ -715,8 +722,106 @@ class TicketService:
             "total": total,
             "page": page,
             "size": size,
-            "pages": pages
+            "pages": pages,
+            "related_tickets": related_items,
         }
+
+    @staticmethod
+    async def _attach_relation_fields(
+        db: AsyncSession,
+        tickets: list,
+        with_relations: bool = False,
+        user_map: Optional[Dict[str, Any]] = None,
+        token: Optional[str] = None,
+    ) -> list:
+        """批量注入父子工单 / 前置依赖关系字段（避免 N+1）。
+
+        同时被 get_tickets（GET /）和 filter_tickets（POST /filter）调用。
+
+        :param with_relations: 若为 True，会额外查出"在关联表中存在但不在当前页 tickets 里"
+                               的工单，返回它们的 ORM 列表（供调用方组装 related_tickets）；
+                               False 时仅回填字段并返回空列表，省掉额外查询。
+        :param user_map:       可选，用于给 extra_tickets 回填 created_by_name / assigned_to_name
+                               等展示字段，便于直接 model_validate 为 TicketListItemResponse。
+        :param token:          可选，user_map 缺失时回退调用 _get_user_map。
+        """
+        ticket_ids = [t.id for t in tickets]
+        parent_of = {}              # child_id -> parent_id
+        predecessor_map = {}        # ticket_id -> [target_task_id]
+        child_count_map = {}        # parent_id -> int
+        child_of_parent = {}        # parent_id -> [child_id, ...]（用于后续查 child_done）
+        relations = []
+        if ticket_ids:
+            rel_stmt = select(TaskRelation).where(
+                TaskRelation.relation_type.in_([RelationType.SUBTASK, RelationType.PREDECESSOR])
+            ).where(
+                or_(TaskRelation.source_task_id.in_(ticket_ids), TaskRelation.target_task_id.in_(ticket_ids))
+            )
+            rel_result = await db.execute(rel_stmt)
+            relations = rel_result.scalars().all()
+
+            child_ids_for_status = set()
+            for r in relations:
+                if r.relation_type == RelationType.SUBTASK:
+                    # 所有 relations 都进 map（不加 ticket_ids 限制）——这样 extra_tickets 里的关联工单
+                    # 也能拿到 parent_id / child_count / child_done，不用等 with_relations 才查
+                    parent_of[r.target_task_id] = r.source_task_id
+                    child_count_map[r.source_task_id] = child_count_map.get(r.source_task_id, 0) + 1
+                    child_of_parent.setdefault(r.source_task_id, []).append(r.target_task_id)
+                    child_ids_for_status.add(r.target_task_id)
+                elif r.relation_type == RelationType.PREDECESSOR:
+                    predecessor_map.setdefault(r.source_task_id, []).append(r.target_task_id)
+
+            child_done_map = {}
+            if child_ids_for_status:
+                status_stmt = select(Ticket.id, Ticket.status).where(Ticket.id.in_(list(child_ids_for_status)))
+                status_result = await db.execute(status_stmt)
+                child_status = dict(status_result.all())
+                done_statuses = {TicketStatus.RESOLVED, TicketStatus.CLOSED, TicketStatus.ARCHIVED}
+                for pid, cids in child_of_parent.items():
+                    child_done_map[pid] = sum(1 for cid in cids if child_status.get(cid) in done_statuses)
+
+        for ticket in tickets:
+            setattr(ticket, "parent_id", parent_of.get(ticket.id))
+            setattr(ticket, "predecessor_ids", predecessor_map.get(ticket.id, []))
+            setattr(ticket, "child_count", child_count_map.get(ticket.id, 0))
+            setattr(ticket, "child_done", child_done_map.get(ticket.id, 0))
+
+        # ── with_relations：把"关系里出现但不在当前页"的工单完整查出来 ──────────
+        if not with_relations or not relations:
+            return []
+
+        ticket_id_set = set(ticket_ids)
+        all_rel_ids = set()
+        for r in relations:
+            all_rel_ids.add(r.source_task_id)
+            all_rel_ids.add(r.target_task_id)
+        extra_ids = list(all_rel_ids - ticket_id_set)
+        if not extra_ids:
+            return []
+
+        extra_stmt = select(Ticket).where(Ticket.id.in_(extra_ids))
+        extra_result = await db.execute(extra_stmt)
+        extra_tickets = list(extra_result.scalars().all())
+
+        # extra_tickets 也需要展示字段，方便 model_validate 为 TicketListItemResponse
+        if user_map is None:
+            user_map = await TicketService._get_user_map(token)
+        for ticket in extra_tickets:
+            setattr(ticket, "created_by_name", user_map.get(ticket.created_by, ticket.created_by))
+            setattr(ticket, "reporter_name", user_map.get(ticket.created_by, ticket.created_by))
+            if ticket.assigned_to:
+                setattr(ticket, "assigned_to_name", user_map.get(ticket.assigned_to, ticket.assigned_to))
+                setattr(ticket, "assignee_name", user_map.get(ticket.assigned_to, ticket.assigned_to))
+            if ticket.customer:
+                setattr(ticket, "customer_name", user_map.get(ticket.customer, ticket.customer))
+            # 复用上面已构建的关系 map：extra_tickets.id 恰好在 map 的 key 或 value 里
+            setattr(ticket, "parent_id", parent_of.get(ticket.id))
+            setattr(ticket, "predecessor_ids", predecessor_map.get(ticket.id, []))
+            setattr(ticket, "child_count", child_count_map.get(ticket.id, 0))
+            setattr(ticket, "child_done", child_done_map.get(ticket.id, 0))
+
+        return extra_tickets
 
     @staticmethod
     async def _build_single_filter(query, f, FIELD_MAPPING, NUMBER_OPS, TEXT_OPS, ENUM_OPS, DATETIME_OPS, token, current_username=None, current_user_id=None):
@@ -1070,6 +1175,13 @@ class TicketService:
                 db, tickets, user_map, current_username
             )
 
+        # 父子工单 / 前置依赖关系：批量注入 parent_id、predecessor_ids、child_count、child_done
+        extra_tickets = await TicketService._attach_relation_fields(
+            db, tickets, with_relations=filter_request.with_relations, user_map=user_map, token=token,
+        )
+
+        related_items = [TicketListItemResponse.model_validate(t) for t in extra_tickets]
+
         pages = (total + size - 1) // size
 
         return {
@@ -1077,7 +1189,8 @@ class TicketService:
             "total": total,
             "page": page,
             "size": size,
-            "pages": pages
+            "pages": pages,
+            "related_tickets": related_items,
         }
 
     @staticmethod
