@@ -151,6 +151,18 @@ class TestAssignArchiveReviewer:
         assert result.reviewer_id == "rev_sw"
         assert "handler" not in result.candidate_ids
 
+    def test_excludes_ticket_related_ids(self):
+        result = assign_archive_reviewer(
+            title="调度任务阻塞无法下发",
+            operator_id="submitter",
+            exclude_ids=["rev_a", "assignee"],
+            load_counts={"rev_a": 0, "rev_b": 1},
+            config=CFG,
+            domain_hint="调度系统",
+        )
+        assert result.reviewer_id == "rev_b"
+        assert "rev_a" not in result.candidate_ids
+
     def test_domain_unknown(self):
         with pytest.raises(ArchiveReviewError) as ei:
             assign_archive_reviewer(
@@ -171,16 +183,31 @@ class TestAssignArchiveReviewer:
             )
         assert ei.value.code == "no_reviewers"
 
-    def test_only_self_on_list(self):
+    def test_single_reviewer_skips_desensitize(self):
+        """领域名单只有一人：跳过脱敏，直接派。"""
         cfg = {"domains": {"调度系统": ["handler"]}, "on_empty": "fail"}
-        with pytest.raises(ArchiveReviewError) as ei:
-            assign_archive_reviewer(
-                title="调度任务阻塞",
-                operator_id="handler",
-                config=cfg,
-                domain_hint="调度系统",
-            )
-        assert ei.value.code == "no_available"
+        result = assign_archive_reviewer(
+            title="调度任务阻塞",
+            operator_id="handler",
+            config=cfg,
+            domain_hint="调度系统",
+        )
+        assert result.reviewer_id == "handler"
+        assert "跳过脱敏" in (result.reason or "")
+
+    def test_multi_all_excluded_falls_back(self):
+        """多人名单全被脱敏时回落，仍可派给相关人。"""
+        cfg = {"domains": {"调度系统": ["rev_a", "rev_b"]}, "on_empty": "fail"}
+        result = assign_archive_reviewer(
+            title="调度任务阻塞",
+            operator_id="rev_a",
+            exclude_ids=["rev_b"],
+            config=cfg,
+            domain_hint="调度系统",
+            rng=random.Random(0),
+        )
+        assert result.reviewer_id in ("rev_a", "rev_b")
+        assert "回落原名单" in (result.reason or "")
 
     def test_domain_hint_skips_infer(self):
         result = assign_archive_reviewer(

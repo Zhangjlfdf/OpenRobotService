@@ -1,4 +1,4 @@
-"""归档审核人派审入口：领域 → 名单 → 排除处理人 → 按负荷概率抽签。"""
+"""归档审核人派审入口：领域 → 名单 →（多人才脱敏，无人回落）→ 按负荷概率抽签。"""
 
 from __future__ import annotations
 
@@ -31,6 +31,7 @@ def assign_archive_reviewer(
     product: str = "",
     department: str = "",
     operator_id: str,
+    exclude_ids: Sequence[str] | None = None,
     load_counts: Mapping[str, int] | None = None,
     config: ArchiveReviewersConfig | Mapping[str, Any] | None = None,
     domain_hint: str | None = None,
@@ -41,10 +42,15 @@ def assign_archive_reviewer(
 
     load_counts: reviewer_id → 当前 submit_status=submitted 的在审数量。
     选人按 weight=1/(load+1) 加权抽签，负荷越低概率越高，不是必派给最少的人。
+
+    脱敏（仅领域名单 ≥2 人时）：operator_id 与 exclude_ids（处理人/提单人等）
+    优先从候选剔除；剔除后无人则回落原名单。名单仅 1 人时跳过脱敏直接派。
+
     调用方（后端接入时）负责查库传入；本函数不连库。
     """
     cfg = _resolve_config(config)
     operator = (operator_id or "").strip()
+    exclude = _normalize_exclude_ids(operator, exclude_ids)
 
     # 只从「配置里出现过的领域」中判（有名单的优先，否则用配置键）
     allowed = cfg.configured_domains()
@@ -76,22 +82,34 @@ def assign_archive_reviewer(
             f"问题领域「{domain}」未配置审核人",
         )
 
-    available = [uid for uid in candidates if uid != operator]
-    if not available:
-        raise ArchiveReviewError(
-            "no_available",
-            "没有可用审核人（名单为空或仅含处理人本人）",
-        )
+    # 先定领域名单；仅多人时脱敏，单人直接派（无需避嫌开销）
+    desensitize = len(candidates) >= 2
+    fallback = False
+    if desensitize:
+        preferred = [uid for uid in candidates if uid not in exclude]
+        if preferred:
+            pool = preferred
+        else:
+            pool = list(candidates)
+            fallback = True
+    else:
+        pool = list(candidates)
 
-    loads = snapshot_loads(available, load_counts)
-    probs = compute_probabilities(available, loads)
-    picked = pick_by_load_probability(available, loads, rng=rng)
+    loads = snapshot_loads(pool, load_counts)
+    probs = compute_probabilities(pool, loads)
+    picked = pick_by_load_probability(pool, loads, rng=rng)
     if not picked:
         raise ArchiveReviewError("no_available", "没有可用审核人")
 
     prob_text = {uid: round(p, 4) for uid, p in probs.items()}
+    if not desensitize:
+        pool_note = f"名单仅1人跳过脱敏；候选={pool}"
+    elif fallback:
+        pool_note = f"脱敏排除={sorted(exclude)}；脱敏后无人，回落原名单={pool}"
+    else:
+        pool_note = f"脱敏排除={sorted(exclude)}；脱敏后候选={pool}"
     reason = (
-        f"领域={domain}；排除处理人后候选={available}；"
+        f"领域={domain}；{pool_note}；"
         f"负荷={loads}；抽签概率={prob_text}；选中={picked}"
         f"（权重=1/(在审+1)，按概率抽签）"
     )
@@ -100,9 +118,23 @@ def assign_archive_reviewer(
         reviewer_id=picked,
         load_snapshot=loads,
         probability_snapshot=probs,
-        candidate_ids=list(available),
+        candidate_ids=list(pool),
         reason=reason,
     )
+
+
+def _normalize_exclude_ids(
+    operator: str,
+    exclude_ids: Sequence[str] | None,
+) -> set[str]:
+    out: set[str] = set()
+    if operator:
+        out.add(operator)
+    for raw in exclude_ids or ():
+        s = (raw or "").strip()
+        if s:
+            out.add(s)
+    return out
 
 
 def _resolve_config(

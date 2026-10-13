@@ -115,6 +115,15 @@ async def dispatch_archive_reviewer(
         product_hint = ""
 
     enriched_report = "\n".join([report_body, *meta_bits]).strip()
+    # 工单相关人优先脱敏（不审自己的单）；名单只剩这些人时由 assign 侧回落仍可派
+    exclude_ids = [
+        x for x in (
+            operator_id,
+            getattr(task, "assigned_to", None),
+            getattr(task, "created_by", None),
+        )
+        if (x or "").strip()
+    ]
     try:
         return assign_archive_reviewer(
             title=task.title or "",
@@ -124,6 +133,7 @@ async def dispatch_archive_reviewer(
             product=product_hint,
             department=(getattr(task, "team", None) or "") or "",
             operator_id=operator_id,
+            exclude_ids=exclude_ids,
             load_counts=loads,
             config=cfg,
         )
