@@ -1595,19 +1595,21 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
    * 确认时本地生成 sid（ensureSessionId）即可立即注册；confirm 按 session_id
    * 幂等覆盖，此函数保留为发送前的兜底（pendingVehicleModeRef 已在确认时清空
    * 则直接 return，不重复调）。
-   * 注册失败（车型未建档 / 网络异常）只提示，不阻断用户提问。
+   * 注册失败（二维码不可用 / 网络异常）只提示，不阻断用户提问。
    */
   const registerVehicleModeNow = useCallback(async (ctx: VehicleContext, sid: string): Promise<void> => {
     pendingVehicleModeRef.current = null;
     try {
       const res = await qaModeConfirm({
         session_id: sid,
+        // scene = 行 id：后端据此精确取「扫的那一行」录入信息（车型/项目/客户）
+        scene: ctx.scene,
         model: ctx.vehicleModel,
         project_name: ctx.projectName,
         customer_name: ctx.customerName,
       });
       if (res?.code !== 0) {
-        Toast({ message: res?.message || '车型未建档，请确认扫码信息', theme: 'warning' });
+        Toast({ message: res?.message || '二维码不可用，请联系管理员', theme: 'warning' });
         return;
       }
       // SOP 外显按钮（0930）：除引导设施外一个文件一个气泡，点击在线查看
