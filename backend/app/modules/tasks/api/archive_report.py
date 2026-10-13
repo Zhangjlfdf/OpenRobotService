@@ -115,7 +115,7 @@ async def archive_start(
             # 4) 操作人显示名
             user_name = await _user_display_name(db, operator_id) or username
 
-            # 5) 写操作日志
+            # 5) 写操作日志（不中途 commit，与业务变更一并提交）
             await OperationLogService.log(
                 db=db,
                 task_id=task_id,
@@ -125,9 +125,11 @@ async def archive_start(
                 to_status=TaskStatus.ARCHIVING.value,
                 detail={"to_report_id": report.id, "version": report.version},
                 description=f"{user_name} 开始归档工单，状态变更为「归档中」",
+                auto_commit=False,
             )
+            await db.commit()
 
-            # 6) _add_system_comment 内部会 commit 当前 session 的全部 pending 变更
+            # 6) 系统评论单独 commit，失败不回滚归档业务
             await _add_system_comment(
                 db, task_id,
                 f"{user_name} 开始归档工单，状态变更为「归档中」",
@@ -206,7 +208,7 @@ async def save_draft(
         db, report_id, body.content, body.revision, operator_id
     )
 
-    # 操作日志（复用 UPDATE）
+    # 操作日志（复用 UPDATE；与草稿一并 commit）
     user_name = await _user_display_name(db, operator_id) or username
     await OperationLogService.log(
         db=db,
@@ -216,9 +218,9 @@ async def save_draft(
         operator_name=user_name,
         description=f"{user_name} 保存了归档报告草稿",
         detail={"report_id": report_id, "revision": updated_report.revision},
+        auto_commit=False,
     )
 
-    # commit（service 只 flush）
     await db.commit()
     await db.refresh(updated_report)
 
@@ -267,7 +269,7 @@ async def submit_report(
         except Exception:
             pass
 
-    # 操作日志（含派审负荷/概率快照；不写 task_dispatch_log）
+    # 操作日志（含派审负荷/概率快照；与 submit 业务一并 commit）
     await OperationLogService.log(
         db=db,
         task_id=report.task_id,
@@ -280,9 +282,12 @@ async def submit_report(
             + (f"（领域：{domain}）" if domain else "")
         ),
         detail=log_detail,
+        auto_commit=False,
     )
+    await db.commit()
+    await db.refresh(updated_report)
 
-    # 系统评论（内部 commit 全部 pending 变更）
+    # 系统评论单独 commit，失败不回滚派审结果
     await _add_system_comment(
         db, report.task_id,
         f"{user_name} 提交了归档报告，系统派审 {reviewer_name} 为审核人"
@@ -290,7 +295,6 @@ async def submit_report(
         username, token,
     )
 
-    await db.refresh(updated_report)
     return await _enrich_report_response(db, updated_report)
 
 
@@ -319,7 +323,7 @@ async def approve_report(
 
     user_name = await _user_display_name(db, operator_id) or username
 
-    # 操作日志
+    # 操作日志（与 approve 业务一并 commit）
     await OperationLogService.log(
         db=db,
         task_id=report.task_id,
@@ -329,9 +333,11 @@ async def approve_report(
         to_status=TaskStatus.ARCHIVED.value,
         description=f"{user_name} 审核通过归档报告，工单状态变更为「已归档」",
         detail={"report_id": report_id},
+        auto_commit=False,
     )
+    await db.commit()
 
-    # 系统评论（内部 commit）
+    # 系统评论单独 commit
     await _add_system_comment(
         db, report.task_id,
         f"{user_name} 审核通过归档报告，工单状态变更为「已归档」",
@@ -374,7 +380,7 @@ async def reject_report(
 
     user_name = await _user_display_name(db, operator_id) or username
 
-    # 操作日志
+    # 操作日志（与 reject 业务一并 commit）
     await OperationLogService.log(
         db=db,
         task_id=report.task_id,
@@ -383,14 +389,16 @@ async def reject_report(
         operator_name=user_name,
         description=f"{user_name} 驳回了归档报告",
         detail={"report_id": report_id, "reason": body.review_comment},
+        auto_commit=False,
     )
+    await db.commit()
+    await db.refresh(rejected_report)
 
-    # 系统评论（内部 commit）
+    # 系统评论单独 commit
     await _add_system_comment(
         db, report.task_id,
         f"{user_name} 驳回了归档报告",
         username, token,
     )
 
-    await db.refresh(rejected_report)
     return await _enrich_report_response(db, rejected_report)

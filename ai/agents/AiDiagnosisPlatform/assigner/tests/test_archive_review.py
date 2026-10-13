@@ -106,6 +106,7 @@ class TestArchiveReviewersOverrides:
 
         override = tmp_path / "runtime_overrides.yaml"
         monkeypatch.setattr(settings_mod, "_OVERRIDE_FILE", override)
+        settings_mod.invalidate_archive_reviewers_cache()
 
         saved = settings_mod.save_archive_reviewers_overrides(
             domains={"调度系统": ["u1", "u1", "u2"], "车体硬件": []},
@@ -116,6 +117,10 @@ class TestArchiveReviewersOverrides:
         eff = settings_mod.effective_archive_reviewers()
         assert eff["source"] == "runtime_overrides"
         assert eff["domains"]["调度系统"] == ["u1", "u2"]
+
+        # mtime 未变时命中缓存（同一对象）
+        again = settings_mod.effective_archive_reviewers()
+        assert again is eff
 
     def test_unknown_domain_rejected(self):
         from ai.agents.AiDiagnosisPlatform.assigner.settings import (

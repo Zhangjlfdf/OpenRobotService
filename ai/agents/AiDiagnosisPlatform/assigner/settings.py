@@ -25,10 +25,15 @@ except ImportError:
 
 CLUSTER_OVERRIDE_KEYS = ("cluster_merge", "cluster_assign", "cluster_min_size")
 _OVERRIDE_FILE = Path(__file__).parent / "config" / "runtime_overrides.yaml"
+_CONFIG_YAML = Path(__file__).parent / "config" / "config.yaml"
 
 # 责任树叶子上的 keywords / anchor。召回支路已撤，给职责卡片当「负责内容」。
 _SCOPE_KEYWORDS: Dict[str, list] = {}
 _SCOPE_ANCHORS: Dict[str, str] = {}
+
+# archive_reviewers 生效配置：按 config.yaml / runtime_overrides mtime 缓存
+_ARCHIVE_REVIEWERS_CACHE: Dict[str, Any] | None = None
+_ARCHIVE_REVIEWERS_MTIMES: tuple[float | None, float | None] | None = None
 
 
 def publish_scope_maps(keywords: Dict[str, list] | None, anchors: Dict[str, str] | None) -> None:
@@ -160,6 +165,24 @@ def normalize_archive_reviewers(
     return {"domains": out_domains, "on_empty": empty}
 
 
+def _file_mtime(path: Path) -> float | None:
+    try:
+        return path.stat().st_mtime if path.exists() else None
+    except OSError:
+        return None
+
+
+def _archive_reviewers_mtimes() -> tuple[float | None, float | None]:
+    return _file_mtime(_CONFIG_YAML), _file_mtime(_OVERRIDE_FILE)
+
+
+def invalidate_archive_reviewers_cache() -> None:
+    """开发者模式保存后或测试里强制清缓存。"""
+    global _ARCHIVE_REVIEWERS_CACHE, _ARCHIVE_REVIEWERS_MTIMES
+    _ARCHIVE_REVIEWERS_CACHE = None
+    _ARCHIVE_REVIEWERS_MTIMES = None
+
+
 def save_archive_reviewers_overrides(
     domains: Any = None,
     *,
@@ -172,17 +195,29 @@ def save_archive_reviewers_overrides(
     _OVERRIDE_FILE.parent.mkdir(parents=True, exist_ok=True)
     with open(_OVERRIDE_FILE, "w", encoding="utf-8") as f:
         yaml.safe_dump(data, f, allow_unicode=True, sort_keys=False)
+    invalidate_archive_reviewers_cache()
     return patch
 
 
 def effective_archive_reviewers() -> dict:
-    """生效配置：runtime_overrides 整块覆盖 config.yaml 默认。"""
+    """生效配置：runtime_overrides 整块覆盖 config.yaml 默认。
+
+    按两份 yaml 的 mtime 缓存；文件变更或 save_archive_reviewers_overrides 后自动失效。
+    """
+    global _ARCHIVE_REVIEWERS_CACHE, _ARCHIVE_REVIEWERS_MTIMES
+
+    mtimes = _archive_reviewers_mtimes()
+    if (
+        _ARCHIVE_REVIEWERS_CACHE is not None
+        and _ARCHIVE_REVIEWERS_MTIMES == mtimes
+    ):
+        return _ARCHIVE_REVIEWERS_CACHE
+
     from ai.agents.AiDiagnosisPlatform.assigner.dual_tree.catalog import DOMAINS
 
-    config_path = Path(__file__).parent / "config" / "config.yaml"
     base = {}
     try:
-        raw = _load_yaml(config_path) or {}
+        raw = _load_yaml(_CONFIG_YAML) or {}
         if isinstance(raw.get("archive_reviewers"), dict):
             base = dict(raw["archive_reviewers"])
     except Exception:
@@ -204,12 +239,15 @@ def effective_archive_reviewers() -> dict:
             domains[key] = [str(x).strip() for x in ids if str(x).strip()]
     for d in DOMAINS:
         domains.setdefault(d, [])
-    return {
+    result = {
         "domains": domains,
         "on_empty": str((src or {}).get("on_empty") or "fail"),
         "domain_order": list(DOMAINS),
         "source": "runtime_overrides" if isinstance(ov, dict) and ov else "config.yaml",
     }
+    _ARCHIVE_REVIEWERS_CACHE = result
+    _ARCHIVE_REVIEWERS_MTIMES = mtimes
+    return result
 
 
 class AssignerConfig:

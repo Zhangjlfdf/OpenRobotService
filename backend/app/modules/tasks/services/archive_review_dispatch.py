@@ -9,12 +9,16 @@ import sys
 from pathlib import Path
 from typing import Any, Optional
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.identity import UserDB
 from app.models.task import ArchiveReport, Task
 
 logger = logging.getLogger(__name__)
+
+# 模块级缓存：避免每次 submit 重复改 sys.path / import
+_ASSIGNER_CACHE: tuple | None = None
 
 
 def _ensure_repo_on_path() -> None:
@@ -26,6 +30,9 @@ def _ensure_repo_on_path() -> None:
 
 
 def _import_assigner():
+    global _ASSIGNER_CACHE
+    if _ASSIGNER_CACHE is not None:
+        return _ASSIGNER_CACHE
     _ensure_repo_on_path()
     from ai.agents.AiDiagnosisPlatform.assigner.archive_review import (
         ArchiveReviewAssignment,
@@ -36,12 +43,57 @@ def _import_assigner():
         effective_archive_reviewers,
     )
 
-    return (
+    _ASSIGNER_CACHE = (
         assign_archive_reviewer,
         ArchiveReviewError,
         ArchiveReviewAssignment,
         effective_archive_reviewers,
     )
+    return _ASSIGNER_CACHE
+
+
+async def expand_exclude_ids(
+    db: AsyncSession,
+    seeds: list[str] | None,
+) -> list[str]:
+    """把工单相关人扩成可比标识集合（users.id / username / wechat_openid）。
+
+    名单里存的是 users.id，操作人/处理人/提单人可能是 openid 或 username；
+    脱敏比较前统一展开，避免身份形态不一致导致避嫌失效。
+    """
+    raw = [str(x).strip() for x in (seeds or []) if (x or "").strip()]
+    if not raw:
+        return []
+
+    out: set[str] = set(raw)
+    # 同步身份表：id / username（及已缓存的 wechat_openid）
+    try:
+        from app.core.user_identity import identity_keys
+
+        for seed in raw:
+            out.update(identity_keys(seed))
+    except Exception:  # noqa: BLE001 — 查身份失败时仍用原值
+        pass
+
+    # 异步再扫 wechat_openid：业务账号绑定 openid 时 identity 缓存可能尚未带该字段
+    try:
+        stmt = select(UserDB.id, UserDB.username, UserDB.wechat_openid).where(
+            or_(
+                UserDB.id.in_(list(out)),
+                UserDB.username.in_(list(out)),
+                UserDB.wechat_openid.in_(list(out)),
+            )
+        )
+        result = await db.execute(stmt)
+        for row in result.all():
+            for val in (row.id, row.username, row.wechat_openid):
+                s = (val or "").strip() if isinstance(val, str) else str(val or "").strip()
+                if s:
+                    out.add(s)
+    except Exception:  # noqa: BLE001
+        logger.exception("expand_exclude_ids 查用户失败，回落原 exclude")
+
+    return sorted(out)
 
 
 async def count_submitted_loads(
@@ -116,14 +168,14 @@ async def dispatch_archive_reviewer(
 
     enriched_report = "\n".join([report_body, *meta_bits]).strip()
     # 工单相关人优先脱敏（不审自己的单）；名单只剩这些人时由 assign 侧回落仍可派
-    exclude_ids = [
-        x for x in (
+    exclude_ids = await expand_exclude_ids(
+        db,
+        [
             operator_id,
             getattr(task, "assigned_to", None),
             getattr(task, "created_by", None),
-        )
-        if (x or "").strip()
-    ]
+        ],
+    )
     try:
         return assign_archive_reviewer(
             title=task.title or "",
