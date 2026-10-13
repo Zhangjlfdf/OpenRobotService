@@ -200,12 +200,21 @@ html, body, #root {
   .tabbar-shell__content .suggested-questions,
   .tabbar-shell__content .tasks-view__filters,
   .tabbar-shell__content .tasks-cards,
+  /* 历史工单页：工具栏（搜索框 + 状态 tab）与下方卡片列表收进同一 768px 居中容器，
+     三者左右边界对齐（此前工具栏全宽、卡片居中，PC 端两者不齐） */
+  .tabbar-shell__content .history-toolbar,
   .tabbar-shell__content .history-tickets__viewport,
   .tabbar-shell__content .history-tickets__head {
     max-width: 768px;
     width: 100%;
     margin-left: auto;
     margin-right: auto;
+  }
+  /* tab 行默认左右各 8px 内边距，比工具栏的 12px 少 4px，
+     会使状态胶囊比搜索框/卡片内缩；桌面端统一 12px 严格对齐 */
+  .tabbar-shell__content .history-tabs {
+    padding-left: 12px;
+    padding-right: 12px;
   }
   .tabbar-shell__content .suggested-questions {
     width: calc(100% - 24px);
@@ -8919,12 +8928,21 @@ html, body, #root {
   .tabbar-shell__content .suggested-questions,
   .tabbar-shell__content .tasks-view__filters,
   .tabbar-shell__content .tasks-cards,
+  /* 历史工单页：工具栏（搜索框 + 状态 tab）与下方卡片列表收进同一 768px 居中容器，
+     三者左右边界对齐（此前工具栏全宽、卡片居中，PC 端两者不齐） */
+  .tabbar-shell__content .history-toolbar,
   .tabbar-shell__content .history-tickets__viewport,
   .tabbar-shell__content .history-tickets__head {
     max-width: 768px;
     width: 100%;
     margin-left: auto;
     margin-right: auto;
+  }
+  /* tab 行默认左右各 8px 内边距，比工具栏的 12px 少 4px，
+     会使状态胶囊比搜索框/卡片内缩；桌面端统一 12px 严格对齐 */
+  .tabbar-shell__content .history-tabs {
+    padding-left: 12px;
+    padding-right: 12px;
   }
   .tabbar-shell__content .chat-input-bar,
   .tabbar-shell__content .suggested-questions {
