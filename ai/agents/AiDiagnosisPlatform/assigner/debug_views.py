@@ -146,3 +146,40 @@ async def debug_save_cluster_params(payload: dict) -> dict:
     snap["params"] = _cluster_params()
     snap["saved"] = saved
     return snap
+
+
+def debug_get_archive_reviewers() -> dict:
+    """开发者模式：当前生效的归档审核人配置（领域 → 多人）。"""
+    from ai.agents.AiDiagnosisPlatform.assigner.settings import effective_archive_reviewers
+
+    data = effective_archive_reviewers()
+    names = _name_by_id()
+    domains = data.get("domains") or {}
+    labeled = {}
+    for domain, ids in domains.items():
+        labeled[domain] = [
+            {"id": uid, "name": names.get(uid) or uid}
+            for uid in ids
+        ]
+    data["reviewers"] = labeled
+    return data
+
+
+def debug_save_archive_reviewers(payload: dict) -> dict:
+    """开发者模式：保存归档审核人名单到 runtime_overrides，并尝试热更新。"""
+    from ai.agents.AiDiagnosisPlatform.assigner.settings import (
+        save_archive_reviewers_overrides,
+    )
+    from ai.agents.AiDiagnosisPlatform.assigner import ensure_dispatch_ready
+
+    body = payload or {}
+    save_archive_reviewers_overrides(
+        domains=body.get("domains"),
+        on_empty=body.get("on_empty") or "fail",
+    )
+    try:
+        flow = ensure_dispatch_ready()
+        flow.reload_config()
+    except Exception as e:
+        logger.warning(f"[debug] 保存归档审核人后热更新失败: {e}")
+    return debug_get_archive_reviewers()

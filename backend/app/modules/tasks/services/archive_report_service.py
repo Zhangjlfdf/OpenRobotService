@@ -13,28 +13,35 @@ from app.core.ticket_roles import get_ticket_roles
 
 class ArchiveReportService:
     @staticmethod
-    async def start_archive(db: AsyncSession, task_id: int, operator_id: str) -> tuple[Task, ArchiveReport]:
-        """开始归档：创建 version=1 的草稿，工单状态置为 ARCHIVING。
+    async def start_archive(
+        db: AsyncSession, task_id: int, operator_id: str
+    ) -> tuple[Task, ArchiveReport, bool]:
+        """开始归档：创建草稿并将工单状态置为 ARCHIVING。
 
-        幂等检查：若该工单已存在 submit_status IN ('draft', 'submitted', 'rejected') 的 ArchiveReport，
-        说明已有未完成的归档流程，返回 ConflictError 让调用方决定提示用户。
+        返回 (task, report, created)。created=False 表示已有未完成归档，幂等复用
+        （避免「库已写入、响应失败」后再点变成 409）。
         """
-        # 检查是否已有未完成的归档流程
+        result = await db.execute(select(Task).where(Task.id == task_id))
+        task = result.scalar_one_or_none()
+        if not task:
+            from fastapi import HTTPException
+            raise HTTPException(status_code=404, detail="工单未找到")
+
+        # 幂等：已有未完成归档则直接复用
         existing = await db.execute(
             select(ArchiveReport)
             .where(ArchiveReport.task_id == task_id)
             .where(ArchiveReport.submit_status.in_(['draft', 'submitted', 'rejected']))
+            .order_by(ArchiveReport.version.desc())
             .limit(1)
         )
         existing_report = existing.scalar_one_or_none()
         if existing_report:
-            # 幂等处理：如果工单状态已经是 ARCHIVING，直接返回现有数据
-            result = await db.execute(select(Task).where(Task.id == task_id))
-            task = result.scalar_one_or_none()
-            if task and task.status == TaskStatus.ARCHIVING:
-                return task, existing_report
-            from fastapi import HTTPException
-            raise HTTPException(status_code=409, detail="该工单已存在未完成的归档流程")
+            # 幂等复用未完成草稿；状态未落到 ARCHIVING 时一并回正
+            if task.status != TaskStatus.ARCHIVING:
+                task.status = TaskStatus.ARCHIVING
+                await db.flush()
+            return task, existing_report, False
 
         # 取最新一版（可能是之前 approved 后又 reopen 工单的历史）
         latest = await db.execute(
@@ -56,16 +63,10 @@ class ArchiveReportService:
             revision=1,
         )
         db.add(report)
-
-        result = await db.execute(select(Task).where(Task.id == task_id))
-        task = result.scalar_one_or_none()
-        if not task:
-            from fastapi import HTTPException
-            raise HTTPException(status_code=404, detail="工单未找到")
         task.status = TaskStatus.ARCHIVING
 
         await db.flush()
-        return task, report
+        return task, report, True
 
     @staticmethod
     async def save_draft(db: AsyncSession, report_id: int, content: str, revision_check: Optional[int], operator_id: str) -> ArchiveReport:
@@ -89,31 +90,84 @@ class ArchiveReportService:
         return report
 
     @staticmethod
-    async def submit(db: AsyncSession, report_id: int, reviewer_id: str, content: Optional[str], revision_check: Optional[int], operator_id: str) -> ArchiveReport:
-        """提交审核：version+1，submit_status→submitted，reviewer 写入"""
+    async def submit(
+        db: AsyncSession,
+        report_id: int,
+        content: Optional[str],
+        revision_check: Optional[int],
+        operator_id: str,
+        *,
+        reviewer_id: Optional[str] = None,
+    ) -> tuple[ArchiveReport, object]:
+        """提交审核：系统派审选出审核人，只写 archive_reports.reviewer。
+
+        不改 tasks.archived_by（仍由审核通过/驳回流程自行处理）。
+        reviewer_id 参数保留兼容，正式路径忽略，由 archive_review 派审决定。
+        返回 (report, assignment)。派审失败抛 HTTPException，不改状态。
+        """
+        from fastapi import HTTPException
+
+        from app.modules.tasks.services.archive_review_dispatch import (
+            assignment_log_detail,
+            dispatch_archive_reviewer,
+        )
+
         result = await db.execute(select(ArchiveReport).where(ArchiveReport.id == report_id))
         report = result.scalar_one_or_none()
         if not report:
-            from fastapi import HTTPException
             raise HTTPException(status_code=404, detail="归档报告未找到")
         if report.submit_status not in ('draft', 'rejected'):
-            from fastapi import HTTPException
             raise HTTPException(status_code=400, detail=f"当前报告状态({report.submit_status})不可提交")
         if revision_check is not None and report.revision != revision_check:
-            from fastapi import HTTPException
             raise HTTPException(status_code=409, detail="报告已被他人修改，请刷新后重试")
 
-        report.version = (report.version or 1) + 1
-        report.submit_status = 'submitted'
-        report.reviewer = reviewer_id
-        report.reviewed_at = None
-        report.review_comment = None
+        task_result = await db.execute(select(Task).where(Task.id == report.task_id))
+        task = task_result.scalar_one_or_none()
+        if not task:
+            raise HTTPException(status_code=404, detail="工单未找到")
+
+        # 派审失败则不进入 submitted（正文若随请求传入也不落库，避免半提交）
+        try:
+            assignment = await dispatch_archive_reviewer(
+                db,
+                task=task,
+                report=report,
+                operator_id=operator_id,
+                content_override=content,
+            )
+        except Exception as exc:
+            # ArchiveReviewError 与其包装
+            code = getattr(exc, "code", None)
+            message = getattr(exc, "message", None) or str(exc) or "归档派审失败"
+            if code:
+                raise HTTPException(status_code=400, detail=message) from exc
+            raise
+
+        chosen = assignment.reviewer_id
+        # 兼容旧调用方：若派审未给出人且显式传了 reviewer，才回退（正常不应走到）
+        if not chosen and reviewer_id:
+            chosen = reviewer_id
+        if not chosen:
+            raise HTTPException(status_code=400, detail="没有可用审核人")
+
         if content is not None:
             report.content = content
+        report.version = (report.version or 1) + 1
+        report.submit_status = 'submitted'
+        report.reviewer = chosen
+        report.reviewed_at = None
+        report.review_comment = None
         report.updated_by = operator_id
         report.revision = (report.revision or 1) + 1
+        # 工单仍保持 archiving；不写 tasks.archived_by
+
         await db.flush()
-        return report
+        # 挂到 assignment 上供 API 写日志（避免再查一次）
+        try:
+            assignment._log_detail = assignment_log_detail(assignment)  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        return report, assignment
 
     @staticmethod
     async def approve(db: AsyncSession, report_id: int, operator_id: str) -> tuple[ArchiveReport, Task]:

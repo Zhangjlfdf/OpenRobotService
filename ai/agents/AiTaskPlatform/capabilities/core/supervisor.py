@@ -28,10 +28,11 @@ import json
 import re
 import time as _time
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional, Protocol
+from typing import Any, Callable, Optional
 
 from ai.core.logging import get_logger
 from ai.agents.AiTaskPlatform.capabilities.core.registry import CapabilityRegistry
+from ai.agents.AiTaskPlatform.capabilities.core import usage as cap_usage
 from ai.agents.AiTaskPlatform.capabilities.core.supervisor_todo import TodoList, TodoItem
 from ai.agents.AiTaskPlatform.tracing import TraceBus
 
@@ -39,7 +40,6 @@ logger = get_logger("TASK_AGENT")
 
 # ── 程序强制护栏（服务端优先，不信任 LLM）──
 MAX_SUB_TASKS = 5          # 一次最多派生子任务数（防无限分叉）；与 _CONCURRENCY 配合：可派 5 个，但最多同时跑 _CONCURRENCY 个
-MAX_ROUNDS_PER_TASK = 3    # 每个子任务内部编排轮数上限（由子能力内部执行，如 LogSubAgent/日志分析的轮数；此处为对齐锚点）
 SOFT_LIMIT = 2             # 调度 LLM 输出解析失败时的重试次数上限（浅则重试，达到上限走兜底）
 _CONCURRENCY = 3           # 同时最多并行执行几个子任务（asyncio.Semaphore，防拉爆 API/限流）
 
@@ -55,10 +55,6 @@ class SupervisorDecision:
 
     def is_simple(self) -> bool:
         return self.complexity == "simple"
-
-
-class SupervisorError(Exception):
-    """Supervisor 调度或执行错误（外层可捕获降级）。"""
 
 
 # LLM 调度决策输出解析（健壮 JSON 解析）
@@ -309,6 +305,9 @@ class Supervisor:
         caps = available_caps or CapabilityRegistry.list_available()
         self._runtime_ctx = runtime_ctx or {}  # 供 _dispatch 注入给能力
         self._runtime_ctx.setdefault("round_supplements", [])
+        cap_usage.ledger(self._runtime_ctx)  # 本次请求的配额台账（幂等）
+        # 本次请求里已用满的能力，从可选集里物理摘掉（同一 runtime_ctx 再跑一轮时命中）
+        caps = cap_usage.drop_exhausted(self._runtime_ctx, caps)
         if not isinstance(self._runtime_ctx.get("trace_bus"), TraceBus):
             self._runtime_ctx["trace_bus"] = TraceBus()
         self._on_progress = on_progress  # 实时进度回调（逐项能力推送，供前端动态展示）
@@ -362,7 +361,7 @@ class Supervisor:
                 "questions": decision.questions,
                 "todo": todo.to_dict_list(),
                 "results": results,
-                "final_text": self._synthesize(results),
+                "final_text": self._synthesize(results, cap_usage.notes(self._runtime_ctx)),
                 "elapsed_ms": round((_time.perf_counter() - t0) * 1000),
                 "_decision": decision.__dict__,
                 "spans": bus.tree(),
@@ -403,6 +402,7 @@ class Supervisor:
         """强护栏：
           - simple 强制 0 派生
           - plan 里的 capability 必须在可用清单内（否者丢弃 + 记 trace）
+          - 同一能力不能超过它声明的每次请求上限（超出的步骤直接不排）
           - 派生数不能超过 max_sub_tasks
         """
         valid_caps = set(caps)
@@ -410,11 +410,21 @@ class Supervisor:
             d.plan = []  # 强制 0 派生，防过度设计
             return d
         kept = []
+        per_cap: dict[str, int] = {}
         for step in d.plan:
-            if step["capability"] in valid_caps:
-                kept.append(step)
-            else:
-                logger.warning(f"[supervisor] 丢弃未知能力: {step['capability']}")
+            cap_name = step["capability"]
+            if cap_name not in valid_caps:
+                logger.warning(f"[supervisor] 丢弃未知能力: {cap_name}")
+                continue
+            lim = cap_usage.limit_of(cap_name)
+            if lim is not None and per_cap.get(cap_name, 0) >= lim:
+                # 机制层直接不排（不是靠 prompt 求 LLM 少调）；同一能力只记一条说明
+                cap_usage.block(self._runtime_ctx, cap_name,
+                                f"计划里排了第 {per_cap[cap_name] + 1} 次，已丢弃")
+                logger.info(f"[supervisor] {cap_name} 计划步骤超过上限 {lim} 次，丢弃多余步骤")
+                continue
+            per_cap[cap_name] = per_cap.get(cap_name, 0) + 1
+            kept.append(step)
         # 数量上限
         d.plan = kept[:max_sub_tasks]
         return d
@@ -467,6 +477,13 @@ class Supervisor:
             if cap is None or not cap.is_available():
                 todo.mark_done(todo_item.id, result=f"能力不可用: {cap_name}")
                 return cap_name, {"ok": False, "error": f"能力不可用: {cap_name}", "text": ""}
+            if not cap_usage.claim(self._runtime_ctx, cap_name):
+                # 机制层硬收口：超出本次请求上限的能力不再执行（不靠 prompt 求 LLM）
+                reason = f"已达本次请求调度上限（{cap_usage.limit_of(cap_name)} 次），未再派发"
+                cap_usage.block(self._runtime_ctx, cap_name, "超出上限的派发已拦下")
+                logger.info(f"[supervisor] {cap_name} {reason}，跳过执行")
+                todo.mark_done(todo_item.id, result=reason)
+                return cap_name, {"ok": False, "error": reason, "text": ""}
             todo.mark_in_progress(todo_item.id)
             if emit is not None:
                 desc = todo_item.description
@@ -582,8 +599,12 @@ class Supervisor:
 
     # ── 汇总 ──
     @staticmethod
-    def _synthesize(results: dict) -> str:
-        """把各子任务结果拼成最终文本（简单拼接，供上层 LLM 继续整理）。"""
+    def _synthesize(results: dict, notes: str = "") -> str:
+        """把各子任务结果拼成最终文本（简单拼接，供上层 LLM 继续整理）。
+
+        notes：机制层说明（如某能力已达本次请求调度上限、未再派发）。必须进正文——
+        缺了它，整理答复的模型会以为还有更深的分析可做。
+        """
         parts = []
         items = list(results.items())
         items.sort(key=lambda kv: (not _result_terminated(kv[1]), kv[0]))
@@ -596,7 +617,8 @@ class Supervisor:
                     parts.append(f"[{cap_name}] {tag} {text}")
                 elif not ok:
                     parts.append(f"[{cap_name}] ⚠️ {res.get('error', '执行失败')}")
-        return "\n\n".join(parts)
+        body = "\n\n".join(parts)
+        return f"{body}\n\n{notes}" if notes else body
 
 
 def _result_terminated(res) -> bool:

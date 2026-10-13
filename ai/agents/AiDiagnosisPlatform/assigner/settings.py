@@ -8,10 +8,11 @@
 - departments          → 已不再从 yaml 读；只认 DB departments.profile_text
 - product_routing      → filtering/product_router.py（产品收紧）
 - vague_strong_signals → ranking/tags.py（Step2 模糊强信号）
+- archive_reviewers    → archive_review/（提交归档报告时的审核人名单）
 """
 
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict  # Any used by normalize_archive_reviewers
 
 try:
     import yaml
@@ -24,10 +25,15 @@ except ImportError:
 
 CLUSTER_OVERRIDE_KEYS = ("cluster_merge", "cluster_assign", "cluster_min_size")
 _OVERRIDE_FILE = Path(__file__).parent / "config" / "runtime_overrides.yaml"
+_CONFIG_YAML = Path(__file__).parent / "config" / "config.yaml"
 
 # 责任树叶子上的 keywords / anchor。召回支路已撤，给职责卡片当「负责内容」。
 _SCOPE_KEYWORDS: Dict[str, list] = {}
 _SCOPE_ANCHORS: Dict[str, str] = {}
+
+# archive_reviewers 生效配置：按 config.yaml / runtime_overrides mtime 缓存
+_ARCHIVE_REVIEWERS_CACHE: Dict[str, Any] | None = None
+_ARCHIVE_REVIEWERS_MTIMES: tuple[float | None, float | None] | None = None
 
 
 def publish_scope_maps(keywords: Dict[str, list] | None, anchors: Dict[str, str] | None) -> None:
@@ -117,6 +123,133 @@ def save_cluster_overrides(
     return hr
 
 
+def normalize_archive_reviewers(
+    domains: Any = None,
+    *,
+    on_empty: str | None = "fail",
+) -> dict:
+    """开发者模式写入前校验：领域 → users.id 列表。"""
+    from ai.agents.AiDiagnosisPlatform.assigner.dual_tree.catalog import DOMAINS
+
+    if not isinstance(domains, dict):
+        raise ValueError("domains 必须是对象：问题领域 → 审核人 id 列表")
+    out_domains: Dict[str, list] = {}
+    known = set(DOMAINS)
+    for name, ids in domains.items():
+        key = str(name or "").strip()
+        if not key:
+            continue
+        if known and key not in known:
+            raise ValueError(f"未知问题领域：{key}")
+        if ids is None:
+            ids = []
+        if isinstance(ids, str):
+            ids = [ids]
+        if not isinstance(ids, (list, tuple)):
+            raise ValueError(f"领域「{key}」的审核人必须是列表")
+        seen = set()
+        clean: list = []
+        for raw in ids:
+            uid = str(raw or "").strip()
+            if not uid or uid in seen:
+                continue
+            seen.add(uid)
+            clean.append(uid)
+        out_domains[key] = clean
+    # 补齐标准领域键，避免前端漏传导致覆盖丢领域
+    for d in DOMAINS:
+        out_domains.setdefault(d, [])
+    empty = (on_empty or "fail").strip().lower() or "fail"
+    if empty != "fail":
+        raise ValueError("on_empty 目前只支持 fail")
+    return {"domains": out_domains, "on_empty": empty}
+
+
+def _file_mtime(path: Path) -> float | None:
+    try:
+        return path.stat().st_mtime if path.exists() else None
+    except OSError:
+        return None
+
+
+def _archive_reviewers_mtimes() -> tuple[float | None, float | None]:
+    return _file_mtime(_CONFIG_YAML), _file_mtime(_OVERRIDE_FILE)
+
+
+def invalidate_archive_reviewers_cache() -> None:
+    """开发者模式保存后或测试里强制清缓存。"""
+    global _ARCHIVE_REVIEWERS_CACHE, _ARCHIVE_REVIEWERS_MTIMES
+    _ARCHIVE_REVIEWERS_CACHE = None
+    _ARCHIVE_REVIEWERS_MTIMES = None
+
+
+def save_archive_reviewers_overrides(
+    domains: Any = None,
+    *,
+    on_empty: str | None = "fail",
+) -> dict:
+    """把归档审核人名单写进 runtime_overrides.yaml（整块覆盖，不改 config.yaml）。"""
+    patch = normalize_archive_reviewers(domains, on_empty=on_empty)
+    data = load_runtime_overrides()
+    data["archive_reviewers"] = patch
+    _OVERRIDE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with open(_OVERRIDE_FILE, "w", encoding="utf-8") as f:
+        yaml.safe_dump(data, f, allow_unicode=True, sort_keys=False)
+    invalidate_archive_reviewers_cache()
+    return patch
+
+
+def effective_archive_reviewers() -> dict:
+    """生效配置：runtime_overrides 整块覆盖 config.yaml 默认。
+
+    按两份 yaml 的 mtime 缓存；文件变更或 save_archive_reviewers_overrides 后自动失效。
+    """
+    global _ARCHIVE_REVIEWERS_CACHE, _ARCHIVE_REVIEWERS_MTIMES
+
+    mtimes = _archive_reviewers_mtimes()
+    if (
+        _ARCHIVE_REVIEWERS_CACHE is not None
+        and _ARCHIVE_REVIEWERS_MTIMES == mtimes
+    ):
+        return _ARCHIVE_REVIEWERS_CACHE
+
+    from ai.agents.AiDiagnosisPlatform.assigner.dual_tree.catalog import DOMAINS
+
+    base = {}
+    try:
+        raw = _load_yaml(_CONFIG_YAML) or {}
+        if isinstance(raw.get("archive_reviewers"), dict):
+            base = dict(raw["archive_reviewers"])
+    except Exception:
+        base = {}
+    extra = load_runtime_overrides()
+    ov = extra.get("archive_reviewers") if isinstance(extra, dict) else None
+    src = ov if isinstance(ov, dict) and ov else base
+    domains_raw = src.get("domains") if isinstance(src, dict) else {}
+    domains: Dict[str, list] = {}
+    if isinstance(domains_raw, dict):
+        for name, ids in domains_raw.items():
+            key = str(name or "").strip()
+            if not key:
+                continue
+            if isinstance(ids, str):
+                ids = [ids]
+            if not isinstance(ids, (list, tuple)):
+                continue
+            domains[key] = [str(x).strip() for x in ids if str(x).strip()]
+    for d in DOMAINS:
+        domains.setdefault(d, [])
+    result = {
+        "domains": domains,
+        "on_empty": str((src or {}).get("on_empty") or "fail"),
+        "domain_order": list(DOMAINS),
+        "source": "runtime_overrides" if isinstance(ov, dict) and ov else "config.yaml",
+    }
+    _ARCHIVE_REVIEWERS_CACHE = result
+    _ARCHIVE_REVIEWERS_MTIMES = mtimes
+    return result
+
+
 class AssignerConfig:
     """派单配置对象：从 config/config.yaml 一次性加载全部派单参数。
 
@@ -170,6 +303,8 @@ class AssignerConfig:
         self.llm_recall: Dict[str, Any] = {
             "single_top_k": 5, "batch_top_k": 3, "single_round_max": 12, "batch_size": 8,
         }
+        # 归档审核人：领域 → users.id 列表（见 archive_review/）
+        self.archive_reviewers: Dict[str, Any] = {"domains": {}, "on_empty": "fail"}
         self._load_all()
 
     def _load_all(self):
@@ -243,6 +378,11 @@ class AssignerConfig:
             "single_round_max": _i("single_round_max", 12),
             "batch_size": _i("batch_size", 8),
         }
+        raw_ar = config.get("archive_reviewers") or {}
+        if isinstance(raw_ar, dict):
+            self.archive_reviewers = raw_ar
+        else:
+            self.archive_reviewers = {"domains": {}, "on_empty": "fail"}
 
     def _load_module_from_db(self):
         """从 DB 行表 module_tree_nodes 加载模块树并派生三张匹配表。
@@ -339,16 +479,24 @@ class AssignerConfig:
         return result
 
     def _merge_runtime_overrides(self):
-        """开发者模式改过的簇门槛盖在 yaml 默认值上。"""
+        """开发者模式改过的簇门槛 / 归档审核人盖在 yaml 默认值上。"""
         extra = load_runtime_overrides()
-        hr = extra.get("history_recall") if isinstance(extra, dict) else None
-        if not isinstance(hr, dict):
+        if not isinstance(extra, dict):
             return
-        if not isinstance(self.history_recall, dict):
-            self.history_recall = {}
-        for key in CLUSTER_OVERRIDE_KEYS:
-            if key in hr and hr[key] is not None:
-                self.history_recall[key] = hr[key]
+        hr = extra.get("history_recall")
+        if isinstance(hr, dict):
+            if not isinstance(self.history_recall, dict):
+                self.history_recall = {}
+            for key in CLUSTER_OVERRIDE_KEYS:
+                if key in hr and hr[key] is not None:
+                    self.history_recall[key] = hr[key]
+        ar = extra.get("archive_reviewers")
+        if isinstance(ar, dict) and ar:
+            # 开发者模式整块覆盖，与 effective_archive_reviewers 一致
+            self.archive_reviewers = {
+                "domains": dict(ar.get("domains") or {}),
+                "on_empty": str(ar.get("on_empty") or "fail"),
+            }
 
     def reload(self):
         """重新加载配置（配置热更新入口，配合派单缓存失效使用）。"""

@@ -182,3 +182,6 @@ _tmp_diag*.py
 /_probe_automation.py
 /_tmp_topo_agent_zip/
 .agents/skills/smart-dispatch-git/scripts/daily-sync-test.ps1
+
+# ===== AiTaskPlatform real eval dataset: local only, generate with build_dataset_from_db.py =====
+ai/agents/AiTaskPlatform/eval/datasets/discuss_real_cases.json

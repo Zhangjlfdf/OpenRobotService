@@ -1037,6 +1037,7 @@ async def get_task(
         except Exception as contact_err:
             logger.warning(f"回填项目对接人失败 task_id={task_id}: {contact_err}")
 
+        # current_archive_report 已由 TicketService.get_ticket_by_id 填充
         return ticket
     except HTTPException:
         raise
