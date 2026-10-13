@@ -26,7 +26,13 @@ class ArchiveReportService:
             .where(ArchiveReport.submit_status.in_(['draft', 'submitted', 'rejected']))
             .limit(1)
         )
-        if existing.scalar_one_or_none():
+        existing_report = existing.scalar_one_or_none()
+        if existing_report:
+            # 幂等处理：如果工单状态已经是 ARCHIVING，直接返回现有数据
+            result = await db.execute(select(Task).where(Task.id == task_id))
+            task = result.scalar_one_or_none()
+            if task and task.status == TaskStatus.ARCHIVING:
+                return task, existing_report
             from fastapi import HTTPException
             raise HTTPException(status_code=409, detail="该工单已存在未完成的归档流程")
 

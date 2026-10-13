@@ -1307,18 +1307,35 @@ class DiscussFlow:
         if facultative and reply.strip() and not early_stopped:
             try:
                 from ai.agents.AiTaskPlatform.capabilities import Evaluator
+                # evidence 必须覆盖初稿的全部事实来源：讨论类回答的依据主要在
+                # 讨论历史/被引用评论/被引用工单/记忆里，只给 facultative（附件分析）
+                # 会让这些真实内容在自评时被判成「幻构」，进而被重写删掉。
+                evidence = Evaluator.build_evidence(
+                    discussion_history,
+                    quoted_comment,
+                    referenced_tickets,
+                    facultative,
+                    memory_block,
+                    user_profile_block,
+                )
                 eval_res = await Evaluator.evaluate_and_rewrite(
                     llm_client=self._llm_client,
                     draft=reply,
-                    evidence=facultative[:1500],       # 引用的证据（日志/图片/历史片段）
+                    evidence=evidence,       # 引用的证据（讨论历史/引用/附件/记忆）
                     context=f"工单: {ctx.title or ''}\n用户问题: {query or ''}",
+                    mode="discuss",          # 讨论问答不评完整性
                 )
-                if eval_res.get("rewritten") or eval_res.get("eval_failed"):
+                if (eval_res.get("rewritten") or eval_res.get("eval_failed")
+                        or eval_res.get("advisory")):
                     eval_used = True
                 if eval_res.get("rewritten"):
                     reply = eval_res["final"]
                     self._add_trace(self.NODE_LLM, "ok",
                                     output={"evaluator": "rewritten", "issues": eval_res.get("eval_notes", []), "reply_chars": len(reply)})
+                elif eval_res.get("advisory"):
+                    # 讨论场景：自评判不通过但不重写，只记录 verdict 供观察，保留初稿
+                    self._add_trace(self.NODE_LLM, "ok",
+                                    output={"evaluator": "advisory_only", "issues": eval_res.get("eval_notes", []), "reply_chars": len(reply)})
                 elif eval_res.get("eval_failed"):
                     self._add_trace(self.NODE_LLM, "ok",
                                     output={"evaluator": "eval_failed", "reply_chars": len(reply)})

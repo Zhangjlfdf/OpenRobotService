@@ -44,17 +44,16 @@ class CapabilityRegistry:
 
     @classmethod
     def get(cls, name: str) -> Optional["BaseCapability"]:
-        """取能力实例。优先复用单例（能力类可提供 _instantiate）。"""
+        """取能力实例（每次新建）。
+
+        注：这里曾有一个 `_instantiate` 自定义实例化钩子（注释称 code_skill 用它复用
+        单例），但全仓无任何能力类实现该属性，分支恒不生效；code_search 实际是在
+        run() 内部自取 get_code_skill() 单例。已删除该死分支，避免误以为实例被复用。
+        """
         cap_cls = cls._capabilities.get(name)
         if cap_cls is None:
             return None
-        # 支持能力类自定义实例化（如 code_skill 用 get_code_skill() 单例）
-        inst_factory = getattr(cap_cls, "_instantiate", None)
-        if callable(inst_factory):
-            inst = inst_factory()
-        else:
-            inst = cap_cls()
-        return inst
+        return cap_cls()
 
     @classmethod
     def match_by_tags(cls, query: str) -> list[str]:

@@ -594,6 +594,7 @@ async def get_tasks(
     closed_at_end: Optional[datetime] = Query(None, description="关闭时间结束"),
     deadline_at_start: Optional[datetime] = Query(None, description="截止时间起始"),
     deadline_at_end: Optional[datetime] = Query(None, description="截止时间结束"),
+    with_relations: bool = Query(False, description="是否同时返回关联工单完整数据（解决父子工单跨页问题）"),
     db: AsyncSession = Depends(get_db)
 ):
     import logging
@@ -646,6 +647,7 @@ async def get_tasks(
             closed_at_end=closed_at_end,
             deadline_at_start=deadline_at_start,
             deadline_at_end=deadline_at_end,
+            with_relations=with_relations,
         )
         logger.debug(f"查询参数构建完成, query_params={query_params}")
 
@@ -677,10 +679,11 @@ async def filter_tasks(
         auth_header = request.headers.get("Authorization")
         token = auth_header[7:] if auth_header and auth_header.startswith("Bearer ") else None
 
-        # 当前用户 username：供「我关注的」(followedBy) 过滤与列表 is_followed 回填
+        # 当前用户：username 供「我关注的」等过滤；user_id 供归档过滤（ArchiveReport.created_by/reviewer 存 user_id）
         current_username = actor_username(current_user)
+        current_user_id = str(current_user.get("id") or current_user.get("user_id") or "") if isinstance(current_user, dict) else ""
 
-        result = await TicketService.filter_tickets(db, filter_request, token, current_username)
+        result = await TicketService.filter_tickets(db, filter_request, token, current_username, current_user_id)
         logger.debug(f"复合过滤查询任务列表成功, total={result.get('total', 0)}")
         return result
     except Exception as e:
@@ -704,12 +707,13 @@ async def filter_tasks_counts(
         auth_header = request.headers.get("Authorization")
         token = auth_header[7:] if auth_header and auth_header.startswith("Bearer ") else None
 
-        # 当前用户 username：供「我关注的」(followedBy) 角标计数
+        # 当前用户：username 供「我关注的」角标；user_id 供归档角标
         current_username = actor_username(current_user)
+        current_user_id = str(current_user.get("id") or current_user.get("user_id") or "") if isinstance(current_user, dict) else ""
 
         totals = []
         for q in batch_request.queries:
-            totals.append(await TicketService.count_tickets(db, q, token, current_username))
+            totals.append(await TicketService.count_tickets(db, q, token, current_username, current_user_id))
         return totals
     except Exception as e:
         logger = logging.getLogger(__name__)
