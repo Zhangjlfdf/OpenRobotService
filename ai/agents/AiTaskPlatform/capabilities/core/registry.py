@@ -4,12 +4,13 @@
 - key 用 module.QualifiedName 保证唯一
 - list_available() 只返回当前环境可用能力（过滤 is_available()==False）
 - match_by_tags() 供 Router / Orchestrator 按标签/描述匹配能力（衔接 G1）
-- get_singleton() 复用能力单例（如 code_skill 的单例懒加载索引）
+- get() 每次新建实例（不复用）：能力实例上的用量计数因此**不会跨调用累计**，
+  所以 `max_usage_per_session` 从未生效过（详见 AiTaskPlatform/issues.md #10）
 """
 
 from __future__ import annotations
 
-from typing import Any, Optional, Type, TYPE_CHECKING
+from typing import Optional, Type, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ai.agents.AiTaskPlatform.capabilities.core.base import BaseCapability
@@ -54,6 +55,18 @@ class CapabilityRegistry:
         if cap_cls is None:
             return None
         return cap_cls()
+
+    @classmethod
+    def limit_of(cls, name: str) -> Optional[int]:
+        """读能力类声明的「每次请求调度上限」（不实例化能力类）。None = 不限。
+
+        供 `capabilities/core/usage.py` 的配额机制使用。刻意读类属性：能力实例每次
+        新建，任何挂在实例上的计数都活不过一次调用（issues.md #10）。
+        """
+        cap_cls = cls._capabilities.get(name)
+        if cap_cls is None:
+            return None
+        return getattr(cap_cls, "max_usage_per_session", None)
 
     @classmethod
     def match_by_tags(cls, query: str) -> list[str]:

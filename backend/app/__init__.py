@@ -4,9 +4,10 @@ load_dotenv()  # 把 .env 注入 os.environ
 from app.services.logging import setup_logging
 setup_logging()
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer
+from sqlalchemy import text
 import time
 from app.core.config import settings
 from app.core.database import init_users_db
@@ -51,6 +52,32 @@ app = FastAPI(
 
 app.openapi_schema = None
 
+def _ensure_project_online_column() -> None:
+    """幂等补 project.last_heartbeat_at / export_version / export_version_updated_at 列。"""
+    from app.core.db import engine
+    try:
+        with engine.connect() as conn:
+            columns_to_add = [
+                ("last_heartbeat_at", "ALTER TABLE project ADD COLUMN last_heartbeat_at FLOAT NULL COMMENT '最近一次心跳时间戳(Unix秒)'"),
+                ("export_version", "ALTER TABLE project ADD COLUMN export_version INT NOT NULL DEFAULT 0 COMMENT '导出授权包版本号（licence/人员变动自动+1）'"),
+                ("export_version_updated_at", "ALTER TABLE project ADD COLUMN export_version_updated_at FLOAT NULL COMMENT 'export_version 最后一次变更时间戳(Unix秒)'"),
+            ]
+            for col_name, ddl in columns_to_add:
+                result = conn.execute(
+                    text("SELECT COUNT(*) FROM information_schema.COLUMNS "
+                         "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'project' AND COLUMN_NAME = :c"),
+                    {"c": col_name}
+                ).scalar()
+                if result == 0:
+                    conn.execute(text(ddl))
+                    conn.commit()
+                    print(f"[补列] project.{col_name} 已补充")
+                else:
+                    print(f"[补列] project.{col_name} 已存在")
+    except Exception as e:  # noqa: BLE001
+        print(f"[补列] 失败（不影响启动）: {e}")
+
+
 @app.on_event("startup")
 async def startup_event():
     if app.openapi_schema is None:
@@ -66,6 +93,9 @@ async def startup_event():
     app.openapi_schema["security"] = [{"BearerAuth": []}]
     
     init_users_db()
+
+    # 补 project.last_heartbeat_at 列（存量库 create_all 不会自动补列）
+    _ensure_project_online_column()
 
     # 空库（测试环境/新机器）自动播下全局项目信息节点：结构来自 default.yaml，
     # 不依赖 alembic 迁移是否在本机跑过；已有全局节点的库原样跳过。
@@ -116,7 +146,20 @@ app.include_router(wechat_api_router, prefix=f"{settings.API_V1_STR}")
 app.include_router(integrations_mappings_router, prefix=f"{settings.API_V1_STR}/admin")
 
 @app.get(f"{settings.API_V1_STR}/health")
-async def health_check():
+async def health_check(project_code: str | None = Query(None, description="项目心跳携带的 project.code")):
+    # 项目心跳：收到 project_code 即更新 project.last_heartbeat_at
+    if project_code:
+        try:
+            from app.core.db import engine
+            with engine.connect() as conn:
+                conn.execute(
+                    text("UPDATE project SET last_heartbeat_at = :ts WHERE code = :code"),
+                    {"ts": time.time(), "code": project_code}
+                )
+                conn.commit()
+        except Exception:
+            # 心跳写失败不影响 health 响应本身——项目离线判定下次重新收到即可恢复
+            pass
     return {
         "status": "healthy",
         "service": settings.APP_NAME,

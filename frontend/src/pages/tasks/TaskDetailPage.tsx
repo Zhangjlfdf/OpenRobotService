@@ -293,7 +293,6 @@ export default function TaskDetailPage() {
   const [archiveEditorVisible, setArchiveEditorVisible] = useState(false);
   const [archiveReportContent, setArchiveReportContent] = useState('');
   const [archiveReportRevision, setArchiveReportRevision] = useState<number>(1);
-  const [archiveReportReviewer, setArchiveReportReviewer] = useState<string | null>(null);
   const [archiveEditorMode, setArchiveEditorMode] = useState<'edit' | 'review'>('edit');
   const [archiveLoading, setArchiveLoading] = useState(false);
   const [archiveRejectReason, setArchiveRejectReason] = useState('');
@@ -685,7 +684,7 @@ export default function TaskDetailPage() {
     }
   };
 
-  // ── 提交归档报告审核 ──
+  // ── 提交归档报告审核（审核人由系统按问题领域 + 负荷概率派审）──
   const handleSubmitArchive = async () => {
     if (archiveLoading) return;
     const reportId = detail?.current_archive_report?.id;
@@ -693,16 +692,12 @@ export default function TaskDetailPage() {
       Toast({ message: '归档报告未找到，请重新开始归档', theme: 'warning' });
       return;
     }
-    if (!archiveReportReviewer) {
-      Toast({ message: '请选择审核人', theme: 'warning' });
-      return;
-    }
     setArchiveLoading(true);
     try {
       // submit 后端返回 ArchiveReportResponse（不是 Ticket），不调 setDetail
       await request(`/archive-report/archive-reports/${reportId}/submit`, {
         method: 'POST',
-        body: JSON.stringify({ reviewer: archiveReportReviewer, content: archiveReportContent, revision: archiveReportRevision }),
+        body: JSON.stringify({ content: archiveReportContent, revision: archiveReportRevision }),
       });
       setArchiveEditorVisible(false);
       loadDetail();
@@ -2626,8 +2621,7 @@ export default function TaskDetailPage() {
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, marginTop: 16 }}>
                 <Button size="small" theme="default" onClick={handleSaveArchiveDraft} loading={archiveLoading}>保存草稿</Button>
                 <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                  <span style={{ fontSize: 12, color: 'var(--muted-foreground)' }}>审核人：</span>
-                  <UserSelect value={archiveReportReviewer} onChange={(u) => setArchiveReportReviewer(u.id)} placeholder="选择审核人" />
+                  <span style={{ fontSize: 12, color: 'var(--muted-foreground)' }}>提交后系统自动指定审核人</span>
                   <Button size="small" theme="primary" onClick={handleSubmitArchive} loading={archiveLoading}>提交审核</Button>
                 </div>
               </div>

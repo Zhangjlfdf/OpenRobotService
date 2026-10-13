@@ -290,23 +290,13 @@ class ResolutionSummaryWorker:
 
 
 # 模块级单例（供 lifespan 使用）
-_resolution_worker: Optional[ResolutionSummaryWorker] = None
-
-
 def resolution_worker_start() -> tuple[ResolutionSummaryWorker, asyncio.Task]:
     """启动 resolver worker（供 ai/run.py lifespan 调用）。
 
     Returns:
         (worker, task)
     """
-    global _resolution_worker
     worker = ResolutionSummaryWorker()
-    _resolution_worker = worker
     task = asyncio.create_task(worker.run())
     worker._task = task
     return worker, task
-
-
-def get_resolution_worker() -> Optional[ResolutionSummaryWorker]:
-    """获取当前 resolution worker 单例（供后端接口入队）。"""
-    return _resolution_worker

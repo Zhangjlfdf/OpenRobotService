@@ -1,11 +1,17 @@
 # -*- coding: utf-8 -*-
 """车型定制模式：扫码入口的模式确认接口（XQE 试点）。
 
-链路：车体二维码（URL 带车型/项目/客户）→ 前端「我要摇人」界面弹信息确认
-弹窗 → 用户确认后前端调 POST /mode/confirm → 此处校验 vehicles 档案表：
-  - 有档案 → 该 session 注册为车型定制模式（memory.metadata["vehicle_mode"]），
-    返回该车型 SOP 手册文档清单（md 链接，前端拉正文渲染）
-  - 无档案 → code=1 报错拦住（实验阶段不降级常规模式）
+链路：车体二维码（跳转 URL 带 scene = str(qrcodes.id)）→ 前端「我要摇人」界面
+弹信息确认弹窗（项目名/客户名/车型取扫码查到的录入信息行）→ 用户确认后前端调
+POST /mode/confirm → 此处按 scene 精确取 wechat_qrcodes 里的那一行：
+  - 该行存在且 status=published → 该 session 注册为车型定制模式
+    （memory.metadata["vehicle_mode"]），返回该车型 SOP 手册文档清单
+    （md 链接，前端拉正文渲染）
+  - scene 非法 / 查无此码 / 非 published → code=1 报错拦住
+    （实验阶段不降级常规模式）
+
+车型/项目名/客户名一律以库内那行为准（请求里的同名字段只作兜底）；同车型多台车
+的 scene（行 id）各不相同，按主键精确取行才不串车。
 
 铁律：定制模式是「加法」——常规链路（不调本接口的会话）一个字节不变；
 后续 pipeline 的检索域限定 / prompt 注入 / 错误码直查全部以
@@ -76,11 +82,6 @@ def build_opening(top_levels: List[str], rng: Optional[random.Random] = None) ->
 
     随机是用户拍板（固定前 5 会让其余类永无曝光）；故障码是重要大类保底
     不随机。不足 2 类不出题（None）。
-    ⚠️ 车型资料引导（vehicle_guide）是**独立结构**，不混入本题 choices——
-    「您遇到了什么问题」是故障排查语境，混入车型介绍按钮语义错乱（1012 用户
-    否决并列方案）。
-    1012 v2：返回拆 choices（常驻 4）/collapsed_choices（折叠，前端「展开全部」
-    补渲染）两组，九大类全部可达且首屏不爆。
     """
     if not top_levels:
         return None
@@ -103,95 +104,41 @@ def build_opening(top_levels: List[str], rng: Optional[random.Random] = None) ->
     }
 
 
-_VEHICLE_GUIDE_QUESTION = "想了解 XQE 车型信息？点击查看"
-
-
-def build_vehicle_guide(model: str, kb_root: Optional[Path] = None) -> Optional[Dict]:
-    """车型基础信息引导（独立于开场故障题，1012）：扫车型详情页生成按钮组。
-
-    详情页文件形态 {MODEL}.md（如 XQE122.md/XQE151.md）——新增型号详情页
-    即自动出现按钮，零代码改动。无详情页 → None（不渲染引导条）。
-    点击按钮 = 用户发出「{型号} 车型介绍」消息 → 走检索命中概览/详情页，
-    带整车图与参数回答（链路已实测）。
-    """
-    sub = model_to_subpath(model)
-    if not sub:
-        return None
-    root = (kb_root or _default_kb_root()) / "company" / sub
-    if not root.is_dir():
-        return None
-    models = []
-    for f in sorted(root.glob("*.md")):
-        m = re.fullmatch(r"([A-Z]+\d+)", f.stem)
-        if m:
-            models.append(m.group(1))
-    if not models:
-        return None
-    return {
-        "question": _VEHICLE_GUIDE_QUESTION,
-        "choices": [f"{m} 车型介绍" for m in models],
-    }
-
-
 class ModeConfirmRequest(BaseModel):
     session_id: str = Field(..., min_length=1, max_length=128, description="会话 ID（前端先建会话再调本接口绑定模式）")
-    model: str = Field(..., min_length=1, max_length=64, description="车型（如 XQE），上游 URL 带来、用户已在弹窗确认")
-    project_name: str = Field(default="", max_length=128, description="项目名（上游 URL 带来）")
-    customer_name: str = Field(default="", max_length=128, description="客户名（上游 URL 带来）")
-    vehicle_code: str = Field(default="", max_length=64, description="唯一车号（可选；传了按车号精确校验，不传按车型+项目匹配）")
+    scene: str = Field(..., min_length=1, max_length=32, description="扫码场景值（= str(wechat_qrcodes.id)，纯数字），据此精确取扫的那一行")
+    model: str = Field(..., min_length=1, max_length=64, description="车型（用户已在弹窗确认的展示值；实际以库内行为准）")
+    project_name: str = Field(default="", max_length=128, description="项目名（弹窗展示值；库内非空时以库内为准）")
+    customer_name: str = Field(default="", max_length=128, description="客户名（弹窗展示值；库内非空时以库内为准）")
+    vehicle_code: str = Field(default="", max_length=64, description="唯一车号（扫码链路不使用，保留字段兼容其他调用方）")
 
 
 # ============================================================
-# 车辆档案表（惰性幂等建表，进程级只建一次）
+# 扫码行查询（数据源：wechat_qrcodes 录入信息行）
 # ============================================================
-_ensure_table_lock = asyncio.Lock()
-_ensure_table_done = False
+# scene 严格为纯数字串（= str(qrcodes.id)，0930 起的微信号场景值口径）：非数字
+# 直接拒绝，不做归一也不做模糊匹配——只按主键命中「扫的那一行」。同车型多台车各
+# 自 id 独立，按车型/项目名兜底匹配会让不同车串味，一律不做。
+_SCENE_RE = re.compile(r"^\d+$")
+
+# 只有已发布（= 车辆已出厂）的码才允许进入定制模式
+_STATUS_PUBLISHED = "published"
 
 
-async def _ensure_vehicle_table() -> None:
-    """幂等建 vehicles 表（AI 侧自有表，create_all 只建它自己，不碰既有表）。"""
-    global _ensure_table_done
-    if _ensure_table_done:
-        return
-    async with _ensure_table_lock:
-        if _ensure_table_done:
-            return
-        from ai.core.database import Base, Vehicle, engine  # noqa: F401
+async def _lookup_qrcode(scene: str):
+    """按主键精确取 scene 对应的二维码行；查无此码返回 None。
 
-        def _create() -> None:
-            Base.metadata.create_all(engine, tables=[Vehicle.__table__])
-
-        await asyncio.to_thread(_create)
-        _ensure_table_done = True
-
-
-async def _lookup_vehicle(model: str, project_name: str, vehicle_code: str):
-    """查车辆档案。返回 Vehicle 行或 None（调用方报错拦住）。
-
-    匹配规则（0930 放宽：车型是白名单键，项目名/客户名仅展示不参与匹配——
-    车辆档案与二维码录入信息是两套数据，靠项目名字符串相等关联太脆，实锤
-    卡「未建档」）：
-      1. model 大小写归一必匹配（xqe/XQE 等价；知识库目录也按 upper 归一）
-      2. vehicle_code 非空 → 车号大小写归一精确匹配
-    只认 active 档案；多条命中取第一条（初版手工建档保证不重复）。
+    只按 id 匹配，车型/项目/客户仅用于展示、不参与匹配。status 校验留给调用方，
+    便于把「查无此码」与「码不可用」报成不同文案（两者都不降级）。
     """
-    from ai.core.database import Vehicle, engine
-    from sqlalchemy import func
+    from ai.core.database import WechatQrcode, engine
     from sqlalchemy.orm import Session as DBSession
 
-    m = (model or "").strip().upper()
-    code = (vehicle_code or "").strip().upper()
-    if not m:
-        return None
+    qr_id = int(scene)
 
     def _query():
         with DBSession(engine) as s:
-            q = s.query(Vehicle).filter(
-                Vehicle.status == "active",
-                func.upper(Vehicle.model) == m)
-            if code:
-                q = q.filter(func.upper(Vehicle.vehicle_code) == code)
-            return q.first()
+            return s.query(WechatQrcode).filter(WechatQrcode.id == qr_id).first()
 
     return await asyncio.to_thread(_query)
 
@@ -247,6 +194,35 @@ def list_manual_docs(model: str, kb_root: Optional[Path] = None,
     return docs
 
 
+_VEHICLE_GUIDE_QUESTION = "想了解 XQE 车型信息？点击查看型号介绍"
+
+
+def build_vehicle_guide(model: str, kb_root: Optional[Path] = None) -> Optional[Dict]:
+    """车型基础信息引导（独立于开场故障题，1012）：扫车型目录下的型号详情页
+    （XQE122.md / XQE151.md 形态）生成按钮组——新增型号详情页即自动出现。
+
+    点击按钮 = 用户发出「{型号} 车型介绍」消息 → 走检索命中概览/详情页，
+    带整车图与参数回答。无型号详情页 → None（不渲染引导条）。
+    """
+    sub = model_to_subpath(model)
+    if not sub:
+        return None
+    root = (kb_root or _default_kb_root()) / "company" / sub
+    if not root.is_dir():
+        return None
+    models = []
+    for f in sorted(root.glob("*.md")):
+        m = re.fullmatch(r"([A-Z]+\d+)", f.stem)
+        if m:
+            models.append(m.group(1))
+    if not models:
+        return None
+    return {
+        "question": _VEHICLE_GUIDE_QUESTION,
+        "choices": [f"{m} 车型介绍" for m in models],
+    }
+
+
 def _default_kb_root() -> Path:
     from ai.config import _KB_DIR
     return _KB_DIR
@@ -257,50 +233,63 @@ def _default_kb_root() -> Path:
 # ============================================================
 async def register_mode(req: ModeConfirmRequest,
                         memory_manager: Optional[MemoryManager] = None) -> dict:
-    """校验车辆档案 → session 注册定制模式 → 返回手册清单。
+    """按 scene 取录入信息行 → session 注册定制模式 → 返回手册清单。
 
-    返回：{code: 0, data: {confirmed, model, domain, manual_docs}} 或 {code: 1, message}。
+    返回：{code: 0, data: {confirmed, model, domain, manual_docs, opening}} 或 {code: 1, message}。
     memory_manager 参数供测试注入 mock；缺省用真实 get_memory_manager()。
     """
-    model = (req.model or "").strip()
-    project_name = (req.project_name or "").strip()
-    customer_name = (req.customer_name or "").strip()
-    vehicle_code = (req.vehicle_code or "").strip()
-
-    if not model:
-        return {"code": 1, "message": "车型不能为空"}
-
-    await _ensure_vehicle_table()
-    vehicle = await _lookup_vehicle(model, project_name, vehicle_code)
-    if vehicle is None:
-        # 实验阶段：报错拦住，不降级常规模式（前端展示报错弹窗）
+    scene = (req.scene or "").strip()
+    if not _SCENE_RE.match(scene):
         logger.warning(
-            f"[vehicle_mode] 未建档拦截: model={model!r} project={project_name!r} "
-            f"vehicle_code={vehicle_code!r}, session={req.session_id}",
+            f"[vehicle_mode] 场景值非法拦截: scene={scene!r}, session={req.session_id}",
         )
-        return {"code": 1, "message": f"车型 {model} 未建档或不在服务范围，请确认扫码信息"}
+        return {"code": 1, "message": "扫码信息无效，请重新扫码或联系管理员"}
 
-    domain = model_to_domain(vehicle.model)
-    # 车型存归一后的值（= 磁盘目录名大小写）：档案表 model 是录入串，可能小写，
-    # 而下游拿它拼检索 filter 的 sub_domain（pipeline._vehicle_mode_domains）、
-    # 渲染 prompt 里的「车型 xxx」，都要与 kb 入库同形才对得上。
-    model_key = model_to_subpath(vehicle.model)
+    row = await _lookup_qrcode(scene)
+    if row is None or (row.status or "").strip() != _STATUS_PUBLISHED:
+        # 实验阶段：查无此码 / 码不可用都报错拦住，不降级常规模式（前端展示提示）
+        logger.warning(
+            f"[vehicle_mode] 二维码不可用拦截: scene={scene} "
+            f"status={getattr(row, 'status', None)!r}, session={req.session_id}",
+        )
+        return {"code": 1, "message": "该二维码未录入信息或不可用，请联系管理员"}
+
+    # 车型以库内那行为准（录入界面必填，正常不会为空）；为空时用弹窗确认值兜底。
+    # 归一到大写（= 磁盘目录名）：下游拿 model 拼检索 filter 的 sub_domain
+    # （pipeline._vehicle_mode_domains）与 prompt 里的「车型 xxx」，都要与 kb
+    # 入库同形才对得上，小写会过滤成空集。
+    model_key = model_to_subpath(
+        (row.vehicle_model or "").strip() or (req.model or "").strip())
+    if not model_key:
+        logger.warning(
+            f"[vehicle_mode] 车型为空拦截: scene={scene}, session={req.session_id}",
+        )
+        return {"code": 1, "message": "该二维码未录入车型信息，请联系管理员"}
+
+    # 项目名/客户名同口径：库内非空以库内为准，为空用弹窗确认值兜底
+    project_name = (row.project_name or "").strip() or (req.project_name or "").strip()
+    customer_name = (row.customer_name or "").strip() or (req.customer_name or "").strip()
+
+    domain = model_to_domain(model_key)
     mode_info = {
         "model": model_key,
         "domain": domain,
-        "vehicle_code": vehicle.vehicle_code,
-        "project_name": vehicle.project_name or project_name,
-        "customer_name": vehicle.customer_name or customer_name,
-        "location": vehicle.location or "",
+        # scene = 行 id：本会话绑定的是「哪一台车」的唯一身份，供追溯
+        "scene": scene,
+        # 扫码链路无车号概念（车号字段保留给其他调用方；空则不注入 prompt 车号段）
+        "vehicle_code": (req.vehicle_code or "").strip(),
+        "project_name": project_name,
+        "customer_name": customer_name,
+        "location": (row.project_location or "").strip(),
         "registered_at": int(time.time()),
     }
 
     mm = memory_manager or await _default_memory_manager()
     memory = await mm.get_memory(req.session_id)
     # SOP 外显清单：排除引导设施文档（分叉树/故障码表的入口在对话里）
-    manual_docs = list_manual_docs(vehicle.model, exclude_guide_docs=True)
-    opening = build_opening(parse_fork_tree_choices(vehicle.model))
-    vehicle_guide = build_vehicle_guide(vehicle.model)
+    manual_docs = list_manual_docs(model_key, exclude_guide_docs=True)
+    opening = build_opening(parse_fork_tree_choices(model_key))
+    vehicle_guide = build_vehicle_guide(model_key)
     if opening:
         # 开场类目随模式入 metadata：pipeline 识别「用户点开场气泡」（query
         # == 类目原文）做零 LLM 短接，不必再读分叉树文件
@@ -310,8 +299,8 @@ async def register_mode(req: ModeConfirmRequest,
     await mm.save_memory(memory)
 
     logger.info(
-        f"[vehicle_mode] 定制模式注册: session={req.session_id} model={model_key} "
-        f"vehicle={vehicle.vehicle_code} domain={domain} manual={len(manual_docs)}篇 "
+        f"[vehicle_mode] 定制模式注册: session={req.session_id} scene={scene} "
+        f"model={model_key} domain={domain} manual={len(manual_docs)}篇 "
         f"opening={len(opening['choices']) if opening else 0}类",
     )
     return {
