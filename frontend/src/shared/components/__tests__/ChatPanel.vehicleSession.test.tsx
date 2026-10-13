@@ -97,7 +97,7 @@ vi.mock('@/api/conversation', async (importOriginal) => {
 });
 
 const VEHICLE_CTX = {
-  scene: 'proj_abc123def456',
+  scene: '101',
   projectName: '项目A',
   customerName: '客户A',
   vehicleModel: 'XQE',
@@ -203,10 +203,18 @@ describe('ChatPanel 车体扫码：车型模式注册与首问同 session_id', (
 
     // 3. 确认即注册：qaModeConfirm 被调用，捕获注册 sid
     await waitFor(() => expect(mockModeConfirm).toHaveBeenCalledTimes(1));
-    const registeredSid = (mockModeConfirm.mock.calls[0][0] as { session_id: string }).session_id;
+    const confirmPayload = mockModeConfirm.mock.calls[0][0] as {
+      session_id: string;
+      scene: string;
+      model: string;
+    };
+    const registeredSid = confirmPayload.session_id;
     expect(registeredSid).toMatch(/^sess_/);
     // 不能用恢复出来的旧会话 sid（扫码 = 这次专用的空白会话）
     expect(registeredSid).not.toBe(OLD_SID);
+    // 必须透传 scene（= 行 id）：后端按它精确取「扫的那一行」录入信息，缺了注册就失败
+    expect(confirmPayload.scene).toBe('101');
+    expect(confirmPayload.model).toBe('XQE');
 
     // 4. 开场题气泡渲染后点类目（= 用户真实路径：点选项即发送全文）
     const chip = await waitFor(() => screen.getByRole('button', { name: '界面报故障码' }));
