@@ -1130,7 +1130,7 @@ export default function TasksView() {
       filters.push({ field: 'closedAt', op: 'le', value: toBoundaryISO(closedEnd, true) });
     }
     return filters;
-  }, [search, statusFilter, priorityFilter, typeFilter, projectFilter, assigneeFilter, creatorFilter, createdStart, createdEnd, resolvedStart, resolvedEnd, closedStart, closedEnd]);
+  }, [search, statusFilter, priorityFilter, typeFilter, projectFilter, assigneeFilter, creatorFilter, createdStart, createdEnd, resolvedStart, resolvedEnd, closedStart, closedEnd, relevanceFilter]);
 
   const fetchTickets = useCallback(async (silent = false) => {
     if (isFetchingRef.current) return;
@@ -1949,6 +1949,7 @@ export default function TasksView() {
 
       {/* 视图切换：普通列表 / 关系列表 */}
       <div
+        className="tasks-view__view-toggle"
         style={{
           display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap',
           marginTop: 8, marginBottom: 4, padding: '0 4px',
