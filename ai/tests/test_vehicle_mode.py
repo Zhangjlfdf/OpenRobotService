@@ -278,7 +278,8 @@ async def test_register_mode_normalizes_model_case(vehicle_db, kb_tmp, mock_memo
 
 @pytest.fixture
 def kb_fork(tmp_path):
-    """带 9 大类顶层节点的分叉树（### 子节点不算顶层）。"""
+    """带 9 大类顶层节点的分叉树（### 子节点不算顶层）+ 一个型号详情页
+    （vehicle_guide 扫描用）。"""
     xqe = tmp_path / "company" / "XQE"
     xqe.mkdir(parents=True)
     (xqe / "故障分叉树.md").write_text(
@@ -288,6 +289,7 @@ def kb_fork(tmp_path):
         "## 5. 界面报故障码\n## 6. 自检失败/开机异常\n## 7. 充电异常\n"
         "## 8. 车体异常（异响/漏油）\n## 9. 多车/调度异常\n",
         encoding="utf-8")
+    (xqe / "XQE122.md").write_text("# XQE122\n", encoding="utf-8")
     return tmp_path
 
 
@@ -310,7 +312,8 @@ def test_parse_fork_tree_missing_returns_empty(tmp_path):
 
 
 def test_build_opening_random5_keeps_code():
-    # 故障码保底 + 随机抽满 5；30 次内 9 类全部有出场（随机性不被固定前 5 垄断）
+    # 常驻 4（故障码保底必在）+ 折叠 5；30 次内 9 类全部有出场
+    #（常驻+折叠并集=全类，随机性不被固定组合垄断）
     import random
 
     from ai.api.vehicle_mode import build_opening
@@ -321,10 +324,11 @@ def test_build_opening_random5_keeps_code():
     seen = set()
     for _ in range(30):
         op = build_opening(levels, rng=rng)
-        assert op is not None and len(op["choices"]) == 5
+        assert op is not None
+        assert len(op["choices"]) == 4 and len(op["collapsed_choices"]) == 5
         assert "界面报故障码" in op["choices"]
         assert op["question"] and op["hint"]
-        seen.update(op["choices"])
+        seen.update(op["choices"] + op["collapsed_choices"])
     assert seen == set(levels)
 
 
@@ -344,9 +348,10 @@ async def test_register_mode_returns_opening(vehicle_db, kb_fork, mock_memory, m
     assert resp["code"] == 0
     op = resp["data"]["opening"]
     assert op is not None
-    assert len(op["choices"]) == 5
+    assert len(op["choices"]) == 4 and len(op["collapsed_choices"]) == 5
     assert "界面报故障码" in op["choices"]
     assert op["hint"]
+    assert resp["data"]["vehicle_guide"] is not None   # 车型资料引导独立结构
 
 
 async def test_register_mode_opening_none_without_tree(vehicle_db, kb_tmp, mock_memory, monkeypatch):
@@ -361,11 +366,11 @@ async def test_register_mode_opening_none_without_tree(vehicle_db, kb_tmp, mock_
 
 
 # ================================================================
-# 车型介绍开场选项（1012）
+# 车型资料引导（1012：独立结构，不混入开场故障题）
 # ================================================================
 
-def test_parse_intro_options_scans_model_pages(tmp_path):
-    from ai.api.vehicle_mode import parse_vehicle_intro_options
+def test_build_vehicle_guide_scans_model_pages(tmp_path):
+    from ai.api.vehicle_mode import build_vehicle_guide
 
     xqe = tmp_path / "company" / "XQE"
     xqe.mkdir(parents=True)
@@ -374,27 +379,19 @@ def test_parse_intro_options_scans_model_pages(tmp_path):
     (xqe / "05_车型概览.md").write_text("# x", encoding="utf-8")   # 非型号页排除
     (xqe / "90_问题清单分类.md").write_text("# x", encoding="utf-8")
 
-    assert parse_vehicle_intro_options("XQE", kb_root=tmp_path) == \
-        ["XQE122 车型介绍", "XQE151 车型介绍"]
-    assert parse_vehicle_intro_options("XQE", kb_root=tmp_path / "nope") == []
+    assert build_vehicle_guide("XQE", kb_root=tmp_path) == {
+        "question": "想了解 XQE 车型信息？点击查看",
+        "choices": ["XQE122 车型介绍", "XQE151 车型介绍"]}
+    assert build_vehicle_guide("XQE", kb_root=tmp_path / "nope") is None
 
 
-def test_build_opening_intro_fixed_first():
+def test_build_opening_collapse_arrow_data():
+    # 常驻 4 + 折叠 5 的数据形态：前端「展开全部」点击后补渲染 collapsed
     from ai.api.vehicle_mode import build_opening
 
-    cats = ["1. 界面报故障码"] + [f"{i}. 类目{i}" for i in range(2, 9)]
-    op = build_opening(cats, intro_options=["XQE122 车型介绍", "XQE151 车型介绍"],
-                       rng=__import__("random").Random(1))
-    # 车型介绍固定排最前且必出现（引导期主推）
-    assert op["choices"][:2] == ["XQE122 车型介绍", "XQE151 车型介绍"]
-    assert "故障码" in op["choices"][2]              # 故障码保底次之
-    assert len(op["choices"]) == 5
-
-
-def test_build_opening_no_intro_behavior_unchanged():
-    from ai.api.vehicle_mode import build_opening
-
-    cats = ["1. 故障码", "2. 取货失败", "3. 卸货异常", "4. 堆叠失败", "5. 充电异常", "6. 车体异常"]
+    cats = ["1. 界面报故障码", "2. 车辆停着不动", "3. 取货失败", "4. 卸货/放货异常",
+            "5. 堆叠失败", "6. 自检失败", "7. 充电异常", "8. 车体异常", "9. 多车调度"]
     op = build_opening(cats, rng=__import__("random").Random(1))
-    assert op["choices"][0] == "1. 故障码"            # 无 intro 时故障码保底排首（原行为）
-    assert len(op["choices"]) == 5
+    assert len(op["choices"]) == 4 and len(op["collapsed_choices"]) == 5
+    assert set(op["choices"]) | set(op["collapsed_choices"]) == set(cats)
+    assert not set(op["choices"]) & set(op["collapsed_choices"])
