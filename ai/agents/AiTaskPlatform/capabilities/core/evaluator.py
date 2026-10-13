@@ -103,8 +103,8 @@ class Evaluator:
         )
 
     @staticmethod
-    def _parse_eval(raw: str) -> Optional[dict]:
-        """解析自评 JSON（健壮解析，剥代码块/散文）。"""
+    def _extract_json(raw: str) -> Optional[dict]:
+        """从 LLM 输出里剥出 JSON 对象（去代码块、散文包裹）。解析不出来返回 None。"""
         text = (raw or "").strip()
         m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
         if m:
@@ -117,9 +117,15 @@ class Evaluator:
             data = json.loads(text)
         except Exception:
             return None
-        if isinstance(data, dict) and "pass" in data:
-            return data
-        return None
+        return data if isinstance(data, dict) else None
+
+    @staticmethod
+    def _parse_eval(raw: str) -> Optional[dict]:
+        """解析自评 JSON（健壮解析）。"""
+        data = Evaluator._extract_json(raw)
+        if data is None or "pass" not in data:
+            return None
+        return data
 
     @staticmethod
     def _build_rewrite_prompt(draft: str, issues: list, evidence: str, context: str) -> str:
@@ -174,6 +180,94 @@ class Evaluator:
         if data is None:
             logger.warning("[evaluator] 自评解析失败")
         return data
+
+    # ── 复核评审意见本身（用 prompt 核对落点，不做字符串匹配）──
+    _VERIFY_SYSTEM_PROMPT = (
+        "你是复核员，负责核对「评审意见本身」站不站得住。只输出 JSON。"
+    )
+
+    @classmethod
+    def _build_verify_prompt(cls, issues: list, draft: str, evidence: str, context: str) -> str:
+        issues_text = "\n".join(f"{i}. {str(x).strip()}" for i, x in enumerate(issues, 1))
+        return (
+            "下面是本次材料（提问 / 引用证据 / 待评回答）与评审员提出的问题清单。\n"
+            "请**逐条**核对：这条问题说的是不是本次材料里的东西。\n\n"
+            "核对口径（务必遵守）：\n"
+            "- 只核对「它指的内容在不在材料里」，**不要**评价这条问题对回答的判断是否合理，"
+            "也不要想怎么改回答。\n"
+            "- 问题指向材料里真实存在的内容（回答里的话、证据里的事实、提问里的字眼）→ grounded=true。\n"
+            "- 问题要求了材料里根本没有的东西，或引用了别处/别的场景的说法 → grounded=false，"
+            "并在 why 里写明「它引用了材料里不存在的什么」。\n"
+            "- 拿不准算 grounded=true：宁可放过一条，也不要凭空指认复核对象在挑刺。\n"
+            "- 材料里没写、但属于常识性提醒的（如「建议复测」），算 grounded=true。\n\n"
+            f"## 提问\n{context or '（无）'}\n\n"
+            f"## 引用证据\n{evidence or '（无）'}\n\n"
+            f"## 待评回答\n{draft or '（无）'}\n\n"
+            f"## 问题清单\n{issues_text}\n\n"
+            "输出 JSON（无其他文字）：\n"
+            '{"checks": [{"index": 1, "grounded": true, "why": "简短"}, ...]}\n'
+            "index 对应上面清单的序号；清单里每条问题都要有一条 check。"
+        )
+
+    @classmethod
+    def _parse_verify(cls, raw: str, expected: int = 0) -> Optional[list]:
+        """解析复核 JSON。缺 checks / 结构不对 → None；条目数少于 expected → None（不猜）。"""
+        data = cls._extract_json(raw)
+        if data is None:
+            return None
+        checks = data.get("checks")
+        if not isinstance(checks, list) or not checks:
+            return None
+        out = []
+        for item in checks:
+            if not isinstance(item, dict) or "grounded" not in item:
+                continue
+            out.append({
+                "index": item.get("index"),
+                "grounded": bool(item.get("grounded")),
+                "why": str(item.get("why") or ""),
+            })
+        if not out or (expected and len(out) < expected):
+            return None
+        return out
+
+    @classmethod
+    async def verify_issues(
+        cls,
+        llm_client,
+        issues: list,
+        draft: str = "",
+        evidence: str = "",
+        context: str = "",
+    ) -> Optional[list]:
+        """复核评审意见的落点：逐条判断「它指的东西在不在本次材料里」。
+
+        为什么用 prompt 而不是字符串匹配：评审意见是中文散文，机械比对要么漏（换词复述
+        材料内容）、要么假阳性（标点/常用词凑出重叠），量出来的不是「有没有落点」而是
+        「用词像不像」。这里交给模型按语义核对，与判官同一套失败处理（调用/解析失败返回 None，
+        绝不猜）。
+
+        Returns:
+            [{"index": int, "grounded": bool, "why": str}, ...]；issues 为空返回 []；失败返回 None。
+        """
+        if not issues:
+            return []
+        if llm_client is None:
+            return None
+        try:
+            raw = await llm_client.complete(
+                prompt=cls._build_verify_prompt(issues, draft, evidence, context),
+                system_prompt=cls._VERIFY_SYSTEM_PROMPT,
+                max_tokens=500,
+                temperature=0.0,
+            )
+        except Exception as e:
+            logger.warning(f"[evaluator] 复核调用失败: {e}")
+            return None
+        parsed = cls._parse_verify(raw, expected=len(issues))
+        if parsed is None:
+            logger.warning("[evaluator] 复核解析失败")
+        return parsed
 
     @classmethod
     async def evaluate_and_rewrite(

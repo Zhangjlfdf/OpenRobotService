@@ -1,25 +1,24 @@
-"""离线评测的指标计算（纯函数，不碰网络/DB，可直接单测）。
+"""离线评测的指标（纯函数，不碰网络/DB，可直接单测）。
 
-为什么要有这一层：`pass/fail` 单次计数**不能当结论**——同一个输入在
-`temperature=0` 下实测也能给出完全相反的判定（见 AiTaskPlatform/issues.md #1–#3）。
-所以这里同时算三样东西：
+**这里刻意不评「判得对不对」。** 讨论场景不该有固定的通过/不通过标准——标准取决于
+用户问的是什么，同一份回答在不同提问下对错不同（见 AiTaskPlatform/issues.md #1–#3
+与 eval/README.md 的实测）。固定的「期望通过/不通过」标签是错的工具，已删除。
 
-  - **准确率**：与人工标注的期望是否一致；
-  - **误杀 / 漏放分开算**：两者后果不同——「误杀」会把本来正确的回答送去重写、
-    真的改坏（我们踩过）；「漏放」会放过幻觉。只报一个总准确率会把这两件事糊在一起；
-  - **多轮一致率**：同一用例跑 K 轮是否同判。**翻转的用例才是要去看的清单**，
-    因为它说明这条判据在这类输入上不可靠，而不是模型「偶尔手滑」。
+只留两件与「具体问了什么」无关、能客观量的事：
 
-`None` 表示调用失败或解析失败，**单独计数**：既不算通过也不算不通过，避免把
-「判官没跑起来」美化成判定结果。
+  1. **判定稳定性**：同一用例多轮是否同判（`stability`）；
+  2. **issues 落点**：判官挑的每条刺，指的东西在不在本次材料里（`verify_report`）。
+     这一步**由 prompt 复核**（`Evaluator.verify_issues`），不做字符串匹配——评审意见是
+     中文散文，机械比对测出来的是「用词像不像」，不是「有没有落点」（实测过：换词复述
+     材料内容会被算成没落点，常用词又会凑出假重叠）。
+
+另外只统计**分布**（通过/不通过/未解析各几次）作为信息，不做评判。`None` 一律单独计数：
+判定为 None = 调用或解析失败；某轮复核为 None = 复核没跑成（不能当成「落点没问题」）。
 """
 
 from __future__ import annotations
 
 from typing import Iterable, Optional
-
-# 判定取值：True=通过 / False=不通过 / None=未解析
-Verdict = Optional[bool]
 
 
 def _round_verdicts(case: dict, round_idx: Optional[int] = None) -> list:
@@ -29,19 +28,8 @@ def _round_verdicts(case: dict, round_idx: Optional[int] = None) -> list:
     return verdicts[round_idx : round_idx + 1]
 
 
-def _pairs(records: Iterable[dict], round_idx: Optional[int] = None) -> list:
-    """(期望, 实际判定) 列表；跳过未解析的那些（它们单独统计）。"""
-    out = []
-    for case in records:
-        for got in _round_verdicts(case, round_idx):
-            if got is None:
-                continue
-            out.append((bool(case.get("expected")), got))
-    return out
-
-
 def count_verdicts(records: Iterable[dict]) -> dict:
-    """通过 / 不通过 / 未解析各多少次（跨全部轮次）。"""
+    """通过 / 不通过 / 未解析各多少次（跨全部轮次）。只是分布，不代表对错。"""
     total = {"pass": 0, "fail": 0, "unparsed": 0}
     for case in records:
         for got in _round_verdicts(case):
@@ -54,33 +42,8 @@ def count_verdicts(records: Iterable[dict]) -> dict:
     return total
 
 
-def confusion(records: Iterable[dict], round_idx: Optional[int] = None) -> dict:
-    """以「期望通过」为正类：误杀（应通过→判不通过）与漏放（应不通过→判通过）分开算。"""
-    hit = false_reject = false_accept = 0
-    for expected, got in _pairs(records, round_idx):
-        if got == expected:
-            hit += 1
-        elif expected:
-            false_reject += 1  # 误杀：会把正确回答送去重写
-        else:
-            false_accept += 1  # 漏放：放过幻觉/偏题
-    return {
-        "hit": hit,
-        "false_reject": false_reject,
-        "false_accept": false_accept,
-        "comparable": hit + false_reject + false_accept,
-    }
-
-
-def accuracy(records: Iterable[dict], round_idx: Optional[int] = None) -> dict:
-    """准确率。分母是「解析成功的判定次数」，未解析的不计入分母（但报告里单列）。"""
-    c = confusion(records, round_idx)
-    rate = (c["hit"] / c["comparable"]) if c["comparable"] else 0.0
-    return {**c, "rate": rate}
-
-
 def stability(records: Iterable[dict]) -> dict:
-    """多轮一致率 + 翻转用例清单（要看的就这份）。"""
+    """多轮一致率 + 翻转用例清单（稳定性的问题都在这份清单上）。"""
     consistent, flipped, unparsed_only = 0, [], []
     for case in records:
         seen = {v for v in _round_verdicts(case) if v is not None}
@@ -100,6 +63,48 @@ def stability(records: Iterable[dict]) -> dict:
     }
 
 
+def verify_report(records: Iterable[dict]) -> dict:
+    """汇总 prompt 复核结果。
+
+    入参 `case["verifications"]` 是每轮的复核结果：
+      - `None`  = 这一轮有评审意见，但复核没跑成（调用/解析失败）→ 单列，**不能当成没问题**
+      - `[]`    = 这一轮没有评审意见（判定通过），无需复核
+      - `[{issue, grounded, why}, ...]` = 逐条复核结果
+
+    `suspicious` 是 grounded=false 的明细：复核员认为这条意见指的东西本次材料里没有，
+    多半在套别的场景模板。**这是可疑清单，不是判决**——复核本身也是 LLM。
+    """
+    grounded = not_grounded = 0
+    failed_rounds = 0
+    suspicious = []
+    for case in records:
+        for r, checks in enumerate(case.get("verifications") or []):
+            if checks is None:
+                failed_rounds += 1
+                continue
+            for item in checks:
+                if not isinstance(item, dict):
+                    continue
+                if item.get("grounded"):
+                    grounded += 1
+                else:
+                    not_grounded += 1
+                    suspicious.append({
+                        "case_id": case.get("case_id"),
+                        "round": r + 1,
+                        "issue": item.get("issue", ""),
+                        "why": item.get("why", ""),
+                    })
+    checkable = grounded + not_grounded
+    return {
+        "grounded": grounded,
+        "not_grounded": not_grounded,
+        "failed_rounds": failed_rounds,
+        "rate": (grounded / checkable) if checkable else 0.0,
+        "suspicious": suspicious,
+    }
+
+
 def summarize(records: list) -> dict:
     """整份报告要用到的全部指标。"""
     cases = [dict(c) for c in records]
@@ -107,46 +112,51 @@ def summarize(records: list) -> dict:
         "cases": len(cases),
         "rounds": max((len(c.get("verdicts") or []) for c in cases), default=0),
         "counts": count_verdicts(cases),
-        "overall": accuracy(cases),
-        "first_round": accuracy(cases, round_idx=0),
         "stability": stability(cases),
+        "verify": verify_report(cases),
     }
 
 
 def format_case_line(case: dict) -> str:
-    """一行的用例明细：期望 → 各轮判定。"""
+    """一行的用例明细：各轮判定 + 挑了几条问题。"""
     marks = ["—" if got is None else ("通过" if got else "不通过")
              for got in (case.get("verdicts") or [])]
-    expected = "通过" if case.get("expected") else "不通过"
+    counts = [len(x or []) for x in (case.get("issues") or [])]
     seen = {v for v in (case.get("verdicts") or []) if v is not None}
-    if len(seen) > 1:
-        flag = "  ⚠️ 翻转"
-    elif seen and seen != {bool(case.get("expected"))}:
-        flag = "  ❌ 判错"
-    else:
-        flag = ""
-    return f"  {str(case.get('case_id')):<44} 期望={expected:<4} 各轮=[{', '.join(marks)}]{flag}"
+    flag = "  ⚠️ 翻转" if len(seen) > 1 else ""
+    return (f"  {str(case.get('case_id')):<44} 各轮=[{', '.join(marks)}]"
+            f"  挑出问题数=[{', '.join(str(c) for c in counts)}]{flag}")
 
 
 def format_report(summary: dict, records: list) -> str:
-    """控制台报告。刻意把「误杀/漏放」和「翻转清单」放在显眼处，不只报一个准确率。"""
+    """控制台报告。刻意**不给**「准确率」，只给稳定性 + 复核落点 + 分布。"""
+    st, vf, ct = summary["stability"], summary["verify"], summary["counts"]
     lines = []
-    ov, st = summary["overall"], summary["stability"]
-    total = summary["counts"]["pass"] + summary["counts"]["fail"] + summary["counts"]["unparsed"]
+    total = ct["pass"] + ct["fail"] + ct["unparsed"]
     lines.append(f"用例 {summary['cases']} 条 × {summary['rounds']} 轮 = {total} 次判定")
     lines.append("")
-    lines.append(f"准确率（全部轮次）  {ov['hit']}/{ov['comparable']} = {ov['rate']:.1%}")
-    fr = summary["first_round"]
-    lines.append(f"  其中首轮          {fr['hit']}/{fr['comparable']} = {fr['rate']:.1%}")
-    lines.append(f"  ❌ 误杀（正确被判不通过、会触发重写） {ov['false_reject']}")
-    lines.append(f"  ⚠️ 漏放（幻觉/偏题被判通过）          {ov['false_accept']}")
-    lines.append(f"  未解析（调用或解析失败）              {summary['counts']['unparsed']}")
-    lines.append("")
+    lines.append("判定分布（只是分布，不是对错）  通过 {} / 不通过 {} / 未解析 {}".format(
+        ct["pass"], ct["fail"], ct["unparsed"]))
     lines.append(f"多轮一致率          {st['consistent']}/{st['scored']} = {st['rate']:.1%}")
     if st["flipped"]:
-        lines.append(f"  ⚠️ 翻转用例（判据在这类输入上不可靠）：{'、'.join(st['flipped'])}")
+        lines.append(f"  ⚠️ 翻转用例（同一输入判得不一样，要去看）：{'、'.join(st['flipped'])}")
     if st["unparsed_only"]:
         lines.append(f"  全程未解析的用例：{'、'.join(st['unparsed_only'])}")
+    lines.append("")
+    checkable = vf["grounded"] + vf["not_grounded"]
+    if checkable:
+        rate = f"{vf['grounded']}/{checkable} = {vf['rate']:.1%}"
+    else:
+        rate = "无可复核的条目"
+    lines.append(f"评审意见落点（prompt 复核）  {rate}")
+    if vf["failed_rounds"]:
+        lines.append(f"  ⚠️ 有 {vf['failed_rounds']} 轮复核没跑成（调用/解析失败）——不算「没问题」")
+    if vf["suspicious"]:
+        lines.append("  ❓ 复核认为「指的东西材料里没有」的意见（可疑：可能在套别的场景模板）——")
+        for item in vf["suspicious"]:
+            lines.append(f"     [{item['case_id']} 第{item['round']}轮] {item['issue']}")
+            if item["why"]:
+                lines.append(f"        复核说明：{item['why']}")
     lines.append("")
     lines.append("用例明细：")
     lines.extend(format_case_line(c) for c in records)
