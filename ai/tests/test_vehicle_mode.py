@@ -362,7 +362,7 @@ async def test_register_mode_returns_opening(vehicle_db, kb_fork, mock_memory, m
     assert resp["code"] == 0
     op = resp["data"]["opening"]
     assert op is not None
-    assert len(op["choices"]) == 5
+    assert len(op["choices"]) == 4 and len(op["collapsed_choices"]) == 5
     assert "界面报故障码" in op["choices"]
     assert op["hint"]
 
@@ -376,3 +376,35 @@ async def test_register_mode_opening_none_without_tree(vehicle_db, kb_tmp, mock_
     resp = await vm.register_mode(_make_request(), memory_manager=mock_memory)
     assert resp["code"] == 0
     assert resp["data"]["opening"] is None
+
+
+# ================================================================
+# 开场题折叠 + 车型资料引导（1012 v2，本分支新增功能）
+# ================================================================
+
+def test_build_opening_collapse_arrow_data():
+    # 常驻 4 + 折叠剩余的数据形态：前端「展开全部」点击后补渲染 collapsed
+    from ai.api.vehicle_mode import build_opening
+
+    cats = ["1. 界面报故障码", "2. 车辆停着不动", "3. 取货失败", "4. 卸货/放货异常",
+            "5. 堆叠失败", "6. 自检失败", "7. 充电异常", "8. 车体异常", "9. 多车调度"]
+    op = build_opening(cats, rng=__import__("random").Random(1))
+    assert len(op["choices"]) == 4 and len(op["collapsed_choices"]) == 5
+    assert set(op["choices"]) | set(op["collapsed_choices"]) == set(cats)
+    assert not set(op["choices"]) & set(op["collapsed_choices"])
+
+
+def test_build_vehicle_guide_scans_model_pages(tmp_path):
+    from ai.api.vehicle_mode import build_vehicle_guide
+
+    xqe = tmp_path / "company" / "XQE"
+    xqe.mkdir(parents=True)
+    (xqe / "XQE122.md").write_text("# x", encoding="utf-8")
+    (xqe / "XQE151.md").write_text("# x", encoding="utf-8")
+    (xqe / "05_车型概览.md").write_text("# x", encoding="utf-8")   # 非型号页排除
+    (xqe / "90_问题清单分类.md").write_text("# x", encoding="utf-8")
+
+    assert build_vehicle_guide("XQE", kb_root=tmp_path) == {
+        "question": "想了解 XQE 车型信息？点击查看型号介绍",
+        "choices": ["XQE122 车型介绍", "XQE151 车型介绍"]}
+    assert build_vehicle_guide("XQE", kb_root=tmp_path / "nope") is None

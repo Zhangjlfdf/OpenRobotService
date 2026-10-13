@@ -89,10 +89,19 @@ def build_opening(top_levels: List[str], rng: Optional[random.Random] = None) ->
     keep = [c for c in top_levels if _OPENING_KEEP_SUBSTR in c]
     rest = [c for c in top_levels if _OPENING_KEEP_SUBSTR not in c]
     rng.shuffle(rest)
-    choices = (keep + rest)[:_OPENING_LIMIT]
+    # 1012 v2：常驻 4（故障码保底优先）+ 折叠剩余——「展开全部」后前端补渲染，
+    # 九大类全部可达（产品经理要全列）而首屏不爆。类目不足 4 时全进常驻。
+    all_cats = keep + rest
+    choices = all_cats[:4]
+    collapsed = all_cats[4:]
     if len(choices) < 2:
         return None
-    return {"question": OPENING_QUESTION, "choices": choices, "hint": OPENING_HINT}
+    return {
+        "question": OPENING_QUESTION,
+        "choices": choices,
+        "collapsed_choices": collapsed,
+        "hint": OPENING_HINT,
+    }
 
 
 class ModeConfirmRequest(BaseModel):
@@ -185,6 +194,35 @@ def list_manual_docs(model: str, kb_root: Optional[Path] = None,
     return docs
 
 
+_VEHICLE_GUIDE_QUESTION = "想了解 XQE 车型信息？点击查看型号介绍"
+
+
+def build_vehicle_guide(model: str, kb_root: Optional[Path] = None) -> Optional[Dict]:
+    """车型基础信息引导（独立于开场故障题，1012）：扫车型目录下的型号详情页
+    （XQE122.md / XQE151.md 形态）生成按钮组——新增型号详情页即自动出现。
+
+    点击按钮 = 用户发出「{型号} 车型介绍」消息 → 走检索命中概览/详情页，
+    带整车图与参数回答。无型号详情页 → None（不渲染引导条）。
+    """
+    sub = model_to_subpath(model)
+    if not sub:
+        return None
+    root = (kb_root or _default_kb_root()) / "company" / sub
+    if not root.is_dir():
+        return None
+    models = []
+    for f in sorted(root.glob("*.md")):
+        m = re.fullmatch(r"([A-Z]+\d+)", f.stem)
+        if m:
+            models.append(m.group(1))
+    if not models:
+        return None
+    return {
+        "question": _VEHICLE_GUIDE_QUESTION,
+        "choices": [f"{m} 车型介绍" for m in models],
+    }
+
+
 def _default_kb_root() -> Path:
     from ai.config import _KB_DIR
     return _KB_DIR
@@ -251,6 +289,7 @@ async def register_mode(req: ModeConfirmRequest,
     # SOP 外显清单：排除引导设施文档（分叉树/故障码表的入口在对话里）
     manual_docs = list_manual_docs(model_key, exclude_guide_docs=True)
     opening = build_opening(parse_fork_tree_choices(model_key))
+    vehicle_guide = build_vehicle_guide(model_key)
     if opening:
         # 开场类目随模式入 metadata：pipeline 识别「用户点开场气泡」（query
         # == 类目原文）做零 LLM 短接，不必再读分叉树文件
@@ -272,6 +311,7 @@ async def register_mode(req: ModeConfirmRequest,
             "domain": domain,
             "manual_docs": manual_docs,
             "opening": opening,
+            "vehicle_guide": vehicle_guide,
         },
     }
 
