@@ -151,7 +151,8 @@ describe('ChatPanel 车体扫码：车型模式注册与首问同 session_id', (
         ? { id: 7, title: '旧会话', messages: [], metadata_: JSON.stringify({ ai_session_id: OLD_SID }) }
         : { id, title: '新会话', messages: [], metadata_: null },
     );
-    // confirm 成功：带开场大方向引导题（点类目即走 send 主路径）
+    // confirm 成功：带开场大方向引导题（点类目即走 send 主路径）+ 1012 新增的
+    // 车型资料引导条与折叠类目
     mockModeConfirm.mockResolvedValue({
       code: 0,
       data: {
@@ -159,9 +160,14 @@ describe('ChatPanel 车体扫码：车型模式注册与首问同 session_id', (
         model: 'XQE',
         domain: 'company',
         manual_docs: [],
+        vehicle_guide: {
+          question: '想了解 XQE 车型信息？点击查看型号介绍',
+          choices: ['XQE122 车型介绍', 'XQE151 车型介绍'],
+        },
         opening: {
           question: '您遇到了什么问题？',
-          choices: ['故障码', '界面报故障码', '自检失败 / 开机异常'],
+          choices: ['界面报故障码', '多车调度', '卸货', '取货'],
+          collapsed_choices: ['建图与定位', '充电异常', '避障异常', '自检失败 / 开机异常', '远程接管'],
           hint: '若是其他情况，请在下方输入框描述',
         },
       },
@@ -230,5 +236,51 @@ describe('ChatPanel 车体扫码：车型模式注册与首问同 session_id', (
     expect(mockCreateConversation).toHaveBeenCalledWith(
       expect.objectContaining({ aiSessionId: registeredSid }),
     );
+  });
+
+  it('开场引导：车型资料引导条独立渲染，开场题常驻 4、展开全部后九类齐全', async () => {
+    storeRef = useWorkbenchStore as unknown as typeof storeRef;
+    renderPanel();
+
+    await waitFor(() => expect(mockGetConversation).toHaveBeenCalledWith(7));
+    await flush();
+    await act(async () => {
+      storeRef.setState({ conversationId: null, vehicleContext: VEHICLE_CTX });
+    });
+    await waitFor(() => expect(mockModeConfirm).toHaveBeenCalledTimes(1));
+    await flush();
+
+    // ① 车型资料引导条：独立气泡（题面 + 两个型号按钮），不走故障题那条
+    expect(await screen.findByText('想了解 XQE 车型信息？点击查看型号介绍')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'XQE122 车型介绍' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'XQE151 车型介绍' })).toBeTruthy();
+
+    // ② 开场题常驻 4 全渲染，折叠 5 类默认不出现
+    for (const c of ['界面报故障码', '多车调度', '卸货', '取货']) {
+      expect(screen.getByRole('button', { name: c })).toBeTruthy();
+    }
+    for (const c of ['建图与定位', '充电异常', '远程接管']) {
+      expect(screen.queryByRole('button', { name: c })).toBeNull();
+    }
+
+    // ③ 「其他情况」提示语只属于大方向题：引导条下面不挂（挂了会误导）
+    expect(screen.getAllByText('若是其他情况，请在下方输入框描述')).toHaveLength(1);
+
+    // ④ 点「展开全部」：折叠 5 类补齐（九大类全部可达），开关文案切「收起」
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /展开全部/ }));
+    });
+    for (const c of ['建图与定位', '充电异常', '避障异常', '自检失败 / 开机异常', '远程接管']) {
+      expect(screen.getByRole('button', { name: c })).toBeTruthy();
+    }
+    expect(screen.getByRole('button', { name: '收起' })).toBeTruthy();
+
+    // ⑤ 点折叠里的类目 = 按选项原文发送（走正常检索链路）
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: '建图与定位' }));
+    });
+    await waitFor(() => expect(mockAskStream).toHaveBeenCalledTimes(1));
+    const askBody = JSON.parse((mockAskStream.mock.calls[0][1] as RequestInit).body as string);
+    expect(askBody.query).toBe('建图与定位');
   });
 });

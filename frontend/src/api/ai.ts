@@ -449,12 +449,20 @@ export const qaModeConfirm = (payload: VehicleModeConfirmPayload) =>
       model: string;
       domain: string;
       manual_docs: Array<{ title: string; path: string; url: string }>;
-      /** 开场大方向引导题（0930）：服务端直出（分叉树顶层随机 5 + 故障码保底），
-       *  无分叉树知识库时为 null（退化为纯输入框）。 */
+      /** 开场大方向引导题（0930）：服务端直出（分叉树顶层），无分叉树知识库时为
+       *  null（退化为纯输入框）。1012 起拆两段：choices=常驻 4（故障码保底优先），
+       *  collapsed_choices=折叠剩余（九大类全部可达而首屏不爆，前端「展开全部」补渲染）。 */
       opening?: {
         question: string;
         choices: Array<string>;
+        collapsed_choices?: Array<string>;
         hint: string;
+      } | null;
+      /** 车型资料引导（1012，独立于故障题）：扫车型目录下型号详情页（XQE122.md
+       *  形态）生成的按钮组，点击=发送「{型号} 车型介绍」走检索。无型号详情页为 null。 */
+      vehicle_guide?: {
+        question: string;
+        choices: Array<string>;
       } | null;
     };
   }>('/qa/mode/confirm', payload);
