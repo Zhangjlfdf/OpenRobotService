@@ -339,10 +339,12 @@ def test_build_opening_random5_keeps_code():
     seen = set()
     for _ in range(30):
         op = build_opening(levels, rng=rng)
-        assert op is not None and len(op["choices"]) == 5
-        assert "界面报故障码" in op["choices"]
+        assert op is not None
+        assert len(op["choices"]) == 4 and len(op["collapsed_choices"]) == 5
+        assert "界面报故障码" in op["choices"]          # 保底在常驻
+        assert not set(op["choices"]) & set(op["collapsed_choices"])  # 不重叠
         assert op["question"] and op["hint"]
-        seen.update(op["choices"])
+        seen.update(op["choices"] + op["collapsed_choices"])
     assert seen == set(levels)
 
 
