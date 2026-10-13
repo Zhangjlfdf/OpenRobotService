@@ -751,14 +751,32 @@ class TicketService:
         child_count_map = {}        # parent_id -> int
         child_of_parent = {}        # parent_id -> [child_id, ...]（用于后续查 child_done）
         relations = []
+        all_rel_ids = set(ticket_ids)
         if ticket_ids:
-            rel_stmt = select(TaskRelation).where(
-                TaskRelation.relation_type.in_([RelationType.SUBTASK, RelationType.PREDECESSOR])
-            ).where(
-                or_(TaskRelation.source_task_id.in_(ticket_ids), TaskRelation.target_task_id.in_(ticket_ids))
-            )
-            rel_result = await db.execute(rel_stmt)
-            relations = rel_result.scalars().all()
+            # BFS 扩展关联闭包：从当前页 ticket_ids 出发，迭代查询所有
+            # 父子 / 前置依赖关系，直到没有新工单被发现。这样多层子工单
+            # （A→B→C）也能完整暴露给前端，而不是只停在第一层。
+            frontier = set(ticket_ids)
+            seen_rel_ids = set()
+            while frontier:
+                rel_stmt = select(TaskRelation).where(
+                    TaskRelation.relation_type.in_([RelationType.SUBTASK, RelationType.PREDECESSOR])
+                ).where(
+                    or_(
+                        TaskRelation.source_task_id.in_(frontier),
+                        TaskRelation.target_task_id.in_(frontier),
+                    )
+                )
+                rel_result = await db.execute(rel_stmt)
+                new_batch = [r for r in rel_result.scalars().all() if r.id not in seen_rel_ids]
+                if not new_batch:
+                    break
+                for r in new_batch:
+                    seen_rel_ids.add(r.id)
+                    relations.append(r)
+                    all_rel_ids.add(r.source_task_id)
+                    all_rel_ids.add(r.target_task_id)
+                frontier = all_rel_ids - frontier
 
             child_ids_for_status = set()
             for r in relations:
@@ -792,10 +810,6 @@ class TicketService:
             return []
 
         ticket_id_set = set(ticket_ids)
-        all_rel_ids = set()
-        for r in relations:
-            all_rel_ids.add(r.source_task_id)
-            all_rel_ids.add(r.target_task_id)
         extra_ids = list(all_rel_ids - ticket_id_set)
         if not extra_ids:
             return []

@@ -199,6 +199,7 @@ html, body, #root {
   .tabbar-shell__content .chat-input-bar,
   .tabbar-shell__content .suggested-questions,
   .tabbar-shell__content .tasks-view__filters,
+  .tabbar-shell__content .tasks-view__view-toggle,
   .tabbar-shell__content .tasks-cards,
   /* 历史工单页：工具栏（搜索框 + 状态 tab）与下方卡片列表收进同一 768px 居中容器，
      三者左右边界对齐（此前工具栏全宽、卡片居中，PC 端两者不齐） */
@@ -8944,6 +8945,7 @@ html, body, #root {
   .tabbar-shell__content .chat-input-bar,
   .tabbar-shell__content .suggested-questions,
   .tabbar-shell__content .tasks-view__filters,
+  .tabbar-shell__content .tasks-view__view-toggle,
   .tabbar-shell__content .tasks-cards,
   /* 历史工单页：工具栏（搜索框 + 状态 tab）与下方卡片列表收进同一 768px 居中容器，
      三者左右边界对齐（此前工具栏全宽、卡片居中，PC 端两者不齐） */
