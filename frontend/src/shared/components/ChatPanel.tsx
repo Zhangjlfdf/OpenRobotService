@@ -97,8 +97,13 @@ interface Message {
   // 车型追问/开场引导选项（0930）：气泡下方渲染可点按钮（不带序号），点击=发送
   // 选项全文（源自知识库，下轮检索 query 质量更好）；答后整组禁用，所选加深
   vehicle_choices?: Array<string> | null;
+  // 折叠的剩余类目（1012 v2）：仅开场题带，点「展开全部」后并入按钮组渲染
+  vehicle_collapsed?: Array<string> | null;
   // 开场大方向引导题标记：题面大字渲染（区别于追问条的普通题面）
   vehicleOpening?: boolean;
+  // 车型资料引导条标记（1012）：题面走普通渲染、不显示「其他情况」提示语
+  // （该提示语只属于「您遇到了什么问题」这类大方向题，引导条下面挂会误导）
+  vehicleGuide?: boolean;
   // 后端落库的 assistant 消息 DB id（event:message_created 回传）。不替换气泡 id
   // （流式闭包持续以本地 id 引用），仅作 mergeDbMessages 对账锚点——打字机排空
   // 未完时 content 与 DB 全文不等，role+content 匹配会失手产生幽灵重复气泡
@@ -331,7 +336,7 @@ const IS_IOS = /iPad|iPhone|iPod/.test(navigator.userAgent)
   || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 
 const MessageBubble = memo(function MessageBubble({
-  msg, editingId, compact, expandedDesc, onToggleDesc, onToggleReaction, onCopy, onEditStart, onEditChange, onEditSave,   onEditCancel, onImageClick, onOpenTicket, onRedispatch, onProjectChoice, answered, selectedChoice, onVehicleChoice, vehicleAnswered, vehiclePicked,
+  msg, editingId, compact, expandedDesc, onToggleDesc, onToggleReaction, onCopy, onEditStart, onEditChange, onEditSave,   onEditCancel, onImageClick, onOpenTicket, onRedispatch, onProjectChoice, answered, selectedChoice, onVehicleChoice, vehicleAnswered, vehiclePicked, vehicleExpanded, onToggleVehicleExpand,
   selectMode, checked, onCheck, onLongPress, selActive,
 }: {
   msg: Message;
@@ -357,6 +362,9 @@ const MessageBubble = memo(function MessageBubble({
   onVehicleChoice?: (msgId: string, choice: string) => void;
   vehicleAnswered?: boolean;
   vehiclePicked?: string;
+  // 开场题折叠态（1012 v2）：展开后常驻与折叠类目并排渲染，开关文案切「收起」
+  vehicleExpanded?: boolean;
+  onToggleVehicleExpand?: (msgId: string) => void;
   // 转发多选（0911）：多选模式下点击整条切换勾选；长按唤起操作菜单（复制/多选，微信式）
   selectMode?: boolean;
   checked?: boolean;
@@ -607,6 +615,12 @@ const MessageBubble = memo(function MessageBubble({
               // 发送选项全文；答后整组禁用、所选实心加深，打字走「其他」不打断。
               (() => {
                 const answeredV = vehicleAnswered ?? false;
+                const base = msg.vehicle_choices || [];
+                const collapsed = msg.vehicle_collapsed || [];
+                // 展开态、或「所选就在折叠里」时并排渲染折叠类目——答完后仍能看见
+                // 自己点的是哪一条（否则折叠组一收，选中的那条直接消失）
+                const showAll = (vehicleExpanded ?? false) || collapsed.includes(vehiclePicked ?? '');
+                const shown = showAll ? [...base, ...collapsed] : base;
                 return (
                   <>
                     {msg.vehicleOpening ? (
@@ -615,7 +629,7 @@ const MessageBubble = memo(function MessageBubble({
                       <MarkdownRenderer content={msg.content} compact={compact} />
                     )}
                     <div className="chat-veh-choices">
-                      {msg.vehicle_choices.map((c) => (
+                      {shown.map((c) => (
                         <button
                           key={c}
                           type="button"
@@ -627,7 +641,16 @@ const MessageBubble = memo(function MessageBubble({
                         </button>
                       ))}
                     </div>
-                    <div className="chat-veh-hint">若是其他情况，请在下方输入框描述</div>
+                    {collapsed.length > 0 && !answeredV && (
+                      <button
+                        type="button"
+                        className="chat-veh-expand"
+                        onClick={() => onToggleVehicleExpand?.(msg.id)}
+                      >
+                        {showAll ? '收起' : `展开全部（还有 ${collapsed.length} 类）`}
+                      </button>
+                    )}
+                    {!msg.vehicleGuide && <div className="chat-veh-hint">若是其他情况，请在下方输入框描述</div>}
                   </>
                 );
               })()
@@ -1248,6 +1271,16 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
       return next;
     });
   }, []);
+  // 开场题「展开全部」折叠态（1012 v2）：与气泡长文本展开分开记，语义不混
+  const [expandedVehicleIds, setExpandedVehicleIds] = useState<Set<string>>(new Set());
+  const toggleVehicleExpanded = useCallback((id: string) => {
+    setExpandedVehicleIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
   const [isRecording, setIsRecording] = useState(false);
   const [voiceMode, setVoiceMode] = useState(false);
   const [voiceWillCancel, setVoiceWillCancel] = useState(false);
@@ -1616,19 +1649,34 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
       if (res.data?.manual_docs?.length) {
         setVehicleSopDocs(res.data.manual_docs.map((d) => ({ title: d.title, url: d.url })));
       }
-      // 开场大方向引导题：confirm 响应直出，本地渲染气泡（demo 阶段不落库，
-      // 刷新后开场题不再显示，转正时再持久化）。
+      // 开场引导气泡：confirm 响应直出，本地渲染（demo 阶段不落库，刷新后不再
+      // 显示，转正时再持久化）。1012 拆两条独立气泡：车型资料引导条在上（引导期
+      // 主推），大方向故障题在下——后端本就是两个字段，前端不合并成一条。
+      const guide = res.data?.vehicle_guide;
       const op = res.data?.opening;
+      const openingMsgs: Message[] = [];
+      if (guide?.choices?.length) {
+        openingMsgs.push({
+          id: uid(),
+          role: 'assistant',
+          content: guide.question,
+          timestamp: new Date().toISOString(),
+          vehicle_choices: guide.choices,
+          vehicleGuide: true,
+        });
+      }
       if (op?.choices?.length) {
-        setMessages((prev) => [...prev, {
+        openingMsgs.push({
           id: uid(),
           role: 'assistant',
           content: op.question,
           timestamp: new Date().toISOString(),
           vehicle_choices: op.choices,
+          vehicle_collapsed: op.collapsed_choices || [],
           vehicleOpening: true,
-        }]);
+        });
       }
+      if (openingMsgs.length) setMessages((prev) => [...prev, ...openingMsgs]);
     } catch {
       Toast({ message: '车型引导模式注册失败，已按常规问答继续', theme: 'warning' });
     }
@@ -3345,7 +3393,8 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
             if (nextUserV) {
               vehicleAnswered = true;
               const tv = (nextUserV.content || '').trim();
-              if (msg.vehicle_choices.includes(tv)) vehiclePicked = tv;
+              // 折叠类目也算命中：用户展开后点的那条要能在收起时保持加深显示
+              if ([...msg.vehicle_choices, ...(msg.vehicle_collapsed || [])].includes(tv)) vehiclePicked = tv;
             }
           }
           return (
@@ -3369,6 +3418,8 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
             onVehicleChoice={handleVehicleChoice}
             vehicleAnswered={vehicleAnswered}
             vehiclePicked={vehiclePicked}
+            vehicleExpanded={expandedVehicleIds.has(msg.id)}
+            onToggleVehicleExpand={toggleVehicleExpanded}
             expandedDesc={expandedMsgIds.has(msg.id)}
             onToggleDesc={toggleMsgExpanded}
             selectMode={isCall && selectMode}
