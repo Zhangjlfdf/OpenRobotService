@@ -28,6 +28,9 @@ python -m ai.agents.AiTaskPlatform.eval.run_eval --list
 # 全量跑 3 轮
 python -m ai.agents.AiTaskPlatform.eval.run_eval --dataset evaluator_verdicts --rounds 3
 
+# 真实生产用例（默认保留真名，见「真实用例」一节）
+python -m ai.agents.AiTaskPlatform.eval.run_eval --dataset discuss_real_cases --rounds 2
+
 # 只跑某几条（id 精确或前缀匹配），多跑几轮看稳定性
 python -m ai.agents.AiTaskPlatform.eval.run_eval --only discuss-contradicts,discuss-invents --rounds 5
 
@@ -40,9 +43,36 @@ python -m ai.agents.AiTaskPlatform.eval.run_eval --rounds 3 --fail-under-consist
 
 退出码：`0` 正常 / `1` 未达 `--fail-under-*` 门槛 / `2` 用法或数据集错误。
 
-**要求**：能调到 LLM（读 `ai/.env`）。**不需要**数据库、不需要 AI 服务在跑——用例集是随仓提交的
-JSON。指标层（[metrics.py](metrics.py)）是纯函数，单测不需要网络：
+**要求**：能调到 LLM（读 `ai/.env`）。**不需要**数据库、不需要 AI 服务在跑——`evaluator_verdicts` 是随仓
+提交的 JSON；`discuss_real_cases` **不入库**（含真实人名，见下一节），要连一次库本地生成。
+指标层（[metrics.py](metrics.py)）是纯函数，单测不需要网络：
 `python -m pytest ai/agents/AiTaskPlatform/eval/test_metrics.py -q`。
+
+## 两个数据集与已跑到的基准
+
+| 数据集 | 来源 | 基准（同一台机器、`temperature=0`） |
+|---|---|---|
+| `evaluator_verdicts`（12 条） | 手写合成 | 2026-10-12，2 轮：24 次判定、12/12 两轮同判、20/20 条意见有落点、0 复核失败 |
+| `discuss_real_cases`（20 条，20 张工单） | **生产库真实三元组**（**不入库**，本地生成） | 2026-10-13，2 轮：判定分布 通过 16 / 不通过 24 / 未解析 0；一致率 **20/20 = 100%**；落点 **50/50 = 100%**；1 轮复核因 LLM 调用 `httpcore.ReadError` 没跑成（网络抖动，单独列出、不算「没问题」） |
+
+> **`discuss_real_cases` 不随仓提交**（含真实人名与工单正文）：它在 `.gitignore` 里，由
+> `build_dataset_from_db.py` 本地生成。干净克隆上跑 `--dataset discuss_real_cases` 会提示生成命令。
+> 下面那些基准数字是在**生成这份数据集的当时**跑出来的，重跑刷新数据后数字会变（这不影响口径，只影响取值）。
+
+**真实集第一轮就抓到一个生产 bug**：判官自己的 JSON 被 `max_tokens=200` 截断 → 解析失败 →
+那条回答的自评被静默跳过（详见 [../issues.md](../issues.md) #20）。同一份 20 条真实用例上对照：
+
+```
+cap=200: 未解析 3/20  ['real-816', 'real-748', 'real-708']   日志全部 truncated=True
+cap=800: 未解析 0/20
+```
+
+> **别把「未解析 0」当成模型变好了**：这是修了截断的结果，不是判据变准了。判得对不对仍然没量。
+
+**真实集换掉重复工单后（20 条 = 20 张工单，回答中位数从 90 字涨到 299 字），判官判「不通过」的比例明显上去了**
+（24/40 vs 老版本 12/40）。两种解释都还站得住：①真实的长回答确实问题更多；②判据对长回答偏严。
+**没有 ground truth，不能从分布推出结论**——这正是「识别判据过严」那条待做要解决的问题。
+唯一能说的是：这一轮里 50 条评审意见**全部**在材料里有落点，没看到「套别的场景模板」的迹象。
 
 ## 指标怎么读
 
@@ -77,9 +107,54 @@ JSON。指标层（[metrics.py](metrics.py)）是纯函数，单测不需要网�
 第三条就是边界：**落点检查抓「引用了不存在的东西」，抓不到「引用了存在的东西但要求不合理」**。
 后者靠判据本身管（见 [../issues.md](../issues.md) #1–#3）。别把落点率当成质量分。
 
+## 真实用例：`datasets/discuss_real_cases.json`
+
+手写用例被证明没有区分力（见「为什么」第 2 条）之后，用例改成**从生产库抽真三元组**：
+
+| 字段 | 来源 |
+|---|---|
+| `context`（提问） | `task_comments` 里人工账号发的、内容含 `@U` 的评论（用户真的这样问的） |
+| `draft`（待评回答） | 同一工单里该提问**之后第一条** `U老师` 回复（AI 当时真答的） |
+| `evidence`（材料） | **事后重建**：工单基本信息 + 提问**之前**的讨论史 + 附件分析摘要 |
+
+生成（要能连生产库，会 import backend 的 `user_service` 解析作者名）——**生成物不入库**，
+留在本地 `.gitignore` 里（默认写到 `datasets/discuss_real_cases.json`）：
+
+```bash
+python -m ai.agents.AiTaskPlatform.eval.build_dataset_from_db --limit 20
+python -m ai.agents.AiTaskPlatform.eval.build_dataset_from_db --limit 20 --anonymize
+python -m ai.agents.AiTaskPlatform.eval.build_dataset_from_db --ticket 640 --limit 3
+python -m ai.agents.AiTaskPlatform.eval.build_dataset_from_db --limit 40 --per-ticket 2
+```
+
+抽取纪律（都是实测踩出来的，改脚本时别退回去）：
+
+- **同一张工单默认只取 1 条**（`--per-ticket`）：不限时 20 条里有 8 条来自同一张查日志的工单，
+  那不是 8 个独立观测，样本被一张工单的问答风格占满（实测改成 1 之后是 20 条 = 20 张工单）。
+  指定 `--ticket` 单张工单时不限。
+- **人名保真**：默认**保留真名**。生产里判官看到的材料就是真名，讨论靠人名区分「谁说了什么」，
+  这条信息本身就是判据的一部分；换成「工程师A/B」等于在评一个生产里不会出现的输入。
+  要给外部看的版本才加 `--anonymize`（那时人名 → 工程师A/B/…、工单号 → 重编号）。
+- **未实名账号**（`users.name` 为空 → 映射只能给出 `wechat_{openid[:10]}`）单独处理：
+  一律写「（微信用户N）」，**同人同号、不同人不同号**。不编名字（编出来会和真人重名），
+  也不写 openid（那是指纹）。两种模式同一条规则。
+  实测库里 291 个 user 有 8 个未实名（全是微信账号）；当前 20 条用例里没抽到，
+  但 `task_comments` 里 **87.2%** 的作者是 `wechat_…` username——一有人未实名就会碰到。
+- **微信 ID / 电话两种模式都隐去**：那是指纹，不是名字。**边界**：正文里出现**未登记的裸 openid**
+  （既不是已知作者、也没带 `wechat_` 前缀）不会被替换——没有可靠识别方式，硬匹配长串会把
+  日志里的 hash 一起换掉。当前真实集里实测 0 次（含 8 个未实名账号的 openid 及其头 10 位）。
+- **证据必须早于提问**：提问之后的评论绝不进材料，否则 AI 的回答本身会混进证据，判官变成抄答案。
+- **滤掉系统通知**：归档/派审/指派这类后端自动消息不是讨论（实测：归档工单的「讨论史」
+  可以 8 条全是「开始归档工单，状态变更为…」）；讨论史里真人发言少于 2 条的工单直接跳过。
+- 材料是**近似**：真实 prompt 没落库，重建的讨论史条数与裁剪长度和当时并不完全一致。
+
+**这批用例的效力边界**：它**还没有**证明能区分判据修复前后——生产里没把「当时的判定」落库，
+就没有 ground truth 可对照。它能回答的是「在真实材料上判得稳不稳、评审意见有没有落点」。
+
 ## 加用例
 
-往 `datasets/<名字>.json` 的 `cases` 里加一条：
+**优先从生产库抽真实用例**（见上一节）；手写只用于补「库里抽不到」的形状。手写时往
+`datasets/<名字>.json` 的 `cases` 里加一条：
 
 ```json
 {
@@ -96,18 +171,20 @@ JSON。指标层（[metrics.py](metrics.py)）是纯函数，单测不需要网�
 
 - **不写「期望通过/不通过」**——见上面的第 2 条；
 - **写明 `why`**：说明这条用例想看什么，供人回原文核对；
-- **只用合成数据**，不要抄真实工单/用户信息（占位名如 `工程师A`，工单号如 `#10001`）；
+- **手写用例只用合成数据**，不要抄真实工单/用户信息（占位名如 `工程师A`，工单号如 `#10001`）；
+  真实用例走 `build_dataset_from_db.py` 生成，别手抄；
 - 新用例类型（另一种 `kind`）= 在 [run_eval.py](run_eval.py) 里加一个执行器 +
   在 `RUNNERS` 登记一行，数据集里用 `kind` 指过来。
 
 ## 已知边界
 
 - **不是单元测试**：要真实 LLM，慢且会飘，不要塞进 `pytest` 默认收集范围（本目录只有
-  `test_metrics.py` 是单测；复核链路的单测在 `capabilities/core/test_evaluator_verify.py`，
-  用假 LLM）。
+  `test_metrics.py`、`test_build_dataset_from_db.py` 是单测；复核链路的单测在
+  `capabilities/core/test_evaluator_verify.py`，用假 LLM）。
 - **不是全量质量评估**：只覆盖自评判定（`kind=evaluator`）。能力调度质量（监督者 plan 该派谁）、
   日志分析结论质量还没进数据集——需要各自先有 ground truth 或可核对的落点定义。
-- **样本量小**：12 条用例。它够用来说「没发现明显问题 + 哪几条不稳」，不够用来说
-  「准确率是多少」；**别把 100% 当精度读**。
-- **回归网的效力未被证明**：目前没有证据表明这份用例集能区分判据修复前后（见「为什么」第 2 条）。
-  要真做回归网，得从生产日志里捞**真实的 evidence/draft 对 + 当时的判定**来建，手写的不算。
+- **样本量小**：合成 12 条 + 真实 20 条。够用来说「没发现明显问题 + 哪几条不稳」，
+  不够用来说「准确率是多少」；**别把 100% 当精度读**。
+- **没有期望标签，所以量不了准确率**：刻意的（标准随提问变）；也因为没有历史判定落库，
+  这批用例还证明不了能区分判据修复前后。
+

@@ -94,10 +94,18 @@ def _issue_at(issues: list, index) -> str:
 RUNNERS: dict[str, Callable[..., Coroutine]] = {"evaluator": _run_evaluator_case}
 
 
+# 本地生成、不入库的数据集（见 .gitignore）：干净克隆上没有，给条生成命令
+_GENERATED = {
+    "discuss_real_cases": "python -m ai.agents.AiTaskPlatform.eval.build_dataset_from_db --limit 20",
+}
+
+
 def load_dataset(name: str) -> dict:
     path = _DATASETS / f"{name}.json"
     if not path.exists():
-        raise FileNotFoundError(f"数据集不存在: {path}")
+        hint = (f"\n  → 这个数据集不入库（含真实人名），需本地生成：{_GENERATED[name]}"
+                if name in _GENERATED else "")
+        raise FileNotFoundError(f"数据集不存在: {path}{hint}")
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
     if not isinstance(data, dict) or not data.get("cases"):

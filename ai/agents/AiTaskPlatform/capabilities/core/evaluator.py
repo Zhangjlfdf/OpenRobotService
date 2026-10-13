@@ -40,6 +40,17 @@ class Evaluator:
         "你是严谨的质量评审员。评估一份 AI 生成的回答是否存在问题，只输出 JSON。"
     )
 
+    # 判官输出上限。原来写死 200：实测（真实生产用例，2026-10-13）问题清单长时会**截断**
+    # 自己的 JSON（cap=200 时 40 轮里 4 轮解析失败，实测输出 126～448 字符、断在字符串中间），
+    # 而解析失败 = 这条回答的自评被静默跳过——**问题越多（回答越糟）越容易跳过审查**。
+    # 800 对实测输出有一倍以上余量；max_tokens 只封顶，正常回答不会因此变贵。
+    JUDGE_MAX_TOKENS = 800
+
+    # 复核输出上限：逐条 check 都要带 index/grounded/why，条数随问题数增长。**500 实测够用**：
+    # 11 轮真实用例（1～3 条意见、共 23 条）0 次解析失败；把清单人为加到 8 条（实测上限的 2.7 倍）
+    # 输出 660 字符仍未截断。真撞上了日志会打「复核解析失败」，别再靠猜。
+    VERIFY_MAX_TOKENS = 500
+
     @staticmethod
     def build_evidence(*parts: str, limit: int = 2000) -> str:
         """拼装自评用的 evidence：空块跳过、去首尾空白、超长截断。
@@ -170,7 +181,7 @@ class Evaluator:
             raw = await llm_client.complete(
                 prompt=cls._build_eval_prompt(draft, evidence, context, mode=mode),
                 system_prompt=cls._EVAL_SYSTEM_PROMPT,
-                max_tokens=200,
+                max_tokens=cls.JUDGE_MAX_TOKENS,
                 temperature=0.0,
             )
         except Exception as e:
@@ -178,7 +189,13 @@ class Evaluator:
             return None
         data = cls._parse_eval(raw)
         if data is None:
-            logger.warning("[evaluator] 自评解析失败")
+            # 截断是这条链上最可能的解析失败原因（实测 cap=200 时问题清单写到一半就断），
+            # 打出发出长度与是否闭合，好让「自评静默跳过」这件事查得动
+            text = (raw or "").strip()
+            logger.warning(
+                f"[evaluator] 自评解析失败: len={len(text)} "
+                f"truncated={not text.endswith('}')}"
+            )
         return data
 
     # ── 复核评审意见本身（用 prompt 核对落点，不做字符串匹配）──
@@ -258,7 +275,7 @@ class Evaluator:
             raw = await llm_client.complete(
                 prompt=cls._build_verify_prompt(issues, draft, evidence, context),
                 system_prompt=cls._VERIFY_SYSTEM_PROMPT,
-                max_tokens=500,
+                max_tokens=cls.VERIFY_MAX_TOKENS,
                 temperature=0.0,
             )
         except Exception as e:
