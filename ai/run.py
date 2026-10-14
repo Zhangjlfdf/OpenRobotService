@@ -261,7 +261,9 @@ async def lifespan(app: FastAPI):
     # 总开关 ENABLE_KNOWLEDGE_SINK 默认关：未验证 LLM 提炼质量前不在生产跑。
     # 开关挡在 import 之前——关的时候完全不加载该模块。
     knowledge_worker = None
+    archive_worker = None
     knowledge_stop = None
+    archive_stop = None
     if get_ai_config().enable_knowledge_sink:
         try:
             from ai.core.knowledge_worker import run_knowledge_worker
@@ -272,6 +274,15 @@ async def lifespan(app: FastAPI):
             logger.error(f"知识沉淀 Worker 启动失败: {e}", exc_info=True)
     else:
         logger.info("知识沉淀 Worker 未启动（ENABLE_KNOWLEDGE_SINK=0）")
+    if getattr(get_ai_config(), "enable_archive_flow", True):
+        try:
+            from ai.core.archive_flow import run_archive_ingest_worker
+            archive_stop = asyncio.Event()
+            archive_worker = asyncio.create_task(
+                run_archive_ingest_worker(archive_stop))
+            logger.info("归档入库 Worker 已启动（轮询 approved 报告）")
+        except Exception as e:
+            logger.error(f"归档入库 Worker 启动失败: {e}", exc_info=True)
 
     # 7. 启动派单后台 Worker（定时扫描待派单池 → 自动指派）
     assign_worker = None
@@ -330,6 +341,14 @@ async def lifespan(app: FastAPI):
             await asyncio.wait_for(knowledge_worker, timeout=10)
         except asyncio.TimeoutError:
             logger.warning("知识沉淀 Worker 停止超时(10s)")
+    if archive_stop:
+        archive_stop.set()
+    if archive_worker:
+        logger.info("归档入库 Worker 停止中...")
+        try:
+            await asyncio.wait_for(archive_worker, timeout=10)
+        except asyncio.TimeoutError:
+            logger.warning("归档入库 Worker 停止超时(10s)")
     if diag_stop:
         diag_stop.set()
         logger.info("诊断后台服务停止中...")
@@ -355,8 +374,9 @@ app.add_middleware(
 )
 
 # ── 挂载路由（从 ai/api 自举，不再依赖 backend）──────────────
-from ai.api import qa_router, chat_router, memory_router, task_agent_router, wecom_router, assigner_router
+from ai.api import qa_router, chat_router, memory_router, task_agent_router, wecom_router, assigner_router, archive_router
 app.include_router(qa_router)
+app.include_router(archive_router)
 app.include_router(chat_router)
 app.include_router(memory_router)
 app.include_router(task_agent_router)

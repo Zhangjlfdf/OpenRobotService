@@ -184,6 +184,93 @@ export async function taskDiscussStream(
   }
 }
 
+export interface ArchiveGenerateHandlers {
+  /** 阶段提示（收集素材/总结中/保存初稿） */
+  onStatus?: (msg: string) => void;
+  /** 报告标题（先生成完） */
+  onTitle?: (text: string) => void;
+  /** 正文增量 */
+  onDelta?: (text: string) => void;
+  /** 生成完成并已写入草稿 */
+  onDone?: (data: { report_id: number; version: number; chars: number }) => void;
+  /** 生成失败（可直接手写） */
+  onError?: (message: string) => void;
+  /** 处理人已手写，AI 初稿不覆盖 */
+  onSkipped?: (message: string) => void;
+}
+
+/**
+ * POST /archive/generate/stream —— 归档报告 AI 初稿（SSE）。
+ * 事件：status / title / delta / done / error / skipped。
+ * 生成与连接解耦：中途断开后台仍会写回，前端可刷新或直接手写。
+ */
+export async function archiveGenerateStream(
+  body: { task_id: number },
+  handlers: ArchiveGenerateHandlers,
+  signal?: AbortSignal,
+): Promise<void> {
+  const res = await fetchWithAuth(`${BASE}/archive/generate/stream`, {
+    method: 'POST',
+    body: JSON.stringify(body),
+    signal,
+    headers: { Accept: 'text/event-stream' },
+  });
+  if (!res.ok) {
+    let detail = '';
+    try {
+      const j = await res.json();
+      detail = typeof j?.detail === 'string' ? j.detail : (typeof j?.message === 'string' ? j.message : '');
+    } catch { /* ignore */ }
+    throw new Error(detail || `服务异常（HTTP ${res.status}）`);
+  }
+  if (!res.body) throw new Error('流式响应无 body');
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder('utf-8');
+  let buffer = '';
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let sep = buffer.indexOf('\n\n');
+      while (sep !== -1) {
+        const rawEvent = buffer.slice(0, sep);
+        buffer = buffer.slice(sep + 2);
+        sep = buffer.indexOf('\n\n');
+        const lines = rawEvent.split('\n');
+        const evLine = lines.find((l) => l.startsWith('event:'));
+        const dataLine = lines.find((l) => l.startsWith('data:'));
+        if (!dataLine) continue;
+        const ev = (evLine ? evLine.slice('event:'.length).trim() : 'message') || 'message';
+        const dataStr = dataLine.slice('data:'.length).trim();
+        if (!dataStr) continue;
+        let obj: Record<string, unknown>;
+        try {
+          obj = JSON.parse(dataStr) as Record<string, unknown>;
+        } catch {
+          continue;
+        }
+        if (ev === 'status') {
+          handlers.onStatus?.(String(obj.msg ?? ''));
+        } else if (ev === 'title') {
+          handlers.onTitle?.(String(obj.text ?? ''));
+        } else if (ev === 'delta') {
+          handlers.onDelta?.(String(obj.text ?? ''));
+        } else if (ev === 'done') {
+          handlers.onDone?.(obj as { report_id: number; version: number; chars: number });
+        } else if (ev === 'error') {
+          handlers.onError?.(String(obj.msg ?? '生成失败'));
+        } else if (ev === 'skipped') {
+          handlers.onSkipped?.(String(obj.msg ?? '报告已有内容，AI 初稿未覆盖'));
+        }
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}
+
 /** 提交工单（显式传 username，token 失效时后端兜底绑定真实用户） */
 export const qaSubmit = (sessionId: string) =>
   aiPost<{ code: number; [key: string]: unknown }>('/qa/submit', { session_id: sessionId, username: useAuthStore.getState().username });
