@@ -4,10 +4,6 @@ from __future__ import annotations
 
 from typing import Dict
 
-from ai.agents.AiDiagnosisPlatform.assigner.recall.expertise_recall import (
-    cluster_snapshot_from_cache,
-    rebuild_cluster_cache,
-)
 from ai.agents.AiDiagnosisPlatform.assigner.settings import AssignerConfig
 from ai.core.logging import get_logger
 
@@ -38,6 +34,9 @@ def _cluster_params() -> dict:
 
 
 async def debug_overview() -> dict:
+    from ai.agents.AiDiagnosisPlatform.assigner.recall.expertise_recall import (
+        cluster_snapshot_from_cache,
+    )
     names = _name_by_id()
     clusters = cluster_snapshot_from_cache(names)
     clusters["params"] = _cluster_params()
@@ -55,6 +54,10 @@ async def debug_overview() -> dict:
 
 
 async def debug_rebuild_clusters() -> dict:
+    from ai.agents.AiDiagnosisPlatform.assigner.recall.expertise_recall import (
+        cluster_snapshot_from_cache,
+        rebuild_cluster_cache,
+    )
     await rebuild_cluster_cache()
     snap = cluster_snapshot_from_cache(_name_by_id())
     snap["params"] = _cluster_params()
@@ -150,7 +153,9 @@ async def debug_save_cluster_params(payload: dict) -> dict:
 
 def debug_get_archive_reviewers() -> dict:
     """开发者模式：当前生效的归档审核人配置（领域 → 多人）。"""
-    from ai.agents.AiDiagnosisPlatform.assigner.settings import effective_archive_reviewers
+    from ai.agents.AiDiagnosisPlatform.assigner.archive_review.store import (
+        effective_archive_reviewers,
+    )
 
     data = effective_archive_reviewers()
     names = _name_by_id()
@@ -167,7 +172,7 @@ def debug_get_archive_reviewers() -> dict:
 
 def debug_save_archive_reviewers(payload: dict) -> dict:
     """开发者模式：保存归档审核人名单到 runtime_overrides，并尝试热更新。"""
-    from ai.agents.AiDiagnosisPlatform.assigner.settings import (
+    from ai.agents.AiDiagnosisPlatform.assigner.archive_review.store import (
         save_archive_reviewers_overrides,
     )
     from ai.agents.AiDiagnosisPlatform.assigner import ensure_dispatch_ready

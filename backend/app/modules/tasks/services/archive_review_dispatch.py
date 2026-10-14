@@ -34,12 +34,14 @@ def _import_assigner():
     if _ASSIGNER_CACHE is not None:
         return _ASSIGNER_CACHE
     _ensure_repo_on_path()
-    from ai.agents.AiDiagnosisPlatform.assigner.archive_review import (
+    from ai.agents.AiDiagnosisPlatform.assigner.archive_review.schemas import (
         ArchiveReviewAssignment,
         ArchiveReviewError,
+    )
+    from ai.agents.AiDiagnosisPlatform.assigner.archive_review.service import (
         assign_archive_reviewer,
     )
-    from ai.agents.AiDiagnosisPlatform.assigner.settings import (
+    from ai.agents.AiDiagnosisPlatform.assigner.archive_review.store import (
         effective_archive_reviewers,
     )
 
