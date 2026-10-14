@@ -5722,6 +5722,32 @@ class AiDiagnosisPlatform:
             yield {"event": "result", "data": result}
             return
 
+        # ---- 车型分叉树直出（1014 ORS-980）：点引导按钮 = 树节点文案确定性回放 ----
+        # 类目/场景/现象选项在树里都有结构化下一层（选项表是人工写的），机械
+        # 匹配命中即秒回下一层按钮或该行方案，零检索零 LLM（点选项不产生新
+        # 信息，让 LLM 转几秒只是把表重新排版）。树直出的 choices 不过
+        # _validate_vehicle_choices——那是 LLM 幻觉选项的清洗闸门（≤3 条/30字），
+        # 树选项是结构化内容源，全量直出。自由输入不命中树路径自然落到下方
+        # 正常链路上 AI；树导览每步都在 turns 里（add_turn + _finalize），
+        # AI 接手时上下文完整。
+        _vm_meta_td = (getattr(memory, "metadata", None) or {}).get("vehicle_mode") or {}
+        if _vm_meta_td.get("model"):
+            from ai.api.vehicle_mode import tree_direct_reply
+            _td = tree_direct_reply(request.query, _vm_meta_td,
+                                    model=_vm_meta_td.get("model"))
+            if _td:
+                logger.info(f"[vehicle_mode] 分叉树直出({_td['kind']}): "
+                            f"session={request.session_id}, q={request.query[:30]}")
+                yield {"event": "token", "data": _td["message"]}
+                _td_result = await self._finalize_diagnosis(
+                    request.session_id, state,
+                    thinking="", action=_td["action"], message=_td["message"],
+                    streaming=True, vehicle_choices=_td.get("choices"))
+                _td_result["vehicle_choices"] = _td.get("choices")
+                if _td_result.get("title"):
+                    yield {"event": "title", "data": {"title": _td_result["title"]}}
+                yield {"event": "result", "data": _td_result}
+                return
 
         # 收集模式取消短接改用 LLM 判断：ticket_cancel 由 LLM 每轮输出（见 DIAGNOSIS_PROMPT
         # 输出规范），服务端只信任这个布尔值，不再用关键词正则（关键词既僵化又漏判）。

@@ -229,6 +229,241 @@ def _default_kb_root() -> Path:
 
 
 # ============================================================
+# 分叉树全树直出（1014 ORS-980）：选项点击走树不走 LLM
+# ============================================================
+# 用户点引导按钮（类目/场景/现象选项）= 树节点文案的确定性回放——机械匹配
+# 后直接返回树里的下一层选项或该行解决方案，零检索零 LLM 秒回（点选项本来
+# 就不产生新信息，让 LLM 转几秒只是把人工写的表重新排版）。自由输入不命中
+# 树路径，自然落到正常链路上 AI。
+#
+# 树结构（kb/company/{车型}/NN_故障分叉树.md）：
+#   ## N. 类目            ← 开场题按钮（build_opening 的数据源）
+#   **引导问题：…**        ← 挂最近节点
+#   ### N.M 场景           ← 部分类目有（如「车辆停着不动」按位置分）
+#   | 选项 | 现象 | 判断 | 解决方案 | 处置 |   ← 选项表（第2列=按钮文案与匹配键）
+#   **X 深化分叉——引导问题：…** ← 场景内的二级选项组（如 1.1-F 的 F1/F2/F3）
+
+_TREE_CACHE: Dict[str, tuple] = {}
+
+
+def parse_fork_tree(model: str, kb_root: Optional[Path] = None) -> List[Dict]:
+    """解析分叉树全树：[{name, question, scenes:[{name,question,rows,deep...}], rows, deep_*}]。
+
+    只收带数字序号的 ## 类目（与 parse_fork_tree_choices 同规则，管理章节天然
+    排除）。文件不存在/解析异常返回 []（直出是增强能力，缺树时按钮消息落到
+    正常 AI 链路）。带 mtime 缓存（每轮 ask 都要解析，树文件 16KB 级别）。
+    """
+    sub = model_to_subpath(model)
+    if not sub:
+        return []
+    root = (kb_root or _default_kb_root()) / "company" / sub
+    tree_file = None
+    if root.is_dir():
+        for f in sorted(root.glob("*.md")):
+            if "分叉树" in f.stem:
+                tree_file = f
+                break
+    if tree_file is None:
+        return []
+    try:
+        mtime = tree_file.stat().st_mtime
+        cache_key = (sub, str(root))
+        cached = _TREE_CACHE.get(cache_key)
+        if cached and cached[0] == mtime:
+            return cached[1]
+        cats: List[Dict] = []
+        cur_cat: Optional[Dict] = None
+        cur_scene: Optional[Dict] = None
+        # 深化分叉组挂在最近的场景/类目上：deep_q=引导问题，deep_rows=F1/F2/F3 行
+        in_deep = False
+
+        def _container() -> Optional[Dict]:
+            return cur_scene if cur_scene is not None else cur_cat
+
+        for ln in tree_file.read_text(encoding="utf-8").splitlines():
+            m = re.match(r"^##\s+(\d+)\s*[.、．]\s*(.+?)\s*$", ln)
+            if m:
+                cur_cat = {"name": m.group(2).strip(), "question": "",
+                           "scenes": [], "rows": [], "deep_q": "", "deep_rows": []}
+                cats.append(cur_cat)
+                cur_scene, in_deep = None, False
+                continue
+            if ln.startswith("## "):
+                # 无数字序号的管理章节（「附：…」「待用户确认」）：停止收集，
+                # 其内容不漏进上一个类目
+                cur_cat, cur_scene, in_deep = None, None, False
+                continue
+            if cur_cat is None:
+                continue
+            m = re.match(r"^###\s+(.+?)\s*$", ln)
+            if m:
+                cur_scene = {"name": m.group(1).strip(), "question": "",
+                             "rows": [], "deep_q": "", "deep_rows": []}
+                cur_cat["scenes"].append(cur_scene)
+                in_deep = False
+                continue
+            m = re.match(r"^\*\*(.+?)深化分叉——(.+?)\*\*", ln)
+            if m:
+                c = _container()
+                if c is not None:
+                    c["deep_q"] = re.sub(r"^引导问题：", "", m.group(2)).strip()
+                    in_deep = True
+                continue
+            m = re.match(r"^\*\*引导问题：(.+?)\*\*", ln)
+            if m:
+                c = _container()
+                if c is not None:
+                    if in_deep and c["deep_rows"]:
+                        c["deep_q"] = m.group(1).strip()
+                    else:
+                        c["question"] = m.group(1).strip()
+                continue
+            # 选项表行：| A | 现象 | 判断 | 方案 | 处置 |
+            if ln.startswith("|"):
+                cells = [c.strip() for c in ln.strip().strip("|").split("|")]
+                if len(cells) < 5 or set(cells[0]) <= {"-", " ", ":"}:
+                    continue
+                if cells[0] == "选项":
+                    continue  # 表头行
+                row = {"opt": cells[0], "phen": cells[1],
+                       "judge": cells[2], "sol": cells[3], "disp": cells[4]}
+                c = _container()
+                if c is None:
+                    continue
+                (c["deep_rows"] if in_deep else c["rows"]).append(row)
+        cats = [c for c in cats if c["scenes"] or c["rows"]]
+        _TREE_CACHE[cache_key] = (mtime, cats)
+        return cats
+    except Exception as e:
+        logger.warning(f"[vehicle_mode] 分叉树全树解析失败: {tree_file.name}: {e}")
+        return []
+
+
+# 承接话术池（1014 用户要求：固定句式显得呆，多点变化让人觉得是 AI 在说）。
+# 抽象表述不带设备示例（flash 照抄 prompt 示例的教训）；池子随机 + 与上一条
+# 不同（tree_phrase 记账），引导问题原文保留（它是准确信息）。
+_TREE_LEADS = {
+    "category": [
+        "收到，这个方向咱们一步步确认。",
+        "好，先把范围缩小一点。",
+        "明白，我问几个关键表现来定位。",
+        "行，按这个思路往下走。",
+    ],
+    "scene": [
+        "好，再看细一点。",
+        "嗯，继续收敛。",
+        "收到，那具体是什么提示？",
+        "OK，最后确认一下表现。",
+    ],
+    "option": [
+        "这种情况常见处理如下：",
+        "按经验先这么处理：",
+        "这个表现对应的方案是：",
+        "找到了，对应的处理是：",
+    ],
+}
+
+
+def _pick_phrase(kind: str, rng: random.Random, last: str) -> str:
+    pool = _TREE_LEADS[kind]
+    p = rng.choice(pool)
+    if p == last and len(pool) > 1:
+        p = rng.choice([x for x in pool if x != last])
+    return p
+
+
+def _match_tree_step(query: str, tree: List[Dict], nav: Dict) -> Optional[Dict]:
+    """按钮文案 → 树节点匹配（纯精确字符串比对，无 LLM）。
+
+    匹配序：类目名（全局）→ 当前类目下场景名 → 当前位置（场景或类目直属）
+    的选项现象列 + 深化分叉列。跨类目跳转由类目名全局匹配兜住。
+    """
+    q = (query or "").strip()
+    if not q:
+        return None
+    for cat in tree:
+        if cat["name"] == q:
+            return {"kind": "category", "node": cat}
+    cur_cat = next((c for c in tree if c["name"] == nav.get("category")), None)
+    if cur_cat is None:
+        return None
+    for sc in cur_cat["scenes"]:
+        if sc["name"] == q:
+            return {"kind": "scene", "node": sc, "cat": cur_cat}
+    container = next((s for s in cur_cat["scenes"] if s["name"] == nav.get("scene")),
+                     None) or cur_cat
+    for row in container["deep_rows"] + container["rows"]:
+        if row["phen"] == q:
+            return {"kind": "option", "node": row, "container": container, "cat": cur_cat}
+    return None
+
+
+def tree_direct_reply(query: str, vm_meta: Dict, model: str,
+                      kb_root: Optional[Path] = None,
+                      rng: Optional[random.Random] = None) -> Optional[Dict]:
+    """车型会话分叉树直出入口：命中返回组装好的回复（pipeline 直接下发）。
+
+    返回 {kind, message, action, choices, nav}；未命中返回 None（走 AI）。
+    vm_meta 是 memory.metadata["vehicle_mode"] 的引用：nav/话术记账直接写回，
+    调用侧随后 save_memory 即持久（树导览轮次由调用侧 turns 机制记录）。
+    """
+    tree = parse_fork_tree(model, kb_root)
+    if not tree:
+        return None
+    nav = vm_meta.get("tree_nav") or {}
+    hit = _match_tree_step(query, tree, nav)
+    if hit is None:
+        return None
+    rng = rng or random
+    last_phrase = vm_meta.get("tree_phrase") or ""
+
+    def _opt_reply(row: Dict) -> str:
+        return "\n".join(filter(None, [
+            f"**现象**：{row['phen']}",
+            f"**原因**：{row['judge']}" if row["judge"] not in ("", "—") else "",
+            f"**处理**：{row['sol']}",
+            f"**处置**：{row['disp']}" if row["disp"] not in ("", "—") else "",
+        ]))
+
+    kind, node = hit["kind"], hit["node"]
+    if kind == "category":
+        lead = _pick_phrase("category", rng, last_phrase)
+        if node["scenes"]:
+            msg = f"{lead}\n\n**{node['name']}**——{node['question'] or '车是在什么情况下出现的？'}"
+            choices = [sc["name"] for sc in node["scenes"]]
+        else:
+            msg = f"{lead}\n\n{node['question'] or '具体是什么表现？'}"
+            choices = [r["phen"] for r in node["rows"]]
+        vm_meta["tree_nav"] = {"category": node["name"], "scene": None}
+        vm_meta["tree_phrase"] = lead
+        return {"kind": kind, "message": msg, "action": "ask", "choices": choices}
+
+    if kind == "scene":
+        lead = _pick_phrase("scene", rng, last_phrase)
+        msg = f"{lead}\n\n{node['question'] or '界面上有什么提示？'}"
+        vm_meta["tree_nav"] = {"category": hit["cat"]["name"], "scene": node["name"]}
+        vm_meta["tree_phrase"] = lead
+        return {"kind": kind, "message": msg, "action": "ask",
+                "choices": [r["phen"] for r in node["rows"]]}
+
+    # 选项行：深化分叉入口行（解决方案列写明「走深化分叉」）→ 出深化引导；
+    # 否则叶子回答，树导览结束（nav 清空，后续自由输入由 AI 接手，全程在 turns 里）
+    container = hit["container"]
+    row = node
+    if container["deep_rows"] and "深化分叉" in row["sol"]:
+        lead = _pick_phrase("scene", rng, last_phrase)
+        msg = f"{lead}\n\n{container['deep_q'] or '再确认一个观察点'}"
+        vm_meta["tree_phrase"] = lead
+        return {"kind": "option", "message": msg, "action": "ask",
+                "choices": [r["phen"] for r in container["deep_rows"]]}
+    lead = _pick_phrase("option", rng, last_phrase)
+    msg = f"{lead}\n\n{_opt_reply(row)}"
+    vm_meta["tree_nav"] = {}
+    vm_meta["tree_phrase"] = lead
+    return {"kind": "option", "message": msg, "action": "answer", "choices": None}
+
+
+# ============================================================
 # 模式注册主流程
 # ============================================================
 async def register_mode(req: ModeConfirmRequest,
