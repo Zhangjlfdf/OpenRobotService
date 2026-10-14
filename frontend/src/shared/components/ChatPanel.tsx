@@ -104,6 +104,9 @@ interface Message {
   // 车型资料引导条标记（1012）：题面走普通渲染、不显示「其他情况」提示语
   // （该提示语只属于「您遇到了什么问题」这类大方向题，引导条下面挂会误导）
   vehicleGuide?: boolean;
+  // 车辆确认气泡标记（1014）：扫码确认后立即插入（confirm 响应前），
+  // confirm 成功时把车型介绍按钮回填到这条气泡上（合并展示，不再另开一条）
+  vehicleConfirm?: boolean;
   // 后端落库的 assistant 消息 DB id（event:message_created 回传）。不替换气泡 id
   // （流式闭包持续以本地 id 引用），仅作 mergeDbMessages 对账锚点——打字机排空
   // 未完时 content 与 DB 全文不等，role+content 匹配会失手产生幽灵重复气泡
@@ -243,11 +246,20 @@ const mapDbMessages = (
       if (Array.isArray(pc) && pc.length > 0) {
         msg.project_choices = pc as NonNullable<Message['project_choices']>;
       }
-      // 车型追问选项持久化恢复（metadata_.vehicle_choices，后端 SSE 落库，0930）
+      // 车型引导持久化恢复：追问选项（metadata_.vehicle_choices，后端 SSE 落库）+
+      // 开场题/确认气泡（1014 前端落库，见 registerVehicleModeNow）——按钮组、
+      // 折叠区、题面样式全部按 metadata 重建，切会话/刷新后引导不丢
       const vc = meta?.vehicle_choices;
       if (Array.isArray(vc) && vc.length > 0) {
         msg.vehicle_choices = vc as NonNullable<Message['vehicle_choices']>;
       }
+      const vcol = meta?.vehicle_collapsed;
+      if (Array.isArray(vcol) && vcol.length > 0) {
+        msg.vehicle_collapsed = vcol as NonNullable<Message['vehicle_collapsed']>;
+      }
+      if (meta?.vehicle_opening) msg.vehicleOpening = true;
+      if (meta?.vehicle_guide) msg.vehicleGuide = true;
+      if (meta?.vehicle_confirm) msg.vehicleConfirm = true;
       const extraMsgs: Message[] = [];
       if (m.file_urls) {
         try {
@@ -628,12 +640,12 @@ const MessageBubble = memo(function MessageBubble({
                     ) : (
                       <MarkdownRenderer content={msg.content} compact={compact} />
                     )}
-                    <div className="chat-veh-choices">
+                    <div className={`chat-veh-choices${msg.vehicleGuide ? ' chat-veh-choices--intro' : ''}`}>
                       {shown.map((c) => (
                         <button
                           key={c}
                           type="button"
-                          className={`chat-veh-chip${answeredV ? (c === vehiclePicked ? ' chat-veh-chip--selected' : ' chat-veh-chip--done') : ''}`}
+                          className={`chat-veh-chip${msg.vehicleGuide ? ' chat-veh-chip--intro' : ''}${answeredV ? (c === vehiclePicked ? ' chat-veh-chip--selected' : ' chat-veh-chip--done') : ''}`}
                           disabled={answeredV}
                           onClick={() => onVehicleChoice?.(msg.id, c)}
                         >
@@ -1584,6 +1596,11 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
 
   // 车体扫码进入：待注册「车型定制模式」的车辆身份（确认后记账，首次发送前注册掉即清空）
   const pendingVehicleModeRef = useRef<VehicleContext | null>(null);
+  // ensureConversation 的稳定引用（registerVehicleModeNow 是 useCallback([])，
+  // 直接闭包会锁死旧 sessionId；ref 转发与 pickVehicleChoiceRef 同款）
+  const ensureConvRef = useRef<(sid: string, firstContent: string) => Promise<number | null>>(
+    async () => null,
+  );
 
   // call 场景：扫码确认车辆信息后注入一条引导说明消息，并把车辆身份记下来待发送前注册。
   // 本 effect 必须声明在 [conversationId] 那个清空对话的 effect 之后：
@@ -1601,6 +1618,7 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
           role: 'assistant',
           content: `已确认车辆信息：项目 ${ctx.projectName || '—'}、客户 ${ctx.customerName || '—'}、车型 ${ctx.vehicleModel || '—'}。\n接下来按该车型的引导流程协助你，直接描述现象或点下面的选项即可。`,
           timestamp: new Date().toISOString(),
+          vehicleConfirm: true,
         },
       ]);
       // 确认即注册（0930 调整）：本地生成 sessionId 立即绑模式——原「发送前注册」
@@ -1649,22 +1667,21 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
       if (res.data?.manual_docs?.length) {
         setVehicleSopDocs(res.data.manual_docs.map((d) => ({ title: d.title, url: d.url })));
       }
-      // 开场引导气泡：confirm 响应直出，本地渲染（demo 阶段不落库，刷新后不再
-      // 显示，转正时再持久化）。1012 拆两条独立气泡：车型资料引导条在上（引导期
-      // 主推），大方向故障题在下——后端本就是两个字段，前端不合并成一条。
+      // 开场引导（1014 转正：confirm 响应直出 + 落库持久化，切会话/刷新后仍在）。
+      // ① 车型介绍按钮回填到确认气泡上（合并成一条——用户反馈三条气泡太多）；
+      // ② 大方向题独立气泡照旧；③ 两条消息带 metadata 落库，历史恢复靠同一
+      // metadata 重建（后端 SSE 落库的追问选项走同一条恢复链路）。
       const guide = res.data?.vehicle_guide;
       const op = res.data?.opening;
-      const openingMsgs: Message[] = [];
+      const confirmContent = `已确认车辆信息：项目 ${ctx.projectName || '—'}、客户 ${ctx.customerName || '—'}、车型 ${ctx.vehicleModel || '—'}。\n接下来按该车型的引导流程协助你，直接描述现象或点下面的选项即可。`;
       if (guide?.choices?.length) {
-        openingMsgs.push({
-          id: uid(),
-          role: 'assistant',
-          content: guide.question,
-          timestamp: new Date().toISOString(),
-          vehicle_choices: guide.choices,
-          vehicleGuide: true,
-        });
+        setMessages((prev) => prev.map((m) => (
+          m.vehicleConfirm
+            ? { ...m, vehicle_choices: guide.choices, vehicleGuide: true }
+            : m
+        )));
       }
+      const openingMsgs: Message[] = [];
       if (op?.choices?.length) {
         openingMsgs.push({
           id: uid(),
@@ -1677,6 +1694,28 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
         });
       }
       if (openingMsgs.length) setMessages((prev) => [...prev, ...openingMsgs]);
+      // 落库（增强路径，失败静默——本地渲染不受影响，只是刷新后引导气泡不再显示）
+      void (async () => {
+        try {
+          const convId = await ensureConvRef.current(sid, '车型引导');
+          if (!convId) return;
+          await appendMessage(convId, 'assistant', confirmContent, {
+            metadata: JSON.stringify({
+              ...(guide?.choices?.length ? { vehicle_choices: guide.choices, vehicle_guide: true } : {}),
+              vehicle_confirm: true,
+            }),
+          });
+          if (op?.choices?.length) {
+            await appendMessage(convId, 'assistant', op.question, {
+              metadata: JSON.stringify({
+                vehicle_choices: op.choices,
+                vehicle_collapsed: op.collapsed_choices || [],
+                vehicle_opening: true,
+              }),
+            });
+          }
+        } catch { /* 落库失败不阻塞引导渲染 */ }
+      })();
     } catch {
       Toast({ message: '车型引导模式注册失败，已按常规问答继续', theme: 'warning' });
     }
@@ -1714,6 +1753,7 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
       return null;
     }
   };
+  ensureConvRef.current = ensureConversation;
 
   /** 带附件发送：文件(可附文字)一起上传 /qa/upload（SSE 流式），逐步推送 VLM 分析 + 诊断。
    * 方案一（乐观渲染）：点发送即插入用户气泡（附件+文字，内嵌上传进度遮罩）+ AI 分析占位气泡，

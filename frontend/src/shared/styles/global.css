@@ -977,6 +977,23 @@ html, body, #root {
 .chat-veh-chip--done {
   opacity: 0.45;
 }
+/* 车型介绍按钮变体（1014）：与开场题的蓝色胶囊区分。同尺寸/圆角/边框粗细，
+   只换色相——蓝=故障排查主线，青绿=车型资料查阅（邻近色和谐，低饱和浅底
+   在手机浅色聊天背景上不刺眼；不用 emoji 前缀，安卓/微信内渲染不一） */
+.chat-veh-chip--intro {
+  border-color: #c3e6d2;
+  background: #eefaf3;
+  color: #1f8a5a;
+}
+.chat-veh-chip--intro:active {
+  background: #dcf3e7;
+  border-color: #189a5c;
+}
+.chat-veh-chip--intro.chat-veh-chip--selected {
+  background: #1f8a5a;
+  border-color: #1f8a5a;
+  color: #fff;
+}
 /* 开场题折叠开关（1012 v2）：常驻 4 之外的类目点此展开/收起，无边框文字按钮，
    与胶囊组左对齐 */
 .chat-veh-expand {
