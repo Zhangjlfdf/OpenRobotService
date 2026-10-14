@@ -453,6 +453,18 @@ class QdrantClientWrapper:
 # 统一检索服务
 # ============================================================
 
+def _ticket_card_collection() -> str:
+    """工单卡集合 override（TICKET_CARD_COLLECTION env，测试环境隔离）。
+
+    非空时 index/retrieve/ensure 全部走该集合，与 company_* 指针完全脱钩——
+    carry_over_cards 只扫 company_ 前缀集合，测试卡物理上不可能被搬进生产集合。
+    生产侧不设此 env，行为与旧版完全一致。
+    """
+    from ai.config import get_ai_config
+    return (get_ai_config().ticket_card_collection or "").strip()
+
+
+
 class RetrievalService:
     """
     统一检索服务
@@ -802,6 +814,7 @@ class RetrievalService:
         sub_domain: Optional[str] = None,
         query_filter=None,
         skip_rerank: bool = False,
+        collection: str = "",
     ) -> List[RetrievalResult]:
         """
         通用 domain 检索：给定 domain 和可选 sub_domain，从对应 Qdrant 集合中检索。
@@ -819,7 +832,7 @@ class RetrievalService:
         """
         from ai.config import get_active_collection_for
 
-        col = get_active_collection_for(domain)
+        col = collection or get_active_collection_for(domain)
         if not col:
             return []
 
@@ -1361,6 +1374,7 @@ class RetrievalService:
             top_k=_fetch_k,
             sub_domain="ticket_resolutions",
             query_filter=_approved_filter,
+            collection=_ticket_card_collection(),
         )
         results = [r for r in results if r.review_status == "approved"]
         # P2 verified 权重：confirmed×1.15，recurred×0.85，rejected×0.7，其余×1.0
@@ -1397,6 +1411,35 @@ class RetrievalService:
         """
         from ai.config import get_active_collection_for, write_active_collection_for
         import time as _time
+
+        override = _ticket_card_collection()
+        if override:
+            # 测试隔离集合：独立存在，绝不写 company 指针（写指针会把整套
+            # company 检索切到测试卡集合上）
+            try:
+                client = await self._qdrant._ensure_client()
+                if await self._to_thread(client.collection_exists, override):
+                    return override
+                await self._ensure_clients()
+                vec_dim = await self._embed_client.get_dimension()
+                from qdrant_client.models import (Distance, VectorParams,
+                                                  SparseVectorParams, SparseIndexParams)
+                await self._to_thread(
+                    client.create_collection,
+                    collection_name=override,
+                    vectors_config={
+                        "dense": VectorParams(size=vec_dim, distance=Distance.COSINE),
+                    },
+                    sparse_vectors_config={
+                        "sparse": SparseVectorParams(
+                            index=SparseIndexParams(on_disk=False)),
+                    },
+                )
+                print(f"  [retrieval] Created ticket card collection: {override}")
+                return override
+            except Exception as e:
+                logger.error(f"创建工单卡隔离集合 {override} 失败: {e}", exc_info=True)
+                return ""
 
         tr_col = get_active_collection_for("company")
         if tr_col:
@@ -1463,7 +1506,7 @@ class RetrievalService:
         from ai.config import get_active_collection_for
         import uuid
 
-        col = get_active_collection_for("company")
+        col = _ticket_card_collection() or get_active_collection_for("company")
         if not col:
             col = await self.ensure_task_resolutions_collection()
         if not col:
@@ -1511,8 +1554,11 @@ class RetrievalService:
         # upsert 都是新点，重复索引会膨胀集合）。
         # 命名双向量（与主入库链路 ai/ingestion/base.py 同 schema）：
         # dense 语义 + sparse BM25——检索侧 RRF 融合的稀疏路才有料。
-        _point_id = str(uuid.uuid5(uuid.NAMESPACE_URL,
-                                   f"yaorenba:task_resolution:{task_id}"))
+        # 隔离集合时 ID 加 test: 命名空间——两库同号工单（helpdesk_test 与
+        # helpdesk_724 都有 #770）即使某天被手动搬进同一集合也不会互相覆盖
+        _id_ns = ("test:" if _ticket_card_collection() else "") + \
+            f"yaorenba:task_resolution:{task_id}"
+        _point_id = str(uuid.uuid5(uuid.NAMESPACE_URL, _id_ns))
         try:
             from qdrant_client.models import PointStruct, SparseVector
             from ai.core.retrieval import generate_bm25_sparse
