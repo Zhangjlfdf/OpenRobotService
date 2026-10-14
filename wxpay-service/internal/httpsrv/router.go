@@ -46,6 +46,8 @@ func NewRouter(d Deps) http.Handler {
 		requestLog(recoverer(internalAuth(d.Cfg.InternalToken, methodOnly(http.MethodPost, http.HandlerFunc(th.cancel))))))
 	mux.Handle("/internal/transfer/query/",
 		requestLog(recoverer(internalAuth(d.Cfg.InternalToken, methodOnly(http.MethodGet, http.HandlerFunc(th.queryByOutBillNo))))))
+	mux.Handle("/internal/transfer/query-by-bill/",
+		requestLog(recoverer(internalAuth(d.Cfg.InternalToken, methodOnly(http.MethodGet, http.HandlerFunc(th.queryByTransferBillNo))))))
 
 	// 微信支付回调：公网可达，不能加内部鉴权中间件。
 	mux.Handle(config.NotifyPathTransfer,

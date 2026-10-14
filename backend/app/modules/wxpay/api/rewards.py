@@ -16,6 +16,7 @@ from app.modules.wxpay.schemas import (
     RewardListOut,
     RewardOut,
     RewardStatsOut,
+    WithdrawIn,
     WithdrawOut,
 )
 from app.modules.wxpay.service import RewardService, WithdrawService
@@ -85,14 +86,19 @@ async def get_reward(
 @router.post("/{reward_id}/withdraw", response_model=WithdrawOut, summary="立即提现 / 去确认")
 async def withdraw(
     reward_id: str,
+    body: Optional[WithdrawIn] = None,
     db: AsyncSession = Depends(get_db),
     user: UserDB = Depends(current_user),
 ):
     """提现入口。
 
     内部走方案 4.3 的三分支决策：
-    - confirm    用返回的 package 调起 requestMerchantTransfer
-    - processing 转账单处于其它非终态，稍后重试
+    - confirm         用返回的 package 调起 requestMerchantTransfer
+    - processing      转账单处于其它非终态，稍后重试
+    - need_real_name  收款人姓名未通过微信实名校验，前端弹窗让用户填写真实姓名后
+                      带着 body.user_name 重新调用本接口
     - success / expired / rejected 按 message 提示
     """
-    return await WithdrawService.withdraw(db, reward_id, user.id)
+    return await WithdrawService.withdraw(
+        db, reward_id, user.id, (body.user_name if body else "") or ""
+    )

@@ -32,12 +32,13 @@
 ```
 wxpay-service/
 ├── cmd/server/main.go              启动、优雅退出、日志初始化
+├── cmd/mockwx/main.go              本地微信支付模拟器入口（含 -genkey 生成密钥）
 ├── internal/
 │   ├── config/config.go            环境变量配置与校验
 │   ├── wxpay/
 │   │   ├── keys.go                 PEM 密钥加载（PKCS#1 / PKCS#8 / PKIX）
 │   │   ├── sign.go                 请求签名 + 应答验签
-│   │   ├── cipher.go               AES-256-GCM 解密 / RSA-OAEP 加密
+│   │   ├── cipher.go               AES-256-GCM 加解密 / RSA-OAEP 加密
 │   │   ├── verifier.go             KeyProvider（微信支付公钥 / 平台证书）
 │   │   ├── client.go               APIv3 HTTP 客户端（自动签名验签）
 │   │   └── notify.go               回调：验签 -> 解析 -> 解密
@@ -46,6 +47,7 @@ wxpay-service/
 │   │   └── service.go              发起转账 / 查单 / 撤销 + 参数校验
 │   ├── store/dedupe.go             回调通知内存去重（第一道防线）
 │   ├── downstream/fastapi.go       推送解密结果给 FastAPI
+│   ├── mockwx/server.go            微信支付 APIv3 模拟器（应答签名 + 回调推送）
 │   └── httpsrv/                    路由、鉴权中间件、错误处理
 ├── Dockerfile / Makefile / .env.example
 └── go.mod                          无第三方依赖
@@ -55,12 +57,20 @@ wxpay-service/
 
 ## 4. 配置
 
-复制 `.env.example` 为 `.env` 后按需修改。全部为环境变量，无配置文件。
+复制 `.env.example` 为 `.env` 后按需修改；服务启动时自动读取**进程工作目录下的 `.env`**（源码目录运行即源码目录下的 `.env`）。
+
+`.env` 加载规则（见 `internal/config/config.go` 的 `loadDotenv`）：
+
+- 文件不存在 → 静默跳过，不报错；
+- **真实环境变量优先**，`.env` 只补不覆盖 → 服务器若改用 `systemd EnvironmentFile=` 或 `docker --env-file` 注入，目录里残留的 `.env` 不会覆盖注入值；
+- `WXPAY_DOTENV=0` 完全关闭读文件；`WXPAY_DOTENV_PATH=/etc/wxpay/wxpay.env` 指定其他路径；
+- 仅用标准库解析，支持 `export ` 前缀、引号包裹、值中含 `=` 或 `#`。
 
 关键项：
 
 | 变量 | 说明 |
 | --- | --- |
+| `WXPAY_DOTENV` / `WXPAY_DOTENV_PATH` | `.env` 兜底开关与路径（可选，`config.go` 无第三方依赖） |
 | `WXPAY_MCH_ID` / `WXPAY_APP_ID` | 商户号与服务号 appid（须已在商户平台完成绑定） |
 | `WXPAY_CERT_SERIAL_NO` / `WXPAY_PRIVATE_KEY_PATH` | 商户 API 证书序列号与私钥文件 |
 | `WXPAY_API_V3_KEY` | **必须 32 字符**，否则启动即失败 |
@@ -88,6 +98,7 @@ wxpay-service/
 | GET | `/healthz` | 健康检查（无需鉴权） |
 | POST | `/internal/transfer/create` | 发起转账 |
 | GET | `/internal/transfer/query/{out_bill_no}` | 按商户单号查单 |
+| GET | `/internal/transfer/query-by-bill/{transfer_bill_no}` | 按微信转账单号查单（微信账单/客服工单只有该单号，排障用） |
 | POST | `/internal/transfer/cancel` | 撤销转账（仅运营后台） |
 
 `POST /internal/transfer/create` 请求体：
@@ -174,7 +185,97 @@ make test-race         # 竞态检测（需 cgo / gcc）
 
 ---
 
-## 8. FastAPI 侧待办（配合本服务）
+## 8. 本地联调：mock 微信支付服务（cmd/mockwx）
+
+测试服务号通常**没有支付权限**，无法申请商户号、也拿不到 API 证书，真实接口调不通。
+`cmd/mockwx` 在本机模拟微信支付的商家转账 API，让整条链路（建单 → 查单 → 回调 → 状态扭转）
+无需任何微信侧资源即可跑通。
+
+### 8.1 为什么需要自签密钥对
+
+真实的应答/回调是用**微信的平台私钥**签名的，而商户只能下载微信支付**公钥**，
+永远拿不到平台私钥 —— 所以商户无法伪造通过验签的微信应答。
+
+模拟器的做法：自签一对 RSA-2048 密钥，**私钥由模拟器持有用于签名，公钥配给本服务用于验签**。
+因为是同一对密钥，验签链路（时间戳 + 随机串 + 报文体的三行验签串）、
+回调的 AES-256-GCM 加解密、`user_name` 的 RSA-OAEP 加解密**都会被真实执行**，只是报文来源换成本机。
+
+### 8.2 三步接入
+
+```bash
+# 1) 生成模拟器密钥对
+go run ./cmd/mockwx -genkey ./testdata
+
+# 2) 修改 .env（关键五项）
+#    WXPAY_PUBLIC_KEY_PATH=./testdata/mock_platform_public_key.pem      # 模拟器的公钥
+#    WXPAY_PUBLIC_KEY_ID=PUB_KEY_ID_MOCK000000001                       # 与 MOCK_PUBLIC_KEY_ID 一致
+#    WXPAY_API_BASE_URL=http://127.0.0.1:9200                           # 指向模拟器
+#    WXPAY_PRIVATE_KEY_PATH=./testdata/mock_platform_private_key.pem     # 联调可复用同一把（模拟器不校验请求签名）
+#    WXPAY_NOTIFY_BASE_URL=http://127.0.0.1:9100                        # 回调要能打到本服务自身
+
+# 3) 另开一个终端启动模拟器
+go run ./cmd/mockwx
+```
+
+`WXPAY_API_BASE_URL` 非空时 `cmd/server` 启动会打印一条 WARN，
+提醒当前请求不会发往微信支付 —— 生产上线前把该行删掉即可。
+
+> 联调时不需要真实商户号、API 证书和 APIv3 密钥：
+> `WXPAY_MCH_ID` / `WXPAY_CERT_SERIAL_NO` 填任意非空值即可通过启动校验，
+> `WXPAY_API_V3_KEY` 必须填 **32 字符**（模拟器默认复用它做回调加解密）。
+
+### 8.3 模拟器接口
+
+**微信支付 API**（应答带 `Wechatpay-*` 验签头）：
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| POST | `/v3/fund-app/mch-transfer/transfer-bills` | 发起转账 |
+| GET | `/v3/fund-app/mch-transfer/transfer-bills/out-bill-no/{no}` | 按商户单号查单 |
+| GET | `/v3/fund-app/mch-transfer/transfer-bills/transfer-bill-no/{no}` | 按微信单号查单 |
+| POST | `/v3/fund-app/mch-transfer/transfer-bills/out-bill-no/{no}/cancel` | 撤销 |
+
+**管理接口**（`/mock/*`，用于驱动流程与注入故障）：
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/mock/bills` | 列出所有单据 |
+| GET | `/mock/bills/{out_bill_no}` | 查看单笔（含解密出的 `user_name`） |
+| POST | `/mock/bills/{out_bill_no}/settle` | 推进状态，body `{"state":"SUCCESS","fail_reason":""}`，终态时推送回调 |
+| POST | `/mock/bills/{out_bill_no}/notify` | 用当前状态**重推**一次回调（验证去重与幂等） |
+| POST | `/mock/fail-next-create` | 注入下一次建单失败 `{"status":400,"code":"NAME_ERROR","message":"..."}` |
+| POST | `/mock/reset` | 清空全部状态 |
+
+### 8.4 典型联调流程
+
+```bash
+# 自动模式：建单 3 秒后自动转 SUCCESS 并推送回调（设 MOCK_AUTO_SETTLE=1）
+
+# 手动模式（默认）：
+# 1. 前端点提现 -> Go 建单 -> 返回 package_info，转账单停留在 WAIT_USER_CONFIRM
+curl -s http://127.0.0.1:9200/mock/bills | jq
+
+# 2. 模拟用户在微信确认页确认收款 -> 转 SUCCESS 并推送回调
+curl -s -XPOST http://127.0.0.1:9200/mock/bills/<out_bill_no>/settle \
+  -H 'Content-Type: application/json' -d '{"state":"SUCCESS"}'
+
+# 3. 验证失败分支
+curl -s -XPOST http://127.0.0.1:9200/mock/bills/<out_bill_no>/settle \
+  -H 'Content-Type: application/json' -d '{"state":"FAIL","fail_reason":"NAME_ERROR"}'
+
+# 4. 验证回调幂等：重复推送同一笔，第二次应被 Go 去重直接 200
+curl -s -XPOST http://127.0.0.1:9200/mock/bills/<out_bill_no>/notify
+```
+
+### 8.5 覆盖不到的部分
+
+- **前端 `requestMerchantTransfer`** 是微信 WebView 的原生桥，测试号无支付权限时调起必然失败，
+  无法被 mock 替代。联调时请直接看后端状态变化，或在非微信环境验证 `unsupported` 分支。
+- 模拟器状态在内存中，重启即清空。
+
+---
+
+## 9. FastAPI 侧待办（配合本服务）
 
 1. 新增 `app/modules/wxpay/`（`api.py` / `client.py` / `service.py` / `models.py` / `tasks.py`）
 2. 建表：`reward_record` / `transfer_bill` / `wxpay_notify_log`（见方案第 7 章）
@@ -185,7 +286,7 @@ make test-race         # 竞态检测（需 cgo / gcc）
 
 ---
 
-## 9. 官方文档索引
+## 10. 官方文档索引
 
 - 商家转账开发指引：https://pay.weixin.qq.com/doc/v3/merchant/4012715211
 - 发起转账：https://pay.weixin.qq.com/doc/v3/merchant/4012716434

@@ -45,6 +45,30 @@ func DecryptResource(apiV3Key, nonce, associatedData, ciphertext string) ([]byte
 	return plain, nil
 }
 
+// EncryptResource 使用 APIv3 密钥做 AEAD_AES_256_GCM 加密，返回 base64 密文。
+//
+// 与 DecryptResource 互为逆操作。生产侧不会用到（回调由微信加密后下发），
+// 仅供本地 mock 服务与单元测试构造回调报文。nonce 必须是 12 字节。
+func EncryptResource(apiV3Key, nonce, associatedData string, plaintext []byte) (string, error) {
+	key := []byte(apiV3Key)
+	if len(key) != 32 {
+		return "", fmt.Errorf("wxpay: APIv3 key must be 32 bytes, got %d", len(key))
+	}
+	if len(nonce) != 12 {
+		return "", fmt.Errorf("wxpay: aes-gcm nonce must be 12 bytes, got %d", len(nonce))
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return "", fmt.Errorf("wxpay: init aes cipher: %w", err)
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", fmt.Errorf("wxpay: init gcm: %w", err)
+	}
+	out := gcm.Seal(nil, []byte(nonce), plaintext, []byte(associatedData))
+	return base64Encode(out), nil
+}
+
 // EncryptOAEP 使用微信支付公钥做 RSA-OAEP 加密（SHA-1），返回 base64 密文。
 //
 // 用于 user_name 等敏感字段。单笔转账 ≥ 2000 元时必须传加密后的收款人姓名。

@@ -4,6 +4,7 @@
 package config
 
 import (
+	"bufio"
 	"fmt"
 	"os"
 	"strconv"
@@ -32,6 +33,11 @@ type Config struct {
 	WechatPayPublicKeyID   string // 形如 PUB_KEY_ID_xxxxxxxxxxxxx
 	WechatPayPublicKeyPath string // wxp_pub.pem
 
+	// APIBaseURL 覆盖微信支付 API 的根地址，形如 http://127.0.0.1:9200。
+	// 为空时使用官方地址 https://api.mch.weixin.qq.com。
+	// ⚠️ 仅用于本地/联调环境指向 mock 服务，生产必须留空。
+	APIBaseURL string
+
 	// 商家转账
 	NotifyBaseURL     string // 公网 HTTPS 站点根地址，如 https://<domain>（不含路径）
 	TransferSceneID   string // 转账场景 ID，现金营销默认 1000
@@ -57,11 +63,65 @@ const (
 	DownstreamNotifyPath = "/internal/wxpay/notify/transfer"
 )
 
+// loadDotenv 从 .env 文件兜底加载配置（仅标准库实现）。
+//
+// 规则：
+//  1. 文件不存在则静默跳过——生产不强制要求存在 .env；
+//  2. 已存在的环境变量优先，文件只补不覆盖——避免误留在源码目录的 .env
+//     覆盖容器/Systemd 注入的真实密钥；
+//  3. 设 WXPAY_DOTENV=0 可完全关闭；WXPAY_DOTENV_PATH 可指定其他路径（默认 .env，相对进程工作目录）。
+//
+// 解析上支持：注释行、空行、`export ` 前缀、单/双引号包裹、值中含 `=` 或 `#`。
+// LoadDotenv 导出版本：供 cmd/mockwx 等开发工具复用同一份 .env 加载实现。
+func LoadDotenv(path string) {
+	f, err := os.Open(path)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		line = strings.TrimPrefix(line, "export ")
+		key, val, ok := strings.Cut(line, "=") // 只切第一个 =，值里可含 =
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		val = strings.TrimSpace(val)
+		// 仅剥离成对的首尾引号，不破坏值内部的引号
+		if len(val) >= 2 && val[0] == val[len(val)-1] && (val[0] == '"' || val[0] == '\'') {
+			val = val[1 : len(val)-1]
+		}
+		if _, exists := os.LookupEnv(key); exists {
+			continue
+		}
+		_ = os.Setenv(key, val)
+	}
+}
+
 // Load 从环境变量加载并校验配置。
+// 启动时会先尝试用 .env 兜底（见 loadDotenv），随后仍以真实环境变量为准。
 func Load() (*Config, error) {
+	if os.Getenv("WXPAY_DOTENV") != "0" {
+		path := os.Getenv("WXPAY_DOTENV_PATH")
+		if strings.TrimSpace(path) == "" {
+			path = ".env"
+		}
+		LoadDotenv(path)
+	}
+
 	c := &Config{
 		ListenAddr:         envStr("WXPAY_LISTEN_ADDR", ":9100"),
-		ShutdownTimeoutSec: envInt("WXPAY_SHUTDOWN_TIMEOUT", 10),
+		// 默认 30s：必须大于 WriteTimeout（默认 15s），否则在途请求未写完就被 Shutdown 超时打断。
+		ShutdownTimeoutSec: envInt("WXPAY_SHUTDOWN_TIMEOUT", 30),
 		ReadTimeoutSec:     envInt("WXPAY_READ_TIMEOUT", 15),
 		WriteTimeoutSec:    envInt("WXPAY_WRITE_TIMEOUT", 15),
 
@@ -75,6 +135,8 @@ func Load() (*Config, error) {
 
 		WechatPayPublicKeyID:   os.Getenv("WXPAY_PUBLIC_KEY_ID"),
 		WechatPayPublicKeyPath: os.Getenv("WXPAY_PUBLIC_KEY_PATH"),
+
+		APIBaseURL: os.Getenv("WXPAY_API_BASE_URL"),
 
 		NotifyBaseURL:     os.Getenv("WXPAY_NOTIFY_BASE_URL"),
 		TransferSceneID:   envStr("WXPAY_TRANSFER_SCENE_ID", "1000"),

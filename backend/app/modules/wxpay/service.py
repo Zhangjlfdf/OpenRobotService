@@ -45,6 +45,10 @@ logger = get_logger(__name__)
 PACKAGE_TTL = timedelta(hours=24)
 # 转账单查询有效期（官方：仅支持 30 天内）
 BILL_QUERY_WINDOW = timedelta(days=30)
+# 微信硬性要求：单笔 >= 2000 元必须传收款人姓名做实名校验（Go 侧会先 RSA-OAEP 加密再提交）
+USER_NAME_REQUIRED_FEN = 200000
+# transfer_remark 上限（微信限制 32 字符；Go 侧按字符数校验，这里同步按字符截断）
+MAX_REMARK_LEN = 32
 
 _ALNUM = string.ascii_uppercase + string.digits
 
@@ -224,7 +228,14 @@ class WithdrawService:
         ).scalar_one_or_none()
 
     @staticmethod
-    async def withdraw(db: AsyncSession, reward_id: str, user_id: str) -> WithdrawOut:
+    async def withdraw(
+        db: AsyncSession, reward_id: str, user_id: str, provided_name: str = ""
+    ) -> WithdrawOut:
+        """立即提现 / 去确认。
+
+        provided_name：用户在前端 `need_real_name` 弹窗中填写的真实姓名，
+        仅当本次建单需要实名校验（单笔 ≥ 2000 元）时使用。
+        """
         if not getattr(settings, "WXPAY_ENABLED", False):
             return WithdrawOut(action="rejected", message="微信支付功能未启用")
 
@@ -299,8 +310,18 @@ class WithdrawService:
                 state=bill.state or "",
             )
 
+        # 分支 C 前置：上一笔带姓名的转账单被微信判为 FAIL，
+        # 说明当前 users.name 已被证伪（可能是微信昵称，或被用户改坏），
+        # 必须让用户重新提供真实姓名，而不是拿同一个名字反复失败。
+        if reward.amount >= USER_NAME_REQUIRED_FEN and not (provided_name or "").strip():
+            if await WithdrawService._last_bill_failed_with_name(db, reward.id):
+                return WithdrawOut(
+                    action="need_real_name",
+                    message="收款人姓名与微信实名信息不一致，请填写真实姓名",
+                )
+
         # 分支 C：无单或已终态 -> 用新的 out_bill_no 发起转账
-        return await WithdrawService._create_bill(db, reward)
+        return await WithdrawService._create_bill(db, reward, provided_name)
 
     @staticmethod
     async def _refresh_bill(db: AsyncSession, bill: TransferBill) -> Optional[TransferBill]:
@@ -334,9 +355,92 @@ class WithdrawService:
         return bill
 
     @staticmethod
-    async def _create_bill(db: AsyncSession, reward: RewardRecord) -> WithdrawOut:
-        """发起转账（必须先落占位单，保证回调到达时能定位到 reward）。"""
+    async def _resolve_user_name(db: AsyncSession, user_id: str) -> Optional[str]:
+        """取默认收款人姓名（微信 >= 2000 元转账的实名校验要求）。
+
+        ⚠️ users.name 的初始值可能是微信昵称，首次大额提现大概率被微信拒绝 —— 这是**故意**的：
+        拒绝后由 `need_real_name` 引导用户填写真实姓名，微信受理后回写 users.name，
+        后续支付直接复用。用户若擅自改坏 users.name，下次提现同样会被检出并再次引导重填，
+        形成自愈闭环。
+        """
+        from app.models.identity import UserDB
+
+        row = (
+            await db.execute(select(UserDB.name).where(UserDB.id == user_id))
+        ).scalar_one_or_none()
+        return (row or "").strip() or None
+
+    @staticmethod
+    async def _last_bill_failed_with_name(db: AsyncSession, reward_id: str) -> bool:
+        """最近一笔终态转账单是否失败（即当前 users.name 已被微信证伪）。
+
+        金额达到实名阈值时建单**必然**携带姓名，因此「最近一笔终态单 = FAIL」
+        即可判定当前 `users.name` 没通过微信实名校验，下次必须让用户重新填写，
+        而不是拿同一个名字反复试。
+        """
+        bill = (
+            await db.execute(
+                select(TransferBill)
+                .where(
+                    TransferBill.reward_id == reward_id,
+                    TransferBill.is_terminal.is_(True),
+                )
+                .order_by(TransferBill.created_at.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        return bill is not None and (bill.state or "").upper() == TransferBillState.FAIL
+
+    @staticmethod
+    async def _persist_user_name(db: AsyncSession, user_id: str, user_name: str) -> None:
+        """把已被微信受理的收款人姓名固化到 users.name，供后续支付复用。
+
+        ⚠️ 只在微信**受理**该姓名后调用（而非最终 SUCCESS），因此极少数情况下
+        固化的姓名仍可能在异步校验中被判不符 —— 届时该单会 FAIL，
+        下次提现由 _last_bill_failed_with_name 检出并再次引导用户重填，形成自愈闭环。
+
+        不在此处 commit，由调用方统一提交。
+        """
+        from app.models.identity import UserDB
+
+        user = (
+            await db.execute(select(UserDB).where(UserDB.id == user_id))
+        ).scalar_one_or_none()
+        if user is None:
+            return
+        if (user.name or "").strip() != user_name:
+            user.name = user_name
+            logger.info(f"[wxpay] 收款人真实姓名已固化: user_id={user_id}")
+
+    @staticmethod
+    async def _create_bill(
+        db: AsyncSession, reward: RewardRecord, provided_name: str = ""
+    ) -> WithdrawOut:
+        """发起转账（必须先落占位单，保证回调到达时能定位到 reward）。
+
+        provided_name 是用户在 `need_real_name` 弹窗里填写的真实姓名；
+        为空时回退 users.name（首次可能取到微信昵称，被微信拒绝后再引导重填）。
+        """
         now = _now()
+
+        # 微信硬性要求：>= 2000 元必须传收款人姓名做实名校验。
+        user_name = ""
+        if reward.amount >= USER_NAME_REQUIRED_FEN:
+            user_name = (provided_name or "").strip()
+            if not user_name:
+                user_name = (
+                    await WithdrawService._resolve_user_name(db, reward.user_id) or ""
+                ).strip()
+            if not user_name:
+                logger.info(
+                    f"[wxpay] 无可用收款人姓名，要求用户填写: reward_id={reward.id} "
+                    f"amount={reward.amount}"
+                )
+                return WithdrawOut(
+                    action="need_real_name",
+                    message="单笔超过 2000 元需收款人真实姓名，请填写与微信实名一致的姓名",
+                )
+
         out_bill_no = gen_out_bill_no()
         bill = TransferBill(
             id=uuid.uuid4().hex,
@@ -358,7 +462,9 @@ class WithdrawService:
                 out_bill_no=out_bill_no,
                 openid=reward.openid,
                 amount=reward.amount,
-                remark=reward.remark or reward.reward_desc,
+                # 备注超 32 字符会被微信拒绝，这里按字符截断（Go 侧同样按字符数校验）
+                remark=(reward.remark or reward.reward_desc or "")[:MAX_REMARK_LEN],
+                user_name=user_name,
                 scene_name=reward.scene_name,
                 reward_desc=reward.reward_desc,
                 perception=str(getattr(settings, "WXPAY_USER_RECV_PERCEPTION", "") or ""),
@@ -374,6 +480,16 @@ class WithdrawService:
                 await db.delete(bill)
                 reward.status = RewardStatus.PENDING
                 await db.commit()
+                if user_name:
+                    # 已携带姓名仍被拒：大概率姓名与微信实名不符，引导用户重填
+                    logger.warning(
+                        f"[wxpay] 携带姓名的转账被微信拒绝，疑似姓名不符: "
+                        f"out_bill_no={out_bill_no} code={e.code}"
+                    )
+                    return WithdrawOut(
+                        action="need_real_name",
+                        message="收款人姓名与微信实名信息不一致，请填写真实姓名",
+                    )
                 return WithdrawOut(action="rejected", message=e.message or "发起转账失败")
             # 其余（网络异常/系统错误）保留占位，等兜底查单刷新，绝不换单重试
             logger.error(
@@ -398,6 +514,9 @@ class WithdrawService:
         reward.status = derive_reward_status(state)
         if reward.status == RewardStatus.SUCCESS:
             reward.withdrawn_at = now
+        # 微信已受理该姓名 -> 固化为 users.name，后续支付直接复用
+        if user_name:
+            await WithdrawService._persist_user_name(db, reward.user_id, user_name)
         await db.commit()
 
         if bill.package_info:

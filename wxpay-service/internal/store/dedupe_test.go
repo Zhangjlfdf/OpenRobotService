@@ -30,6 +30,27 @@ func TestDeduperTTLExpiry(t *testing.T) {
 	}
 }
 
+// Has 只判断不写入，Mark 才写入 —— 回调处理依赖这个语义：
+// 推送下游失败时不 Mark，微信的重试才不会被误判为重复通知。
+func TestDeduperHasDoesNotMark(t *testing.T) {
+	d := NewDeduper(time.Hour, 100)
+	if d.Has("EV-010") || d.Has("EV-010") {
+		t.Fatal("Has must not mark the id")
+	}
+	d.Mark("EV-010")
+	if !d.Has("EV-010") {
+		t.Fatal("Mark must make Has return true")
+	}
+}
+
+func TestDeduperMarkEmptyID(t *testing.T) {
+	d := NewDeduper(time.Hour, 100)
+	d.Mark("")
+	if d.Has("") {
+		t.Fatal("empty id must never be marked")
+	}
+}
+
 func TestDeduperEmptyID(t *testing.T) {
 	d := NewDeduper(time.Hour, 100)
 	if d.Seen("") || d.Seen("") {

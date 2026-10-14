@@ -9,7 +9,7 @@
 // ⚠️ 确认页返回 ok 不等于到账：到账由微信回调扭转 reward 状态，前端只提示「已提交，等待到账」。
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Button, Loading, Navbar, Toast } from 'tdesign-mobile-react';
+import { Button, Input, Loading, Navbar, Popup, Toast } from 'tdesign-mobile-react';
 import { POLL_INTERVAL_MS } from '@/config/poll';
 import {
   fetchRewardStats,
@@ -66,6 +66,12 @@ export default function MyRewards() {
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState('');
+  /** 真实姓名弹窗：微信实名校验未通过时要求用户填写 */
+  const [nameDialog, setNameDialog] = useState<{ open: boolean; reward: RewardItem | null }>({
+    open: false,
+    reward: null,
+  });
+  const [realName, setRealName] = useState('');
   /** 正在提现的奖励 id：串行化点击，避免连点打出多笔建单请求 */
   const [pendingId, setPendingId] = useState<string | null>(null);
 
@@ -105,14 +111,25 @@ export default function MyRewards() {
     return () => window.clearInterval(timer);
   }, [hasWithdrawing, load]);
 
-  const handleWithdraw = useCallback(
-    async (item: RewardItem) => {
+  const closeNameDialog = useCallback(() => {
+    setNameDialog({ open: false, reward: null });
+  }, []);
+
+  const runWithdraw = useCallback(
+    async (item: RewardItem, userName?: string) => {
       if (pendingId) return; // 已有提现在途：忽略连点
       if (item.status === 'success' || item.status === 'expired') return;
 
       setPendingId(item.id);
       try {
-        const res = await withdrawReward(item.id);
+        const res = await withdrawReward(item.id, userName);
+
+        if (res.action === 'need_real_name') {
+          // 收款人姓名未通过微信实名校验：弹窗收集真实姓名后重新提交
+          setRealName('');
+          setNameDialog({ open: true, reward: item });
+          return;
+        }
 
         if (res.action === 'confirm') {
           const r = await requestMerchantTransfer({
@@ -149,6 +166,19 @@ export default function MyRewards() {
     },
     [pendingId, load],
   );
+
+  /** 提交真实姓名并重新发起提现（仅在收到 need_real_name 后使用） */
+  const submitRealName = useCallback(async () => {
+    const name = realName.trim();
+    if (!name) {
+      Toast({ message: '请填写真实姓名', theme: 'warning' });
+      return;
+    }
+    const reward = nameDialog.reward;
+    if (!reward) return;
+    closeNameDialog();
+    await runWithdraw(reward, name);
+  }, [realName, nameDialog.reward, closeNameDialog, runWithdraw]);
 
   const hasMore = items.length < total;
 
@@ -303,7 +333,7 @@ export default function MyRewards() {
                       disabled={disabled}
                       loading={busy}
                       data-testid={`reward-action-${item.id}`}
-                      onClick={() => void handleWithdraw(item)}
+                      onClick={() => void runWithdraw(item)}
                     >
                       {actionLabel(item.status)}
                     </Button>
@@ -332,6 +362,29 @@ export default function MyRewards() {
           确认后一般即时到账，最终状态以本页显示为准。
         </div>
       </div>
+
+      {/* 真实姓名收集：微信对单笔 ≥2000 元的转账要求收款人姓名与实名一致 */}
+      <Popup visible={nameDialog.open} onClose={closeNameDialog} placement="center" showOverlay>
+        <div style={{ padding: 16, width: '80vw', maxWidth: 320 }}>
+          <h4 style={{ marginBottom: 8, fontSize: 16, fontWeight: 600 }}>填写真实姓名</h4>
+          <p style={{ fontSize: 13, color: '#8a8f92', marginBottom: 16, lineHeight: 1.6 }}>
+            微信要求单笔 2000 元及以上的转账校验收款人实名，请填写与你的微信实名信息一致的姓名。
+          </p>
+          <Input
+            placeholder="请输入真实姓名"
+            value={realName}
+            onChange={(v) => setRealName(String(v))}
+          />
+          <div style={{ display: 'flex', gap: 12, marginTop: 16 }}>
+            <Button block variant="outline" onClick={closeNameDialog}>
+              取消
+            </Button>
+            <Button block theme="primary" onClick={() => void submitRealName()}>
+              提交并提现
+            </Button>
+          </div>
+        </div>
+      </Popup>
     </div>
   );
 }

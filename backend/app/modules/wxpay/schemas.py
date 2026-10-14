@@ -46,11 +46,12 @@ class WithdrawOut(BaseModel):
     """提现/去确认结果。
 
     action:
-    - confirm    有待确认转账单，用 package 调起 requestMerchantTransfer
-    - processing 转账单处于其它非终态，提示稍后再试
-    - success    已到账
-    - expired    奖励已失效
-    - rejected   不满足提现条件（金额/状态），见 message
+    - confirm         有待确认转账单，用 package 调起 requestMerchantTransfer
+    - processing      转账单处于其它非终态，提示稍后再试
+    - need_real_name  收款人姓名未通过微信实名校验，需用户填写真实姓名后重新提交
+    - success         已到账
+    - expired         奖励已失效
+    - rejected        不满足提现条件（金额/状态），见 message
     """
 
     action: str
@@ -60,6 +61,16 @@ class WithdrawOut(BaseModel):
     package: str = ""
     out_bill_no: str = ""
     state: str = ""
+
+
+class WithdrawIn(BaseModel):
+    """提现请求体。
+
+    user_name 仅在后端返回 `action=need_real_name` 后由用户填写并再次提交。
+    微信受理该姓名后会被固化为 `users.name`，后续支付自动复用，无需再次填写。
+    """
+
+    user_name: str = Field("", max_length=64, description="收款人真实姓名，须与微信实名一致")
 
 
 # ============ 内部：发放奖励 ============

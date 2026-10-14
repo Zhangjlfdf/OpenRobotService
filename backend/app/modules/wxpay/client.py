@@ -108,6 +108,15 @@ class WxpayServiceClient:
         """按商户单号查单（提现决策 + 兜底查单均依赖）。"""
         return await self._request("GET", f"/internal/transfer/query/{out_bill_no}")
 
+    async def query_transfer_by_bill_no(self, transfer_bill_no: str) -> Dict[str, Any]:
+        """按微信转账单号查单。
+
+        排障用：微信账单/客服工单里只有 transfer_bill_no，无法反推商户单号。
+        """
+        return await self._request(
+            "GET", f"/internal/transfer/query-by-bill/{transfer_bill_no}"
+        )
+
     async def cancel_transfer(self, out_bill_no: str) -> Dict[str, Any]:
         """撤销转账（仅运营后台；返回成功仅代表受理，需再查单确认）。"""
         return await self._request("POST", "/internal/transfer/cancel", {"out_bill_no": out_bill_no})

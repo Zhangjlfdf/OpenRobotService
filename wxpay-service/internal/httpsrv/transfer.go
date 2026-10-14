@@ -85,6 +85,30 @@ func (h *transferHandler) queryByOutBillNo(w http.ResponseWriter, r *http.Reques
 	writeOK(w, bill)
 }
 
+// queryByTransferBillNo 按微信转账单号查单。
+// 路径：GET /internal/transfer/query-by-bill/{transfer_bill_no}
+//
+// 运维价值：微信侧只有 transfer_bill_no（如账单明细、客服工单），
+// 仅靠 out_bill_no 无法反查，排障时必须能按微信单号查。
+func (h *transferHandler) queryByTransferBillNo(w http.ResponseWriter, r *http.Request) {
+	billNo := strings.Trim(strings.TrimPrefix(r.URL.Path, "/internal/transfer/query-by-bill/"), "/")
+	if billNo == "" {
+		writeFail(w, http.StatusBadRequest, "transfer_bill_no is required")
+		return
+	}
+	// 防御路径穿越。
+	if strings.Contains(billNo, "/") {
+		writeFail(w, http.StatusBadRequest, "invalid transfer_bill_no")
+		return
+	}
+	bill, err := h.svc.QueryByTransferBillNo(r.Context(), billNo)
+	if err != nil {
+		writeTransferError(w, err)
+		return
+	}
+	writeOK(w, bill)
+}
+
 func (h *transferHandler) cancel(w http.ResponseWriter, r *http.Request) {
 	raw, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 	if err != nil {

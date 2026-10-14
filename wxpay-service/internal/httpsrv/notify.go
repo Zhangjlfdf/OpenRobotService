@@ -24,12 +24,28 @@ type notifyHandler struct {
 	downstream *downstream.Client
 }
 
+// maxNotifyBody 是回调报文体的上限。
+// 正常的商家转账回调远小于此；超限直接拒绝，而不是静默截断成验签失败。
+const maxNotifyBody = 1 << 20 // 1 MiB
+
 func (h *notifyHandler) transfer(w http.ResponseWriter, r *http.Request) {
 	// 1. 读取原始报文体（禁止任何重序列化）。
-	raw, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if r.ContentLength > maxNotifyBody {
+		wechatFail(w, http.StatusRequestEntityTooLarge, "request body too large")
+		return
+	}
+	raw, err := io.ReadAll(io.LimitReader(r.Body, maxNotifyBody))
 	if err != nil {
 		wechatFail(w, http.StatusBadRequest, "read body failed")
 		return
+	}
+	// 读取到上限说明报文被截断（可能是攻击或异常流量），明确拒绝而非交给验签。
+	if len(raw) >= maxNotifyBody {
+		var probe [1]byte
+		if n, _ := r.Body.Read(probe[:]); n > 0 {
+			wechatFail(w, http.StatusRequestEntityTooLarge, "request body too large")
+			return
+		}
 	}
 
 	// 2. 验签 -> 解析 -> 解密（顺序不可变）。
@@ -55,8 +71,12 @@ func (h *notifyHandler) transfer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 4. 幂等：同一通知可能多次送达（第一道防线；最终幂等由 FastAPI 唯一索引保证）。
-	if h.deduper.Seen(notification.ID) {
+	// 4. 幂等判断（第一道防线；最终幂等由 FastAPI 唯一索引保证）。
+	//
+	// 这里只判断不记录：必须先推送成功才能 Mark。否则推送失败应答 5xx 后，
+	// 微信的重试会被误判为「已处理过的重复通知」直接返回 200，
+	// 导致该笔回调永久丢失（只能等 FastAPI 兜底查单补偿）。
+	if h.deduper.Has(notification.ID) {
 		slog.Info("duplicate notification skipped", "notify_id", notification.ID)
 		wechatOK(w)
 		return
@@ -90,6 +110,10 @@ func (h *notifyHandler) transfer(w http.ResponseWriter, r *http.Request) {
 		wechatFail(w, http.StatusInternalServerError, "downstream unavailable")
 		return
 	}
+
+	// 6. 推送成功后才标记为已处理，允许微信在失败场景下重试。
+	//    重复推送是安全的：FastAPI 侧 wxpay_notify_log.notify_id 唯一索引会幂等拦截。
+	h.deduper.Mark(notification.ID)
 
 	slog.Info("transfer notification processed",
 		"notify_id", notification.ID,

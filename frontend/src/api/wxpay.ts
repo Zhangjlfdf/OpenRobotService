@@ -46,13 +46,20 @@ export interface RewardStats {
 
 /**
  * 提现结果动作：
- * - confirm    有待确认转账单，用 mch_id/app_id/package 调起 requestMerchantTransfer
- * - processing 转账单处于其它非终态（含刚发起未返回 package），提示稍后查看
- * - success    已到账
- * - expired    奖励已失效
- * - rejected   不满足提现条件（金额/状态/微信拒绝），见 message
+ * - confirm         有待确认转账单，用 mch_id/app_id/package 调起 requestMerchantTransfer
+ * - processing      转账单处于其它非终态（含刚发起未返回 package），提示稍后查看
+ * - need_real_name  收款人姓名未通过微信实名校验，需弹窗让用户填写真实姓名后带 user_name 重试
+ * - success         已到账
+ * - expired         奖励已失效
+ * - rejected        不满足提现条件（金额/状态/微信拒绝），见 message
  */
-export type WithdrawAction = 'confirm' | 'processing' | 'success' | 'expired' | 'rejected';
+export type WithdrawAction =
+  | 'confirm'
+  | 'processing'
+  | 'need_real_name'
+  | 'success'
+  | 'expired'
+  | 'rejected';
 
 export interface WithdrawResp {
   action: WithdrawAction;
@@ -93,9 +100,16 @@ export function fetchRewardStats(): Promise<RewardStats> {
  *
  * 后端内部走三分支决策：复用 package → 查单提示处理中 → 换新单号建单，
  * 保证同一笔奖励至多有一笔非终态转账单（防重复出资），前端无需自行判重。
+ *
+ * @param userName 仅在上一次返回 action=need_real_name 时填写：
+ *                 微信对单笔 ≥2000 元的转账要求收款人姓名与实名一致，
+ *                 受理后后端会固化该姓名，后续支付自动复用。
  */
-export function withdrawReward(rewardId: string): Promise<WithdrawResp> {
-  return request<WithdrawResp>(`/${encodeURIComponent(rewardId)}/withdraw`, { method: 'POST' });
+export function withdrawReward(rewardId: string, userName?: string): Promise<WithdrawResp> {
+  return request<WithdrawResp>(`/${encodeURIComponent(rewardId)}/withdraw`, {
+    method: 'POST',
+    ...(userName ? { body: JSON.stringify({ user_name: userName }) } : {}),
+  });
 }
 
 /** 分 → 元（保留两位） */

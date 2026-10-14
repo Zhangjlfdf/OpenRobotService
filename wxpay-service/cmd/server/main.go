@@ -38,6 +38,11 @@ func run() error {
 		return err
 	}
 	setupLogger(cfg.LogLevel)
+	if cfg.APIBaseURL != "" {
+		// 生产误配会把真实资金请求发到 mock，必须显式告警。
+		slog.Warn("WXPAY_API_BASE_URL is overridden: requests will NOT reach WeChat Pay",
+			"api_base_url", cfg.APIBaseURL)
+	}
 
 	// 1. 加载密钥材料。
 	privateKey, err := wxpay.LoadPrivateKey(cfg.PrivateKeyPath)
@@ -52,6 +57,7 @@ func run() error {
 
 	// 2. 构造 APIv3 客户端。
 	client, err := wxpay.NewClient(wxpay.ClientConfig{
+		BaseURL:         cfg.APIBaseURL,
 		MchID:           cfg.MchID,
 		CertSerialNo:    cfg.CertSerialNo,
 		PrivateKey:      privateKey,

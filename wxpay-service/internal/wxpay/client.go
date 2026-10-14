@@ -15,6 +15,12 @@ import (
 
 const defaultBaseURL = "https://api.mch.weixin.qq.com"
 
+// responseTimestampSkew 是应答验签允许的时间偏差。
+//
+// 只验签不校验时间窗等于接受任意时刻的重放报文。5 分钟是微信官方 SDK 的通行取值。
+// ⚠️ 前提：服务器必须开启 NTP 时钟同步，否则偏差过大会导致所有请求被拒。
+const responseTimestampSkew = 5 * time.Minute
+
 // Client 是 APIv3 的 HTTP 客户端：自动签名请求、自动验签应答。
 type Client struct {
 	baseURL string
@@ -163,6 +169,16 @@ func (c *Client) verifyResponse(header http.Header, body []byte) error {
 	}
 	timestamp := header.Get("Wechatpay-Timestamp")
 	nonce := header.Get("Wechatpay-Nonce")
+
+	// 时间窗校验：拒绝超出偏差范围的应答（防重放）。
+	ts, err := ParseTimestamp(timestamp)
+	if err != nil {
+		return err
+	}
+	if skew := time.Since(time.Unix(ts, 0)); skew > responseTimestampSkew || skew < -responseTimestampSkew {
+		return fmt.Errorf("wxpay: response timestamp out of window: %q (skew %s)", timestamp, skew)
+	}
+
 	return VerifySignature(pub, timestamp, nonce, string(body), signature)
 }
 

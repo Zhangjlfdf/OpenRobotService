@@ -46,6 +46,24 @@ vi.mock('tdesign-mobile-react', () => ({
       {children}
     </button>
   ),
+  Popup: ({ children, visible }: { children?: ReactNode; visible?: boolean }) =>
+    visible ? <div data-testid="popup">{children}</div> : null,
+  Input: ({
+    value,
+    onChange,
+    placeholder,
+  }: {
+    value?: string;
+    onChange?: (v: string) => void;
+    placeholder?: string;
+  }) => (
+    <input
+      data-testid="realname-input"
+      placeholder={placeholder}
+      value={value ?? ''}
+      onChange={(e) => onChange?.(e.target.value)}
+    />
+  ),
   Toast: vi.fn(),
 }));
 
@@ -137,6 +155,60 @@ describe('MyRewards', () => {
       expect(Toast).toHaveBeenCalledWith({ message: '转账处理中，请稍后重试', theme: 'warning' }),
     );
     expect(mockTransfer).not.toHaveBeenCalled();
+  });
+
+  it('need_real_name 分支：弹出姓名输入框，填写后带 user_name 重新提现', async () => {
+    mockWithdraw
+      .mockResolvedValueOnce({
+        action: 'need_real_name',
+        message: '收款人姓名与微信实名信息不一致，请填写真实姓名',
+      })
+      .mockResolvedValueOnce({
+        action: 'confirm',
+        message: '请完成收款确认',
+        mch_id: '1230000109',
+        app_id: 'wxabc',
+        package: 'mch_id=123&package_info=xxx',
+        out_bill_no: 'B2',
+        state: 'WAIT_USER_CONFIRM',
+      });
+    mockTransfer.mockResolvedValue({ result: 'ok', raw: 'requestMerchantTransfer:ok' });
+
+    renderView();
+    await waitFor(() => expect(screen.getByTestId('reward-action-r1')).toBeInTheDocument());
+    fireEvent.click(screen.getByTestId('reward-action-r1'));
+
+    // 第一次不带姓名 -> 弹窗要求填写，且**不**调起确认页
+    await waitFor(() => expect(screen.getByTestId('popup')).toBeInTheDocument());
+    expect(mockWithdraw).toHaveBeenLastCalledWith('r1', undefined);
+    expect(mockTransfer).not.toHaveBeenCalled();
+
+    fireEvent.change(screen.getByTestId('realname-input'), { target: { value: '张三' } });
+    fireEvent.click(screen.getByText('提交并提现'));
+
+    // 第二次带姓名重试 -> 拿到 package 后调起确认页
+    await waitFor(() => expect(mockWithdraw).toHaveBeenLastCalledWith('r1', '张三'));
+    await waitFor(() => expect(mockTransfer).toHaveBeenCalled());
+  });
+
+  it('姓名弹窗未填写时提交，提示且不发起提现', async () => {
+    mockWithdraw.mockResolvedValue({
+      action: 'need_real_name',
+      message: '收款人姓名与微信实名信息不一致，请填写真实姓名',
+    });
+
+    renderView();
+    await waitFor(() => expect(screen.getByTestId('reward-action-r1')).toBeInTheDocument());
+    fireEvent.click(screen.getByTestId('reward-action-r1'));
+    await waitFor(() => expect(screen.getByTestId('popup')).toBeInTheDocument());
+
+    const callsBefore = mockWithdraw.mock.calls.length;
+    fireEvent.click(screen.getByText('提交并提现'));
+
+    await waitFor(() =>
+      expect(Toast).toHaveBeenCalledWith({ message: '请填写真实姓名', theme: 'warning' }),
+    );
+    expect(mockWithdraw.mock.calls.length).toBe(callsBefore);
   });
 
   it('已到账的奖励按钮禁用，点击不发起提现', async () => {
