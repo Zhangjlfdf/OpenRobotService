@@ -994,6 +994,20 @@ html, body, #root {
   border-color: #1f8a5a;
   color: #fff;
 }
+/* 车型介绍按钮组两列等宽（1014）：实测 375 宽下两个胶囊需 286px 而容器只有
+   258px，flex-wrap 竖排成两行很浪费。grid 两列一行放下；chip 内边距/字号
+   微调——不换行文字 105px，列内容区须留足余量（padding 4px 时 118px，
+   余 13px），赌 1px 临界会在安卓/微信字体渲染下随机换行 */
+.chat-veh-choices--intro {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+.chat-veh-choices--intro .chat-veh-chip {
+  padding: 8px 4px;
+  font-size: 13px;
+  text-align: center;
+}
 /* 开场题折叠开关（1012 v2）：常驻 4 之外的类目点此展开/收起，无边框文字按钮，
    与胶囊组左对齐 */
 .chat-veh-expand {
