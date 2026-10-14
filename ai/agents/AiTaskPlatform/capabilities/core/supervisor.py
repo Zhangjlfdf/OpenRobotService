@@ -42,6 +42,33 @@ logger = get_logger("TASK_AGENT")
 MAX_SUB_TASKS = 5          # 一次最多派生子任务数（防无限分叉）；与 _CONCURRENCY 配合：可派 5 个，但最多同时跑 _CONCURRENCY 个
 SOFT_LIMIT = 2             # 调度 LLM 输出解析失败时的重试次数上限（浅则重试，达到上限走兜底）
 _CONCURRENCY = 3           # 同时最多并行执行几个子任务（asyncio.Semaphore，防拉爆 API/限流）
+_MAX_ROUNDS = 2            # 规划轮数上限：初始 + 追规一次。轮数越多越贵（每轮一次规划 LLM + 可能多派能力）
+_RESULT_SNIPPET_CHARS = 400   # 追规时每个能力结果喂回去的字符上限（防把长文本再灌一遍）
+_EXECUTED_BLOCK_CHARS = 2000  # 「本轮已执行」整段的字符上限
+
+
+def _executed_block(plan_all: list, results: dict) -> str:
+    """追规那轮的「本轮已执行」段：只说**结果**，不带能力的内部过程。
+
+    过程（日志子 Agent 的多轮、工具内部步骤）走 progress_emitter / span 树，
+    是给前端过程区看的，**不进任何 prompt**。这里只喂「派了什么 + 拿到了什么」，
+    让规划器知道还缺什么，而不是重复派同样的能力。
+    """
+    if not plan_all and not results:
+        return ""
+    lines = ["## 本轮已执行（不要重复派这些能力）"]
+    for step in plan_all:
+        cap = step.get("capability") or ""
+        goal = step.get("goal") or ""
+        res = results.get(cap) or {}
+        text = str(res.get("text") or "").strip()
+        if not text and not res.get("ok", True):
+            text = f"（未成功：{res.get('error') or '无结果'}）"
+        if len(text) > _RESULT_SNIPPET_CHARS:
+            text = text[:_RESULT_SNIPPET_CHARS] + "…（已截断）"
+        lines.append(f"- {cap}（{goal}）：{text or '（无输出）'}")
+    return "\n".join(lines)[:_EXECUTED_BLOCK_CHARS]
+
 
 
 @dataclass
@@ -323,47 +350,84 @@ class Supervisor:
         bus = self._bus()
 
         with bus.start_span("supervisor.run"):
-            # 1. 调度决策（LLM 建议）
-            with bus.start_span("plan"):
-                decision = await self._plan(task_context, caps, max_sub_tasks)
-                bus.set_attribute("complexity", decision.complexity)
-                bus.set_attribute("派生数", len(decision.plan or []))
-
-            # 2. 建 todo（F7：plan 转 TodoList）
             todo = TodoList()
-            for step in decision.plan:
-                todo.add(step.get("goal") or step.get("capability"), capability=step.get("capability", ""))
+            results: dict = {}
+            plan_all: list = []
+            rounds: list[dict] = []
+            first_complexity = None
+            first_decision = None
+            ask_user = False
+            questions: list = []
 
-            # 3. simple → 0 派生，直接返回（无 plan）
-            if decision.is_simple() or not decision.plan:
-                return {
-                    "complexity": decision.complexity,
-                    "plan": decision.plan,
-                    "ask_user": decision.ask_user,
-                    "questions": decision.questions,
-                    "todo": todo.to_dict_list(),
-                    "results": {},
-                    "final_text": "",
-                    "elapsed_ms": round((_time.perf_counter() - t0) * 1000),
-                    "_decision": decision.__dict__,
-                    "spans": bus.tree(),
-                }
+            # 有界多轮：初始规划 → 派发 → 看结果 → 再追规一次（_MAX_ROUNDS）。
+            # 原来只规划一次、结果不回流 —— KB 没命中 / 日志没读出根因时没有第二次机会。
+            for rnd in range(_MAX_ROUNDS):
+                # 每轮重算可派集：用满的摘掉，「已派过的」也摘掉。
+                # 已派过的必须排除：results 以**能力名**为 key，同一能力跑两次后者会覆盖
+                # 前者，而上层逐 key 读 text —— 覆盖等于吞掉证据。
+                caps_round = [c for c in cap_usage.drop_exhausted(self._runtime_ctx, caps)
+                              if c not in results]
+                if not caps_round:
+                    rounds.append({"round": rnd + 1, "stop": "无可派能力"})
+                    break
 
-            # 4. 执行 plan（派生子任务）
-            await self._consume_injects(todo, _emit)
-            results = await self._dispatch(decision.plan, todo, max_sub_tasks, _emit)
+                ctx_round = task_context
+                if rnd > 0:
+                    ctx_round = f"{task_context}\n\n{_executed_block(plan_all, results)}"
 
-            # 5. 汇总
+                with bus.start_span("plan"):
+                    decision = await self._plan(ctx_round, caps_round, max_sub_tasks)
+                    bus.set_attribute("complexity", decision.complexity)
+                    bus.set_attribute("派生数", len(decision.plan or []))
+                    if rnd > 0:
+                        bus.set_attribute("追规", True)
+
+                if first_decision is None:
+                    first_decision, first_complexity = decision, decision.complexity
+                # 澄清问题以**首轮**提出为准（最贴近用户原话），不被后续轮覆盖
+                if decision.ask_user and decision.questions and not ask_user:
+                    ask_user, questions = True, list(decision.questions)
+
+                if decision.is_simple() or not decision.plan:
+                    rounds.append({"round": rnd + 1, "stop": "规划器判定无需再派"})
+                    break
+
+                for step in decision.plan:
+                    todo.add(step.get("goal") or step.get("capability"),
+                             capability=step.get("capability", ""))
+                plan_all.extend(decision.plan)
+
+                if rnd == 0:
+                    await self._consume_injects(todo, _emit)
+                got = await self._dispatch(decision.plan, todo, max_sub_tasks, _emit)
+                results.update(got)
+                rounds.append({
+                    "round": rnd + 1,
+                    "planned": [s.get("capability") for s in decision.plan],
+                })
+
+                # 历史方案已验证（terminate）→ 硬停，别白跑下一轮昂贵能力
+                if any(_result_terminated(r) for r in got.values()):
+                    rounds[-1]["stop"] = "历史方案已验证"
+                    break
+                await self._consume_injects(todo, _emit)
+
+            note = cap_usage.notes(self._runtime_ctx)
             return {
-                "complexity": decision.complexity,
-                "plan": decision.plan,
-                "ask_user": decision.ask_user,
-                "questions": decision.questions,
+                # complexity 取**首轮**：它描述问题本身的复杂度，不该被次轮的 simple 覆盖
+                "complexity": (first_complexity or "simple"),
+                "plan": plan_all,
+                "ask_user": ask_user,
+                "questions": questions,
                 "todo": todo.to_dict_list(),
                 "results": results,
-                "final_text": self._synthesize(results, cap_usage.notes(self._runtime_ctx)),
+                "final_text": self._synthesize(results, note) if results else "",
+                # 配额说明单独给一个键：docstring 写着「必须进正文」，但 final_text 没有
+                # 消费者（discuss_flow 从不读它）→ 上层要用 note，别指望它出现在 results 里。
+                "note": note,
+                "rounds": rounds,
                 "elapsed_ms": round((_time.perf_counter() - t0) * 1000),
-                "_decision": decision.__dict__,
+                "_decision": (first_decision.__dict__ if first_decision else {}),
                 "spans": bus.tree(),
             }
 
@@ -483,7 +547,14 @@ class Supervisor:
                 cap_usage.block(self._runtime_ctx, cap_name, "超出上限的派发已拦下")
                 logger.info(f"[supervisor] {cap_name} {reason}，跳过执行")
                 todo.mark_done(todo_item.id, result=reason)
-                return cap_name, {"ok": False, "error": reason, "text": ""}
+                # meta.blocked 是**独立标记**：这是机制层主动收敛，不是能力执行失败。
+                # 少了它上层只能看到 ok=False，会把「主动不再重复分析」渲染成「分析失败」。
+                return cap_name, {
+                    "ok": False,
+                    "error": reason,
+                    "text": "",
+                    "meta": {"blocked": "quota"},
+                }
             todo.mark_in_progress(todo_item.id)
             if emit is not None:
                 desc = todo_item.description

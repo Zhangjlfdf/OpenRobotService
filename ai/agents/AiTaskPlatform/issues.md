@@ -9,7 +9,7 @@
 
 | 项 | 事实 |
 |----|------|
-| 测试 | `python -m pytest -q` → **901 passed, 27 skipped**。跳过的是需要本地 Qdrant 数据的检索用例。**2026-10-14 移除自评机制（#22）少 58 条、新增工单状态（#23）加 22 条**，净 **865 条**（863 passed + 2 个既有失败，见 dual_tree） |
+| 测试 | `python -m pytest -q` → **884 passed, 27 skipped**（另有 2 个 `dual_tree` 既有失败）。跳过的是需要本地 Qdrant 数据的检索用例。变更轨迹：移除自评机制（#22）−58 条、工单状态（#23）+22 条、Supervisor 追规（#24）+13 条 |
 | 进程模型 | [../../run.py:446](../../run.py:446) 的 `uvicorn.run` **没有 `workers=`** → **单进程**。所以「进程内缓存/快照」方案成立（[runtime/inject_mailbox.py](runtime/inject_mailbox.py)、[runtime/report_cache.py](runtime/report_cache.py)），但也意味着**重启即失** |
 | `.env` | 未纳入版本控制（`.gitignore:22`）。改了必须**手动改 + 重启 AI 服务**，`load_dotenv` 只在启动时读一次 |
 | 过程区数据契约 | 后端 [tracing/trace.py](tracing/trace.py) 的 `nest_progress_todos` 产出「分析 →（规划 + 各能力）→ 子步骤/事件」；前端 `frontend/src/shared/components/DiscussionPanel.tsx` 的 `ProgressTodoItem` **递归渲染 `children`**，后端行自带的 `status`/`phase` 优先于 span 状态 |
@@ -277,6 +277,60 @@
 `contexts/test_quoted_context.py`、`services/test_agent_state_worker.py`。
 其中锁死三条：最近 N 条**不折叠**进状态、状态为空**不注入**状态块（短工单无回归）、
 解析失败**不推进**水位线。
+
+## 2026-10-14 Supervisor 加一轮追规：从「一次规划就派发」到「行动→看结果→再规划」（#24）
+
+**问题（不是 bug，是能力缺口）**：Supervisor 一直是「`_plan()` → `_dispatch()` → 汇总」，
+**规划只做一次、结果不再回流**。于是 KB 没命中 / 日志没读出根因时，它**没有第二次机会** ——
+只能靠一次规划里把要派的都想到。这是"不够智慧"的根，比缺联网更关键。
+
+对比：仓库里早有两份多轮实现（`AiDataAnalysisPlatform/agent.py` 的 ReAct 循环、
+`AiDiagnosisPlatform/tool_loop.py`），`ai/core/llm.py` 的 `complete_with_tools`/`stream_with_tools`
+也早写好 —— **Supervisor 一处没用**。本次没有换轨到原生工具调用（那是更大的重写，还得处理
+DeepSeek 的 reasoning_content 回传协议），而是**把现成的 `_plan`/`_dispatch` 包进循环**，
+保留护栏、配额、进度、注入这些已经工作的机制。
+
+**设计：最多 2 轮（`_MAX_ROUNDS`），四个关键点各对应一个已探明的坑**
+
+| 点 | 为什么 |
+|---|---|
+| **次轮排除已派过的能力** | `results` 以**能力名**为 key，同一能力跑两次后者会**覆盖**前者；上层逐 key 读 `text`，覆盖等于吞掉证据 |
+| **每轮重算 `drop_exhausted`** | 否则次轮会排进必然被 `claim` 拦下的步骤，产生 `ok:False` 噪音 |
+| **`terminate` 每轮末尾检查** | 历史方案已验证就该硬停，别白跑下一轮昂贵能力 |
+| **`is_simple()` / 空 plan = 停** | 复用现成字段，**不改 `SupervisorDecision` 的 schema**（那套健壮 JSON 解析保持原样） |
+
+**次轮喂给规划器的只有「结果」，没有「过程」**：`_executed_block` 只带「派了什么 + 拿到了什么」
+（各自截断 400 字、整段 2000 字）。能力内部的多轮（如 LogSubAgent 的 `log_r1/log_r2`）
+走进度广播和 span 树，**是给前端过程区看的，一个字都不进 prompt**。
+
+**顺带修掉两个「机制没接线」的问题（同一类，之前也踩过）**
+
+1. **配额提示从没到过模型**：`cap_usage.notes()` 生成的「已达上限，请给出有界结论」
+   只写进 `run()` 的 `final_text`，而 `discuss_flow` **从不读 `final_text`**（0 处引用）——
+   docstring（`_synthesize`）写着「**必须进正文**」，但它没有正文。现在 `run()` 单独返回
+   `note` 键，`discuss_flow` 追加进 `facultative`。
+2. **配额拦下被渲染成「分析失败」**：`_run_one` 配额拦下返回 `{ok: False, error: ...}`，
+   与真失败同形，上层会走「真失败」分支说「日志分析失败」。现在加独立标记
+   `meta.blocked = "quota"`，上层据此只说「已到调度上限，基于现有信息给结论」。
+
+**教训（与 #22 同源）**：`final_text` 是**死输出**——一个精心拼好的汇总契约，却没有消费者。
+**产出没有读者，等于没产出**；而它旁边那句「必须进正文」的注释，反而让人以为已经接好了。
+找这类问题的办法还是那条：**从消费者往回数引用**。
+
+**测试**：`run()` 此前**零单测**（`test_usage_quota.py` 全在绕开 LLM 直调 `_guard_decision` /
+`_dispatch_group` / `_synthesize`），而它是每次 @U老师 的必经之路。新增
+`capabilities/core/test_supervisor_run.py`（13 条）：单轮基线（simple 不派、派了会跑、
+results 以能力名为 key）、次轮看得到已执行且不能重派、`terminate` 早停、上限就是 2、
+`plan` 累计而 `complexity` 取首轮、两轮 span 顺序、`note` 不污染 results、已执行段会截断。
+全量 **884 passed / 27 skipped**。
+
+**风险**
+
+- **没有开关**（用户明确要求直接生效）：出问题只能回滚代码，不能改配置降级。
+- **配额更快吃满**：多轮 = 更多能力调用 → 更早触顶 `max_usage_per_session`。
+  这正是上面第 1、2 条要一起修的原因，否则用户会看到一堆莫名其妙的"失败"。
+- **不做「同能力多轮重试」**（如换 query 重读日志）：`results` 的形状表达不了。
+  真要做需先改它的契约。
 
 ## 工具链与协作约定（#11–#14，全是本仓真实踩过的）
 

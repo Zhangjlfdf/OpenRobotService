@@ -342,20 +342,25 @@ class DiscussFlow:
         discussion_lines = comment_lines
 
         # 2.1 工单 Agent 状态：把较早的讨论折叠成结构化状态，prompt 里只留最近 N 条原文。
-        #     总开关默认关 —— 关时 comment_lines 完全不动，行为与改造前逐字一致。
+        #     开关关时 comment_lines 完全不动，行为与改造前逐字一致。
         #     读状态/渲染失败一律回退全量原文（状态丢了不致命，原文还在）。
         state_block = ""
+        _as_on = False
+        _all_comments = len(comment_lines)
         try:
-            from ai.config import get_ai_config as _get_cfg
-            _cfg = _get_cfg()
-            if getattr(_cfg, "enable_agent_state", False):
+            from ai.config import (
+                agent_state_enabled as _as_on_fn,
+                agent_state_raw_window as _as_window,
+            )
+            _as_on = bool(_as_on_fn())
+            if _as_on:
                 from ai.agents.AiTaskPlatform.contexts.agent_state import (
                     load_state as _load_state,
                     render_state_block as _render_state,
                 )
                 block = _render_state(_load_state(task_id).get("state"))
                 if block:
-                    _window = max(0, int(getattr(_cfg, "agent_state_raw_window", 10) or 0))
+                    _window = max(0, int(_as_window() or 0))
                     _kept = comment_lines[-_window:] if _window else []
                     # 全部算完才改写：否则中途抛错会「原文被裁了、状态又没上」，反而更差。
                     state_block = block
@@ -368,13 +373,36 @@ class DiscussFlow:
             logger.warning(f"[discuss] 读取工单状态失败，回退全量原文: {_st_e}")
             state_block = ""
 
+        # 分层结果打一行日志：这是「状态到底有没有生效」最直接的观测点。
+        # 不带正文（正文另外由 dump 开关控制），所以可以常开、好 grep。
+        if not _as_on:
+            logger.info(
+                f"[discuss] 上下文分层 task={task_id} 开关=关 原文=全量{_all_comments}条"
+            )
+        elif state_block:
+            logger.info(
+                f"[discuss] 上下文分层 task={task_id} 开关=开 状态=有({len(state_block)}字) "
+                f"原文=最近{len(comment_lines)}/{_all_comments}条"
+            )
+        else:
+            logger.info(
+                f"[discuss] 上下文分层 task={task_id} 开关=开 状态=空"
+                f"（本单还没折叠过历史）原文=全量{_all_comments}条"
+            )
+        if state_block:
+            try:
+                from ai.config import agent_state_debug_dump as _dump
+                if _dump():
+                    logger.info(f"[discuss] 状态块原文 task={task_id}:\n{state_block}")
+            except Exception:
+                pass
+
         # 2b. 讨论区「引用这句话」：用户引用某条评论后再 @U老师。
         #     与 @# 同款预加载，单独成段，避免淹没在最近 10 条历史里。
         quoted_comment = ""
         try:
-            from ai.config import get_ai_config as _get_cfg_q
-            _qk = getattr(_get_cfg_q(), "discuss_quoted_context_k", None)
-            quoted_comment = format_quoted_comment_block(context or {}, k=_qk)
+            from ai.config import discuss_quoted_context_k as _qk
+            quoted_comment = format_quoted_comment_block(context or {}, k=_qk())
         except Exception as _q_e:
             logger.warning(f"[discuss] 引用评论注入失败: {_q_e}")
             quoted_comment = ""
@@ -998,8 +1026,13 @@ class DiscussFlow:
                             "project_info": "项目现场信息",
                         }.get(cap_name, cap_name)
                         facultative += f"\n[{label}]\n{res['text']}\n"
+                    elif isinstance(res, dict) and (res.get("meta") or {}).get("blocked") == "quota":
+                        # 配额拦下 ≠ 执行失败：机制层主动收敛。这里**只负责别把它渲染成失败**
+                        # （不加这个分支就会走下面的「真失败」路径，对用户说「日志分析失败」）。
+                        # 具体说明由 run() 的 note 统一给出，避免同一句话进两次。
+                        logger.info(f"[discuss] 能力 {cap_name} 因配额拦下，未执行（机制层主动收敛）")
                     elif isinstance(res, dict) and not res.get("ok"):
-                        # 能力失败：记录告警（无发生时间的日志提示已内嵌在结果文本里，不再单独阻断）
+                        # 真失败：记录告警（无发生时间的日志提示已内嵌在结果文本里，不再单独阻断）
                         logger.warning(f"[discuss] 能力 {cap_name} 失败: {res.get('error')}")
                         if cap_name == "log_analyze" and runtime_ctx.get("log_path"):
                             _enames = [Path(p).name for p in (runtime_ctx.get("log_paths") or [runtime_ctx["log_path"]])]
@@ -1010,6 +1043,13 @@ class DiscussFlow:
                                 "**禁止**对用户说「附件只有对话记录/没有车端日志」；"
                                 "应如实说明：服务器算法日志已到位，分析因 LLM/服务异常中断，请稍后重试。\n"
                             )
+
+            # 机制层说明（配额拦下等）统一从这里进正文。
+            # 原来它只写进 run() 的 final_text，而 discuss_flow 从不读 final_text
+            # → 这句「已达上限、请给出有界结论」从没到过模型（docstring 写着「必须进正文」）。
+            _mech_note = (sup_result.get("note") or "").strip()
+            if _mech_note:
+                facultative += f"\n[机制说明]\n{_mech_note}\n"
 
             # ── 确定性保底（仅当用户明确要求"分析全部/所有附件/图片"时）——强制补做图片分析 ──
             # LLM 调度偶发只派 attachment_parse（解析文本附件）而不派 image_analyze，
@@ -1166,11 +1206,19 @@ class DiscussFlow:
                 "todo": final_todo,
                 "decision": sup_result.get("_decision"),
                 "run_id": run_id,
+                # 每轮派了什么、为什么停（多轮追规的可观测点，供 trace 与排查）
+                "rounds": sup_result.get("rounds") or [],
                 "spans": sup_result.get("spans") or (
                     runtime_ctx["trace_bus"].tree()
                     if hasattr(runtime_ctx.get("trace_bus"), "tree") else []
                 ),
             }
+            # 每一轮各打一行：多轮到底有没有发生、停在哪 —— 不用翻 spans 也能看出来
+            for _r in reasoning_trace["rounds"]:
+                logger.info(
+                    f"[discuss] 调度第{_r.get('round')}轮 task={task_id} "
+                    f"派={_r.get('planned') or '无'} 停因={_r.get('stop') or '-'}"
+                )
 
             # ── 澄清闭环（P4）：Supervisor 判定还需向用户确认关键信息（ask_user=true）——
             #    作为「排查优先」的补充而非阻塞：把待确认问题作为可选的"结尾补充提问"注入
@@ -1381,8 +1429,8 @@ class DiscussFlow:
         # 5.1 回复已落库 → 异步刷新工单状态（把新讨论折叠进结构化状态）。
         #     走 Redis 队列，不给用户回复加延迟；入队失败只告警，下次 @ 自然重试。
         try:
-            from ai.config import get_ai_config as _get_cfg_en
-            if getattr(_get_cfg_en(), "enable_agent_state", False):
+            from ai.config import agent_state_enabled as _as_on_en
+            if _as_on_en():
                 from ai.agents.AiTaskPlatform.services.agent_state_worker import (
                     enqueue_ticket_state,
                 )
