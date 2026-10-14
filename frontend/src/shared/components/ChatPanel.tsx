@@ -1596,6 +1596,12 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
 
   // 车体扫码进入：待注册「车型定制模式」的车辆身份（确认后记账，首次发送前注册掉即清空）
   const pendingVehicleModeRef = useRef<VehicleContext | null>(null);
+
+  // 确认气泡文案模板（渲染与落库共用）：key-value 分行 + 加粗标签——
+  // 标签挤在长句里没有标识性（1014 用户反馈「很随意」）
+  const vehicleConfirmText = (ctx: VehicleContext) =>
+    `**车辆信息已确认**\n\n**项目**：${ctx.projectName || '—'}\n**客户**：${ctx.customerName || '—'}\n**车型**：${ctx.vehicleModel || '—'}\n\n接下来按该车型的引导流程协助你，直接描述现象或点下面的选项即可。`;
+
   // ensureConversation 的稳定引用（registerVehicleModeNow 是 useCallback([])，
   // 直接闭包会锁死旧 sessionId；ref 转发与 pickVehicleChoiceRef 同款）
   const ensureConvRef = useRef<(sid: string, firstContent: string) => Promise<number | null>>(
@@ -1616,7 +1622,7 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
         {
           id: uid(),
           role: 'assistant',
-          content: `已确认车辆信息：项目 ${ctx.projectName || '—'}、客户 ${ctx.customerName || '—'}、车型 ${ctx.vehicleModel || '—'}。\n接下来按该车型的引导流程协助你，直接描述现象或点下面的选项即可。`,
+          content: vehicleConfirmText(ctx),
           timestamp: new Date().toISOString(),
           vehicleConfirm: true,
         },
@@ -1673,7 +1679,7 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
       // metadata 重建（后端 SSE 落库的追问选项走同一条恢复链路）。
       const guide = res.data?.vehicle_guide;
       const op = res.data?.opening;
-      const confirmContent = `已确认车辆信息：项目 ${ctx.projectName || '—'}、客户 ${ctx.customerName || '—'}、车型 ${ctx.vehicleModel || '—'}。\n接下来按该车型的引导流程协助你，直接描述现象或点下面的选项即可。`;
+      const confirmContent = vehicleConfirmText(ctx);
       if (guide?.choices?.length) {
         setMessages((prev) => prev.map((m) => (
           m.vehicleConfirm

@@ -251,7 +251,7 @@ describe('ChatPanel 车体扫码：车型模式注册与首问同 session_id', (
     await flush();
 
     // ① 确认气泡：车型介绍按钮并入这条气泡（1014 合并），不再有独立的引导题面
-    expect(await screen.findByText(/已确认车辆信息：项目 项目A、客户 客户A、车型 XQE/)).toBeTruthy();
+    expect(await screen.findByText(/车辆信息已确认/)).toBeTruthy();
     expect(screen.queryByText('想了解 XQE 车型信息？点击查看型号介绍')).toBeNull();
     const intro122 = screen.getByRole('button', { name: /XQE122 车型介绍/ });
     const intro151 = screen.getByRole('button', { name: /XQE151 车型介绍/ });
@@ -276,7 +276,7 @@ describe('ChatPanel 车体扫码：车型模式注册与首问同 session_id', (
     const first = mockAppendMessage.mock.calls[0] as [number, string, string, { metadata?: string }];
     const second = mockAppendMessage.mock.calls[1] as [number, string, string, { metadata?: string }];
     expect(first[1]).toBe('assistant');
-    expect(first[2]).toContain('已确认车辆信息');
+    expect(first[2]).toContain('**车辆信息已确认**');
     expect(JSON.parse(first[3].metadata || '{}')).toMatchObject({
       vehicle_confirm: true,
       vehicle_guide: true,
@@ -319,7 +319,7 @@ describe('ChatPanel 车体扫码：车型模式注册与首问同 session_id', (
               {
                 id: 101,
                 role: 'assistant',
-                content: '已确认车辆信息：项目 项目A、客户 客户A、车型 XQE。\n接下来按该车型的引导流程协助你，直接描述现象或点下面的选项即可。',
+                content: '**车辆信息已确认**\n\n**项目**：项目A\n**客户**：客户A\n**车型**：XQE\n\n接下来按该车型的引导流程协助你，直接描述现象或点下面的选项即可。',
                 created_at: '2026-10-14T01:00:00Z',
                 metadata_: JSON.stringify({
                   vehicle_confirm: true,
