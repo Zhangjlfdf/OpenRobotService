@@ -12,6 +12,38 @@ import type { TicketStatusKey, UrgencyKey } from '@/shared/constants/dashboard';
 const adminRequest = createRequest(API_CONFIG.ADMIN.BASE_URL, 'Admin');
 const tasksRequest = createRequest(API_CONFIG.TASKS.BASE_URL, 'Tasks');
 
+export interface DashboardQuestion {
+  record_id: string;
+  reported_at: string;
+  problem_description: string;
+  solution_description: string;
+  vehicle_number: string;
+  vehicle_model: string;
+  vehicle_info: string;
+}
+
+export interface DashboardQuestions {
+  report_date: string;
+  total: number;
+  page: number;
+  page_size: number;
+  items: DashboardQuestion[];
+  last_sync_at: string | null;
+}
+
+export async function fetchDashboardQuestions(
+  reportDate: string, page = 1, pageSize = 20,
+): Promise<DashboardQuestions> {
+  const query = new URLSearchParams({
+    report_date: reportDate, page: String(page), page_size: String(pageSize),
+  });
+  const res = await adminRequest<{ code: number; data?: DashboardQuestions }>(
+    `/dashboard/questions?${query}`, { skipCache: true },
+  );
+  if (res.code !== 0 || !res.data) throw new Error('问题列表加载失败');
+  return res.data;
+}
+
 /**
  * 将 projectIds 拼接为 project_ids 查询参数。
  * - undefined：不附加参数（向后兼容，不过滤）
@@ -70,10 +102,9 @@ export async function fetchTicketSummary(projectIds?: string[]): Promise<TicketS
 
 export interface TicketSourceAnalysis {
   by_type: { key: string; count: number }[];   // 工单类型分布（key 为 task_type 枚举值，显示名见 TICKET_TYPE_DISPLAY_MAP）
-  by_role: { label: string; count: number }[]; // 提单人角色分布（count = 该角色提单人工单数，角色名含「未分配角色」「其他」）
 }
 
-const EMPTY_SOURCE_ANALYSIS: TicketSourceAnalysis = { by_type: [], by_role: [] };
+const EMPTY_SOURCE_ANALYSIS: TicketSourceAnalysis = { by_type: [] };
 
 /**
  * GET /api/admin/dashboard/tickets/source-analysis?project_ids=id1,id2
@@ -91,6 +122,46 @@ export async function fetchTicketSourceAnalysis(projectIds?: string[]): Promise<
     return EMPTY_SOURCE_ANALYSIS;
   } catch {
     return EMPTY_SOURCE_ANALYSIS;
+  }
+}
+
+/** 公司/部门下拉选项与组织分布条目 */
+export interface OrgOptionItem {
+  id: string;
+  name: string;
+}
+
+export interface TicketCreatorOrgAnalysis {
+  dimension: 'company' | 'department';  // company=按公司统计 / department=选公司后按部门统计
+  companies: OrgOptionItem[];           // 公司下拉框选项（全部公司）
+  by_org: { label: string; count: number }[]; // 组织维度工单数（含「未分配公司」「未分配部门」「其他」）
+}
+
+const EMPTY_CREATOR_ORG: TicketCreatorOrgAnalysis = { dimension: 'company', companies: [], by_org: [] };
+
+/**
+ * GET /api/admin/dashboard/tickets/creator-org-analysis?project_ids=id1,id2&company_id=c1
+ * 响应：{ code: 0, data: TicketCreatorOrgAnalysis }
+ * 数据来源：tasks.created_by → users.company_id / department_id → companies / departments 主数据表
+ * （companies.id ↔ departments.company_id），见 task_dashboard_service.get_creator_org_analysis。
+ * 不传 companyId 按公司归组；传入后仅统计该公司提单人的工单并按部门归组。
+ */
+export async function fetchTicketCreatorOrgAnalysis(
+  projectIds?: string[],
+  companyId?: string,
+): Promise<TicketCreatorOrgAnalysis> {
+  try {
+    const params = new URLSearchParams();
+    if (projectIds !== undefined) params.set('project_ids', projectIds.join(','));
+    if (companyId) params.set('company_id', companyId);
+    const qs = params.toString();
+    const res = await adminRequest<{ code: number; data: TicketCreatorOrgAnalysis }>(
+      `/dashboard/tickets/creator-org-analysis${qs ? `?${qs}` : ''}`,
+    );
+    if (res.code === 0 && res.data) return res.data;
+    return EMPTY_CREATOR_ORG;
+  } catch {
+    return EMPTY_CREATOR_ORG;
   }
 }
 
