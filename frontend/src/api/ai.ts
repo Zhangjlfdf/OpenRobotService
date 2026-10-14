@@ -105,7 +105,7 @@ export interface TaskDiscussStreamBody {
 export interface TaskDiscussStreamHandlers {
   /** 正文增量 token */
   onToken?: (token: string) => void;
-  /** Evaluator/附录改写后的完整正文（替换草稿） */
+  /** 附录（澄清建议/记忆标记）追加后的完整正文（替换草稿） */
   onRewrite?: (reply: string) => void;
   /** 评论已落库后的结果 */
   onResult?: (data: { task_id?: string; reply?: string; [k: string]: unknown }) => void;
