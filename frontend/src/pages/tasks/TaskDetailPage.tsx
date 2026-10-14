@@ -672,7 +672,9 @@ export default function TaskDetailPage() {
       setArchiveGenStatus('AI 正在为您总结归档报告…');
       let acc = '';
       await archiveGenerateStream(
-        { task_id: detail.id },
+        // task_id 走 int（后端 ArchiveGenerateRequest.task_id: int）；
+        // detail.id 是路由字符串，与 ticket.ts 既有写法一致显式转换
+        { task_id: Number(detail.id) },
         {
           onStatus: (m) => setArchiveGenStatus(m),
           onTitle: (t) => { acc = `# ${t}\n\n`; setArchiveReportContent(acc); },
