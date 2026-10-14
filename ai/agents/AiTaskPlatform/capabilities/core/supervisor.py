@@ -70,7 +70,6 @@ def _executed_block(plan_all: list, results: dict) -> str:
     return "\n".join(lines)[:_EXECUTED_BLOCK_CHARS]
 
 
-
 @dataclass
 class SupervisorDecision:
     """Supervisor 调度决策（程序解析 LLM 输出后的结构化结果）。"""
