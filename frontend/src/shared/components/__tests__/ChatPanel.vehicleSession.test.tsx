@@ -277,6 +277,9 @@ describe('ChatPanel 车体扫码：车型模式注册与首问同 session_id', (
     const second = mockAppendMessage.mock.calls[1] as [number, string, string, { metadata?: string }];
     expect(first[1]).toBe('assistant');
     expect(first[2]).toContain('**车辆信息已确认**');
+    // key-value 行尾双空格 = markdown 硬换行（renderer 无 remark-breaks，
+    // 单 \n 会被合并成一段——实测「项目一行、客户车型挤一行」）
+    expect(first[2]).toContain('**项目**：项目A  \n**客户**：客户A  \n**车型**：XQE');
     expect(JSON.parse(first[3].metadata || '{}')).toMatchObject({
       vehicle_confirm: true,
       vehicle_guide: true,
