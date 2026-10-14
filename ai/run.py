@@ -298,24 +298,24 @@ async def lifespan(app: FastAPI):
         logger.error(f"解决方式总结 Worker 启动失败: {e}", exc_info=True)
 
     # 7.6 启动工单状态刷新 Worker（每次 @U老师 之后把新讨论折叠进结构化状态）。
-    # 总开关 ENABLE_AGENT_STATE 默认关（关时行为与改造前逐字一致，便于灰度与回滚）。
+    # **无条件启动**：总开关 ENABLE_AGENT_STATE 是热生效的（改 .env 不必重启），
+    # 如果这里按开关决定启不启，运行中把开关打开就还得重启才有人消费队列。
+    # 开关关时没人入队，消费者只是阻塞在 BRPOP 上，不产生开销。
     agent_state_worker = None
-    if get_ai_config().enable_agent_state:
-        try:
-            from ai.agents.AiTaskPlatform.services.agent_state_worker import (
-                agent_state_worker_start,
-            )
-            agent_state_worker, _as_task = agent_state_worker_start()
-            _ascfg = get_ai_config()
-            logger.info(
-                f"工单状态刷新 Worker 已启动 "
-                f"(concurrency={_ascfg.agent_state_worker_concurrency}, "
-                f"queue={_ascfg.agent_state_worker_queue})"
-            )
-        except Exception as e:
-            logger.error(f"工单状态刷新 Worker 启动失败: {e}", exc_info=True)
-    else:
-        logger.info("工单状态刷新 Worker 未启动（ENABLE_AGENT_STATE=0）")
+    try:
+        from ai.agents.AiTaskPlatform.services.agent_state_worker import (
+            agent_state_worker_start,
+        )
+        agent_state_worker, _as_task = agent_state_worker_start()
+        _ascfg = get_ai_config()
+        logger.info(
+            f"工单状态刷新 Worker 已启动 "
+            f"(concurrency={_ascfg.agent_state_worker_concurrency}, "
+            f"queue={_ascfg.agent_state_worker_queue}, "
+            f"开关={_ascfg.enable_agent_state})"
+        )
+    except Exception as e:
+        logger.error(f"工单状态刷新 Worker 启动失败: {e}", exc_info=True)
 
     # 8. 企业微信 Smartsheet 集成状态
     try:

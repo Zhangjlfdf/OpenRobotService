@@ -113,18 +113,32 @@ async def refresh_ticket_state(task_id, llm=None) -> dict:
 
 
 async def _consumer(queue_key: str, llm, stop: asyncio.Event) -> None:
-    """单个消费者：BRPOP 阻塞取任务，逐个处理。"""
-    from ai.config import get_ai_config as _cfg
+    """单个消费者：BRPOP 阻塞取任务，逐个处理。
 
+    ⚠️ **超时不是异常**：BRPOP 到点没数据必然超时，那是空轮询的正常结果。
+    照 `resolution_worker._consumer` 的已验写法——brpop 用短超时，外面再套一层
+    wait_for，超时直接 `continue`。
+
+    这里踩过坑：一开始把超时当异常记 WARNING（`brpop(timeout=30)` 直接抛
+    `Timeout reading from localhost:6379`），于是 N 个消费者每隔几秒各刷一条，
+    把日志淹了（2026-10-14 生产实测）。
+    """
     r = None
     try:
         import redis.asyncio as aioredis
+        from redis.exceptions import TimeoutError as RedisTimeout
 
-        r = aioredis.from_url(_cfg().redis_url or "redis://localhost:6379/0")
+        r = aioredis.from_url(get_ai_config().redis_url or "redis://localhost:6379/0")
         while not stop.is_set():
             try:
-                item = await r.brpop(queue_key, timeout=int(_cfg().agent_state_worker_wait_timeout))
+                item = await asyncio.wait_for(r.brpop(queue_key, timeout=1), timeout=3)
+            except (asyncio.TimeoutError, RedisTimeout):
+                # 空轮询：队列里没有任务，正常。不记日志。
+                continue
+            except asyncio.CancelledError:
+                raise
             except Exception as e:
+                # 真异常（连不上 Redis 等）才告警，退避 1 秒再试
                 logger.warning(f"[agent_state] BRPOP 异常，1s 后重试: {e}")
                 await asyncio.sleep(1)
                 continue
@@ -134,6 +148,7 @@ async def _consumer(queue_key: str, llm, stop: asyncio.Event) -> None:
             try:
                 task_id = int(raw)
             except (TypeError, ValueError):
+                logger.warning(f"[agent_state] 非法任务载荷 {raw!r}，忽略")
                 continue
             try:
                 await refresh_ticket_state(task_id, llm)
