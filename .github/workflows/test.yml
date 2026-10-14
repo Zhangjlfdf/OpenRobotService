@@ -155,6 +155,11 @@ jobs:
     name: Real backend smoke tests
     runs-on: ubuntu-latest
     needs: test-infra
+    # 后端与 alembic 的连接串默认 root:123456@helpdesk，指向 service 容器
+    # （root:root@openrobot）才是 1045 Access denied 的根因——job 级统一覆盖，
+    # migrations / Start backend / smoke 三个步骤共享
+    env:
+      DATABASE_URL: mysql+pymysql://root:root@127.0.0.1:3306/openrobot
 
     services:
       mysql:
