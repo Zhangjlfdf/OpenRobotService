@@ -238,7 +238,7 @@ describe('ChatPanel 车体扫码：车型模式注册与首问同 session_id', (
     );
   });
 
-  it('开场引导：车型资料引导条独立渲染，开场题常驻 4、展开全部后九类齐全', async () => {
+  it('开场引导：车型介绍并入确认气泡，开场题常驻 4、展开后九类齐全、两条气泡落库', async () => {
     storeRef = useWorkbenchStore as unknown as typeof storeRef;
     renderPanel();
 
@@ -250,23 +250,46 @@ describe('ChatPanel 车体扫码：车型模式注册与首问同 session_id', (
     await waitFor(() => expect(mockModeConfirm).toHaveBeenCalledTimes(1));
     await flush();
 
-    // ① 车型资料引导条：独立气泡（题面 + 两个型号按钮），不走故障题那条
-    expect(await screen.findByText('想了解 XQE 车型信息？点击查看型号介绍')).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'XQE122 车型介绍' })).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'XQE151 车型介绍' })).toBeTruthy();
+    // ① 确认气泡：车型介绍按钮并入这条气泡（1014 合并），不再有独立的引导题面
+    expect(await screen.findByText(/车辆信息已确认/)).toBeTruthy();
+    expect(screen.queryByText('想了解 XQE 车型信息？点击查看型号介绍')).toBeNull();
+    const intro122 = screen.getByRole('button', { name: /XQE122 车型介绍/ });
+    const intro151 = screen.getByRole('button', { name: /XQE151 车型介绍/ });
+    // 视觉区分（1014）：车型介绍按钮用 intro 变体（区别于开场题的蓝色胶囊）
+    expect(intro122.className).toContain('chat-veh-chip--intro');
+    expect(intro151.className).toContain('chat-veh-chip--intro');
 
-    // ② 开场题常驻 4 全渲染，折叠 5 类默认不出现
+    // ② 开场题常驻 4 全渲染，折叠 5 类默认不出现；开场题按钮不带 intro 变体
     for (const c of ['界面报故障码', '多车调度', '卸货', '取货']) {
       expect(screen.getByRole('button', { name: c })).toBeTruthy();
     }
+    expect(screen.getByRole('button', { name: '界面报故障码' }).className).not.toContain('chat-veh-chip--intro');
     for (const c of ['建图与定位', '充电异常', '远程接管']) {
       expect(screen.queryByRole('button', { name: c })).toBeNull();
     }
 
-    // ③ 「其他情况」提示语只属于大方向题：引导条下面不挂（挂了会误导）
+    // ③ 「其他情况」提示语只属于大方向题：确认气泡下面不挂
     expect(screen.getAllByText('若是其他情况，请在下方输入框描述')).toHaveLength(1);
 
-    // ④ 点「展开全部」：折叠 5 类补齐（九大类全部可达），开关文案切「收起」
+    // ④ 落库（1014 持久化）：建会话 + 两条 assistant 消息带 metadata
+    await waitFor(() => expect(mockAppendMessage).toHaveBeenCalledTimes(2));
+    const first = mockAppendMessage.mock.calls[0] as [number, string, string, { metadata?: string }];
+    const second = mockAppendMessage.mock.calls[1] as [number, string, string, { metadata?: string }];
+    expect(first[1]).toBe('assistant');
+    expect(first[2]).toContain('**车辆信息已确认**');
+    expect(JSON.parse(first[3].metadata || '{}')).toMatchObject({
+      vehicle_confirm: true,
+      vehicle_guide: true,
+      vehicle_choices: ['XQE122 车型介绍', 'XQE151 车型介绍'],
+    });
+    expect(second[2]).toBe('您遇到了什么问题？');
+    expect(JSON.parse(second[3].metadata || '{}')).toMatchObject({
+      vehicle_opening: true,
+      vehicle_choices: ['界面报故障码', '多车调度', '卸货', '取货'],
+      vehicle_collapsed: ['建图与定位', '充电异常', '避障异常', '自检失败 / 开机异常', '远程接管'],
+    });
+
+    // ⑤ 点「展开全部」：折叠 5 类补齐（九大类全部可达），开关文案切「收起」
     await act(async () => {
       fireEvent.click(screen.getByRole('button', { name: /展开全部/ }));
     });
@@ -275,12 +298,63 @@ describe('ChatPanel 车体扫码：车型模式注册与首问同 session_id', (
     }
     expect(screen.getByRole('button', { name: '收起' })).toBeTruthy();
 
-    // ⑤ 点折叠里的类目 = 按选项原文发送（走正常检索链路）
+    // ⑥ 点折叠里的类目 = 按选项原文发送（走正常检索链路）
     await act(async () => {
       fireEvent.click(screen.getByRole('button', { name: '建图与定位' }));
     });
     await waitFor(() => expect(mockAskStream).toHaveBeenCalledTimes(1));
     const askBody = JSON.parse((mockAskStream.mock.calls[0][1] as RequestInit).body as string);
     expect(askBody.query).toBe('建图与定位');
+  });
+
+  it('历史恢复：落库的引导气泡按 metadata 重建按钮（切会话/刷新后引导不丢）', async () => {
+    // 旧会话 7 带两条落库的引导消息（1014 持久化的形态）
+    mockGetConversation.mockImplementation(async (id: number) =>
+      id === 7
+        ? {
+            id: 7,
+            title: '扫码会话',
+            metadata_: null,
+            messages: [
+              {
+                id: 101,
+                role: 'assistant',
+                content: '**车辆信息已确认**\n\n**项目**：项目A\n**客户**：客户A\n**车型**：XQE\n\n接下来按该车型的引导流程协助你，直接描述现象或点下面的选项即可。',
+                created_at: '2026-10-14T01:00:00Z',
+                metadata_: JSON.stringify({
+                  vehicle_confirm: true,
+                  vehicle_guide: true,
+                  vehicle_choices: ['XQE122 车型介绍', 'XQE151 车型介绍'],
+                }),
+              },
+              {
+                id: 102,
+                role: 'assistant',
+                content: '您遇到了什么问题？',
+                created_at: '2026-10-14T01:00:01Z',
+                metadata_: JSON.stringify({
+                  vehicle_opening: true,
+                  vehicle_choices: ['界面报故障码', '多车调度'],
+                  vehicle_collapsed: ['充电异常'],
+                }),
+              },
+            ],
+          }
+        : { id, title: '新会话', messages: [], metadata_: null },
+    );
+
+    storeRef = useWorkbenchStore as unknown as typeof storeRef;
+    renderPanel();
+
+    // 恢复完成：两条气泡的按钮组都按 metadata 重建（intro 变体 + 折叠开关）
+    expect(await screen.findByRole('button', { name: /XQE122 车型介绍/ })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /XQE151 车型介绍/ }).className).toContain('chat-veh-chip--intro');
+    expect(screen.getByRole('button', { name: '界面报故障码' }).className).not.toContain('chat-veh-chip--intro');
+    expect(screen.getByRole('button', { name: /展开全部（还有 1 类）/ })).toBeTruthy();
+
+    // 开场题大字题面（vehicleOpening 标记恢复）
+    expect(screen.getByText('您遇到了什么问题？')).toBeTruthy();
+    // 提示语只挂在开场题下（确认气泡 vehicleGuide 恢复后不挂）
+    expect(screen.getAllByText('若是其他情况，请在下方输入框描述')).toHaveLength(1);
   });
 });
