@@ -53,6 +53,15 @@ jobs:
           pip install -r backend/requirements.txt
           pip install -e automation/
 
+      - name: Init test DB schema
+        # contract 测试（automation/tests/infrastructure）直查 tasks/task_comments
+        # 等表：mysql service 只建了空库 openrobot，先按 backend ORM 建齐全部表。
+        env:
+          DATABASE_URL: mysql+pymysql://root:root@127.0.0.1:3306/openrobot
+          PYTHONPATH: ${{ github.workspace }}/backend
+        run: |
+          python -c "from app.core.db import engine; from app.models import Base; Base.metadata.create_all(engine)"
+
       - name: Run infrastructure tests
         env:
           PYTHONPATH: ${{ github.workspace }}
