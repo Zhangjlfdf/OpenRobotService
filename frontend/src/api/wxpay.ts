@@ -6,6 +6,9 @@
 import { createRequest } from './client';
 import API_CONFIG from '@/config/api';
 
+// ⚠️ BASE_URL 是 /api/wxpay，而后端奖励接口在 /api/wxpay/rewards/**、管理端在
+//    /api/wxpay/admin/**。两者共用本 request，因此调用方必须各自带上一級子路径，
+//    漏写会直接 404（历史上 fetchRewards/fetchRewardStats/withdrawReward 都踩过）。
 const request = createRequest(API_CONFIG.WXPAY.BASE_URL, 'Wxpay');
 
 /** 奖励状态（与后端 RewardStatus 对齐） */
@@ -87,12 +90,12 @@ export function fetchRewards(params?: {
   if (params?.status) qs.set('status', params.status);
   qs.set('page', String(params?.page ?? 1));
   qs.set('size', String(params?.size ?? 20));
-  return request<RewardListResp>(`/?${qs.toString()}`, { skipCache: true });
+  return request<RewardListResp>(`/rewards/?${qs.toString()}`, { skipCache: true });
 }
 
 /** 奖励汇总（待提现 / 累计已到账） */
 export function fetchRewardStats(): Promise<RewardStats> {
-  return request<RewardStats>('/stats', { skipCache: true });
+  return request<RewardStats>('/rewards/stats', { skipCache: true });
 }
 
 /**
@@ -106,7 +109,7 @@ export function fetchRewardStats(): Promise<RewardStats> {
  *                 受理后后端会固化该姓名，后续支付自动复用。
  */
 export function withdrawReward(rewardId: string, userName?: string): Promise<WithdrawResp> {
-  return request<WithdrawResp>(`/${encodeURIComponent(rewardId)}/withdraw`, {
+  return request<WithdrawResp>(`/rewards/${encodeURIComponent(rewardId)}/withdraw`, {
     method: 'POST',
     ...(userName ? { body: JSON.stringify({ user_name: userName }) } : {}),
   });
