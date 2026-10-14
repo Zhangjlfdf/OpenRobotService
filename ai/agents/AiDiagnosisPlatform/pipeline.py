@@ -5550,7 +5550,7 @@ class AiDiagnosisPlatform:
             "referenced_ticket": referenced_ticket,
             "vehicle_choices": vehicle_choices,
         }
-    def _validate_vehicle_choices(parsed: dict) -> Optional[List[str]]:
+    def _validate_vehicle_choices(self, parsed: dict) -> Optional[List[str]]:
         """车型追问选项机械校验（0930）：超标截断，救不到下限才整批丢弃。
 
         清洗链：丢非字符串/空串/超 30 字/重复 → 不足 2 条整批丢弃 → 超 3 条截前 3。
