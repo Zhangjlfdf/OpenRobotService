@@ -977,21 +977,21 @@ html, body, #root {
 .chat-veh-chip--done {
   opacity: 0.45;
 }
-/* 车型介绍按钮变体（1014）：与开场题的蓝色胶囊区分。同尺寸/圆角/边框粗细，
-   只换色相——蓝=故障排查主线，青绿=车型资料查阅（邻近色和谐，低饱和浅底
-   在手机浅色聊天背景上不刺眼；不用 emoji 前缀，安卓/微信内渲染不一） */
+/* 车型介绍按钮变体（1014，产品定稿全站统一蓝调）：同族深一档蓝（#1a73e8 家族
+   Google Blue 色阶）与开场题浅蓝区分——底/边/字各深一档；不用 emoji 前缀
+   （安卓/微信内渲染不一） */
 .chat-veh-chip--intro {
-  border-color: #c3e6d2;
-  background: #eefaf3;
-  color: #1f8a5a;
+  border-color: #aecbfa;
+  background: #e8f0fe;
+  color: #185abc;
 }
 .chat-veh-chip--intro:active {
-  background: #dcf3e7;
-  border-color: #189a5c;
+  background: #d2e3fc;
+  border-color: #1a73e8;
 }
 .chat-veh-chip--intro.chat-veh-chip--selected {
-  background: #1f8a5a;
-  border-color: #1f8a5a;
+  background: #1a73e8;
+  border-color: #1a73e8;
   color: #fff;
 }
 /* 车型介绍按钮组两列等宽（1014）：实测 375 宽下两个胶囊需 286px 而容器只有
@@ -8762,17 +8762,15 @@ html, body, #root {
 .conv-item.active { background: var(--blue-soft); }
 .conv-item__main { flex: 1; min-width: 0; }
 .conv-item__title { font-size: 13px; font-weight: 500; color: var(--foreground); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* 标题行 flex（车型角标 1014）：title min-width:0 保住 ellipsis，角标不被挤 */
-.conv-item__titlerow { display: flex; align-items: center; gap: 6px; min-width: 0; }
-.conv-item__titlerow .conv-item__title { min-width: 0; flex: 1 1 auto; }
-/* 车型定制会话角标：青绿小胶囊（与车型介绍按钮同色系），低调可辨 */
+/* 车型定制会话角标：conv-item 直接子级（flex align-items:center 整行垂直居中）。
+   蓝色系（产品要求全站统一蓝调，与 #1a73e8 主色同族深一档，区别于故障排查按钮的浅蓝） */
 .conv-item__badge {
   flex: none;
   padding: 1px 6px;
   border-radius: 6px;
-  background: #eefaf3;
-  border: 1px solid #c3e6d2;
-  color: #1f8a5a;
+  background: #e8f0fe;
+  border: 1px solid #aecbfa;
+  color: #185abc;
   font-size: 10.5px;
   line-height: 1.5;
   white-space: nowrap;
