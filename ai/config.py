@@ -128,6 +128,29 @@ class AIConfig(BaseModel):
     resolution_worker_wait_timeout: float = Field(default=30.0, description="BROP 阻塞等待秒数 / LLM 单轮超时秒数")
     resolution_empty_text: str = Field(default="", description="无任何内容时返回的空串（占位提示由前端 placeholder 控制）")
 
+    # ========== 工单 Agent 状态（讨论区「记得之前发生了什么」）==========
+    enable_agent_state: bool = Field(
+        default=False,
+        description="工单 Agent 状态总开关：默认关（关时行为与改造前逐字一致，便于灰度与回滚）",
+    )
+    agent_state_raw_window: int = Field(
+        default=10,
+        description="进 prompt 的「最近讨论原文」条数；更早的折叠进结构化状态",
+    )
+    agent_state_worker_concurrency: int = Field(
+        default=4, description="工单状态刷新 Worker 最大并行数"
+    )
+    agent_state_worker_queue: str = Field(
+        default="ors:agent_state", description="工单状态刷新任务队列（Redis List）"
+    )
+    agent_state_worker_wait_timeout: float = Field(
+        default=30.0, description="状态 Worker BRPOP 阻塞等待秒数 / LLM 单轮超时秒数"
+    )
+    discuss_quoted_context_k: int = Field(
+        default=5,
+        description="用户引用某条评论再 @U老师 时，前后各取几条作为语境注入",
+    )
+
     # ========== MinIO 对象存储（附件图片读取）==========
     minio_endpoint: str = Field(default="localhost:9000")
     minio_access_key: str = Field(default="")
@@ -324,6 +347,10 @@ def get_ai_config() -> AIConfig:
         # 诊断服务
         diagnosis_scan_interval=int(os.getenv("DIAGNOSIS_SCAN_INTERVAL", "60")),
         enable_knowledge_sink=os.getenv("ENABLE_KNOWLEDGE_SINK", "0").strip().lower() in ("1", "true", "yes", "on"),
+        # 工单 Agent 状态（灰度开关 + 两个可调参数）
+        enable_agent_state=os.getenv("ENABLE_AGENT_STATE", "0").strip().lower() in ("1", "true", "yes", "on"),
+        agent_state_raw_window=int(os.getenv("AGENT_STATE_RAW_WINDOW", "10")),
+        discuss_quoted_context_k=int(os.getenv("DISCUSS_QUOTED_CONTEXT_K", "5")),
         # 派单后台
         assign_scan_interval=int(os.getenv("ASSIGN_SCAN_INTERVAL", "120")),
         # Debug

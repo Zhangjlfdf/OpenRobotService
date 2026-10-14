@@ -297,6 +297,26 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"解决方式总结 Worker 启动失败: {e}", exc_info=True)
 
+    # 7.6 启动工单状态刷新 Worker（每次 @U老师 之后把新讨论折叠进结构化状态）。
+    # 总开关 ENABLE_AGENT_STATE 默认关（关时行为与改造前逐字一致，便于灰度与回滚）。
+    agent_state_worker = None
+    if get_ai_config().enable_agent_state:
+        try:
+            from ai.agents.AiTaskPlatform.services.agent_state_worker import (
+                agent_state_worker_start,
+            )
+            agent_state_worker, _as_task = agent_state_worker_start()
+            _ascfg = get_ai_config()
+            logger.info(
+                f"工单状态刷新 Worker 已启动 "
+                f"(concurrency={_ascfg.agent_state_worker_concurrency}, "
+                f"queue={_ascfg.agent_state_worker_queue})"
+            )
+        except Exception as e:
+            logger.error(f"工单状态刷新 Worker 启动失败: {e}", exc_info=True)
+    else:
+        logger.info("工单状态刷新 Worker 未启动（ENABLE_AGENT_STATE=0）")
+
     # 8. 企业微信 Smartsheet 集成状态
     try:
         _wcfg = get_ai_config()
@@ -323,6 +343,9 @@ async def lifespan(app: FastAPI):
     if resolution_worker:
         logger.info("解决方式总结 Worker 停止中...")
         await resolution_worker.stop()
+    if agent_state_worker:
+        logger.info("工单状态刷新 Worker 停止中...")
+        await agent_state_worker.stop()
     if knowledge_stop:
         knowledge_stop.set()
         logger.info("知识沉淀 Worker 停止中...")

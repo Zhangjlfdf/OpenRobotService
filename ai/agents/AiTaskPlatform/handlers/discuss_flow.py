@@ -341,11 +341,40 @@ class DiscussFlow:
         discussion_history = "\n".join(comment_lines) if comment_lines else "（暂无讨论）"
         discussion_lines = comment_lines
 
+        # 2.1 工单 Agent 状态：把较早的讨论折叠成结构化状态，prompt 里只留最近 N 条原文。
+        #     总开关默认关 —— 关时 comment_lines 完全不动，行为与改造前逐字一致。
+        #     读状态/渲染失败一律回退全量原文（状态丢了不致命，原文还在）。
+        state_block = ""
+        try:
+            from ai.config import get_ai_config as _get_cfg
+            _cfg = _get_cfg()
+            if getattr(_cfg, "enable_agent_state", False):
+                from ai.agents.AiTaskPlatform.contexts.agent_state import (
+                    load_state as _load_state,
+                    render_state_block as _render_state,
+                )
+                block = _render_state(_load_state(task_id).get("state"))
+                if block:
+                    _window = max(0, int(getattr(_cfg, "agent_state_raw_window", 10) or 0))
+                    _kept = comment_lines[-_window:] if _window else []
+                    # 全部算完才改写：否则中途抛错会「原文被裁了、状态又没上」，反而更差。
+                    state_block = block
+                    comment_lines = _kept
+                    discussion_lines = _kept
+                    discussion_history = (
+                        "\n".join(_kept) if _kept else "（更早的讨论已并入上方状态）"
+                    )
+        except Exception as _st_e:
+            logger.warning(f"[discuss] 读取工单状态失败，回退全量原文: {_st_e}")
+            state_block = ""
+
         # 2b. 讨论区「引用这句话」：用户引用某条评论后再 @U老师。
         #     与 @# 同款预加载，单独成段，避免淹没在最近 10 条历史里。
         quoted_comment = ""
         try:
-            quoted_comment = format_quoted_comment_block(context or {})
+            from ai.config import get_ai_config as _get_cfg_q
+            _qk = getattr(_get_cfg_q(), "discuss_quoted_context_k", None)
+            quoted_comment = format_quoted_comment_block(context or {}, k=_qk)
         except Exception as _q_e:
             logger.warning(f"[discuss] 引用评论注入失败: {_q_e}")
             quoted_comment = ""
@@ -553,12 +582,16 @@ class DiscussFlow:
             ]
             if for_plan:
                 parts.extend([att_inventory, known_txt, new_txt, project_catalog])
-            return await fit_ticket_history(
+            desc, disc = await fit_ticket_history(
                 description=ctx.description or "",
                 comment_lines=comment_lines,
                 fixed_text="\n".join(parts),
                 llm_client=self._llm_client,
             )
+            if state_block:
+                # 状态在前、原文在后：状态是较早讨论的结论层，原文是最近的逐字记录。
+                disc = f"{state_block}\n## 最近讨论（原文）\n{disc}"
+            return desc, disc
 
         description_for_prompt, discussion_history = await _fit_history(for_plan=True)
 
@@ -1344,6 +1377,18 @@ class DiscussFlow:
             self._add_diagnosis_comment_short(int(task_id), comment_reply)
         except Exception as e:
             logger.warning(f"[discuss] 写评论失败 task={task_id}: {e}")
+
+        # 5.1 回复已落库 → 异步刷新工单状态（把新讨论折叠进结构化状态）。
+        #     走 Redis 队列，不给用户回复加延迟；入队失败只告警，下次 @ 自然重试。
+        try:
+            from ai.config import get_ai_config as _get_cfg_en
+            if getattr(_get_cfg_en(), "enable_agent_state", False):
+                from ai.agents.AiTaskPlatform.services.agent_state_worker import (
+                    enqueue_ticket_state,
+                )
+                await enqueue_ticket_state(task_id)
+        except Exception as _as_e:
+            logger.warning(f"[discuss] 状态刷新入队失败 task={task_id}: {_as_e}")
 
         if progress_done_payload:
             try:
