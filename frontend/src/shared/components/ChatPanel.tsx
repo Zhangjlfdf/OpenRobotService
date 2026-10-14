@@ -1599,8 +1599,11 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
 
   // 确认气泡文案模板（渲染与落库共用）：key-value 分行 + 加粗标签——
   // 标签挤在长句里没有标识性（1014 用户反馈「很随意」）
+  // MarkdownRenderer 只挂 remark-gfm（无 remark-breaks）：单 \n 是软换行会被合并
+  // 成一段（实测「项目一行、客户车型挤一行」）。key-value 行尾补两个空格 =
+  // markdown 标准硬换行，三行各占一行——这两个尾随空格是语义，别清理。
   const vehicleConfirmText = (ctx: VehicleContext) =>
-    `**车辆信息已确认**\n\n**项目**：${ctx.projectName || '—'}\n**客户**：${ctx.customerName || '—'}\n**车型**：${ctx.vehicleModel || '—'}\n\n接下来按该车型的引导流程协助你，直接描述现象或点下面的选项即可。`;
+    `**车辆信息已确认**\n\n**项目**：${ctx.projectName || '—'}  \n**客户**：${ctx.customerName || '—'}  \n**车型**：${ctx.vehicleModel || '—'}\n\n接下来按该车型的引导流程协助你，直接描述现象或点下面的选项即可。`;
 
   // ensureConversation 的稳定引用（registerVehicleModeNow 是 useCallback([])，
   // 直接闭包会锁死旧 sessionId；ref 转发与 pickVehicleChoiceRef 同款）
@@ -1699,7 +1702,20 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
           vehicleOpening: true,
         });
       }
-      if (openingMsgs.length) setMessages((prev) => [...prev, ...openingMsgs]);
+      if (openingMsgs.length) {
+        setMessages((prev) => [...prev, ...openingMsgs]);
+        // 扫码确认后的引导气泡是新会话的第一批消息：沿用「追加即贴底」会把
+        // 「车辆信息已确认」顶出视口上方（开场题+折叠区内容长，实测首屏只剩
+        // 尾部）。引导该从上往下读——强制回顶部。双层 rAF 等批量 setMessages
+        // commit 完成后执行；atBottom 同步置 false，防后续追加 effect 再拉底。
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          const el = messagesContainerRef.current;
+          if (el) {
+            el.scrollTop = 0;
+            atBottomRef.current = false;
+          }
+        }));
+      }
       // 落库（增强路径，失败静默——本地渲染不受影响，只是刷新后引导气泡不再显示）
       void (async () => {
         try {
