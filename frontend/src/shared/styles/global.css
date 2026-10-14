@@ -8762,6 +8762,21 @@ html, body, #root {
 .conv-item.active { background: var(--blue-soft); }
 .conv-item__main { flex: 1; min-width: 0; }
 .conv-item__title { font-size: 13px; font-weight: 500; color: var(--foreground); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 标题行 flex（车型角标 1014）：title min-width:0 保住 ellipsis，角标不被挤 */
+.conv-item__titlerow { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.conv-item__titlerow .conv-item__title { min-width: 0; flex: 1 1 auto; }
+/* 车型定制会话角标：青绿小胶囊（与车型介绍按钮同色系），低调可辨 */
+.conv-item__badge {
+  flex: none;
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: #eefaf3;
+  border: 1px solid #c3e6d2;
+  color: #1f8a5a;
+  font-size: 10.5px;
+  line-height: 1.5;
+  white-space: nowrap;
+}
 .conv-item__time { font-size: 11px; color: var(--muted-foreground); margin-top: 2px; white-space: nowrap; }
 /* 行内操作钮（设计稿：size-7 rounded-md muted，hover background） */
 .conv-item__actions { display: flex; gap: 4px; flex-shrink: 0; }
