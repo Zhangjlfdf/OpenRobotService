@@ -118,6 +118,8 @@ const TaskDetailPage = lazyImport(() => import('@/pages/tasks/TaskDetailPage'));
 const OperationLogsPage = lazyImport(() => import('@/pages/tasks/OperationLogsPage'));
 // 我的历史奖励（微信商家转账 · 提现入口）：直挂根路由，保留底部 Tab 可点
 const MyRewards = lazyImport(() => import('@/pages/rewards/MyRewards'));
+// 奖励管理（微信商家转账 · 管理端）：后台管理 → 其他 → 奖励管理
+const WxpayRewardManage = lazyImport(() => import('@/pages/admin/WxpayRewardManage'));
 
 const Dashboard = lazyImport(() => import('@/pages/admin/Dashboard'));
 // 工单数据看板：工单监测/类型分布/接单人响应时间三张看板（首页「工单数据看板」小节的「其他数据统计」进入）
@@ -273,6 +275,8 @@ const router = createBrowserRouter([
                   { path: 'file-explorer', element: <FileExplorer /> },
                   { path: 'wechat', element: <WechatManage /> },
                   { path: 'profile', element: <UserProfile /> },
+                  // 奖励管理：转账测试 + 转账单/奖励记录运维（与「其他」入口页同一个 AdminLayout 壳）
+                  { path: 'wxpay-rewards', element: <WxpayRewardManage /> },
                 ],
               },
             ],

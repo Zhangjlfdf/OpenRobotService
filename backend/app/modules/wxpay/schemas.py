@@ -97,6 +97,98 @@ class GrantRewardOut(BaseModel):
     duplicated: bool = Field(False, description="True 表示同 (source_type, source_id) 已发放过，返回既有记录")
 
 
+# ============ 管理端：奖励 / 转账单运维（后台管理-其他-奖励管理）============
+
+
+class AdminRewardOut(BaseModel):
+    """管理端奖励记录（比用户端多出 user_id / openid / source_*，便于排障）。"""
+
+    id: str
+    user_id: str
+    openid: str = ""
+    amount: int = Field(..., description="奖励金额，单位：分")
+    scene_name: str = ""
+    reward_desc: str = ""
+    remark: str = ""
+    source_type: str = ""
+    source_id: Optional[str] = None
+    status: str = ""
+    # 当前有效转账单（与 RewardOut 同义，管理端列表直接展示免二次请求）
+    bill_state: Optional[str] = None
+    out_bill_no: Optional[str] = None
+    expire_at: Optional[datetime] = None
+    withdrawn_at: Optional[datetime] = None
+    created_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class AdminRewardListOut(BaseModel):
+    total: int
+    page: int
+    size: int
+    items: list[AdminRewardOut]
+
+
+class AdminBillOut(BaseModel):
+    """管理端转账单。"""
+
+    id: str
+    reward_id: str
+    out_bill_no: str
+    transfer_bill_no: Optional[str] = None
+    appid: Optional[str] = None
+    mchid: Optional[str] = None
+    openid: Optional[str] = None
+    amount: Optional[int] = Field(None, description="转账金额，单位：分")
+    state: Optional[str] = None
+    is_terminal: bool = False
+    fail_reason: Optional[str] = None
+    wx_create_time: Optional[str] = None
+    wx_update_time: Optional[str] = None
+    last_query_at: Optional[datetime] = None
+    query_count: int = 0
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    # 关联字段：列表里直接可见，免去前端二次请求
+    reward_status: Optional[str] = None
+    reward_amount: Optional[int] = None
+    user_id: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class AdminBillListOut(BaseModel):
+    total: int
+    page: int
+    size: int
+    items: list[AdminBillOut]
+
+
+class AdminBillStatsOut(BaseModel):
+    """转账单状态分布（页面顶部概览）。"""
+
+    total: int = 0
+    open_count: int = Field(0, description="非终态笔数")
+    terminal_count: int = Field(0, description="终态笔数")
+    by_state: dict = Field(default_factory=dict, description="微信侧状态 → 笔数")
+
+
+class AdminBillActionOut(BaseModel):
+    """转账单操作（查单刷新 / 撤销）结果。
+
+    deleted=True 表示微信侧查无此单、占位记录已被清理（见
+    WithdrawService._refresh_bill），此时 bill 为 None，前端应刷新列表而非更新行。
+    """
+
+    ok: bool = True
+    message: str = ""
+    deleted: bool = False
+    bill: Optional[AdminBillOut] = None
+
+
 # ============ 内部：Go 服务推送的回调 ============
 
 

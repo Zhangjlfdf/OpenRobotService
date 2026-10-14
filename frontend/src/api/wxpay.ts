@@ -116,3 +116,179 @@ export function withdrawReward(rewardId: string, userName?: string): Promise<Wit
 export function fenToYuan(fen: number): string {
   return ((fen || 0) / 100).toFixed(2);
 }
+
+// ═══════════════════════════════════════════════════════════════
+// 管理端（后台管理 → 其他 → 奖励管理）
+// 对应后端 backend/app/modules/wxpay/api/admin.py，路由 /api/wxpay/admin/*
+// ═══════════════════════════════════════════════════════════════
+
+/** 「奖励管理」入口权限码（与后端 admin.py 的 PERM 常量必须一致） */
+export const PERM_WXPAY_ADMIN = 'frontend:admin:wxpay-rewards:show';
+
+export interface AdminBillItem {
+  id: string;
+  reward_id: string;
+  out_bill_no: string;
+  transfer_bill_no?: string | null;
+  appid?: string | null;
+  mchid?: string | null;
+  openid?: string | null;
+  amount?: number | null;
+  state?: string | null;
+  is_terminal: boolean;
+  fail_reason?: string | null;
+  wx_create_time?: string | null;
+  wx_update_time?: string | null;
+  query_count: number;
+  created_at?: string | null;
+  updated_at?: string | null;
+  reward_status?: string | null;
+  reward_amount?: number | null;
+  user_id?: string | null;
+}
+
+export interface AdminBillListResp {
+  total: number;
+  page: number;
+  size: number;
+  items: AdminBillItem[];
+}
+
+export interface AdminBillStats {
+  total: number;
+  open_count: number;
+  terminal_count: number;
+  by_state: Record<string, number>;
+}
+
+export interface AdminBillActionResp {
+  ok: boolean;
+  message: string;
+  /** true 表示微信侧查无此单、本地占位记录已清理，前端应刷新列表而非更新行 */
+  deleted: boolean;
+  bill: AdminBillItem | null;
+}
+
+export interface AdminRewardItem {
+  id: string;
+  user_id: string;
+  openid: string;
+  amount: number;
+  scene_name: string;
+  reward_desc: string;
+  remark: string;
+  source_type: string;
+  source_id?: string | null;
+  status: string;
+  bill_state?: string | null;
+  out_bill_no?: string | null;
+  expire_at?: string | null;
+  withdrawn_at?: string | null;
+  created_at?: string | null;
+}
+
+export interface AdminRewardListResp {
+  total: number;
+  page: number;
+  size: number;
+  items: AdminRewardItem[];
+}
+
+export interface GrantRewardResp {
+  id: string;
+  user_id: string;
+  amount: number;
+  status: string;
+  expire_at?: string | null;
+  duplicated: boolean;
+}
+
+/** 转账单列表（管理端） */
+export function fetchAdminBills(params?: {
+  state?: string;
+  only_open?: boolean;
+  keyword?: string;
+  page?: number;
+  size?: number;
+}): Promise<AdminBillListResp> {
+  const qs = new URLSearchParams();
+  if (params?.state) qs.set('state', params.state);
+  if (params?.only_open !== undefined) qs.set('only_open', String(params.only_open));
+  if (params?.keyword) qs.set('keyword', params.keyword);
+  qs.set('page', String(params?.page ?? 1));
+  qs.set('size', String(params?.size ?? 20));
+  return request<AdminBillListResp>(`/admin/bills?${qs.toString()}`, { skipCache: true });
+}
+
+/** 转账单状态分布 */
+export function fetchAdminBillStats(): Promise<AdminBillStats> {
+  return request<AdminBillStats>('/admin/bills/stats', { skipCache: true });
+}
+
+/** 查单刷新（从微信侧同步最新状态） */
+export function refreshAdminBill(billId: string): Promise<AdminBillActionResp> {
+  return request<AdminBillActionResp>(`/admin/bills/${encodeURIComponent(billId)}/refresh`, {
+    method: 'POST',
+  });
+}
+
+/**
+ * 撤销转账。
+ *
+ * 后端返回成功仅代表微信「受理」，必须再查单确认是否到终态；
+ * 后端撤销后已自动回查一次，这里把最新状态带回给前端。
+ */
+export function cancelAdminBill(billId: string): Promise<AdminBillActionResp> {
+  return request<AdminBillActionResp>(`/admin/bills/${encodeURIComponent(billId)}/cancel`, {
+    method: 'POST',
+  });
+}
+
+/** 奖励记录列表（管理端） */
+export function fetchAdminRewards(params?: {
+  user_id?: string;
+  status?: string;
+  keyword?: string;
+  page?: number;
+  size?: number;
+}): Promise<AdminRewardListResp> {
+  const qs = new URLSearchParams();
+  if (params?.user_id) qs.set('user_id', params.user_id);
+  if (params?.status) qs.set('status', params.status);
+  if (params?.keyword) qs.set('keyword', params.keyword);
+  qs.set('page', String(params?.page ?? 1));
+  qs.set('size', String(params?.size ?? 20));
+  return request<AdminRewardListResp>(`/admin/rewards?${qs.toString()}`, { skipCache: true });
+}
+
+/** 发放奖励（仅记账，不建转账单） */
+export function grantAdminReward(payload: {
+  user_id: string;
+  openid?: string;
+  amount: number;
+  scene_name: string;
+  reward_desc: string;
+  remark?: string;
+  source_type?: string;
+  source_id?: string;
+  expire_days?: number;
+}): Promise<GrantRewardResp> {
+  return request<GrantRewardResp>('/admin/rewards/grant', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+/**
+ * 对指定奖励发起转账（提现）。
+ *
+ * 与用户自提现走同一套三分支决策，因此后台重复点击不会造成重复出资。
+ * 返回 action=confirm 时可用 mch_id/app_id/package 调起 requestMerchantTransfer，
+ * 但管理端通常在普通浏览器操作（无 WeixinJSBridge），此时以查单/回调结果为准。
+ */
+export function withdrawAdminReward(rewardId: string, userName?: string): Promise<WithdrawResp> {
+  return request<WithdrawResp>(`/admin/rewards/${encodeURIComponent(rewardId)}/withdraw`, {
+    method: 'POST',
+    ...(userName ? { body: JSON.stringify({ user_name: userName }) } : {}),
+  });
+}

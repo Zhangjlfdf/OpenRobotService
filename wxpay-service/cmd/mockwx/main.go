@@ -69,8 +69,15 @@ func run() error {
 		return fmt.Errorf("MOCK_API_V3_KEY/WXPAY_API_V3_KEY must be 32 bytes, got %d", len(apiV3Key))
 	}
 
+	// 应答 Serial 必须能被 wxpay-service 查到。与上面两项目保持一致的三段回落：
+	// MOCK_PUBLIC_KEY_ID -> WXPAY_PUBLIC_KEY_ID -> defaultPublicKeyID。
+	// 少了中间这一段时，只要 .env 里的 WXPAY_PUBLIC_KEY_ID 不是默认常量，
+	// 模拟器就会用硬编码值签名，而 wxpay-service 用自己的 ID 查表，
+	// 于是每个接口都报：wxpay: no public key for serial "PUB_KEY_ID_MOCK000000001"。
+	publicKeyID := envStr("MOCK_PUBLIC_KEY_ID", envStr("WXPAY_PUBLIC_KEY_ID", defaultPublicKeyID))
+
 	srv, err := mockwx.NewServer(mockwx.Options{
-		PublicKeyID:   envStr("MOCK_PUBLIC_KEY_ID", defaultPublicKeyID),
+		PublicKeyID:   publicKeyID,
 		PrivateKey:    privateKey,
 		APIv3Key:      apiV3Key,
 		MchID:         envStr("MOCK_MCH_ID", envStr("WXPAY_MCH_ID", "MOCK_MCHID")),
@@ -98,7 +105,8 @@ func run() error {
 	go func() {
 		slog.Info("mockwx starting",
 			"addr", addr,
-			"public_key_id", envStr("MOCK_PUBLIC_KEY_ID", defaultPublicKeyID),
+			// 与 wxpay-service 的 WXPAY_PUBLIC_KEY_ID 必须一致，不一致时验签必定失败。
+			"public_key_id", publicKeyID,
 			"initial_state", envStr("MOCK_INITIAL_STATE", "WAIT_USER_CONFIRM"),
 			"auto_settle", envBool("MOCK_AUTO_SETTLE"),
 		)
