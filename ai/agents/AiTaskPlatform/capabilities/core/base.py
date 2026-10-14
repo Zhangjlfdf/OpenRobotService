@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 
 
 class CapabilityResult:
-    """统一能力返回：内容 + 元信息 + 状态（供 trace / Evaluator / Router 使用）。
+    """统一能力返回：内容 + 元信息 + 状态（供 trace / Router 使用）。
 
     用 dataclass（非 Pydantic）：它是轻量结果容器，构造频繁，且支持位置参数
     （本环境 Pydantic 2.13 禁止位置参数构造 BaseModel，见 BUG 记录）。

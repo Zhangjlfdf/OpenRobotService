@@ -124,7 +124,7 @@ async def save_cluster_params(
 
 
 def _archive_reviewers_helpers():
-    """直接读写 assigner 配置文件（与 submit 派审同源），不经 AI 代理。"""
+    """直接读写 archive_review.store（叶子模块），不经 AI 代理、不拉派单 pipeline。"""
     import sys
     from pathlib import Path
 
@@ -133,7 +133,7 @@ def _archive_reviewers_helpers():
     root = str(repo)
     if root not in sys.path:
         sys.path.insert(0, root)
-    from ai.agents.AiDiagnosisPlatform.assigner.settings import (
+    from ai.agents.AiDiagnosisPlatform.assigner.archive_review.store import (
         effective_archive_reviewers,
         save_archive_reviewers_overrides,
     )

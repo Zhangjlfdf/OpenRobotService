@@ -102,28 +102,31 @@ class TestLoadProbability:
 
 class TestArchiveReviewersOverrides:
     def test_normalize_and_effective_roundtrip(self, tmp_path, monkeypatch):
-        from ai.agents.AiDiagnosisPlatform.assigner import settings as settings_mod
+        from ai.agents.AiDiagnosisPlatform.assigner.archive_review import store as store_mod
 
         override = tmp_path / "runtime_overrides.yaml"
-        monkeypatch.setattr(settings_mod, "_OVERRIDE_FILE", override)
-        settings_mod.invalidate_archive_reviewers_cache()
+        config_yaml = tmp_path / "config.yaml"
+        config_yaml.write_text("archive_reviewers: {}\n", encoding="utf-8")
+        monkeypatch.setattr(store_mod, "_OVERRIDE_FILE", override)
+        monkeypatch.setattr(store_mod, "_CONFIG_YAML", config_yaml)
+        store_mod.invalidate_archive_reviewers_cache()
 
-        saved = settings_mod.save_archive_reviewers_overrides(
+        saved = store_mod.save_archive_reviewers_overrides(
             domains={"调度系统": ["u1", "u1", "u2"], "车体硬件": []},
         )
         assert saved["domains"]["调度系统"] == ["u1", "u2"]
         assert "摇人吧" in saved["domains"]
 
-        eff = settings_mod.effective_archive_reviewers()
+        eff = store_mod.effective_archive_reviewers()
         assert eff["source"] == "runtime_overrides"
         assert eff["domains"]["调度系统"] == ["u1", "u2"]
 
         # mtime 未变时命中缓存（同一对象）
-        again = settings_mod.effective_archive_reviewers()
+        again = store_mod.effective_archive_reviewers()
         assert again is eff
 
     def test_unknown_domain_rejected(self):
-        from ai.agents.AiDiagnosisPlatform.assigner.settings import (
+        from ai.agents.AiDiagnosisPlatform.assigner.archive_review.store import (
             normalize_archive_reviewers,
         )
 

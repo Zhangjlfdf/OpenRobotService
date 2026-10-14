@@ -293,7 +293,7 @@ class DiscussFlow:
         展示执行过程；最终回复只写纯粹答复（不含过程块）。
 
         on_token / on_rewrite：可选回调（sync 或 async）。流式出字时逐 token 调用
-        on_token；Evaluator/澄清附录等改写全文后调用 on_rewrite(完整正文)。
+        on_token；澄清附录等追加正文后调用 on_rewrite(完整正文)。
         """
         t0 = time.perf_counter()
         self._pop_trace()
@@ -365,7 +365,6 @@ class DiscussFlow:
         from ai.agents.AiTaskPlatform.contexts import build_img_ctx
 
         facultative = ""
-        early_stopped = False  # 历史方案已验证：跳过 Evaluator 二次改写
         reasoning_trace = {}  # 透明化 planning（G6）：记录 Supervisor 的调度 plan/todo
         progress_done_payload = None  # (run_id, todos)，评论落库后再广播 done
         # 澄清闭环（P4）：当 Supervisor 判定需向用户确认关键信息且无子任务可派时为 True
@@ -955,8 +954,6 @@ class DiscussFlow:
             # 把各能力结果拼进 facultative
             if sup_result.get("results"):
                 for cap_name, res in sup_result["results"].items():
-                    if isinstance(res, dict) and (res.get("terminate") or (res.get("meta") or {}).get("terminate")):
-                        early_stopped = True
                     if isinstance(res, dict) and res.get("text"):
                         label = {
                             "image_analyze": "图片分析",
@@ -1301,47 +1298,6 @@ class DiscussFlow:
                         output={"reply_chars": len(reply), "streamed": True},
                         elapsed_ms=round((time.perf_counter() - t_llm) * 1000))
 
-        # 4.5 Evaluator-optimizer（改造点 C/G4）：仅对"需工具的讨论"启用（成本护栏，纯闲聊不启用）
-        # 早停（已验证历史方案）跳过自评改写，避免把可直接采用的结论改偏。
-        eval_used = False
-        if facultative and reply.strip() and not early_stopped:
-            try:
-                from ai.agents.AiTaskPlatform.capabilities import Evaluator
-                # evidence 必须覆盖初稿的全部事实来源：讨论类回答的依据主要在
-                # 讨论历史/被引用评论/被引用工单/记忆里，只给 facultative（附件分析）
-                # 会让这些真实内容在自评时被判成「幻构」，进而被重写删掉。
-                evidence = Evaluator.build_evidence(
-                    discussion_history,
-                    quoted_comment,
-                    referenced_tickets,
-                    facultative,
-                    memory_block,
-                    user_profile_block,
-                )
-                eval_res = await Evaluator.evaluate_and_rewrite(
-                    llm_client=self._llm_client,
-                    draft=reply,
-                    evidence=evidence,       # 引用的证据（讨论历史/引用/附件/记忆）
-                    context=f"工单: {ctx.title or ''}\n用户问题: {query or ''}",
-                    mode="discuss",          # 讨论问答不评完整性
-                )
-                if (eval_res.get("rewritten") or eval_res.get("eval_failed")
-                        or eval_res.get("advisory")):
-                    eval_used = True
-                if eval_res.get("rewritten"):
-                    reply = eval_res["final"]
-                    self._add_trace(self.NODE_LLM, "ok",
-                                    output={"evaluator": "rewritten", "issues": eval_res.get("eval_notes", []), "reply_chars": len(reply)})
-                elif eval_res.get("advisory"):
-                    # 讨论场景：自评判不通过但不重写，只记录 verdict 供观察，保留初稿
-                    self._add_trace(self.NODE_LLM, "ok",
-                                    output={"evaluator": "advisory_only", "issues": eval_res.get("eval_notes", []), "reply_chars": len(reply)})
-                elif eval_res.get("eval_failed"):
-                    self._add_trace(self.NODE_LLM, "ok",
-                                    output={"evaluator": "eval_failed", "reply_chars": len(reply)})
-            except Exception as e:
-                logger.warning(f"[discuss] Evaluator 执行异常，沿用初稿: {e}")
-
         # 4.7 澄清闭环（P4）「排查优先 + 一次性建议补充」：
         #      - 分析永远是主体（已经在上面的 DISCUSS 路径生成）；
         #      - 若 Supervisor 判定还缺关键信息，才在答复末尾**建议**补充（是建议，不是提问）；
@@ -1369,7 +1325,7 @@ class DiscussFlow:
             if marker not in (reply or ""):
                 reply = f"✅ {marker}\n\n{(reply or '').lstrip()}"
 
-        # 流式草稿被 Evaluator / 澄清附录 / 记忆标记改写后，推送完整正文替换前端草稿
+        # 流式草稿被澄清附录 / 记忆标记追加后，推送完整正文替换前端草稿
         if (reply or "") != (draft_snapshot or ""):
             await _emit_discuss_hook(on_rewrite, reply or "")
 

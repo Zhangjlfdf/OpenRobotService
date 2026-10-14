@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
-from ai.agents.AiDiagnosisPlatform.assigner.dual_tree.catalog import DOMAINS
+from ai.agents.AiDiagnosisPlatform.assigner.archive_review.domains import DOMAINS
 
 
 @dataclass(frozen=True)
@@ -59,7 +59,7 @@ def parse_archive_reviewers(raw: Mapping[str, Any] | None) -> ArchiveReviewersCo
 
 
 def load_from_assigner_config(assigner_config: Any | None = None) -> ArchiveReviewersConfig:
-    """从 AssignerConfig 实例或直接读 yaml。"""
+    """从 AssignerConfig 实例，或 archive_review.store 生效配置。"""
     if assigner_config is not None and hasattr(assigner_config, "archive_reviewers"):
         raw = getattr(assigner_config, "archive_reviewers", None)
         if isinstance(raw, ArchiveReviewersConfig):
@@ -67,12 +67,10 @@ def load_from_assigner_config(assigner_config: Any | None = None) -> ArchiveRevi
         if isinstance(raw, Mapping):
             return parse_archive_reviewers(raw)
     try:
-        from ai.agents.AiDiagnosisPlatform.assigner.settings import AssignerConfig
+        from ai.agents.AiDiagnosisPlatform.assigner.archive_review.store import (
+            effective_archive_reviewers,
+        )
 
-        cfg = assigner_config if isinstance(assigner_config, AssignerConfig) else AssignerConfig()
-        raw = getattr(cfg, "archive_reviewers", None)
-        if isinstance(raw, ArchiveReviewersConfig):
-            return raw
-        return parse_archive_reviewers(raw if isinstance(raw, Mapping) else {})
+        return parse_archive_reviewers(effective_archive_reviewers())
     except Exception:
         return parse_archive_reviewers({})
