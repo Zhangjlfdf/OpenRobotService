@@ -203,7 +203,8 @@ def mark_indexed(task_id: int, status: str) -> None:
         db.close()
 
 
-async def process_ticket(row: dict, retriever, dry_run: bool = False) -> str:
+async def process_ticket(row: dict, retriever, dry_run: bool = False,
+                          archive_content: str | None = None) -> str:
     """处理单张工单：组装 → 提炼 → 入库 → 标记。
 
     Returns: indexed | empty | failed
@@ -221,7 +222,7 @@ async def process_ticket(row: dict, retriever, dry_run: bool = False) -> str:
     card = await distill_solution(
         title=row.get("title") or "",
         description=row.get("description") or "",
-        resolution_summary=meta.get("resolution_summary") or "",
+        resolution_summary=(archive_content or meta.get("resolution_summary") or ""),
         comments_text=comments_text,
         task_type=ticket_type,
     )

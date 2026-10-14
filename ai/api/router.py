@@ -132,6 +132,47 @@ async def get_pipeline() -> AiDiagnosisPlatform:
     return await get_diagnosis_platform()
 
 
+archive_router = APIRouter(prefix="/api/ai/archive", tags=["archive-ai"])
+
+
+class ArchiveGenerateRequest(BaseModel):
+    task_id: int
+
+
+@archive_router.post("/generate/stream", summary="归档报告 AI 初稿（SSE 流式生成）")
+async def archive_generate_stream(
+    req: ArchiveGenerateRequest,
+    http_req: Request,
+):
+    """处理人点「开始归档」后由前端调用。SSE 事件：
+    status{msg} / title{text} / delta{text} / done{report_id,version,chars}
+    / error{msg} / skipped{msg}（处理人已手写，AI 初稿弃用）。
+
+    生成与连接解耦：断开后台任务照常完成落库；同单进行中 409（前端走轮询兜底）。"""
+    username, _ = _current_user(http_req)
+    if not username:
+        raise HTTPException(status_code=401, detail="登录已过期，请重新登录")
+    from ai.core import archive_flow
+    queue: asyncio.Queue = asyncio.Queue()
+    ok = archive_flow.spawn_generation(req.task_id, queue, username)
+    if not ok:
+        raise HTTPException(status_code=409, detail="该工单报告正在生成中")
+
+    async def sse():
+        import asyncio as _aio
+        try:
+            while True:
+                ev = await queue.get()
+                yield f"event: {ev['type']}\ndata: {json.dumps(ev, ensure_ascii=False)}\n\n"
+                if ev["type"] in ("done", "error"):
+                    break
+        except _aio.CancelledError:
+            # 连接断开：后台任务继续完成落库，前端走轮询兜底
+            return
+
+    return StreamingResponse(sse(), media_type="text/event-stream")
+
+
 def _current_user(request: Request) -> tuple[str, bool]:
     """从 Authorization 头解出 (username, is_admin)；无效/缺失返回 ('', False)。"""
     auth = request.headers.get("Authorization", "")
