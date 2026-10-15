@@ -106,6 +106,9 @@ def test_dispatch_refuses_when_exhausted(stubs):
     assert results["quota_stub"]["ok"] is False
     assert "上限" in results["quota_stub"]["error"]
     assert "quota_stub" in usage.notes(sup._runtime_ctx)
+    # 拦下 ≠ 失败：必须留独立标记，否则上层只能看到 ok=False，
+    # 会把它渲染成「分析失败」（用户会以为分析崩了，其实是机制层主动收敛）。
+    assert results["quota_stub"]["meta"]["blocked"] == "quota"
 
 
 def test_dispatch_within_limit_runs_and_stays_quiet(stubs):
