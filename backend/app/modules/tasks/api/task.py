@@ -969,8 +969,13 @@ async def get_task(
                 prof = dict(_log.profile or {})
                 assigned_name = user_map.get(_log.assigned_id, _log.assigned_id)
                 pref_name = user_map.get(_log.preferred_id) if _log.preferred_id else None
-                # 接单人身份：当前登录者 == 本轮真正被派单对象（_log.assigned_id）时可看「派单理由」
-                _viewer_assignee = bool(_viewer_user and user_matches(_viewer_user, _log.assigned_id))
+                # 接单人身份：以**工单当前的 assigned_to** 为准。
+                # 为什么不能只看 `_log.assigned_id`：人工转派走的是 operation_log，
+                # **不写 TaskDispatchLog** —— 转派后这张表的最后一轮仍是"原来那次派单"，
+                # assigned_id 还是旧接单人，于是新接单人被判成"不是接单人"、看不到派单原因。
+                # 兜底：工单没有 assigned_to 时（老数据）仍按本轮派单对象判。
+                _assignee_ref = getattr(ticket, "assigned_to", None) or _log.assigned_id
+                _viewer_assignee = bool(_viewer_user and user_matches(_viewer_user, _assignee_ref))
                 # 面向用户展示的派单理由：把 reasoning 里可能残留的 users.id 替换为姓名
                 # （供 tip_detail 话术与接单人/提单人/管理员的「派单原因」共用）
                 reasoning_display = clean_reasoning_for_display(_log.reasoning, _log, user_map)
