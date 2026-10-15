@@ -21,6 +21,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_async_db as get_db
+from app.models.identity import UserDB
 from app.models.wxpay import RewardRecord, TransferBill, TransferBillState
 from app.modules.admin.api.auth import require_permission
 from app.modules.wxpay.client import WxpayServiceError, wxpay_client
@@ -31,6 +32,8 @@ from app.modules.wxpay.schemas import (
     AdminBillStatsOut,
     AdminRewardListOut,
     AdminRewardOut,
+    AdminUserOptionListOut,
+    AdminUserOptionOut,
     GrantRewardIn,
     GrantRewardOut,
     WithdrawIn,
@@ -91,6 +94,80 @@ def _bill_out(bill: TransferBill, reward: Optional[RewardRecord] = None) -> Admi
         reward_amount=reward.amount if reward else None,
         user_id=reward.user_id if reward else None,
     )
+
+
+def _receivable_openid(uid: str, username: str, bound: Optional[str]) -> tuple[str, str]:
+    """解析用户可收款 openid → (openid, source)。
+
+    绑定列优先；微信注册用户 users.id 本身就是 openid，无需也不应该再占绑定列。
+    """
+    if bound and bound.strip():
+        return bound.strip(), "bound"
+    if (username or "").startswith("wechat_"):
+        return uid, "self"
+    return "", ""
+
+
+# ── 转账测试：收款用户候选（下拉数据源，读 users 表）──
+
+
+@router.get(
+    "/user-options", response_model=AdminUserOptionListOut, summary="收款用户候选（转账测试下拉）"
+)
+async def list_user_options(
+    keyword: Optional[str] = Query(None, description="id / 账号 / 姓名 / openid 模糊匹配"),
+    only_receivable: bool = Query(False, description="true=仅返回能解析出 openid 的用户"),
+    limit: int = Query(200, ge=1, le=500),
+    db: AsyncSession = Depends(get_db),
+    current_user=require_permission(PERM),
+):
+    """转账测试表单的「用户 ID」下拉候选。
+
+    刻意不复用 `GET /api/tasks/assignable-users`：它无 openid，且只需登录即可调用，
+    把收款 openid 暴露给全体登录用户不合适；这里受同一 PERM 兜住。
+    """
+    ensure_permission()
+    stmt = select(UserDB.id, UserDB.username, UserDB.name, UserDB.wechat_openid)
+    if keyword:
+        like = f"%{keyword.strip()}%"
+        stmt = stmt.where(
+            or_(
+                UserDB.id.like(like),
+                UserDB.username.like(like),
+                UserDB.name.like(like),
+                UserDB.wechat_openid.like(like),
+            )
+        )
+    if only_receivable:
+        stmt = stmt.where(
+            or_(
+                UserDB.wechat_openid.isnot(None),
+                UserDB.wechat_openid != "",
+                UserDB.username.like("wechat_%"),
+            )
+        )
+
+    total = (
+        await db.execute(select(func.count()).select_from(stmt.subquery()))
+    ).scalar() or 0
+    rows = (await db.execute(stmt.order_by(UserDB.username).limit(limit))).all()
+
+    items = []
+    for uid, username, name, bound in rows:
+        openid, source = _receivable_openid(uid or "", username or "", bound)
+        items.append(
+            AdminUserOptionOut(
+                id=uid or "",
+                username=username or "",
+                name=name,
+                wechat_openid=bound,
+                openid=openid,
+                openid_source=source,
+            )
+        )
+    # 可收款的排前面：转账下拉绝大多数时候就是在挑这些人
+    items.sort(key=lambda o: (0 if o.openid else 1, o.username))
+    return AdminUserOptionListOut(total=total, truncated=total > len(items), items=items)
 
 
 # ── 概览：状态分布（必须声明在 /bills/{bill_id} 之前，否则被路径参数吃掉）──

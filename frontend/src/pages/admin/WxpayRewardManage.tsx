@@ -1,7 +1,8 @@
 // 后台管理 —— 奖励管理（后台管理 → 其他 → 奖励管理）
 //
 // 三块能力：
-// 1. 转账测试：发放奖励 → 对该奖励发起转账，一步走完「记账 + 建单」
+// 1. 转账测试：选中收款用户（下拉读 users 表）→ 发放奖励 → 对该奖励发起转账，
+//    一步走完「记账 + 建单」
 // 2. 转账单：列表 / 筛选 / 查单刷新 / 撤销
 // 3. 奖励记录：列表 / 筛选 / 发起转账
 //
@@ -25,6 +26,7 @@ import {
   fetchAdminBillStats,
   fetchAdminBills,
   fetchAdminRewards,
+  fetchAdminUserOptions,
   fenToYuan,
   grantAdminReward,
   refreshAdminBill,
@@ -34,6 +36,7 @@ import type {
   AdminBillItem,
   AdminBillStats,
   AdminRewardItem,
+  AdminUserOption,
 } from '@/api/wxpay';
 import { useAuthStore } from '@/stores/auth';
 
@@ -83,6 +86,28 @@ const FIELD_LABEL: React.CSSProperties = {
   marginBottom: 4,
 };
 
+/** 收款用户下拉：可滚动候选列表 */
+const USER_LIST: React.CSSProperties = {
+  marginTop: 6,
+  maxHeight: 220,
+  overflowY: 'auto',
+  border: '1px solid #e7ebeb',
+  borderRadius: 8,
+};
+
+const USER_HINT: React.CSSProperties = {
+  marginTop: 6,
+  fontSize: 11,
+  color: '#999',
+  lineHeight: 1.6,
+};
+
+function userOptionText(opt: AdminUserOption): string {
+  if (!opt.openid) return '未绑定微信 openid';
+  const tail = opt.openid.length > 6 ? `…${opt.openid.slice(-6)}` : opt.openid;
+  return `${tail}（${opt.openid_source === 'self' ? '微信注册' : '已绑定'}）`;
+}
+
 /** 列表行：两栏（主信息 + 右侧操作区） */
 const ROW: React.CSSProperties = {
   borderTop: '1px solid #f1f4f4',
@@ -124,6 +149,47 @@ export default function WxpayRewardManage() {
   });
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<string>('');
+
+  // ── 收款用户候选（下拉，读 users 表）──
+  const [userKeyword, setUserKeyword] = useState('');
+  const [userOptions, setUserOptions] = useState<AdminUserOption[]>([]);
+  const [userTotal, setUserTotal] = useState(0);
+  const [userLoading, setUserLoading] = useState(false);
+  const [selectedUser, setSelectedUser] = useState<AdminUserOption | null>(null);
+
+  const loadUserOptions = useCallback(
+    (kw: string) => {
+      if (!allowed) return;
+      setUserLoading(true);
+      fetchAdminUserOptions({ keyword: kw.trim() || undefined, limit: 200 })
+        .then((r) => {
+          if (!mountedRef.current) return;
+          setUserOptions(r.items || []);
+          setUserTotal(r.total || 0);
+        })
+        .catch(() => {
+          if (!mountedRef.current) return;
+          setUserOptions([]);
+          setUserTotal(0);
+        })
+        .finally(() => {
+          if (mountedRef.current) setUserLoading(false);
+        });
+    },
+    [allowed],
+  );
+
+  // 首屏立即拉一次；之后输入关键字时防抖 300ms 再查（后端 limit 截断，靠搜索收敛）
+  useEffect(() => {
+    const timer = setTimeout(() => loadUserOptions(userKeyword), userKeyword ? 300 : 0);
+    return () => clearTimeout(timer);
+  }, [userKeyword, loadUserOptions]);
+
+  const pickUser = useCallback((opt: AdminUserOption) => {
+    setSelectedUser(opt);
+    // openid 自动带入；解析不到时留空，由用户手填（测试环境支持任意值）
+    setForm((f) => ({ ...f, user_id: opt.id, openid: opt.openid || '' }));
+  }, []);
 
   // ── 转账单 ──
   const [stats, setStats] = useState<AdminBillStats | null>(null);
@@ -360,22 +426,65 @@ export default function WxpayRewardManage() {
       <section style={CARD}>
         <div style={CARD_TITLE}>转账测试</div>
         <div style={FIELD_ROW}>
-          <div style={FIELD_LABEL}>用户 ID（users.id）</div>
+          <div style={FIELD_LABEL}>收款用户（下拉取自 users 表，选中即填 users.id）</div>
           <Input
-            value={form.user_id}
-            placeholder="必填"
-            onChange={(v) => setForm((f) => ({ ...f, user_id: String(v ?? '') }))}
+            value={userKeyword}
+            placeholder="搜索姓名 / 账号 / users.id / openid"
+            onChange={(v) => setUserKeyword(String(v ?? ''))}
           />
+          <div style={USER_LIST}>
+            {userLoading ? (
+              <div style={USER_HINT}>加载中…</div>
+            ) : userOptions.length === 0 ? (
+              <div style={USER_HINT}>无匹配用户</div>
+            ) : (
+              userOptions.map((u) => {
+                const active = u.id === form.user_id;
+                return (
+                  <div
+                    key={u.id}
+                    onClick={() => pickUser(u)}
+                    style={{
+                      padding: '8px 10px',
+                      borderBottom: '1px solid #f1f4f4',
+                      background: active ? '#eaf4fa' : '#fff',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    <div style={{ fontSize: 13, color: '#333' }}>{u.name || u.username}</div>
+                    <div style={{ fontSize: 11, color: '#999', marginTop: 2 }}>
+                      {u.username}｜{userOptionText(u)}
+                    </div>
+                  </div>
+                );
+              })
+            )}
+          </div>
+          <div style={USER_HINT}>
+            共 {userTotal} 人
+            {userOptions.length < userTotal
+              ? `，已显示前 ${userOptions.length} 条，请用上方搜索缩小范围`
+              : ''}
+          </div>
+          <div style={USER_HINT}>
+            已选中：
+            {selectedUser
+              ? `${selectedUser.name || selectedUser.username}（${selectedUser.id}）`
+              : '未选择'}
+          </div>
         </div>
         <div style={FIELD_ROW}>
-          <div style={FIELD_LABEL}>
-            收款 openid（留空回退用户绑定的 wechat_openid）
-          </div>
+          <div style={FIELD_LABEL}>收款 openid（选中用户后自动带入，可手改）</div>
           <Input
             value={form.openid}
             placeholder="测试环境可填任意值，如 oTEST0001"
             onChange={(v) => setForm((f) => ({ ...f, openid: String(v ?? '') }))}
           />
+          {form.user_id && !form.openid.trim() ? (
+            <div style={{ ...USER_HINT, color: '#d54941' }}>
+              该用户解析不到 openid，请手填或从下拉重选；留空时后端回退 users.wechat_openid
+            </div>
+          ) : null}
         </div>
         <div style={FIELD_ROW}>
           <div style={FIELD_LABEL}>金额（分）</div>

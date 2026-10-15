@@ -264,6 +264,42 @@ export function fetchAdminRewards(params?: {
   return request<AdminRewardListResp>(`/admin/rewards?${qs.toString()}`, { skipCache: true });
 }
 
+/** 转账测试「收款用户」下拉候选：读 users 表，并给出可收款 openid */
+export interface AdminUserOption {
+  id: string;
+  username: string;
+  name?: string | null;
+  wechat_openid?: string | null;
+  /** 可收款 openid：绑定列优先，微信注册用户回退 users.id；都没有则空串 */
+  openid: string;
+  /** bound=绑定列 / self=微信注册用户 id 即 openid / 空=解析不到 */
+  openid_source: string;
+}
+
+export interface AdminUserOptionListResp {
+  total: number;
+  /** 命中数超过本次返回条数 → 需用 keyword 进一步缩小范围 */
+  truncated: boolean;
+  items: AdminUserOption[];
+}
+
+/** 收款用户候选（转账测试下拉数据源） */
+export function fetchAdminUserOptions(params?: {
+  keyword?: string;
+  only_receivable?: boolean;
+  limit?: number;
+}): Promise<AdminUserOptionListResp> {
+  const qs = new URLSearchParams();
+  if (params?.keyword) qs.set('keyword', params.keyword);
+  if (params?.only_receivable !== undefined) {
+    qs.set('only_receivable', String(params.only_receivable));
+  }
+  qs.set('limit', String(params?.limit ?? 200));
+  return request<AdminUserOptionListResp>(`/admin/user-options?${qs.toString()}`, {
+    skipCache: true,
+  });
+}
+
 /** 发放奖励（仅记账，不建转账单） */
 export function grantAdminReward(payload: {
   user_id: string;

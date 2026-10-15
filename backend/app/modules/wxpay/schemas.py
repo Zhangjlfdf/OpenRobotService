@@ -189,6 +189,30 @@ class AdminBillActionOut(BaseModel):
     bill: Optional[AdminBillOut] = None
 
 
+class AdminUserOptionOut(BaseModel):
+    """转账测试「收款用户」下拉候选（读 users 表）。
+
+    openid 是可收款 openid：优先 users.wechat_openid；微信注册用户 users.id 本身
+    就是 openid（见 wechat/services/auth_service.register_wechat_user），回退到 id。
+    两者都没有 → openid 为空串，前端需提示不可直接转账（测试环境可手填任意值）。
+    """
+
+    id: str
+    username: str = ""
+    name: Optional[str] = None
+    wechat_openid: Optional[str] = None
+    openid: str = ""
+    openid_source: str = Field(
+        "", description="bound=绑定列；self=微信注册用户 users.id 即 openid；空=解析不到"
+    )
+
+
+class AdminUserOptionListOut(BaseModel):
+    total: int = 0
+    truncated: bool = Field(False, description="命中数超过本次返回条数时需用 keyword 缩小范围")
+    items: list[AdminUserOptionOut]
+
+
 # ============ 内部：Go 服务推送的回调 ============
 
 
