@@ -272,6 +272,29 @@ class TaskFollower(Base):
         return f"<TaskFollower(task_id={self.task_id}, username='{self.username}')>"
 
 
+class TaskLike(Base):
+    """工单点赞表：用户对工单点赞（活动中心「精品工单榜」按此计数倒序）。
+
+    与 TaskFollower 同构：task_id + username 唯一键保证幂等，
+    重复点赞只刷新 created_at，不产生脏数据；取消点赞即删行。
+    榜单口径：只统计 status=archived 的工单（精品=沉淀下来的问答）。
+    """
+    __tablename__ = "task_likes"
+
+    id = Column(BigInteger, primary_key=True, index=True, comment="点赞记录ID")
+    task_id = Column(BigInteger, ForeignKey("tasks.id", ondelete="CASCADE"),
+                     nullable=False, index=True, comment="任务ID")
+    username = Column(String(50), nullable=False, index=True, comment="点赞人username")
+    created_at = Column(DateTime, server_default=func.now(), nullable=False, comment="点赞时间")
+
+    __table_args__ = (
+        UniqueConstraint("task_id", "username", name="uq_task_likes"),
+    )
+
+    def __repr__(self):
+        return f"<TaskLike(task_id={self.task_id}, username='{self.username}')>"
+
+
 class TaskParticipant(Base):
     """任务参与人表：记录与工单相关度较高的多个人（工单视角）。
 
