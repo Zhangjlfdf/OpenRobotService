@@ -9,7 +9,7 @@
 
 | 项 | 事实 |
 |----|------|
-| 测试 | `python -m pytest -q` → **912 passed, 27 skipped**（另有 2 个 `dual_tree` 既有失败）。跳过的是需要本地 Qdrant 数据的检索用例。变更轨迹：移除自评机制（#22）−58 条、工单状态（#23）+22 条、Supervisor 追规（#24）+13 条、编排补强（#25）+28 条 |
+| 测试 | `python -m pytest -q` → **940 passed, 27 skipped**（另有 2 个 `dual_tree` 既有失败）。跳过的是需要本地 Qdrant 数据的检索用例。变更轨迹：移除自评机制（#22）−58 条、工单状态（#23）+22 条、Supervisor 追规（#24）+13 条、编排补强（#25）+28 条、回归信号（#26）+24 条 |
 | 进程模型 | [../../run.py:446](../../run.py:446) 的 `uvicorn.run` **没有 `workers=`** → **单进程**。所以「进程内缓存/快照」方案成立（[runtime/inject_mailbox.py](runtime/inject_mailbox.py)、[runtime/report_cache.py](runtime/report_cache.py)），但也意味着**重启即失** |
 | `.env` | 未纳入版本控制（`.gitignore:22`）。改了必须**手动改 + 重启 AI 服务**，`load_dotenv` 只在启动时读一次 |
 | 过程区数据契约 | 后端 [tracing/trace.py](tracing/trace.py) 的 `nest_progress_todos` 产出「分析 →（规划 + 各能力）→ 子步骤/事件」；前端 `frontend/src/shared/components/DiscussionPanel.tsx` 的 `ProgressTodoItem` **递归渲染 `children`**，后端行自带的 `status`/`phase` 优先于 span 状态 |
