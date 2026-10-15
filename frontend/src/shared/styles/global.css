@@ -949,10 +949,10 @@ html, body, #root {
   appearance: none;
   max-width: 100%;
   padding: 8px 14px;
-  border: 1px solid #c9d9f5;
+  border: 1px solid color-mix(in oklab, var(--primary) 35%, var(--card));
   border-radius: 16px;
-  background: #f4f7fd;
-  color: #1a5cc8;
+  background: var(--primary-soft);
+  color: var(--sky);
   font-size: 13.5px;
   line-height: 1.4;
   text-align: left;
@@ -961,37 +961,35 @@ html, body, #root {
   transition: background 0.15s, border-color 0.15s, opacity 0.15s;
 }
 .chat-veh-chip:active {
-  background: #e8f0fe;
-  border-color: #1a73e8;
+  background: var(--accent);
+  border-color: var(--primary);
 }
 .chat-veh-chip:disabled {
   cursor: default;
 }
 /* 答复后整组持久保留：所选实心加深，其余弱化 */
 .chat-veh-chip--selected {
-  background: #1a73e8;
-  border-color: #1a73e8;
+  background: var(--sky);
+  border-color: var(--sky);
   color: #fff;
   font-weight: 600;
 }
 .chat-veh-chip--done {
   opacity: 0.45;
 }
-/* 车型介绍按钮变体（1014，产品定稿全站统一蓝调）：同族深一档蓝（#1a73e8 家族
-   Google Blue 色阶）与开场题浅蓝区分——底/边/字各深一档；不用 emoji 前缀
-   （安卓/微信内渲染不一） */
+/* 车型介绍按钮变体：马卡龙主蓝底白字，与开场题的浅蓝胶囊保持同一色系。 */
 .chat-veh-chip--intro {
-  border-color: #aecbfa;
-  background: #e8f0fe;
-  color: #185abc;
+  border-color: var(--primary);
+  background: var(--primary);
+  color: #fff;
 }
 .chat-veh-chip--intro:active {
-  background: #d2e3fc;
-  border-color: #1a73e8;
+  background: var(--sky);
+  border-color: var(--sky);
 }
 .chat-veh-chip--intro.chat-veh-chip--selected {
-  background: #1a73e8;
-  border-color: #1a73e8;
+  background: var(--sky);
+  border-color: var(--sky);
   color: #fff;
 }
 /* 车型介绍按钮组两列等宽（1014）：实测 375 宽下两个胶囊需 286px 而容器只有
@@ -1016,7 +1014,7 @@ html, body, #root {
   padding: 0;
   border: none;
   background: none;
-  color: #1a73e8;
+  color: var(--sky);
   font-size: 12.5px;
   line-height: 1.5;
   cursor: pointer;
@@ -8763,14 +8761,14 @@ html, body, #root {
 .conv-item__main { flex: 1; min-width: 0; }
 .conv-item__title { font-size: 13px; font-weight: 500; color: var(--foreground); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* 车型定制会话角标：conv-item 直接子级（flex align-items:center 整行垂直居中）。
-   蓝色系（产品要求全站统一蓝调，与 #1a73e8 主色同族深一档，区别于故障排查按钮的浅蓝） */
+   主题变量蓝（与故障排查按钮同款用色：主题浅蓝底+蓝字+主蓝 35% 描边），跟随 #277 主题化 */
 .conv-item__badge {
   flex: none;
   padding: 1px 6px;
   border-radius: 6px;
-  background: #e8f0fe;
-  border: 1px solid #aecbfa;
-  color: #185abc;
+  background: var(--primary-soft);
+  border: 1px solid color-mix(in oklab, var(--primary) 35%, var(--card));
+  color: var(--sky);
   font-size: 10.5px;
   line-height: 1.5;
   white-space: nowrap;
