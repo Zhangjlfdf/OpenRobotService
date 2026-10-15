@@ -122,6 +122,15 @@ _PLAN_TOOL = {
 }
 
 
+def _max_run_seconds() -> float:
+    """本次 run 的墙上时钟上限（热生效）。取不到就用默认值 —— 配置问题不该打断调度。"""
+    try:
+        from ai.config import supervisor_max_run_seconds
+        return float(supervisor_max_run_seconds())
+    except Exception:
+        return 300.0
+
+
 def _cap_succeeded(res) -> bool:
     """该能力这一轮是否**拿到了东西**。
 
@@ -494,10 +503,18 @@ class Supervisor:
             first_decision = None
             ask_user = False
             questions: list = []
+            # 墙上时钟安全阀：只挡「开始新的一轮」，不打断已经在跑的能力（那会丢证据）。
+            _deadline = t0 + _max_run_seconds()
 
             # 有界多轮：初始规划 → 派发 → 看结果 → 再追规一次（_MAX_ROUNDS）。
             # 原来只规划一次、结果不回流 —— KB 没命中 / 日志没读出根因时没有第二次机会。
             for rnd in range(_MAX_ROUNDS):
+                if results and _time.perf_counter() > _deadline:
+                    rounds.append({"round": rnd + 1, "stop": "超时收束"})
+                    logger.warning(
+                        f"[supervisor] 已达墙上时钟上限（{_max_run_seconds()}s），不再开始新一轮"
+                    )
+                    break
                 # 每轮重算可派集：用满的摘掉，**已经成功**的也摘掉。
                 # 成功的必须排除：results 以**能力名**为 key，同一能力跑两次后者会覆盖
                 # 前者，而上层逐 key 读 text —— 覆盖等于吞掉证据。
@@ -551,6 +568,12 @@ class Supervisor:
                 await self._consume_injects(todo, _emit)
 
             note = cap_usage.notes(self._runtime_ctx)
+            # 耗时/轮次观测：想给调度定「成本预算」时，先看这条的分布，别凭想象设数。
+            _elapsed_ms = round((_time.perf_counter() - t0) * 1000)
+            logger.info(
+                f"[supervisor] 本轮耗时 {_elapsed_ms}ms 轮次={len(rounds)} "
+                f"派发={sorted(results)} 停因={[r.get('stop') for r in rounds if r.get('stop')]}"
+            )
             return {
                 # complexity 取**首轮**：它描述问题本身的复杂度，不该被次轮的 simple 覆盖
                 "complexity": (first_complexity or "simple"),

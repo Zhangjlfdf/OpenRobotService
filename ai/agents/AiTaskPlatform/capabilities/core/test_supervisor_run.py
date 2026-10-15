@@ -506,3 +506,52 @@ def test_tool_path_supports_after(caps):
     ]})
     _run(llm)
     assert "A的结果(先查A)" in _CapB.calls[0]
+
+
+# ── F：墙上时钟安全阀 + 耗时观测 ─────────────────────────────
+
+def test_deadline_stops_starting_new_rounds(caps):
+    """超时不打断正在跑的能力，但**不再开始新的一轮**。
+
+    注意它只在「已经有结果」时才挡 —— 第一轮还没跑就超时说明是环境异常，
+    那种情况交给上层的超时/异常处理，不该在这里静默返回空。
+    """
+    import ai.agents.AiTaskPlatform.capabilities.core.supervisor as supmod
+
+    llm = _SeqLLM(
+        _dec("medium", [_step("run_stub_a", "一")]),
+        _dec("medium", [_step("run_stub_b", "二")]),   # 不该被用到
+    )
+    orig = supmod._max_run_seconds
+    supmod._max_run_seconds = lambda: -1.0             # 立刻过期
+    try:
+        res = _run(llm)
+    finally:
+        supmod._max_run_seconds = orig
+
+    assert _CapA.calls == ["一"], "第一轮照跑（不因为阀值就什么都不做）"
+    assert _CapB.calls == [], "第二轮不该开始"
+    assert any(r.get("stop") == "超时收束" for r in res["rounds"])
+    assert len(llm.prompts) == 1, "也不该再调一次规划 LLM"
+
+
+def test_deadline_does_not_fire_normally(caps):
+    """默认上限很宽松：正常两轮不该被它影响。"""
+    llm = _SeqLLM(
+        _dec("medium", [_step("run_stub_a", "一")]),
+        _dec("medium", [_step("run_stub_b", "二")]),
+    )
+    res = _run(llm)
+
+    assert len(llm.prompts) == 2
+    assert _CapB.calls == ["二"]
+    assert not any(r.get("stop") == "超时收束" for r in res["rounds"])
+
+
+def test_elapsed_is_reported(caps):
+    """耗时/轮次要留在结果里（定预算的依据是分布，不是拍脑袋）。"""
+    llm = _SeqLLM(_dec("simple"))
+    res = _run(llm)
+    assert isinstance(res["elapsed_ms"], int)
+    assert res["elapsed_ms"] >= 0
+    assert res["rounds"], "轮次摘要要在"

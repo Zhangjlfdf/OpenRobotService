@@ -99,6 +99,19 @@ def discuss_quoted_context_k() -> int:
     return _hot_int("DISCUSS_QUOTED_CONTEXT_K", 5)
 
 
+def supervisor_max_run_seconds() -> int:
+    """一次 Supervisor.run 的**墙上时钟硬上限**（热生效，默认 300 秒）。
+
+    注意它是**安全阀**，不是预算：只该在病态情况（某个能力卡住、多轮叠加）
+    兜住，不参与日常调优。超时后**不再开始新的一轮**，把已拿到的结果返回，
+    并在正文里说明是超时收束 —— 不打断已经在跑的能力（那会丢证据）。
+
+    真要把预算调紧，请先看 `[supervisor] 本轮耗时` 那条日志的分布再定，
+    别凭想象设一个数。
+    """
+    return _hot_int("SUPERVISOR_MAX_RUN_SECONDS", 300)
+
+
 def agent_state_debug_dump() -> bool:
     """是否把状态块原文打进日志（热生效，**默认关**）。
 
