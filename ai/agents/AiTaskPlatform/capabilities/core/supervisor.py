@@ -83,6 +83,45 @@ def _plan_waves(plan: list[dict]) -> list[list[tuple[int, dict]]]:
     return waves
 
 
+# 原生工具调用：让模型用**工具参数**提交计划（参数由接口解析成 dict），
+# 绕开「模型吐的 JSON 不老实」那一层。失败一律回退 JSON 路径，见 Supervisor._plan。
+_PLAN_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "submit_plan",
+        "description": "提交本次排查的调度计划（必须调用本工具，不要输出文字）",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "complexity": {"type": "string", "enum": ["simple", "medium", "complex"]},
+                "reasoning": {"type": "string", "description": "简短理由"},
+                "ask_user": {"type": "boolean"},
+                "questions": {"type": "array", "items": {"type": "string"}},
+                "plan": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "capability": {"type": "string", "description": "必须来自可用能力清单"},
+                            "goal": {"type": "string"},
+                            "parallel": {"type": "boolean"},
+                            "after": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "本步要等哪些能力先跑完（可选）",
+                            },
+                            "window_minutes": {"type": "integer"},
+                        },
+                        "required": ["capability"],
+                    },
+                },
+            },
+            "required": ["complexity", "plan"],
+        },
+    },
+}
+
+
 def _cap_succeeded(res) -> bool:
     """该能力这一轮是否**拿到了东西**。
 
@@ -196,7 +235,16 @@ def _parse_decision(raw: str) -> Optional[SupervisorDecision]:
         return _decision_from_fields(text)
     if not isinstance(data, dict):
         return None
+    return _decision_from_dict(data)
 
+
+def _decision_from_dict(data: dict) -> Optional[SupervisorDecision]:
+    """规范化后的决策 dict → SupervisorDecision。
+
+    单独抽出来是因为**原生工具调用**拿到的参数已经是 dict（由接口解析），
+    不需要再走 `_parse_decision` 那套「从模型文本里抠 JSON」的容错 —— 两条路
+    共用这一步，形状才保证一致。
+    """
     plan = data.get("plan") or []
     if not isinstance(plan, list):
         plan = []
@@ -523,13 +571,65 @@ class Supervisor:
 
     # ── 调度决策 ──
     async def _plan(self, task_context: str, caps: list[str], max_sub_tasks: int) -> SupervisorDecision:
-        """调用调度 LLM，评估复杂度 + 出 plan。
+        """取调度决策：**优先原生工具调用**，拿不到再走原来的 JSON 路径。
 
-        调度 LLM 输出解析失败时：浅轮数（< SOFT_LIMIT）重试，达到上限则按 simple 兜底
-        （延续"服务端确定性兜底优先"）。
+        两条路都产出同一种 SupervisorDecision（共用 `_decision_from_dict`），
+        所以后续的护栏/派发/进度完全不受影响。工具调用不可用时行为与改造前一致。
+        """
+        decision = await self._plan_via_tool(task_context, caps)
+        if decision is None:
+            decision = await self._plan_via_json(task_context, caps)
+        if decision is None:
+            logger.warning("[supervisor] 调度解析多次失败，按 simple 兜底")
+            return SupervisorDecision(complexity="simple", reasoning="调度解析多次失败，兜底为 simple")
+        # 程序强制护栏（服务端优先，不信任 LLM）
+        return self._guard_decision(decision, caps, max_sub_tasks)
+
+    async def _plan_via_tool(self, task_context: str, caps: list[str]) -> Optional[SupervisorDecision]:
+        """原生工具调用取计划：参数由接口解析成 dict，不需要从模型文本里抠 JSON。
+
+        **只调一轮**：模型把计划当作最终产物通过 `submit_plan` 提交，不涉及「工具结果回传」，
+        所以也不会碰到 DeepSeek「tools + 思考」那条 reasoning_content 多轮回传协议。
+
+        任何失败（llm 不支持工具调用 / 调用抛错 / 模型没调工具 / 参数不是 dict）→ None，
+        由 `_plan` 回退 JSON 路径 —— 这条回退保证新路径不可能比改造前更差。
+        """
+        complete_with_tools = getattr(self._llm, "complete_with_tools", None)
+        if complete_with_tools is None:
+            return None
+        try:
+            resp = await complete_with_tools(
+                tools=[_PLAN_TOOL],
+                prompt=self._build_plan_prompt(task_context, caps),
+                system_prompt=(
+                    "你是一个严谨的排查任务调度器。**必须调用 submit_plan 工具**提交计划，"
+                    "不要输出任何文字。"
+                ),
+                max_tokens=600,
+                temperature=0.0,
+            )
+        except Exception as e:
+            logger.info(
+                f"[supervisor] 原生工具调用取计划失败（{type(e).__name__}: {e}），回退 JSON 路径"
+            )
+            return None
+
+        for tc in (resp or {}).get("tool_calls") or []:
+            if tc.get("name") != "submit_plan":
+                continue
+            args = tc.get("arguments")
+            if isinstance(args, dict) and (args.get("plan") is not None or args.get("complexity")):
+                return _decision_from_dict(args)
+        logger.info("[supervisor] 模型没有调用 submit_plan，回退 JSON 路径")
+        return None
+
+    async def _plan_via_json(self, task_context: str, caps: list[str]) -> Optional[SupervisorDecision]:
+        """原来的路径：让模型吐 JSON，多层容错解析；全失败返回 None（由 _plan 兜底）。
+
+        （两层容错——`_parse_decision` 的抠 JSON + 这里的重试——之所以留着，是因为
+          中转站/换模型时模型不一定支持工具调用；它同时也是工具路径的回退网。）
         """
         prompt = self._build_plan_prompt(task_context, caps)
-        decision = None
         for attempt in range(SOFT_LIMIT + 1):
             raw = await self._llm.complete(
                 prompt=prompt,
@@ -539,18 +639,12 @@ class Supervisor:
             )
             decision = _parse_decision(raw)
             if decision is not None:
-                break
+                return decision
             logger.warning(
                 f"[supervisor] 调度输出解析失败 (attempt {attempt + 1}/{SOFT_LIMIT + 1}); "
                 f"raw={repr((raw or '')[:300])}"
             )
-
-        if decision is None:
-            logger.warning("[supervisor] 调度解析多次失败，按 simple 兜底")
-            return SupervisorDecision(complexity="simple", reasoning="调度解析多次失败，兜底为 simple")
-
-        # 程序强制护栏（服务端优先，不信任 LLM）
-        return self._guard_decision(decision, caps, max_sub_tasks)
+        return None
 
     def _guard_decision(self, d: SupervisorDecision, caps: list[str], max_sub_tasks: int) -> SupervisorDecision:
         """强护栏：

@@ -413,3 +413,96 @@ def test_executed_block_marks_retryable(flaky):
     )
     assert "已成功，不要重复派" in block
     assert "可换个说法再派一次" in block
+
+
+# ── D：原生工具调用取计划（拿不到就回退 JSON）────────────────
+
+class _ToolLLM:
+    """只会原生工具调用的假 LLM：按需返回 submit_plan 的 tool_calls。"""
+
+    def __init__(self, arguments=None, *, name="submit_plan", raise_exc=None):
+        self.arguments = arguments
+        self.name = name
+        self.raise_exc = raise_exc
+        self.calls = 0
+        self.used_complete = 0
+
+    async def complete_with_tools(self, tools, messages=None, prompt=None,
+                                  system_prompt=None, max_tokens=2000,
+                                  temperature=0.1, thinking=None):
+        self.calls += 1
+        assert tools and tools[0]["function"]["name"] == "submit_plan"
+        if self.raise_exc:
+            raise self.raise_exc
+        return {"content": "", "reasoning": "", "tool_calls": [
+            {"id": "call_1", "name": self.name, "arguments": self.arguments}
+        ]}
+
+    async def complete(self, prompt, system_prompt=None, max_tokens=2000,
+                       temperature=0.1, thinking=False):
+        self.used_complete += 1
+        return _dec("simple")           # JSON 回退路径
+
+
+def test_tool_path_is_used_when_available(caps):
+    """llm 支持工具调用时，用它取计划 —— 参数已是 dict，不必再抠 JSON。"""
+    llm = _ToolLLM({"complexity": "medium",
+                    "plan": [{"capability": "run_stub_a", "goal": "查A"}]})
+    res = _run(llm)
+
+    # 每轮各调一次（两轮 = 2 次）；关键是**一次都没走 JSON 路径**
+    assert llm.calls == 2
+    assert llm.used_complete == 0, "走了工具路径就不该再走 JSON 路径"
+    assert _CapA.calls == ["查A"]
+    assert res["complexity"] == "medium"
+
+
+def test_tool_path_not_called_when_llm_lacks_it(caps):
+    """llm 没有 complete_with_tools（多数测试替身如此）→ 直接走 JSON 路径，行为不变。"""
+    llm = _SeqLLM(_dec("medium", [_step("run_stub_a", "查A")]))
+    res = _run(llm)
+    assert _CapA.calls == ["查A"]
+    assert res["results"]["run_stub_a"]["ok"] is True
+
+
+def test_falls_back_to_json_when_tool_call_errors(caps):
+    """工具调用抛错 → 回退 JSON 路径，绝不让调度整个失败。"""
+    llm = _ToolLLM(None, raise_exc=RuntimeError("中转站不认 tools"))
+    res = _run(llm)
+
+    assert llm.used_complete >= 1, "必须回退到 JSON 路径"
+    assert res["complexity"] in ("simple", "medium", "complex")
+
+
+def test_falls_back_when_model_calls_a_different_tool(caps):
+    """模型没调 submit_plan（调了别的/没调）→ 也要回退，而不是当成空计划。"""
+    llm = _ToolLLM({"plan": []}, name="some_other_tool")
+    res = _run(llm)
+    assert llm.used_complete >= 1
+
+
+def test_tool_arguments_non_dict_falls_back(caps):
+    """arguments 不是 dict（中转站给字符串）→ 回退。"""
+    llm = _ToolLLM("这是个字符串不是 dict")
+    res = _run(llm)
+    assert llm.used_complete >= 1
+
+
+def test_tool_plan_goes_through_the_same_guard(caps):
+    """工具路径的计划同样要过护栏：未知能力照样被丢弃。"""
+    llm = _ToolLLM({"complexity": "complex",
+                    "plan": [{"capability": "根本没这能力", "goal": "x"},
+                             {"capability": "run_stub_a", "goal": "查A"}]})
+    res = _run(llm)
+    assert _CapA.calls == ["查A"]
+    assert "根本没这能力" not in res["results"]
+
+
+def test_tool_path_supports_after(caps):
+    """工具路径也要支持 after（否则 D 会把 B 的能力掐掉一半）。"""
+    llm = _ToolLLM({"complexity": "complex", "plan": [
+        {"capability": "run_stub_a", "goal": "先查A"},
+        {"capability": "run_stub_b", "goal": "据A继续", "after": ["run_stub_a"]},
+    ]})
+    _run(llm)
+    assert "A的结果(先查A)" in _CapB.calls[0]
