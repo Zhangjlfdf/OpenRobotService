@@ -234,7 +234,7 @@ describe('ChatPanel 车体扫码：车型模式注册与首问同 session_id', (
     expect(askBody.session_id).toBe(registeredSid);
     // 建会话时落库的 aiSessionId 也与该 sid 一致（会话↔session 映射不错位）
     expect(mockCreateConversation).toHaveBeenCalledWith(
-      expect.objectContaining({ aiSessionId: registeredSid }),
+      expect.objectContaining({ aiSessionId: registeredSid, vehicle: 'XQE' }),
     );
   });
 

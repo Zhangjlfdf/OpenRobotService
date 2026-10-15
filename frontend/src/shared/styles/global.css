@@ -8760,6 +8760,19 @@ html, body, #root {
 .conv-item.active { background: var(--blue-soft); }
 .conv-item__main { flex: 1; min-width: 0; }
 .conv-item__title { font-size: 13px; font-weight: 500; color: var(--foreground); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 车型定制会话角标：conv-item 直接子级（flex align-items:center 整行垂直居中）。
+   主题变量蓝（与故障排查按钮同款用色：主题浅蓝底+蓝字+主蓝 35% 描边），跟随 #277 主题化 */
+.conv-item__badge {
+  flex: none;
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: var(--primary-soft);
+  border: 1px solid color-mix(in oklab, var(--primary) 35%, var(--card));
+  color: var(--sky);
+  font-size: 10.5px;
+  line-height: 1.5;
+  white-space: nowrap;
+}
 .conv-item__time { font-size: 11px; color: var(--muted-foreground); margin-top: 2px; white-space: nowrap; }
 /* 行内操作钮（设计稿：size-7 rounded-md muted，hover background） */
 .conv-item__actions { display: flex; gap: 4px; flex-shrink: 0; }

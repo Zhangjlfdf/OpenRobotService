@@ -1607,7 +1607,7 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
 
   // ensureConversation 的稳定引用（registerVehicleModeNow 是 useCallback([])，
   // 直接闭包会锁死旧 sessionId；ref 转发与 pickVehicleChoiceRef 同款）
-  const ensureConvRef = useRef<(sid: string, firstContent: string) => Promise<number | null>>(
+  const ensureConvRef = useRef<(sid: string, firstContent: string, vehicle?: string) => Promise<number | null>>(
     async () => null,
   );
 
@@ -1719,7 +1719,7 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
       // 落库（增强路径，失败静默——本地渲染不受影响，只是刷新后引导气泡不再显示）
       void (async () => {
         try {
-          const convId = await ensureConvRef.current(sid, '车型引导');
+          const convId = await ensureConvRef.current(sid, '车型引导', ctx.vehicleModel);
           if (!convId) return;
           await appendMessage(convId, 'assistant', confirmContent, {
             metadata: JSON.stringify({
@@ -1761,13 +1761,15 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
   }, [sessionId, newSessionId]);
 
   /** 确保 DB 会话存在：首条消息时创建（title 用占位「新会话」，第2轮由 AI 生成后同步），后续复用 convRef */
-  const ensureConversation = async (sid: string, firstContent: string): Promise<number | null> => {
+  const ensureConversation = async (sid: string, firstContent: string, vehicle?: string): Promise<number | null> => {
+    // vehicle 标记只在首次建会话时写入（后续 send 复用 convRef 不会覆盖）
     if (convRef.current) return convRef.current;
     try {
       const conv = await createConversation({
         title: '新会话',
         scene,
         aiSessionId: sid,
+        vehicle,
       });
       convRef.current = conv.id;
       return conv.id;
