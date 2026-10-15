@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.modules.wxpay.client import WxpayServiceError, wxpay_client
 from app.modules.wxpay.models import (
+    RewardConfig,
     RewardRecord,
     RewardStatus,
     TransferBill,
@@ -70,15 +71,26 @@ class RewardService:
 
     @staticmethod
     async def grant(
-        db: AsyncSession, payload: GrantRewardIn
+        db: AsyncSession,
+        payload: GrantRewardIn,
+        role: Optional[str] = None,
+        status: str = RewardStatus.PENDING_AUDIT,
+        auto_commit: bool = True,
     ) -> Tuple[RewardRecord, bool]:
-        """发放奖励（纯记账）。返回 (记录, 是否重复发放)。"""
+        """发放奖励（纯记账）。返回 (记录, 是否重复发放)。
+
+        role / status 由调用方显式传入：
+        - 手动测试（admin 转账测试）：role="manual", status=PENDING, auto_commit=True（原行为）
+        - 业务自动发放：role=具体角色, status 由审核决策引擎决定
+        """
         if payload.source_id:
             existed = (
                 await db.execute(
                     select(RewardRecord).where(
                         RewardRecord.source_type == payload.source_type,
                         RewardRecord.source_id == payload.source_id,
+                        # role 参与查重，但历史数据 role 可能为 NULL
+                        (RewardRecord.role == role) | (RewardRecord.role.is_(None)),
                     )
                 )
             ).scalar_one_or_none()
@@ -100,27 +112,31 @@ class RewardService:
             remark=(payload.remark or "")[:32],
             source_type=payload.source_type or "",
             source_id=payload.source_id,
-            status=RewardStatus.PENDING,
+            role=role or "manual",
+            status=status,
             expire_at=_now() + timedelta(days=days),
         )
         db.add(record)
         try:
-            await db.commit()
+            await db.flush()
+            if auto_commit:
+                await db.commit()
         except IntegrityError:
-            # 并发下撞 (source_type, source_id) 唯一约束
             await db.rollback()
             existed = (
                 await db.execute(
                     select(RewardRecord).where(
                         RewardRecord.source_type == payload.source_type,
                         RewardRecord.source_id == payload.source_id,
+                        (RewardRecord.role == role) | (RewardRecord.role.is_(None)),
                     )
                 )
             ).scalar_one_or_none()
             if existed:
                 return existed, True
             raise
-        await db.refresh(record)
+        if auto_commit:
+            await db.refresh(record)
         return record, False
 
     @staticmethod
@@ -131,6 +147,137 @@ class RewardService:
             await db.execute(select(UserDB.wechat_openid).where(UserDB.id == user_id))
         ).scalar_one_or_none()
         return row
+
+    @staticmethod
+    async def resolve_config(
+        db: AsyncSession, key: str
+    ) -> Optional[dict]:
+        """读取 RewardConfig。不存在或 enabled=false 返回 None，调用方据此跳过业务。"""
+        row = (
+            await db.execute(
+                select(RewardConfig).where(RewardConfig.config_key == key)
+            )
+        ).scalar_one_or_none()
+        if row is None or not row.enabled:
+            return None
+        return row.config or {}
+
+    @staticmethod
+    async def grant_batch(
+        db: AsyncSession,
+        items: List[GrantRewardIn],
+        role: str,
+        audit_policy: Optional[dict] = None,
+        auto_commit: bool = True,
+    ) -> Tuple[int, List[RewardRecord]]:
+        """批量记账 + 审核决策 + 自动发起 withdraw（同事务）。
+
+        返回 (新建条数, 所有 RewardRecord 列表)。
+        - 逐条查重 (source_type, source_id, role)；已存在则跳过
+        - 新建后立即调 AuditDecisionEngine.evaluate() 分流
+        - 自动通过的：status=pending + audit_by='AUTO' + audit_at
+        - 强制审核的：status=pending_audit
+        - flush 后，自动通过的那批循环调 WithdrawService.withdraw(auto_commit=False)
+        """
+        now = _now()
+        created: List[RewardRecord] = []
+        # 收集需要自动发起转账的 reward（status=pending 且由 AUTO 通过）
+        auto_withdraw: List[RewardRecord] = []
+
+        for payload in items:
+            if not payload.source_id:
+                # 无 source_id 无法查重，跳过（调用方必须提供）
+                logger.warning(f"[reward] grant_batch 跳过无 source_id 的条目: user_id={payload.user_id}")
+                continue
+
+            # 查重
+            existed = (
+                await db.execute(
+                    select(RewardRecord).where(
+                        RewardRecord.source_type == payload.source_type,
+                        RewardRecord.source_id == payload.source_id,
+                        (RewardRecord.role == role) | (RewardRecord.role.is_(None)),
+                    )
+                )
+            ).scalar_one_or_none()
+            if existed:
+                continue
+
+            openid = payload.openid
+            if not openid:
+                openid = await RewardService._resolve_openid(db, payload.user_id)
+
+            # 决策：自动通过 or 强制审核
+            reason = None  # 风控原因（强制审核时记录）
+            if audit_policy:
+                auto_pass = await AuditDecisionEngine.evaluate(
+                    db, payload.user_id, payload.amount, audit_policy
+                )
+                if auto_pass:
+                    status = RewardStatus.PENDING
+                    audit_by = "AUTO"
+                    audit_at = now
+                    audit_remark = None
+                else:
+                    status = RewardStatus.PENDING_AUDIT
+                    audit_by = None
+                    audit_at = None
+                    # 记录触发了哪条规则（用于前端展示风控标记）
+                    reason = await AuditDecisionEngine.reason(
+                        db, payload.user_id, payload.amount, audit_policy
+                    )
+                    audit_remark = reason
+            else:
+                # 无策略 → 全部 pending_audit（保守）
+                status = RewardStatus.PENDING_AUDIT
+                audit_by = None
+                audit_at = None
+                audit_remark = None
+
+            days = payload.expire_days or int(settings.WXPAY_REWARD_EXPIRE_DAYS or 30)
+            record = RewardRecord(
+                id=uuid.uuid4().hex,
+                user_id=payload.user_id,
+                openid=openid or "",
+                amount=int(payload.amount),
+                scene_name=payload.scene_name,
+                reward_desc=payload.reward_desc,
+                remark=(payload.remark or "")[:32],
+                source_type=payload.source_type or "",
+                source_id=payload.source_id,
+                role=role,
+                status=status,
+                expire_at=now + timedelta(days=days),
+                audit_by=audit_by,
+                audit_at=audit_at,
+                audit_remark=audit_remark,
+            )
+            db.add(record)
+            created.append(record)
+            if status == RewardStatus.PENDING:
+                auto_withdraw.append(record)
+
+        if not created:
+            return 0, []
+
+        await db.flush()
+
+        # 自动发起转账（同事务，auto_commit=False 让外层统一提交）
+        for record in auto_withdraw:
+            try:
+                await WithdrawService.withdraw(
+                    db, record.id, record.user_id, auto_commit=False
+                )
+            except Exception as e:
+                logger.error(
+                    f"[reward] 自动发起转账失败: reward_id={record.id} err={e}"
+                )
+                # 自动转账失败不阻断主事务，reward 仍为 pending 状态，后续可手动发起
+
+        if auto_commit:
+            await db.commit()
+
+        return len(created), created
 
     @staticmethod
     async def get(db: AsyncSession, reward_id: str, user_id: str) -> Optional[RewardRecord]:
@@ -229,12 +376,16 @@ class WithdrawService:
 
     @staticmethod
     async def withdraw(
-        db: AsyncSession, reward_id: str, user_id: str, provided_name: str = ""
+        db: AsyncSession,
+        reward_id: str,
+        user_id: str,
+        provided_name: str = "",
+        auto_commit: bool = True,
     ) -> WithdrawOut:
         """立即提现 / 去确认。
 
-        provided_name：用户在前端 `need_real_name` 弹窗中填写的真实姓名，
-        仅当本次建单需要实名校验（单笔 ≥ 2000 元）时使用。
+        provided_name：用户在前端 `need_real_name` 弹窗中填写的真实姓名。
+        auto_commit：False 时不提交事务（供 grant_batch 同事务场景使用）。
         """
         if not getattr(settings, "WXPAY_ENABLED", False):
             return WithdrawOut(action="rejected", message="微信支付功能未启用")
@@ -254,6 +405,14 @@ class WithdrawService:
 
         now = _now()
 
+        # 前置校验：审核未通过的奖励一律不可提现
+        if reward.status in RewardStatus.NON_WITHDRAWABLE:
+            if reward.status == RewardStatus.PENDING_AUDIT:
+                return WithdrawOut(
+                    action="rejected", message="奖励尚未通过财务审核，暂不可提现"
+                )
+            return WithdrawOut(action="rejected", message="奖励已被驳回")
+
         if reward.status == RewardStatus.SUCCESS:
             return WithdrawOut(action="success", message="已到账")
         if reward.status == RewardStatus.EXPIRED:
@@ -262,7 +421,8 @@ class WithdrawService:
         # 过期判定与回写
         if reward.expire_at and reward.expire_at < now:
             reward.status = RewardStatus.EXPIRED
-            await db.commit()
+            if auto_commit:
+                await db.commit()
             return WithdrawOut(action="expired", message="奖励已失效")
 
         min_fen = int(getattr(settings, "WXPAY_MIN_WITHDRAW_FEN", 100) or 0)
@@ -287,13 +447,14 @@ class WithdrawService:
                 and bill.package_expire_at > now
             )
             if not reusable:
-                bill = await WithdrawService._refresh_bill(db, bill)
+                bill = await WithdrawService._refresh_bill(db, bill, auto_commit=auto_commit)
 
         # 分支 A：复用 package_info
         if bill is not None and TransferBillState.can_reuse_package(bill.state):
             if bill.package_expire_at and bill.package_expire_at > now and bill.package_info:
                 reward.status = RewardStatus.WITHDRAWING
-                await db.commit()
+                if auto_commit:
+                    await db.commit()
                 return WithdrawOut(
                     action="confirm",
                     message="请完成收款确认",
@@ -307,7 +468,8 @@ class WithdrawService:
         # 分支 B 续：刷新后仍非终态
         if bill is not None and not TransferBillState.is_terminal(bill.state):
             reward.status = RewardStatus.WITHDRAWING
-            await db.commit()
+            if auto_commit:
+                await db.commit()
             return WithdrawOut(
                 action="processing",
                 message="转账处理中，请稍后重试",
@@ -315,9 +477,7 @@ class WithdrawService:
                 state=bill.state or "",
             )
 
-        # 分支 C 前置：上一笔带姓名的转账单被微信判为 FAIL，
-        # 说明当前 users.name 已被证伪（可能是微信昵称，或被用户改坏），
-        # 必须让用户重新提供真实姓名，而不是拿同一个名字反复失败。
+        # 分支 C 前置：上一笔带姓名的转账单被微信判为 FAIL
         if reward.amount >= USER_NAME_REQUIRED_FEN and not (provided_name or "").strip():
             if await WithdrawService._last_bill_failed_with_name(db, reward.id):
                 return WithdrawOut(
@@ -326,14 +486,15 @@ class WithdrawService:
                 )
 
         # 分支 C：无单或已终态 -> 用新的 out_bill_no 发起转账
-        return await WithdrawService._create_bill(db, reward, provided_name)
+        return await WithdrawService._create_bill(
+            db, reward, provided_name, auto_commit=auto_commit
+        )
 
     @staticmethod
-    async def _refresh_bill(db: AsyncSession, bill: TransferBill) -> Optional[TransferBill]:
-        """查单刷新转账单。
-
-        微信侧查不到（404）说明未受理成功，删除占位后返回 None，交由上层重新建单。
-        """
+    async def _refresh_bill(
+        db: AsyncSession, bill: TransferBill, auto_commit: bool = True
+    ) -> Optional[TransferBill]:
+        """查单刷新转账单。"""
         try:
             data = await wxpay_client.query_transfer(bill.out_bill_no)
         except WxpayServiceError as e:
@@ -345,7 +506,8 @@ class WithdrawService:
                 return None
             bill.last_query_at = _now()
             bill.query_count = (bill.query_count or 0) + 1
-            await db.commit()
+            if auto_commit:
+                await db.commit()
             return bill
 
         state = data.get("state") or bill.state
@@ -356,7 +518,8 @@ class WithdrawService:
         bill.is_terminal = TransferBillState.is_terminal(state)
         bill.last_query_at = _now()
         bill.query_count = (bill.query_count or 0) + 1
-        await db.commit()
+        if auto_commit:
+            await db.commit()
         return bill
 
     @staticmethod
@@ -419,16 +582,14 @@ class WithdrawService:
 
     @staticmethod
     async def _create_bill(
-        db: AsyncSession, reward: RewardRecord, provided_name: str = ""
+        db: AsyncSession,
+        reward: RewardRecord,
+        provided_name: str = "",
+        auto_commit: bool = True,
     ) -> WithdrawOut:
-        """发起转账（必须先落占位单，保证回调到达时能定位到 reward）。
-
-        provided_name 是用户在 `need_real_name` 弹窗里填写的真实姓名；
-        为空时回退 users.name（首次可能取到微信昵称，被微信拒绝后再引导重填）。
-        """
+        """发起转账（必须先落占位单，保证回调到达时能定位到 reward）。"""
         now = _now()
 
-        # 微信硬性要求：>= 2000 元必须传收款人姓名做实名校验。
         user_name = ""
         if reward.amount >= USER_NAME_REQUIRED_FEN:
             user_name = (provided_name or "").strip()
@@ -467,7 +628,6 @@ class WithdrawService:
                 out_bill_no=out_bill_no,
                 openid=reward.openid,
                 amount=reward.amount,
-                # 备注超 32 字符会被微信拒绝，这里按字符截断（Go 侧同样按字符数校验）
                 remark=(reward.remark or reward.reward_desc or "")[:MAX_REMARK_LEN],
                 user_name=user_name,
                 scene_name=reward.scene_name,
@@ -476,7 +636,6 @@ class WithdrawService:
                 scene_id=str(getattr(settings, "WXPAY_TRANSFER_SCENE_ID", "") or ""),
             )
         except WxpayServiceError as e:
-            # 明确 4xx 且非系统错误 => 微信侧未受理，删除占位允许重试
             if (not e.system_error) and 400 <= e.status_code < 500:
                 logger.warning(
                     f"[wxpay] 发起转账被拒绝，占位单已删除: "
@@ -484,9 +643,9 @@ class WithdrawService:
                 )
                 await db.delete(bill)
                 reward.status = RewardStatus.PENDING
-                await db.commit()
+                if auto_commit:
+                    await db.commit()
                 if user_name:
-                    # 已携带姓名仍被拒：大概率姓名与微信实名不符，引导用户重填
                     logger.warning(
                         f"[wxpay] 携带姓名的转账被微信拒绝，疑似姓名不符: "
                         f"out_bill_no={out_bill_no} code={e.code}"
@@ -504,13 +663,13 @@ class WithdrawService:
                         message="运营账户余额不足，请通知运营方充值后重新发起提现",
                     )
                 return WithdrawOut(action="rejected", message=e.message or "发起转账失败")
-            # 其余（网络异常/系统错误）保留占位，等兜底查单刷新，绝不换单重试
             logger.error(
                 f"[wxpay] 发起转账异常，占位单保留待查单: "
                 f"out_bill_no={out_bill_no} request_id={e.request_id} err={e}"
             )
             reward.status = RewardStatus.WITHDRAWING
-            await db.commit()
+            if auto_commit:
+                await db.commit()
             return WithdrawOut(
                 action="processing",
                 message="转账处理中，请稍后重试",
@@ -527,10 +686,10 @@ class WithdrawService:
         reward.status = derive_reward_status(state)
         if reward.status == RewardStatus.SUCCESS:
             reward.withdrawn_at = now
-        # 微信已受理该姓名 -> 固化为 users.name，后续支付直接复用
         if user_name:
             await WithdrawService._persist_user_name(db, reward.user_id, user_name)
-        await db.commit()
+        if auto_commit:
+            await db.commit()
 
         if bill.package_info:
             return WithdrawOut(
@@ -745,3 +904,94 @@ async def check_consistency(db: AsyncSession) -> Dict[str, int]:
     if rows:
         await db.commit()
     return {"withdrawing": len(rows), "fixed": fixed, "stuck": stuck}
+
+
+class AuditDecisionEngine:
+    """审核决策引擎：小额/低风险奖励自动通过，大额/高频用户强制财务审核。
+
+    决策步骤（按短路顺序）：
+    1. auto_pass_max_fen        — 单笔金额超阈值？→ 强制审核
+    2. force_audit_user_total_count — 用户累计奖励次数超阈值？→ 强制审核
+    3. force_audit_user_daily_fen — 用户当日奖励金额超阈值？→ 强制审核
+    全部通过 → 自动通过
+    """
+
+    @staticmethod
+    async def evaluate(
+        db: AsyncSession, user_id: str, amount_fen: int, policy: dict
+    ) -> bool:
+        """返回 True=自动通过，False=强制审核。"""
+        # 1. 金额阈值
+        max_fen = int(policy.get("auto_pass_max_fen", 0) or 0)
+        if max_fen and amount_fen > max_fen:
+            return False
+
+        # 2. 用户累计奖励次数
+        force_total = int(policy.get("force_audit_user_total_count", 0) or 0)
+        if force_total > 0:
+            cnt = (
+                await db.execute(
+                    select(func.count(RewardRecord.id)).where(
+                        RewardRecord.user_id == user_id
+                    )
+                )
+            ).scalar() or 0
+            if int(cnt) >= force_total:
+                return False
+
+        # 3. 用户当日奖励金额
+        force_daily = int(policy.get("force_audit_user_daily_fen", 0) or 0)
+        if force_daily > 0:
+            today_start = _now().date()
+            # SQLite / MySQL 兼容写法：DATE(created_at)
+            daily_sum = (
+                await db.execute(
+                    select(func.coalesce(func.sum(RewardRecord.amount), 0)).where(
+                        RewardRecord.user_id == user_id,
+                        func.func("DATE", RewardRecord.created_at) == str(today_start),
+                    )
+                )
+            ).scalar() or 0
+            if int(daily_sum) >= force_daily:
+                return False
+
+        return True
+
+    @staticmethod
+    async def reason(
+        db: AsyncSession, user_id: str, amount_fen: int, policy: dict
+    ) -> str:
+        """返回触发强制审核的具体原因（用于 audit_remark 和前端风控标记）。"""
+        reasons: List[str] = []
+
+        max_fen = int(policy.get("auto_pass_max_fen", 0) or 0)
+        if max_fen and amount_fen > max_fen:
+            reasons.append(f"金额超 {max_fen // 100} 元自动通过阈值")
+
+        force_total = int(policy.get("force_audit_user_total_count", 0) or 0)
+        if force_total > 0:
+            cnt = (
+                await db.execute(
+                    select(func.count(RewardRecord.id)).where(
+                        RewardRecord.user_id == user_id
+                    )
+                )
+            ).scalar() or 0
+            if int(cnt) >= force_total:
+                reasons.append(f"累计奖励 {int(cnt)} 次 ≥ {force_total} 次强制审核阈值")
+
+        force_daily = int(policy.get("force_audit_user_daily_fen", 0) or 0)
+        if force_daily > 0:
+            today_start = _now().date()
+            daily_sum = (
+                await db.execute(
+                    select(func.coalesce(func.sum(RewardRecord.amount), 0)).where(
+                        RewardRecord.user_id == user_id,
+                        func.func("DATE", RewardRecord.created_at) == str(today_start),
+                    )
+                )
+            ).scalar() or 0
+            if int(daily_sum) >= force_daily:
+                reasons.append(f"当日奖励 {int(daily_sum) // 100} 元 ≥ {force_daily // 100} 元强制审核阈值")
+
+        return "; ".join(reasons) if reasons else "风控规则触发"

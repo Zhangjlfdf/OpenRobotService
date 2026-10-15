@@ -223,7 +223,10 @@ class ArchiveReportService:
     @staticmethod
     async def approve(db: AsyncSession, report_id: int, operator_id: str, review_comment: str,
                       value_point: str, revision: int) -> tuple[ArchiveReport, Task]:
-        """审核通过：submit_status→approved，reviewed_at 写入，工单→ARCHIVED，archived_by/archived_at 写入"""
+        """审核通过：submit_status→approved，reviewed_at 写入，工单→ARCHIVED，archived_by/archived_at 写入。
+
+        同时自动生成三条闭环奖励（reporter / assignee / reviewer），走审核决策引擎分流。
+        """
         result = await db.execute(select(ArchiveReport).where(ArchiveReport.id == report_id)
             .with_for_update().execution_options(populate_existing=True))
         report = result.scalar_one_or_none()
@@ -261,6 +264,60 @@ class ArchiveReportService:
                 reviewer_id=operator_id, outcome="approved", review_comment=report.review_comment,
                 value_point=report.value_point, content=report.content, created_at=utcnow()))
             await publish_report(db, task, report)
+
+        # ── 自动生成闭环奖励（flush 前注入，保证 task/report/reward 同事务）──
+        try:
+            from app.modules.wxpay.schemas import GrantRewardIn
+            from app.modules.wxpay.service import RewardService
+
+            cfg = await RewardService.resolve_config(db, "task_archive")
+            policy = await RewardService.resolve_config(db, "audit_policy")
+            if cfg is not None and task is not None:
+                task_id_str = str(task.id)
+                scene_name = "工单闭环奖励"
+                items: list[GrantRewardIn] = []
+
+                # 提单人
+                if task.created_by and int(cfg.get("reporter_fen", 0) or 0) > 0:
+                    items.append(GrantRewardIn(
+                        user_id=task.created_by,
+                        amount=int(cfg["reporter_fen"]),
+                        scene_name=scene_name,
+                        reward_desc="工单提单人奖励",
+                        source_type="task",
+                        source_id=task_id_str,
+                    ))
+                # 接单人
+                if task.assigned_to and int(cfg.get("assignee_fen", 0) or 0) > 0:
+                    items.append(GrantRewardIn(
+                        user_id=task.assigned_to,
+                        amount=int(cfg["assignee_fen"]),
+                        scene_name=scene_name,
+                        reward_desc="工单接单人奖励",
+                        source_type="task",
+                        source_id=task_id_str,
+                    ))
+                # 审核人（即当前 operator_id，刚通过了解决报告审核）
+                if operator_id and int(cfg.get("reviewer_fen", 0) or 0) > 0:
+                    items.append(GrantRewardIn(
+                        user_id=operator_id,
+                        amount=int(cfg["reviewer_fen"]),
+                        scene_name=scene_name,
+                        reward_desc="归档审核人奖励",
+                        source_type="task",
+                        source_id=task_id_str,
+                    ))
+
+                if items:
+                    await RewardService.grant_batch(
+                        db, items, role="task", audit_policy=policy, auto_commit=False
+                    )
+        except Exception as e:
+            from app.services.logging import get_logger
+            get_logger(__name__).error(
+                f"[reward] 闭环奖励自动发放失败: task_id={task.id if task else '?'} err={e}"
+            )
+            # 奖励发放失败不阻断归档主流程
 
         await db.flush()
         return report, task
