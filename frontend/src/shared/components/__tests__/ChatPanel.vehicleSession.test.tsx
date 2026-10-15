@@ -74,6 +74,7 @@ const mockAskStream = vi.fn();
 const mockGetConversation = vi.fn();
 const mockCreateConversation = vi.fn();
 const mockAppendMessage = vi.fn();
+const mockUpdateConversationMeta = vi.fn();
 
 vi.mock('@/api/ai', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/api/ai')>();
@@ -93,6 +94,7 @@ vi.mock('@/api/conversation', async (importOriginal) => {
     createConversation: (p: { title: string; scene: string; aiSessionId?: string }) => mockCreateConversation(p),
     appendMessage: (cid: number, role: string, content: string, opts?: unknown) => mockAppendMessage(cid, role, content, opts),
     updateMessageContent: vi.fn().mockResolvedValue(undefined),
+    updateConversationMeta: (...args) => mockUpdateConversationMeta(...args),
   };
 });
 
@@ -121,6 +123,7 @@ describe('ChatPanel 车体扫码：车型模式注册与首问同 session_id', (
     mockGetConversation.mockReset();
     mockCreateConversation.mockReset();
     mockAppendMessage.mockReset();
+    mockUpdateConversationMeta.mockReset();
 
     // 初始态：页面进入时已自动选中最近会话（conversationId=7），
     // 其 ai_session_id 会被 Effect A 恢复进 sessionId（旧 sid 来源）。
@@ -277,6 +280,9 @@ describe('ChatPanel 车体扫码：车型模式注册与首问同 session_id', (
     const second = mockAppendMessage.mock.calls[1] as [number, string, string, { metadata?: string }];
     expect(first[1]).toBe('assistant');
     expect(first[2]).toContain('**车辆信息已确认**');
+    // 尾句「接下来按该车型的引导流程…」已删（用户反馈多余）：确认气泡只有
+    // 标题 + 三行 key-value
+    expect(first[2]).not.toContain('接下来按该车型的引导流程');
     // key-value 行尾双空格 = markdown 硬换行（renderer 无 remark-breaks，
     // 单 \n 会被合并成一段——实测「项目一行、客户车型挤一行」）
     expect(first[2]).toContain('**项目**：项目A  \n**客户**：客户A  \n**车型**：XQE');
@@ -359,5 +365,11 @@ describe('ChatPanel 车体扫码：车型模式注册与首问同 session_id', (
     expect(screen.getByText('您遇到了什么问题？')).toBeTruthy();
     // 提示语只挂在开场题下（确认气泡 vehicleGuide 恢复后不挂）
     expect(screen.getAllByText('若是其他情况，请在下方输入框描述')).toHaveLength(1);
+
+    // 存量自愈：会话有 vehicle_confirm 引导消息但 metadata 缺 vehicle 标记
+    // （角标功能上线前的老扫码会话）→ 恢复时自动从确认气泡提取车型回填，
+    // 下次拉列表即有角标（fire-and-forget，无需 SQL 补数据）
+    await waitFor(() => expect(mockUpdateConversationMeta).toHaveBeenCalledTimes(1));
+    expect(mockUpdateConversationMeta).toHaveBeenCalledWith(7, { vehicle: 'XQE' });
   });
 });
