@@ -528,12 +528,18 @@ class DiscussFlow:
                     )
             except Exception:
                 pass
-        # 用户明确要"重新分析日志/再分析/前面的分析是错的"时，强制重读日志并让
-        # Supervisisor 重新走 log_analyze（复用缓存索引，只重跑推理，不重建索引）。
-        _ask_reanalyze_log = bool(
+        # 用户在质疑此前的结论时，强制重读日志并让 Supervisor 重走 log_analyze
+        # （复用缓存索引，只重跑推理，不重建索引）。
+        #
+        # 判据用**并集**：意图分类的语义判断（_llm_challenge）+ 关键词兜底。
+        # - 语义判断能接住关键词表接不住的换说法（"你这结论站不住"），这是原来缺的；
+        # - 关键词表**故意保留**作为兜底：分类失败/低置信时 _llm_challenge 是 None，
+        #   而「用户在质疑就必须真重跑」是产品承诺，不能因为一次分类抖动就失守。
+        _kw_reanalyze = bool(
             query
             and any(kw in query for kw in ("重新分析", "再分析", "重新看", "再看一下", "分析是错的", "分析错了", "不对吧", "之前分析", "重新查"))
         )
+        _ask_reanalyze_log = bool(_llm_challenge) or _kw_reanalyze
 
         # 3.1 构造给调度 LLM 看的能力描述清单（只把"当前可用的、有意义的"交给它）
         #   - 确定性程序护栏：能力所需资源缺失时直接从可用清单剔除，避免 LLM 派发必然失败的能力
@@ -665,18 +671,28 @@ class DiscussFlow:
         # 3.2b LLM 意图路由（改造点 A / G1）：识别纯闲聊 → 走短 prompt 快路径，
         #      不派生任何工具/子 Agent，省一次 Supervisor 调度 + token。
         is_pure_chat = False
+        # 意图分类顺带判「用户是否在质疑此前的结论」—— 不再单靠关键词表。
+        # None = 分类没跑成（调用失败/低置信）→ 下面由关键词兜底。
+        _llm_challenge: bool | None = None
         if query:
             try:
                 from ai.agents.AiTaskPlatform.capabilities import Router
-                intent = await Router.classify(
+                _cls = await Router.classify_full(
                     llm_client=self._llm_client,
                     query=query,
                     has_attachments=has_att,
                     has_logs=has_logs,
-                    fallback="general",
                 )
-                is_pure_chat = (intent == "pure_chat")
-                self._add_trace(self.NODE_DISCUSS, "ok", output={"router_intent": intent})
+                if _cls:
+                    is_pure_chat = (_cls["intent"] == "pure_chat")
+                    _llm_challenge = bool(_cls.get("challenge"))
+                    self._add_trace(self.NODE_DISCUSS, "ok", output={
+                        "router_intent": _cls["intent"],
+                        "router_challenge": _llm_challenge,
+                    })
+                else:
+                    self._add_trace(self.NODE_DISCUSS, "ok",
+                                    output={"router_intent": "fallback"})
             except Exception:
                 is_pure_chat = False
 
