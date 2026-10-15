@@ -180,6 +180,11 @@ class AIConfig(BaseModel):
     qdrant_timeout: float = Field(default=5.0)
     qdrant_local_path: str = Field(default="", description="本地模式路径，非空时忽略 host/port")
 
+    ticket_card_collection: str = Field(
+        default="", description="工单卡独立集合（测试环境隔离，如 test_ticket_resolutions；"
+        "空=随 company 域指针。非空时工单卡读写全部走该集合，与 company_* 指针脱钩——"
+        "carry_over 只扫 company_ 前缀，测试卡物理上不可能被搬进生产集合）")
+
     # ========== Redis ==========
     redis_url: str = Field(default="redis://localhost:6379/0")
     redis_max_context_turns: int = Field(default=3)
@@ -422,6 +427,7 @@ def get_ai_config() -> AIConfig:
         qdrant_collection_name=os.getenv("QDRANT_COLLECTION", "operation_docs"),
         qdrant_timeout=float(os.getenv("QDRANT_TIMEOUT", "5.0")),
         qdrant_local_path=os.getenv("QDRANT_LOCAL_PATH", ""),
+        ticket_card_collection=os.getenv("TICKET_CARD_COLLECTION", ""),
         # Redis
         redis_url=os.getenv("REDIS_URL", "redis://localhost:6379/0"),
         redis_max_context_turns=int(os.getenv("REDIS_MAX_CONTEXT_TURNS", "3")),

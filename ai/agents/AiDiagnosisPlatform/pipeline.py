@@ -2286,6 +2286,17 @@ class AiDiagnosisPlatform:
                 if _key == "project":
                     logger.info(f"[state] 丢弃对话中误写的 project 值: {v!r}")
                     continue
+                # 指名处理人值的括号注释剥离（1013 生产实锤）：LLM 会把「提单给
+                # 我自己」输出成「胡健楠（提单人本人）」——带注释的值过不了
+                # requested_assignee 闸门（users 显示名精确匹配），指名静默失效，
+                # 而回复话术却按「已记录」说——话术与状态不符。剥注释后精确
+                # 匹配即过闸。null 字符串同理（decide 偶发输出）。
+                if _key == "requested_assignee":
+                    _cleaned = re.sub(r"（[^）]*）|\([^)]*\)", "", v).strip()
+                    if _cleaned and _cleaned != v:
+                        logger.info(f"[state] requested_assignee 剥括号注释: "
+                                    f"{v!r} → {_cleaned!r}")
+                        v = _cleaned
                 state.collected_info[_key] = v
                 _merged_view[_key] = v[:30]
             if _merged_view:
@@ -4134,7 +4145,10 @@ class AiDiagnosisPlatform:
             "🔴 问题已锁定到具体部件时，要素只围绕该部件收敛——只收该部件的"
             "标识与故障现象，其他部件/对象的编号一律不列）\n"
             "3. 对照对话：逐项核对第 2 步要素——用户已经说过什么"
-            "（含顺带提到、换说法说过、能直接推出的）？哪些要素用户（现场人员）答得上来？\n"
+            "（含顺带提到、换说法说过、能直接推出的）？哪些要素用户（现场人员）答得上来？"
+            "🔴 助手此前复述/总结过的内容（如查单返回的工单详情、对话里念过的"
+            "历史记录）同样算「对话中已有」——用户说「根据XX提单」「就按刚才说的」时，"
+            "从这些已复述内容直接推导字段值，不得当作缺口重新追问\n"
             "4. 定字段：从「未说、用户能答、且与处理该问题直接相关」中挑 0-2 个核心 + 0-2 个补充；对话已把开工要素说清时一项都不挑\n\n"
             "# 红线（🔴 违反任何一条即返工）\n"
             "- 🔴 话题归属：若对话**中前段**在处理某个话题（如设备故障排查），"
@@ -5328,13 +5342,22 @@ class AiDiagnosisPlatform:
 
     def _parse_agent_output(self, raw: str) -> dict:
         """
-        解析 Agent 输出，支持三种格式：
+        解析 Agent 输出，支持五种格式：
         A) ```json {...} ``` === 回复文本     ← 标准格式
         B) ```json {...} ``` 回复文本         ← 缺 ===
         C) {...} 回复文本                     ← 裸 JSON（无 ``` 包裹）
         D) {...}                              ← 只有 JSON
+        E) ```json {...（未闭合围栏，到结尾）  ← 1013 新增：max_tokens 截断/模型
+                                                偷懒不写闭合 ```（原 A~D 全不
+                                                匹配 → 整轮丢弃 + 原文泄漏，
+                                                sess_mv63uw3a 生产实锤）
+
+        解析健壮性（1013）：loads 失败先修复（中文引号/尾逗号），仍失败按宽松
+        正则抢救顶层关键字段；message 卫生——协议原文（```json 块）绝不泄漏给
+        用户，剥离后无正文给兜底话术。
         """
         text = raw.strip()
+        data = {}          # 解析失败的兜底空对象（E 等场景必需）
         thinking = ""
         action = "ask"
         intent = ""
@@ -5348,11 +5371,11 @@ class AiDiagnosisPlatform:
         message = text
         json_end = 0  # JSON 区域结束位置
 
-        # ---- 尝试匹配带 ``` 包裹的 JSON ----
+        # ---- A/B）闭合围栏：```json ... ``` ----
         m_fenced = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", text, re.IGNORECASE)
-        # ---- 裸 JSON：用括号深度计数定位最外层 }，避免非贪婪正则被嵌套 {} 截断 ----
+        # ---- C/D）裸 JSON：括号深度计数定位最外层 }，避免非贪婪正则被嵌套 {} 截断 ----
         _bare_end = -1
-        if not m_fenced and text and text[0] == '{':
+        if not m_fenced and text and text[0] == "{":
             depth = 0
             in_string = False
             escape = False
@@ -5360,7 +5383,7 @@ class AiDiagnosisPlatform:
                 if escape:
                     escape = False
                     continue
-                if ch == '\\' and in_string:
+                if ch == "\\" and in_string:
                     escape = True
                     continue
                 if ch == '"':
@@ -5368,13 +5391,53 @@ class AiDiagnosisPlatform:
                     continue
                 if in_string:
                     continue
-                if ch == '{':
+                if ch == "{":
                     depth += 1
-                elif ch == '}':
+                elif ch == "}":
                     depth -= 1
                     if depth == 0:
                         _bare_end = i + 1
                         break
+
+        # ---- E）未闭合围栏（1013 实锤 sess_mv63uw3a）----
+        _e_match = False
+        _e_json_str, _e_json_end = None, 0
+        if m_fenced is None:
+            _of = re.match(r"```(?:json)?\s*", text)
+            if _of:
+                _cand = text[_of.end():]
+                _cand_st = _cand.lstrip()
+                if _cand_st.startswith("{"):
+                    _lead = len(_cand) - len(_cand_st)
+                    depth = 0
+                    in_string = False
+                    esc = False
+                    _end_e = -1
+                    for i, ch in enumerate(_cand_st):
+                        if esc:
+                            esc = False
+                            continue
+                        if ch == "\\" and in_string:
+                            esc = True
+                            continue
+                        if ch == '"':
+                            in_string = not in_string
+                            continue
+                        if in_string:
+                            continue
+                        if ch == "{":
+                            depth += 1
+                        elif ch == "}":
+                            depth -= 1
+                            if depth == 0:
+                                _end_e = i + 1
+                                break
+                    if _end_e > 0:
+                        _e_match = True
+                        _e_json_str = _cand_st[:_end_e].strip()
+                        _e_json_end = _of.end() + _lead + _end_e
+                        logger.info(f"[parse] 未闭合围栏抢救: 提取 json "
+                                    f"{len(_e_json_str)} chars")
 
         json_str = None
         if m_fenced:
@@ -5383,6 +5446,9 @@ class AiDiagnosisPlatform:
         elif _bare_end > 0:
             json_str = text[:_bare_end].strip()
             json_end = _bare_end
+        elif _e_match:
+            json_str = _e_json_str
+            json_end = _e_json_end
 
         if json_str:
             try:
@@ -5407,7 +5473,6 @@ class AiDiagnosisPlatform:
                 if not isinstance(referenced_ticket, str):
                     referenced_ticket = ""
                 # 车型追问选项（0930）：JSON 顶层 vehicle_choices，校验在调用侧
-                # （需要 action/会话态上下文，此处只收原始值）
                 vehicle_choices = data.get("vehicle_choices")
                 if not isinstance(vehicle_choices, list):
                     vehicle_choices = None
@@ -5416,72 +5481,56 @@ class AiDiagnosisPlatform:
                 if not isinstance(ticket_cancel, bool):
                     ticket_cancel = str(ticket_cancel).lower() in ("true", "1")
             except (json.JSONDecodeError, Exception):
+                # F）常见坏 JSON 修复：中文引号 → 直引号；对象尾逗号
+                _fixed = (json_str.replace("\u201c", '"').replace("\u201d", '"')
+                          .replace("\u2018", "'").replace("\u2019", "'")
+                          .replace(",}", "}").replace(",]", "]"))
+                try:
+                    data = json.loads(_fixed)
+                    logger.info("[parse] 坏 JSON 修复成功（引号/尾逗号）")
+                except Exception:
+                    data = {}
+                # G）仍失败 → 宽松正则抢救顶层关键字段（截断场景：字段靠前的
+                # action/problem_summary/collected_info 通常已完整输出）
+                if not isinstance(data, dict):
+                    data = {}
+                    for _k in ("action", "intent", "ticket_type", "problem_summary"):
+                        _m = re.search(rf'"{_k}"\s*:\s*"([^"]*)"', json_str)
+                        if _m and _m.group(1):
+                            data[_k] = _m.group(1)
+                    _m = re.search(r'"collected_info"\s*:\s*\{([^{}]*)\}', json_str)
+                    if _m:
+                        _ci = {}
+                        for _km, _kv in re.findall(
+                                r'"([^"]+)"\s*:\s*"([^"]*)"', _m.group(1)):
+                            _ci[_km] = _kv
+                        if _ci:
+                            data["collected_info"] = _ci
+                    logger.info(f"[parse] 截断/坏 JSON 字段抢救: {sorted(data.keys())}")
                 logger.info(f"[parse] json.loads failed on extracted JSON: "
                             f"json_str={json_str[:120]!r}")
 
-        # ---- 提取 JSON 之后的文本 ----
+        # ---- message 组装（1013 卫生版）----
+        # 解析成功：message = JSON 之后的正文（submit 允许空，系统随后弹窗）。
+        # 解析失败：剥掉 ```json 块后仍无正文 → 固定兜底话术——协议原文
+        # （```json 块）绝不泄漏给用户。
         after_json = text[json_end:] if json_end else text
-
-        if json_str:
-            after = re.sub(r"^```\s*", "", after_json).strip()
-            if after:
-                message = after
+        if json_str and data:
+            message = after_json.strip()
+            if not message and action == "ask":
+                message = "这条我这边解析遇到了点问题，麻烦您换个说法再说一次～"
+                action = "answer"
+        else:
+            _stripped = re.sub(r"```(?:json)?[\s\S]*?(?:```|$)", "", text).strip()
+            message = _stripped if _stripped else (
+                "这条我这边解析遇到了点问题，麻烦您换个说法再说一次～")
 
         message = message.lstrip("\n\r ")
 
         # 兜底清理：LLM 偶尔在 JSON 后多吐碎片（如 ,"key":"val"}、}} 等）
-        _before_clean = message[:100]
         message = re.sub(
             r'^[，,}\]\s]+(?:"[^"]*"\s*:\s*[^,\s]+\s*\}*)?[,，\s]*', '', message).strip()
-        if message != _before_clean.strip():
-            logger.info(f"[parse] cleaned JSON fragment: "
-                        f"before={_before_clean!r} after={message[:100]!r}")
 
-        # 兜底：如果 message 仍然以 JSON 开头（无 === 且无后续文本），
-        # 尝试剥掉裸 JSON 对象（同样用深度计数）
-        if message and (message.startswith("{") or message.startswith("```")):
-            # 先试带 ``` 包裹的
-            cleaned = re.sub(r'```(?:json)?\s*\{[\s\S]*?\}\s*```', '', message).strip()
-            # 再试裸 JSON（深度计数）
-            if not cleaned or cleaned.startswith("{"):
-                _msg_bare_end = -1
-                if message[0] == '{':
-                    _d, _s, _e = 0, False, False
-                    for _i, _ch in enumerate(message):
-                        if _e:
-                            _e = False
-                            continue
-                        if _ch == '\\' and _s:
-                            _e = True
-                            continue
-                        if _ch == '"':
-                            _s = not _s
-                            continue
-                        if _s:
-                            continue
-                        if _ch == '{':
-                            _d += 1
-                        elif _ch == '}':
-                            _d -= 1
-                            if _d == 0:
-                                _msg_bare_end = _i + 1
-                                break
-                    if _msg_bare_end > 0:
-                        cleaned = message[_msg_bare_end:].strip()
-            if cleaned:
-                message = cleaned
-            elif action == "submit":
-                # submit 且整个 message 就是裸 JSON（无后续正文）：符合 prompt 的
-                # 「message 留空」——置空，review 分支会回填「已生成工单草稿…」。
-                # 不置空的话 JSON 文本会一路带进 _finalize_diagnosis 状态流转。
-                message = ""
-            else:
-                # 剥不掉且非 submit：message 置空，交给下方「最终兜底」统一处理
-                # （LLM 抽风输出纯 JSON 无正文时，宁可让系统补一句通用确认，
-                # 也不把 JSON 文本当正文流给用户）。
-                message = ""
-
-        # 最终兜底：message 为空时给一个有意义的默认回复。
         # 例外：action=submit 时允许空 message——prompt 要求 submit 不写正文，
         # 系统随后展示「正在生成工单」动画 + 弹窗话术，这里不能再塞兜底文案。
         if (not message or not message.strip()) and action != "submit":
@@ -5501,9 +5550,7 @@ class AiDiagnosisPlatform:
             "referenced_ticket": referenced_ticket,
             "vehicle_choices": vehicle_choices,
         }
-
-    @staticmethod
-    def _validate_vehicle_choices(parsed: dict) -> Optional[List[str]]:
+    def _validate_vehicle_choices(self, parsed: dict) -> Optional[List[str]]:
         """车型追问选项机械校验（0930）：超标截断，救不到下限才整批丢弃。
 
         清洗链：丢非字符串/空串/超 30 字/重复 → 不足 2 条整批丢弃 → 超 3 条截前 3。
@@ -5675,6 +5722,32 @@ class AiDiagnosisPlatform:
             yield {"event": "result", "data": result}
             return
 
+        # ---- 车型分叉树直出（1014 ORS-980）：点引导按钮 = 树节点文案确定性回放 ----
+        # 类目/场景/现象选项在树里都有结构化下一层（选项表是人工写的），机械
+        # 匹配命中即秒回下一层按钮或该行方案，零检索零 LLM（点选项不产生新
+        # 信息，让 LLM 转几秒只是把表重新排版）。树直出的 choices 不过
+        # _validate_vehicle_choices——那是 LLM 幻觉选项的清洗闸门（≤3 条/30字），
+        # 树选项是结构化内容源，全量直出。自由输入不命中树路径自然落到下方
+        # 正常链路上 AI；树导览每步都在 turns 里（add_turn + _finalize），
+        # AI 接手时上下文完整。
+        _vm_meta_td = (getattr(memory, "metadata", None) or {}).get("vehicle_mode") or {}
+        if _vm_meta_td.get("model"):
+            from ai.api.vehicle_mode import tree_direct_reply
+            _td = tree_direct_reply(request.query, _vm_meta_td,
+                                    model=_vm_meta_td.get("model"))
+            if _td:
+                logger.info(f"[vehicle_mode] 分叉树直出({_td['kind']}): "
+                            f"session={request.session_id}, q={request.query[:30]}")
+                yield {"event": "token", "data": _td["message"]}
+                _td_result = await self._finalize_diagnosis(
+                    request.session_id, state,
+                    thinking="", action=_td["action"], message=_td["message"],
+                    streaming=True, vehicle_choices=_td.get("choices"))
+                _td_result["vehicle_choices"] = _td.get("choices")
+                if _td_result.get("title"):
+                    yield {"event": "title", "data": {"title": _td_result["title"]}}
+                yield {"event": "result", "data": _td_result}
+                return
 
         # 收集模式取消短接改用 LLM 判断：ticket_cancel 由 LLM 每轮输出（见 DIAGNOSIS_PROMPT
         # 输出规范），服务端只信任这个布尔值，不再用关键词正则（关键词既僵化又漏判）。

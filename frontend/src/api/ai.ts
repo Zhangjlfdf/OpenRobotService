@@ -184,6 +184,93 @@ export async function taskDiscussStream(
   }
 }
 
+export interface ArchiveGenerateHandlers {
+  /** 阶段提示（收集素材/总结中/保存初稿） */
+  onStatus?: (msg: string) => void;
+  /** 报告标题（先生成完） */
+  onTitle?: (text: string) => void;
+  /** 正文增量 */
+  onDelta?: (text: string) => void;
+  /** 生成完成并已写入草稿 */
+  onDone?: (data: { report_id: number; version: number; chars: number }) => void;
+  /** 生成失败（可直接手写） */
+  onError?: (message: string) => void;
+  /** 处理人已手写，AI 初稿不覆盖 */
+  onSkipped?: (message: string) => void;
+}
+
+/**
+ * POST /archive/generate/stream —— 归档报告 AI 初稿（SSE）。
+ * 事件：status / title / delta / done / error / skipped。
+ * 生成与连接解耦：中途断开后台仍会写回，前端可刷新或直接手写。
+ */
+export async function archiveGenerateStream(
+  body: { task_id: number },
+  handlers: ArchiveGenerateHandlers,
+  signal?: AbortSignal,
+): Promise<void> {
+  const res = await fetchWithAuth(`${BASE}/archive/generate/stream`, {
+    method: 'POST',
+    body: JSON.stringify(body),
+    signal,
+    headers: { Accept: 'text/event-stream' },
+  });
+  if (!res.ok) {
+    let detail = '';
+    try {
+      const j = await res.json();
+      detail = typeof j?.detail === 'string' ? j.detail : (typeof j?.message === 'string' ? j.message : '');
+    } catch { /* ignore */ }
+    throw new Error(detail || `服务异常（HTTP ${res.status}）`);
+  }
+  if (!res.body) throw new Error('流式响应无 body');
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder('utf-8');
+  let buffer = '';
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let sep = buffer.indexOf('\n\n');
+      while (sep !== -1) {
+        const rawEvent = buffer.slice(0, sep);
+        buffer = buffer.slice(sep + 2);
+        sep = buffer.indexOf('\n\n');
+        const lines = rawEvent.split('\n');
+        const evLine = lines.find((l) => l.startsWith('event:'));
+        const dataLine = lines.find((l) => l.startsWith('data:'));
+        if (!dataLine) continue;
+        const ev = (evLine ? evLine.slice('event:'.length).trim() : 'message') || 'message';
+        const dataStr = dataLine.slice('data:'.length).trim();
+        if (!dataStr) continue;
+        let obj: Record<string, unknown>;
+        try {
+          obj = JSON.parse(dataStr) as Record<string, unknown>;
+        } catch {
+          continue;
+        }
+        if (ev === 'status') {
+          handlers.onStatus?.(String(obj.msg ?? ''));
+        } else if (ev === 'title') {
+          handlers.onTitle?.(String(obj.text ?? ''));
+        } else if (ev === 'delta') {
+          handlers.onDelta?.(String(obj.text ?? ''));
+        } else if (ev === 'done') {
+          handlers.onDone?.(obj as { report_id: number; version: number; chars: number });
+        } else if (ev === 'error') {
+          handlers.onError?.(String(obj.msg ?? '生成失败'));
+        } else if (ev === 'skipped') {
+          handlers.onSkipped?.(String(obj.msg ?? '报告已有内容，AI 初稿未覆盖'));
+        }
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}
+
 /** 提交工单（显式传 username，token 失效时后端兜底绑定真实用户） */
 export const qaSubmit = (sessionId: string) =>
   aiPost<{ code: number; [key: string]: unknown }>('/qa/submit', { session_id: sessionId, username: useAuthStore.getState().username });
@@ -423,19 +510,22 @@ export const qaTicketAck = (sessionId: string, dispatchId = '', status = 'dispat
 export interface VehicleModeConfirmPayload {
   /** 会话 ID：先有会话再绑模式；同一 session 重复调用=覆盖重注册（幂等） */
   session_id: string;
-  /** 车型（如 XQE），取 wechat_qrcodes 录入信息行的 vehicle_model */
+  /** 扫码场景值（= str(wechat_qrcodes.id)，纯数字）：后端据此精确取扫的那一行录入信息 */
+  scene: string;
+  /** 车型（如 XQE）：弹窗展示值；后端以库内 vehicle_model 为准，此处仅作兜底 */
   model: string;
   project_name?: string;
   customer_name?: string;
-  /** 唯一车号：扫码链路只有 scene（proj_ 随机串）不是车号，故留空，走后端 model + project_name 匹配 */
+  /** 唯一车号：扫码链路无用（scene 才是车体身份），保留字段兼容其他调用方 */
   vehicle_code?: string;
 }
 
 /**
  * 车型定制模式确认：把当前会话注册为车型定制模式（该车型的 SOP / 故障分叉树引导）。
  *
- * code=0 注册成功，data 带回该车型的手册文档清单；code=1 表示车型未建档或不在服务范围，
- * message 面向用户（实验阶段明确不降级为常规模式，前端提示后由用户确认扫码信息）。
+ * code=0 注册成功，data 带回该车型的手册文档清单；code=1 表示二维码不可用（查无此码 /
+ * 非已发布 / scene 非法 / 未录车型），message 面向用户（实验阶段明确不降级为常规模式，
+ * 前端提示后由用户联系管理员）。
  */
 export const qaModeConfirm = (payload: VehicleModeConfirmPayload) =>
   aiPost<{
@@ -446,12 +536,20 @@ export const qaModeConfirm = (payload: VehicleModeConfirmPayload) =>
       model: string;
       domain: string;
       manual_docs: Array<{ title: string; path: string; url: string }>;
-      /** 开场大方向引导题（0930）：服务端直出（分叉树顶层随机 5 + 故障码保底），
-       *  无分叉树知识库时为 null（退化为纯输入框）。 */
+      /** 开场大方向引导题（0930）：服务端直出（分叉树顶层），无分叉树知识库时为
+       *  null（退化为纯输入框）。1012 起拆两段：choices=常驻 4（故障码保底优先），
+       *  collapsed_choices=折叠剩余（九大类全部可达而首屏不爆，前端「展开全部」补渲染）。 */
       opening?: {
         question: string;
         choices: Array<string>;
+        collapsed_choices?: Array<string>;
         hint: string;
+      } | null;
+      /** 车型资料引导（1012，独立于故障题）：扫车型目录下型号详情页（XQE122.md
+       *  形态）生成的按钮组，点击=发送「{型号} 车型介绍」走检索。无型号详情页为 null。 */
+      vehicle_guide?: {
+        question: string;
+        choices: Array<string>;
       } | null;
     };
   }>('/qa/mode/confirm', payload);

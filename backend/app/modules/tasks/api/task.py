@@ -594,6 +594,7 @@ async def get_tasks(
     closed_at_end: Optional[datetime] = Query(None, description="关闭时间结束"),
     deadline_at_start: Optional[datetime] = Query(None, description="截止时间起始"),
     deadline_at_end: Optional[datetime] = Query(None, description="截止时间结束"),
+    with_relations: bool = Query(False, description="是否同时返回关联工单完整数据（解决父子工单跨页问题）"),
     db: AsyncSession = Depends(get_db)
 ):
     import logging
@@ -646,6 +647,7 @@ async def get_tasks(
             closed_at_end=closed_at_end,
             deadline_at_start=deadline_at_start,
             deadline_at_end=deadline_at_end,
+            with_relations=with_relations,
         )
         logger.debug(f"查询参数构建完成, query_params={query_params}")
 
