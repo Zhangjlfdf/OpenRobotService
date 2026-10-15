@@ -251,3 +251,99 @@ def test_executed_block_stays_bounded(caps):
     block = _executed_block([{"capability": "x", "goal": "g"}], {"x": {"ok": True, "text": long_text}})
     assert len(block) <= _EXECUTED_BLOCK_CHARS
     assert "已截断" in block
+
+
+# ── B：能力结果互相喂养 ─────────────────────────────────────
+
+def test_default_wave_order_is_unchanged(caps):
+    """没有任何步骤写 after 时，必须沿用改造前的顺序：检索先、日志后。
+
+    （这条默认值靠 _plan_waves 用同一套机制表达，不是另一条代码路径。）
+    """
+    from ai.agents.AiTaskPlatform.capabilities.core.supervisor import _plan_waves
+
+    plan = [{"capability": "log_analyze"}, {"capability": "retrieve_kb"}]
+    waves = _plan_waves(plan)
+    caps_of = lambda w: [s["capability"] for _, s in w]        # noqa: E731
+    assert len(waves) == 2, "旧行为就是两波"
+    assert caps_of(waves[0]) == ["retrieve_kb"], "非日志的先跑"
+    assert caps_of(waves[1]) == ["log_analyze"], "日志后跑（历史命中就不用读了）"
+
+
+def test_no_log_analyze_is_one_wave(caps):
+    """没有 log_analyze 时不该凭空多出一波。"""
+    from ai.agents.AiTaskPlatform.capabilities.core.supervisor import _plan_waves
+
+    waves = _plan_waves([{"capability": "run_stub_a"}, {"capability": "run_stub_b"}])
+    assert len(waves) == 1
+    assert sorted(s["capability"] for _, s in waves[0]) == ["run_stub_a", "run_stub_b"]
+
+
+def test_explicit_after_orders_and_injects(caps):
+    """显式 after：后跑的那步要等到前一步的**结果**，并拿到它作为输入。"""
+    llm = _SeqLLM(
+        _dec("complex", [
+            _step("run_stub_a", "先查A"),
+            {"capability": "run_stub_b", "goal": "据A继续", "parallel": True,
+             "after": ["run_stub_a"]},
+        ]),
+    )
+    _run(llm)
+
+    assert _CapB.calls, "B 应该跑"
+    assert "先查A" in _CapB.calls[0], "B 的 query 要带上自己的 goal"
+    assert "A的结果(先查A)" in _CapB.calls[0], "B 必须拿到 A 的结果（这就是互相喂养）"
+
+
+def test_after_without_dependency_gets_no_injection(caps):
+    """没写 after 的步骤不该被灌上游结论 —— 否则等于给 query 掺水。"""
+    llm = _SeqLLM(_dec("complex", [
+        _step("run_stub_a", "查A"),
+        _step("run_stub_b", "查B"),
+    ]))
+    _run(llm)
+
+    assert _CapB.calls == ["查B"], "B 的 query 应当原样，不含 A 的结果"
+    assert _CapA.calls == ["查A"]
+
+
+def test_after_pointing_outside_plan_is_dropped(caps):
+    """after 指向没排进 plan 的能力 → 摘掉，否则那一波永远等不到（或变成并跑）。"""
+    from ai.agents.AiTaskPlatform.capabilities.core.supervisor import (
+        Supervisor,
+        SupervisorDecision,
+    )
+
+    sup = Supervisor(llm_client=None)
+    sup._runtime_ctx = {}
+    d = SupervisorDecision(complexity="complex", plan=[
+        {"capability": "run_stub_a", "goal": "g", "after": ["根本没这能力"]},
+    ])
+    out = sup._guard_decision(d, ["run_stub_a", "run_stub_b"], 5)
+    assert "after" not in out.plan[0], "落空的依赖必须摘掉"
+
+
+def test_cyclic_after_does_not_deadlock(caps):
+    """after 成环 → 剩下的并作一波照跑，绝不卡死。"""
+    from ai.agents.AiTaskPlatform.capabilities.core.supervisor import _plan_waves
+
+    waves = _plan_waves([
+        {"capability": "run_stub_a", "after": ["run_stub_b"]},
+        {"capability": "run_stub_b", "after": ["run_stub_a"]},
+    ])
+    assert len(waves) == 1, "成环时并跑，不是无限等"
+    assert len(waves[0]) == 2
+
+
+def test_upstream_block_is_bounded(caps):
+    """注入的上游结论要截断。"""
+    from ai.agents.AiTaskPlatform.capabilities.core.supervisor import (
+        _EXECUTED_BLOCK_CHARS,
+        _upstream_block,
+    )
+
+    step = {"capability": "b", "after": ["a"]}
+    prev = {"a": {"ok": True, "text": "结论" * 5000}}
+    block = _upstream_block(step, prev)
+    assert block and len(block) <= _EXECUTED_BLOCK_CHARS
+    assert "已截断" in block

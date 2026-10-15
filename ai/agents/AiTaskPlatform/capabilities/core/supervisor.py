@@ -47,6 +47,61 @@ _RESULT_SNIPPET_CHARS = 400   # 追规时每个能力结果喂回去的字符上
 _EXECUTED_BLOCK_CHARS = 2000  # 「本轮已执行」整段的字符上限
 
 
+def _plan_waves(plan: list[dict]) -> list[list[tuple[int, dict]]]:
+    """把 plan 按 `after` 依赖分成若干波；同波内并发跑。
+
+    **没有任何步骤写 `after` 时，沿用改造前的默认顺序**：非 log_analyze 先跑、
+    log_analyze 后跑（历史方案已验证就别再读昂贵日志）。这条默认用同一套机制表达，
+    不是另一条代码路径。
+
+    一旦有步骤显式写了 `after`，就完全按它来（不写 after 的步骤进第一波）。
+    依赖成环或指向未排的能力时，剩下的**并作一波照跑** —— 宁可不按序，也不卡死。
+    """
+    indexed = list(enumerate(plan))
+    any_explicit = any(s.get("after") for _, s in indexed)
+
+    deps: dict[int, set] = {}
+    for i, s in indexed:
+        dep = set(s.get("after") or [])
+        if not any_explicit and s.get("capability") == "log_analyze":
+            dep = {c for _, c in ((j, t.get("capability")) for j, t in indexed)
+                   if c and c != "log_analyze"}
+        deps[i] = dep
+
+    waves: list[list[tuple[int, dict]]] = []
+    done: set = set()
+    remaining = dict(deps)
+    while remaining:
+        ready = [i for i, dep in remaining.items() if not (dep - done)]
+        if not ready:                      # 成环 / 依赖落空 → 剩下的并一波，别卡死
+            logger.warning(f"[supervisor] after 依赖无法满足，剩余 {len(remaining)} 步并作一波")
+            ready = list(remaining)
+        waves.append([indexed[i] for i in sorted(ready)])
+        for i in ready:
+            done.add(plan[i].get("capability"))
+            remaining.pop(i)
+    return waves
+
+
+def _upstream_block(step: dict, prev_results: dict) -> str:
+    """该步骤声明依赖（`after`）的上游能力结果，供它接着分析。
+
+    没有 `after` 的步骤拿不到 —— 不给它灌一堆无关的上游结论，避免把 query 冲淡。
+    """
+    deps = step.get("after") or []
+    if not deps or not prev_results:
+        return ""
+    parts: list[str] = []
+    for cap in deps:
+        text = str((prev_results.get(cap) or {}).get("text") or "").strip()
+        if not text:
+            continue
+        if len(text) > _RESULT_SNIPPET_CHARS:
+            text = text[:_RESULT_SNIPPET_CHARS] + "…（已截断）"
+        parts.append(f"[{cap}]\n{text}")
+    return "\n\n".join(parts)[:_EXECUTED_BLOCK_CHARS]
+
+
 def _executed_block(plan_all: list, results: dict) -> str:
     """追规那轮的「本轮已执行」段：只说**结果**，不带能力的内部过程。
 
@@ -139,6 +194,15 @@ def _parse_decision(raw: str) -> Optional[SupervisorDecision]:
             for extra_key in ("window_minutes", "before_minutes", "after_minutes", "occurred_at", "params"):
                 if extra_key in p and p[extra_key] is not None:
                     item[extra_key] = p[extra_key]
+            # after：该步骤要等哪些能力跑完（可选）。给了就能让后波看到前波的结果，
+            # 例如「日志读出型号后再去查该型号的 KB」。见 _plan_waves。
+            _after = p.get("after")
+            if isinstance(_after, str):
+                _after = [_after]
+            if isinstance(_after, list):
+                _after = [str(x).strip() for x in _after if str(x or "").strip()]
+                if _after:
+                    item["after"] = _after
             clean_plan.append(item)
     # questions（ask_user=true 时问用户的澄清问题；兼容 string / list 两种形态）
     q = data.get("questions") or []
@@ -280,13 +344,19 @@ class Supervisor:
             f"{task_context}\n\n"
             "## 输出（仅 JSON，无其他文字）\n"
             '{"complexity":"simple|medium|complex","reasoning":"...",'
-            '"plan":[{"capability":"<能力名，必须来自可用能力清单>","goal":"...","parallel":bool,"window_minutes":<可选，仅log_analyze>}],'
+            '"plan":[{"capability":"<能力名，必须来自可用能力清单>","goal":"...","parallel":bool,'
+            '"after":["<可选：本步要等哪些能力先跑完>"],"window_minutes":<可选，仅log_analyze>}],'
             '"ask_user":bool,"questions":["..."]}\n'
             "规则：\n"
             "- 任务简单（纯知识问答、无多领域线索）→ complexity=simple，plan 为空\n"
             "- 单一领域线索 → complexity=medium，plan 含 1 项\n"
             "- 多领域线索交叉 → complexity=complex，plan 含多项，parallel 合理设 true\n"
             "- capability 只能从可用能力清单里选，严禁凭空命名\n"
+            "- **after（可选）**：某步必须**拿着另一步的结论**才能做时，在 after 里写那个能力名"
+            "（如「日志分析读出机型/错误码后再去查知识库」→ 知识库那步写 after:[\"log_analyze\"]）。"
+            "写了的步骤会等依赖跑完，并**自动拿到依赖的结果**作为输入。\n"
+            "- after 不写 = 可以立刻并行跑。**只有当确实存在先后依赖时才写**，"
+            "无依赖地串起来只会白白拖长耗时。\n"
             "- 若派 log_analyze 且故障属缓慢累积/日志稀疏，可在 window_minutes 指定更长的前因窗口（默认15即可）\n"
             "- retrieve_history 与 log_analyze 同时派时，程序会先跑历史方案；已验证命中则跳过日志分析\n"
             "- **若关键信息缺失（如故障发生时间/是否可复现/变更了什么/报错现场）导致无法可靠排查，"
@@ -489,50 +559,72 @@ class Supervisor:
             per_cap[cap_name] = per_cap.get(cap_name, 0) + 1
             kept.append(step)
         # 数量上限
-        d.plan = kept[:max_sub_tasks]
+        kept = kept[:max_sub_tasks]
+        # after 只允许指向**本 plan 里真实存在**的能力：指向没排的能力会让那一波永远等
+        # 不到（靠 _plan_waves 的环兜底也只是变成并跑），不如这里直接摘干净。
+        present = {s.get("capability") for s in kept}
+        for step in kept:
+            if "after" in step:
+                dep = [a for a in step["after"] if a in present and a != step.get("capability")]
+                if dep:
+                    step["after"] = dep
+                else:
+                    step.pop("after", None)
+        d.plan = kept
         return d
 
     # ── 派生子任务（支持并行/串行 + 并发上限 + 早停）──
     async def _dispatch(self, plan: list[dict], todo: TodoList, max_sub_tasks: int, emit: Optional[Callable] = None) -> dict:
-        """log_analyze 放到第二波：历史方案已验证则跳过昂贵日志分析。
+        """按 `_plan_waves` 分波派发；后波能拿到前波的结果（issues.md #25-B）。
 
-        按原 plan 下标对齐 todo，避免 log_analyze 排在前面时跳错项。
+        为什么要分波：历史方案已验证（terminate）就不必再读昂贵的日志。
+        为什么要让后波看到前波：日志分析读出关键信息后，才谈得上拿它去查该能力对应的
+        KB/排查树/历史 —— 改造前后波看不到前波，这条链是断的。
+
+        按原 plan 下标对齐 todo，避免早停时标错项。
         """
-        early = [(i, s) for i, s in enumerate(plan) if s.get("capability") != "log_analyze"]
-        late = [(i, s) for i, s in enumerate(plan) if s.get("capability") == "log_analyze"]
-        results = {}
-        if early:
-            results.update(await self._dispatch_group(early, todo, emit))
-            if any(_result_terminated(r) for r in results.values()):
-                bus = self._bus()
-                for i, step in late:
-                    if i >= len(todo._items):
-                        continue
-                    item = todo._items[i]
-                    if item.status == "completed":
-                        continue
-                    with bus.start_span(step.get("capability") or "log_analyze"):
-                        bus.set_status("skipped", reason="历史方案已验证")
-                    todo.mark_done(item.id, result="已跳过：历史方案已验证（早停）")
-                    if emit is not None:
-                        emit("done", {
-                            "id": item.id,
-                            "description": item.description or step.get("capability") or "",
-                            "status": "completed",
-                            "capability": step.get("capability") or "",
-                        })
-                return results
-        if late:
-            results.update(await self._dispatch_group(late, todo, emit))
+        results: dict = {}
+        for wave in _plan_waves(plan):
+            got = await self._dispatch_group(wave, todo, emit, results)
+            results.update(got)
+            if any(_result_terminated(r) for r in got.values()):
+                # 历史方案已验证 → 后面的波整体跳过（与改造前的早停语义一致）
+                self._skip_remaining_waves(plan, results, todo, emit)
+                break
         return results
+
+    def _skip_remaining_waves(self, plan, results, todo, emit) -> None:
+        """把还没跑过的步骤标成「已跳过：历史方案已验证」并推进度。"""
+        bus = self._bus()
+        for i, step in enumerate(plan):
+            cap = step.get("capability")
+            if cap in results:
+                continue
+            if i >= len(todo._items):
+                continue
+            item = todo._items[i]
+            if item.status == "completed":
+                continue
+            with bus.start_span(cap or "capability"):
+                bus.set_status("skipped", reason="历史方案已验证")
+            todo.mark_done(item.id, result="已跳过：历史方案已验证（早停）")
+            if emit is not None:
+                emit("done", {
+                    "id": item.id,
+                    "description": item.description or cap or "",
+                    "status": "completed",
+                    "capability": cap or "",
+                })
 
     async def _dispatch_group(
         self,
         indexed_plan: list[tuple[int, dict]],
         todo: TodoList,
         emit: Optional[Callable],
+        prev_results: Optional[dict] = None,
     ) -> dict:
         sem = asyncio.Semaphore(_CONCURRENCY)
+        prev_results = prev_results or {}
 
         async def _run_one(step: dict, todo_item: TodoItem):
             cap_name = step["capability"]
@@ -574,6 +666,13 @@ class Supervisor:
             try:
                 async with sem:
                     kwargs = {"query": step.get("goal", "")}
+                    # 声明了 after 的步骤，把它依赖的上游结果接在自己的 query 后面，
+                    # 让「日志读出型号 → 再去查该型号的 KB」这类链条成立。
+                    _up = _upstream_block(step, prev_results)
+                    if _up:
+                        kwargs["query"] = (
+                            f"{kwargs['query']}\n\n## 上游能力的结论（据此继续）\n{_up}"
+                        ).strip()
                     extra = "\n".join(self._runtime_ctx.get("round_supplements") or [])
                     if extra:
                         kwargs["query"] = f"{kwargs['query']}\n\n工程师本轮补充:\n{extra}".strip()
