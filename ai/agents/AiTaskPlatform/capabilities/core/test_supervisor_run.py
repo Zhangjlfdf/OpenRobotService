@@ -77,10 +77,10 @@ def caps():
         CapabilityRegistry._capabilities.pop(key, None)
 
 
-def _run(llm, ctx=None):
+def _run(llm, ctx=None, caps=None):
     return asyncio.run(Supervisor(llm_client=llm).run(
         task_context="工单上下文",
-        available_caps=["run_stub_a", "run_stub_b"],
+        available_caps=caps or ["run_stub_a", "run_stub_b"],
         runtime_ctx=ctx if ctx is not None else {},
     ))
 
@@ -347,3 +347,69 @@ def test_upstream_block_is_bounded(caps):
     block = _upstream_block(step, prev)
     assert block and len(block) <= _EXECUTED_BLOCK_CHARS
     assert "已截断" in block
+
+
+# ── C：失败的能力可以在追规那轮重试 ────────────────────────
+
+class _FlakyCap(BaseCapability):
+    """第一次失败、第二次成功 —— 模拟「一次抖动毁掉整轮」。"""
+    name = "run_stub_flaky"
+    description = "第一次失败、之后成功的替身"
+    attempts: list = []
+
+    async def run(self, **kwargs):
+        type(self).attempts.append(kwargs.get("query", ""))
+        if len(type(self).attempts) == 1:
+            return CapabilityResult.failure("第一次失败（模拟抖动）")
+        return CapabilityResult(text=f"第二次成功({kwargs.get('query','')})")
+
+
+@pytest.fixture
+def flaky():
+    _FlakyCap.attempts = []
+    CapabilityRegistry.register(_FlakyCap)
+    yield
+    for key in [k for k, v in CapabilityRegistry._capabilities.items() if v is _FlakyCap]:
+        CapabilityRegistry._capabilities.pop(key, None)
+
+
+def test_failed_capability_can_be_retried_in_the_next_round(flaky):
+    """失败的能力不该被和「成功的能力」一样禁掉：它没有正文可覆盖，重试是纯赚。
+
+    （这正是「一次 LLM 抖动毁掉整轮」的直接修法 —— 追规那轮给了它第二次机会。）
+    """
+    llm = _SeqLLM(
+        _dec("medium", [_step("run_stub_flaky", "第一次问法")]),
+        _dec("medium", [_step("run_stub_flaky", "换个说法再问")]),
+    )
+    res = _run(llm, caps=["run_stub_flaky"])
+
+    assert len(_FlakyCap.attempts) == 2, "失败的能力应该被再派一次"
+    assert "换个说法再问" in _FlakyCap.attempts[1]
+    assert res["results"]["run_stub_flaky"]["ok"] is True
+    assert "第二次成功" in res["results"]["run_stub_flaky"]["text"]
+
+
+def test_only_failed_ones_are_retryable(caps, flaky):
+    """混在一起验：成功的不重派、失败的可以 —— 别把 C 做过头。"""
+    llm = _SeqLLM(
+        _dec("medium", [_step("run_stub_a", "查A"), _step("run_stub_flaky", "查flaky")]),
+        _dec("medium", [_step("run_stub_a", "又查一次A"), _step("run_stub_flaky", "换个说法查flaky")]),
+    )
+    _run(llm, caps=["run_stub_a", "run_stub_flaky"])
+
+    assert _CapA.calls == ["查A"], "成功的能力不能被重派（证据会被覆盖）"
+    assert len(_FlakyCap.attempts) == 2, "失败的能力应该被重派"
+    assert "换个说法查flaky" in _FlakyCap.attempts[1]
+
+
+def test_executed_block_marks_retryable(flaky):
+    """「本轮已执行」段要标清哪条能再试、哪条不能，否则规划器只会瞎猜。"""
+    from ai.agents.AiTaskPlatform.capabilities.core.supervisor import _executed_block
+
+    block = _executed_block(
+        [{"capability": "a", "goal": "g"}, {"capability": "b", "goal": "g"}],
+        {"a": {"ok": True, "text": "有结论"}, "b": {"ok": False, "error": "抖动"}},
+    )
+    assert "已成功，不要重复派" in block
+    assert "可换个说法再派一次" in block

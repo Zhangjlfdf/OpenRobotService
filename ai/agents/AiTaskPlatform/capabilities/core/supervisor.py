@@ -83,6 +83,19 @@ def _plan_waves(plan: list[dict]) -> list[list[tuple[int, dict]]]:
     return waves
 
 
+def _cap_succeeded(res) -> bool:
+    """该能力这一轮是否**拿到了东西**。
+
+    只有「ok 且有正文」才算成功。失败 / 空输出 / 配额拦下都算没拿到 ——
+    追规那轮据此决定哪些还能再派一次（见 run() 的 caps_round）。
+    """
+    return bool(
+        isinstance(res, dict)
+        and res.get("ok", True)
+        and str(res.get("text") or "").strip()
+    )
+
+
 def _upstream_block(step: dict, prev_results: dict) -> str:
     """该步骤声明依赖（`after`）的上游能力结果，供它接着分析。
 
@@ -111,17 +124,21 @@ def _executed_block(plan_all: list, results: dict) -> str:
     """
     if not plan_all and not results:
         return ""
-    lines = ["## 本轮已执行（不要重复派这些能力）"]
+    lines = ["## 本轮已执行"]
     for step in plan_all:
         cap = step.get("capability") or ""
         goal = step.get("goal") or ""
         res = results.get(cap) or {}
         text = str(res.get("text") or "").strip()
-        if not text and not res.get("ok", True):
-            text = f"（未成功：{res.get('error') or '无结果'}）"
+        if _cap_succeeded(res):
+            mark = "（已成功，不要重复派）"
+        else:
+            # 明确告诉规划器「这条还能再试」——失败的重试不会覆盖任何证据，
+            # 而换一个角度再查一次正是追规这一轮的意义。
+            mark = f"（没拿到结果：{res.get('error') or '无输出'}，可换个说法再派一次）"
         if len(text) > _RESULT_SNIPPET_CHARS:
             text = text[:_RESULT_SNIPPET_CHARS] + "…（已截断）"
-        lines.append(f"- {cap}（{goal}）：{text or '（无输出）'}")
+        lines.append(f"- {cap}（{goal}）：{text or '（空）'} {mark}")
     return "\n".join(lines)[:_EXECUTED_BLOCK_CHARS]
 
 
@@ -355,6 +372,8 @@ class Supervisor:
             "- **after（可选）**：某步必须**拿着另一步的结论**才能做时，在 after 里写那个能力名"
             "（如「日志分析读出机型/错误码后再去查知识库」→ 知识库那步写 after:[\"log_analyze\"]）。"
             "写了的步骤会等依赖跑完，并**自动拿到依赖的结果**作为输入。\n"
+            "- 若上方给了「本轮已执行」段：**已成功的**不要重复派；标着「可换个说法再派一次」的"
+            "说明上一轮没拿到结果，可以再派一次（换个更具体的 goal）。都没有就说明够了。\n"
             "- after 不写 = 可以立刻并行跑。**只有当确实存在先后依赖时才写**，"
             "无依赖地串起来只会白白拖长耗时。\n"
             "- 若派 log_analyze 且故障属缓慢累积/日志稀疏，可在 window_minutes 指定更长的前因窗口（默认15即可）\n"
@@ -431,11 +450,13 @@ class Supervisor:
             # 有界多轮：初始规划 → 派发 → 看结果 → 再追规一次（_MAX_ROUNDS）。
             # 原来只规划一次、结果不回流 —— KB 没命中 / 日志没读出根因时没有第二次机会。
             for rnd in range(_MAX_ROUNDS):
-                # 每轮重算可派集：用满的摘掉，「已派过的」也摘掉。
-                # 已派过的必须排除：results 以**能力名**为 key，同一能力跑两次后者会覆盖
+                # 每轮重算可派集：用满的摘掉，**已经成功**的也摘掉。
+                # 成功的必须排除：results 以**能力名**为 key，同一能力跑两次后者会覆盖
                 # 前者，而上层逐 key 读 text —— 覆盖等于吞掉证据。
+                # **失败的可以再派**（C）：失败的结果没有 text，重试它不会覆盖任何证据，
+                # 而「换个角度再查一次」正是追规这一轮存在的意义。
                 caps_round = [c for c in cap_usage.drop_exhausted(self._runtime_ctx, caps)
-                              if c not in results]
+                              if not _cap_succeeded(results.get(c))]
                 if not caps_round:
                     rounds.append({"round": rnd + 1, "stop": "无可派能力"})
                     break
