@@ -29,13 +29,37 @@ from typing import Iterable, Optional
 
 # ── S1 人名幻觉 ─────────────────────────────────────────────
 
+# 明显不是人名的条目 —— 实测踩到的（`users.name` 里真的存在）：
+#   `...`（有人名字就是三个点）、`管理员`（角色词，回答里说「需管理员重启」会被误标）。
+# 这类条目混进人名表会让 S1 大面积误报，必须在**匹配之前**滤掉。
+_ROLE_WORDS = {
+    "管理员", "系统", "客服", "测试", "匿名", "未知", "用户", "访客",
+    "admin", "system", "guest", "none", "null", "unknown",
+}
+_NAME_EXTRA_CHARS = {"·", "-", " "}     # 阿依古丽·买买提 / Mary-Jane 这类
+
+
+def is_plausible_person_name(name: str) -> bool:
+    """像不像一个人名（用于清洗 users 表来的候选）。
+
+    宁可严一点：漏掉真名只是少一处核对，误报一个角色词会让整批数字失真。
+    """
+    n = str(name or "").strip()
+    if not (2 <= len(n) <= 20):
+        return False
+    if n.lower() in _ROLE_WORDS:
+        return False
+    return all(ch.isalpha() or ch in _NAME_EXTRA_CHARS for ch in n)
+
+
 def find_mentioned_names(text: str, known_names: Iterable[str]) -> list[str]:
     """从 text 里找出「已知人名」的出现（长名优先，避免短名吃掉长名的一部分）。
 
     用「已知人名集合」而不是做 NER：这个域的人名基本都在 users 表里，
     拿表去匹配**没有误报**，也不需要模型。
     """
-    names = sorted({str(n).strip() for n in (known_names or []) if str(n or "").strip()},
+    names = sorted({str(n).strip() for n in (known_names or [])
+                    if is_plausible_person_name(n)},
                    key=len, reverse=True)
     taken: list[tuple[int, int]] = []
     found: list[str] = []

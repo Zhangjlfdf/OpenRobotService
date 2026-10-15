@@ -20,11 +20,21 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import time
 from pathlib import Path
 from typing import Iterable, Optional
 
-from ai.core.logging import get_logger
+# 直接跑本脚本时要能 import 后端的 app.*：把仓库根与 backend/ 加进 sys.path
+# （与 ai/core/conftest.py 同一套做法）。
+# 注意：import app.core.database 会在导入期执行 create_all —— 只建**缺失的表**，
+# 不删不改。在本地副本上跑没问题；对着生产库跑之前请先想清楚。
+_ROOT = Path(__file__).resolve().parents[4]
+for _p in (str(_ROOT), str(_ROOT / "backend")):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+from ai.core.logging import get_logger  # noqa: E402
 
 logger = get_logger("TASK_AGENT")
 
@@ -124,16 +134,19 @@ def build(limit: int = 20, *, ticket_ids: Optional[Iterable[int]] = None,
         render_comment_lines,
     )
 
-    # 候选工单：有评论的活跃工单（最近优先）
+    # 候选工单：**直接找「有 @U 提问」的工单**，而不是「有评论的工单」。
+    # 后者命中率极低（实测 120 张里只有 8 张有问答对），白扫一大圈。
     db = SessionLocal()
     try:
-        q = db.query(TaskComment.task_id).distinct()
+        q = db.query(TaskComment.task_id).distinct().filter(
+            TaskComment.content.like("%@U%"),
+            TaskComment.created_by != AI_AUTHOR,
+        )
         if since:
             q = q.filter(TaskComment.created_at >= since)
         if ticket_ids:
             q = q.filter(TaskComment.task_id.in_([int(t) for t in ticket_ids]))
-        ids = [r[0] for r in q.all()]
-        ids = sorted(ids, reverse=True)[: max(limit * 6, 60)]   # 多取一些，下面会筛掉不少
+        ids = sorted({r[0] for r in q.all()}, reverse=True)[: max(limit * 3, 60)]
     finally:
         db.close()
 
@@ -183,12 +196,20 @@ def build(limit: int = 20, *, ticket_ids: Optional[Iterable[int]] = None,
 
 
 def known_names() -> list[str]:
-    """users 表里的显示名（用于 S1 人名幻觉）—— 与生产同一套映射。"""
+    """users 表里的显示名（用于 S1 人名幻觉）—— 与生产同一套映射。
+
+    清洗两道（都在 signals 那一侧，单一来源）：
+      - 未实名代称「（微信用户N）」不是人名；
+      - `is_plausible_person_name` 滤掉角色词与垃圾值
+        （实测 users 表里真的有 `...` 和 `管理员`，不清洗会大面积误报）。
+    """
+    from ai.agents.AiTaskPlatform.regression.signals import is_plausible_person_name
+
     try:
         from ai.agents.AiTaskPlatform.contexts.comments import _author_display_map
         names = {v for v in (_author_display_map() or {}).values() if v}
-        # 未实名代称（「（微信用户N）」）不是人名，排除
-        return sorted(n for n in names if not n.startswith("（微信用户"))
+        return sorted(n for n in names
+                      if not n.startswith("（微信用户") and is_plausible_person_name(n))
     except Exception as e:
         logger.warning(f"[regression] 读取用户姓名失败: {e}")
         return []

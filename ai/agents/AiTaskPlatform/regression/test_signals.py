@@ -9,6 +9,7 @@ from ai.agents.AiTaskPlatform.regression.signals import (
     compare,
     find_mentioned_names,
     is_giveup,
+    is_plausible_person_name,
     name_hallucination,
     score_case,
 )
@@ -122,3 +123,36 @@ def test_score_case_end_to_end():
     )
     assert row["names_unsupported"] == ["齐子谦"]
     assert row["citations_missing"] == ["99999"]
+
+
+# ── 人名表清洗（实测踩到的：users 表里有 `...` 和 `管理员`）──────
+
+def test_role_words_are_not_names():
+    """「管理员」是角色词：回答里说「需管理员重启」不该被当成凭空出现的人名。"""
+    assert is_plausible_person_name("管理员") is False
+    assert is_plausible_person_name("系统") is False
+    assert is_plausible_person_name("admin") is False
+
+
+def test_junk_values_are_not_names():
+    """users 表里真的出现过名字是 `...` 的用户 —— 不清洗会大面积误报。"""
+    assert is_plausible_person_name("...") is False
+    assert is_plausible_person_name("1") is False
+    assert is_plausible_person_name("") is False
+    assert is_plausible_person_name("A/B") is False
+
+
+def test_real_names_still_pass():
+    assert is_plausible_person_name("汪海波") is True
+    assert is_plausible_person_name("Mary-Jane") is True
+    assert is_plausible_person_name("阿依古丽·买买提") is True
+
+
+def test_role_word_in_answer_is_not_flagged():
+    """端到端：回答里出现「管理员」不该报人名幻觉。"""
+    out = name_hallucination(
+        answer="需管理员重启算法计算服务",
+        material="[汪海波] 地图发布卡住了",
+        known_names=["管理员", "汪海波"],
+    )
+    assert out["unsupported"] == []
