@@ -84,6 +84,14 @@ export function readVehicleTag(conv: { metadata_: string | null }): string {
   }
 }
 
+/** 补写会话 metadata（自愈：存量扫码会话缺 vehicle 角标时，恢复时检测到引导
+ *  消息即回填；只传 metadata_，title 等其余字段不动）。 */
+export const updateConversationMeta = (id: number, meta: Record<string, unknown>) =>
+  request<Conversation>(`/conversations/${id}`, {
+    method: 'PUT',
+    body: JSON.stringify({ metadata_: JSON.stringify(meta) }),
+  });
+
 /** 当前用户在指定场景下的会话列表（最新在前）；skipCache 确保删除/新建后列表是最新的 */
 export const listMyConversations = (scene: ChatScene, limit = 5) =>
   request<Conversation[]>(`/conversations?scene_type=${SCENE_TO_DB[scene]}&limit=${limit}`, { skipCache: true });
