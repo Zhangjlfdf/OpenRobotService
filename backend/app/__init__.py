@@ -19,6 +19,7 @@ from app.modules.admin.api.wecom_sheets import public_router as wecom_sheets_pub
 from app.modules.tasks import tasks_router
 from app.modules.call import call_router
 from app.modules.dataqa import dataqa_router
+from app.modules.wxpay import wxpay_router, internal_router
 
 import app.integrations  # noqa: E402  装载外部任务源插件（按 TASK_SOURCES_ENABLED 自注册）
 from app.integrations.api import router as integrations_sources_router
@@ -32,6 +33,9 @@ from app.wechat.services.user_statistics_snapshot import (
     stop_user_statistics_scheduler,
 )
 security = HTTPBearer()
+
+# 随 shutdown 执行的清理钩子（模块内按需 append）
+_shutdown_hooks = []
 
 app = FastAPI(
     title=settings.APP_NAME,
@@ -118,11 +122,28 @@ async def startup_event():
     # 每个整点拉取昨日用户增减数据，并覆盖为该日期最新渠道明细
     start_user_statistics_scheduler()
 
+    # 微信支付兜底任务：查单刷新 / 奖励过期 / 一致性巡检
+    # （未启用 WXPAY_ENABLED 时内部自行跳过，不影响启动）
+    try:
+        from app.modules.wxpay.tasks import (
+            start_wxpay_scheduler,
+            stop_wxpay_scheduler,
+        )
+        start_wxpay_scheduler()
+        _shutdown_hooks.append(stop_wxpay_scheduler)
+    except Exception as e:  # noqa: BLE001
+        print(f"[wxpay] 兜底任务调度器启动失败（不影响启动）: {e}")
+
 
 @app.on_event("shutdown")
 async def shutdown_event():
     stop_user_info_snapshot_scheduler()
     stop_user_statistics_scheduler()
+    for hook in _shutdown_hooks:
+        try:
+            hook()
+        except Exception as e:  # noqa: BLE001
+            print(f"[wxpay] 停止调度器异常: {e}")
 
 app.add_middleware(
     CORSMiddleware,
@@ -143,6 +164,10 @@ app.include_router(tasks_router, prefix=f"{settings.API_V1_STR}")
 app.include_router(call_router, prefix=f"{settings.API_V1_STR}")
 app.include_router(dataqa_router, prefix=f"{settings.API_V1_STR}")
 app.include_router(wechat_api_router, prefix=f"{settings.API_V1_STR}")
+# 微信支付：用户端走 /api/wxpay/**（JWT）；内部接口**不能**加 /api 前缀，
+# 必须与 Go 侧 WXPAY_FASTAPI_BASE_URL + /internal/wxpay/notify/transfer 严格一致
+app.include_router(wxpay_router, prefix=f"{settings.API_V1_STR}")
+app.include_router(internal_router)
 app.include_router(integrations_mappings_router, prefix=f"{settings.API_V1_STR}/admin")
 
 @app.get(f"{settings.API_V1_STR}/health")
