@@ -7,28 +7,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-
-PRODUCT_DOMAIN = {
-    "调度USP": "调度系统",
-    "车端硬件": "车体硬件",
-    "车端软件": "车端软件",
-    "摇人吧服务号": "摇人吧",
-}
-
-DEPT_DOMAIN = {
-    "智能规划研究院": "调度系统",
-    "机器人事业部": "车体硬件",
-    "智能移动研究院": "车端软件",
-}
-
-DOMAINS = (
-    "调度系统",
-    "车体硬件",
-    "车端软件",
-    "摇人吧",
-    "上游对接",
-    "实施工具",
-    "售前",
+from ai.agents.AiDiagnosisPlatform.assigner.dual_tree.domains import (
+    DEPT_DOMAIN,
+    DOMAINS,
+    PRODUCT_DOMAIN,
 )
 
 

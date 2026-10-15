@@ -789,32 +789,9 @@ class DiagnoseFlow:
                         output={"response_chars": len(raw)},
                         elapsed_ms=round((time.perf_counter() - t4) * 1000))
 
-        # 5. Evaluator-optimizer（改造点 C / G4）：诊断报告也做自评/重写，消除偏题/幻觉
+        # 5. 报告即初稿（自评/重写已整体移除，见 issues.md）
         t5 = time.perf_counter()
         report_md = raw.strip()
-        eval_used = False
-        try:
-            from ai.agents.AiTaskPlatform.capabilities import Evaluator
-            # evidence = 附件分析 + 历史方案 + 知识库（诊断报告引用的全部证据）
-            evidence_parts = [att_text, hist_text, kb_context]
-            evidence = "\n\n".join(p for p in evidence_parts if p and "未检索" not in p and "无" not in p)[:2000]
-            eval_res = await Evaluator.evaluate_and_rewrite(
-                llm_client=self._llm_client,
-                draft=report_md,
-                evidence=evidence,
-                context=f"工单: {context.title or ''}\n用户问题: 帮我分析这个工单",
-            )
-            if eval_res.get("rewritten") or eval_res.get("eval_failed"):
-                eval_used = True
-            if eval_res.get("rewritten"):
-                report_md = eval_res["final"]
-                self._add_trace(self.NODE_LLM, "ok",
-                                output={"evaluator": "rewritten", "issues": eval_res.get("eval_notes", []), "report_chars": len(report_md)})
-            elif eval_res.get("eval_failed"):
-                self._add_trace(self.NODE_LLM, "ok",
-                                output={"evaluator": "eval_failed", "report_chars": len(report_md)})
-        except Exception as e:
-            logger.warning(f"[diagnose] Evaluator 执行异常，沿用初稿: {e}")
         conf = 0.0
         m = re.search(r'置信度[：:]\s*(\d+\.?\d*)', report_md)
         if m:

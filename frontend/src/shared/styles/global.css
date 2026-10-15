@@ -949,10 +949,10 @@ html, body, #root {
   appearance: none;
   max-width: 100%;
   padding: 8px 14px;
-  border: 1px solid #c9d9f5;
+  border: 1px solid color-mix(in oklab, var(--primary) 35%, var(--card));
   border-radius: 16px;
-  background: #f4f7fd;
-  color: #1a5cc8;
+  background: var(--primary-soft);
+  color: var(--sky);
   font-size: 13.5px;
   line-height: 1.4;
   text-align: left;
@@ -961,38 +961,50 @@ html, body, #root {
   transition: background 0.15s, border-color 0.15s, opacity 0.15s;
 }
 .chat-veh-chip:active {
-  background: #e8f0fe;
-  border-color: #1a73e8;
+  background: var(--accent);
+  border-color: var(--primary);
 }
 .chat-veh-chip:disabled {
   cursor: default;
 }
 /* 答复后整组持久保留：所选实心加深，其余弱化 */
 .chat-veh-chip--selected {
-  background: #1a73e8;
-  border-color: #1a73e8;
+  background: var(--sky);
+  border-color: var(--sky);
   color: #fff;
   font-weight: 600;
 }
 .chat-veh-chip--done {
   opacity: 0.45;
 }
-/* 车型介绍按钮变体（1014）：与开场题的蓝色胶囊区分。同尺寸/圆角/边框粗细，
-   只换色相——蓝=故障排查主线，青绿=车型资料查阅（邻近色和谐，低饱和浅底
-   在手机浅色聊天背景上不刺眼；不用 emoji 前缀，安卓/微信内渲染不一） */
+/* 车型介绍按钮变体：马卡龙主蓝底白字，与开场题的浅蓝胶囊保持同一色系。 */
 .chat-veh-chip--intro {
-  border-color: #c3e6d2;
-  background: #eefaf3;
-  color: #1f8a5a;
+  border-color: var(--primary);
+  background: var(--primary);
+  color: #fff;
 }
 .chat-veh-chip--intro:active {
-  background: #dcf3e7;
-  border-color: #189a5c;
+  background: var(--sky);
+  border-color: var(--sky);
 }
 .chat-veh-chip--intro.chat-veh-chip--selected {
-  background: #1f8a5a;
-  border-color: #1f8a5a;
+  background: var(--sky);
+  border-color: var(--sky);
   color: #fff;
+}
+/* 车型介绍按钮组两列等宽（1014）：实测 375 宽下两个胶囊需 286px 而容器只有
+   258px，flex-wrap 竖排成两行很浪费。grid 两列一行放下；chip 内边距/字号
+   微调——不换行文字 105px，列内容区须留足余量（padding 4px 时 118px，
+   余 13px），赌 1px 临界会在安卓/微信字体渲染下随机换行 */
+.chat-veh-choices--intro {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+.chat-veh-choices--intro .chat-veh-chip {
+  padding: 8px 4px;
+  font-size: 13px;
+  text-align: center;
 }
 /* 开场题折叠开关（1012 v2）：常驻 4 之外的类目点此展开/收起，无边框文字按钮，
    与胶囊组左对齐 */
@@ -1002,7 +1014,7 @@ html, body, #root {
   padding: 0;
   border: none;
   background: none;
-  color: #1a73e8;
+  color: var(--sky);
   font-size: 12.5px;
   line-height: 1.5;
   cursor: pointer;
@@ -8748,6 +8760,19 @@ html, body, #root {
 .conv-item.active { background: var(--blue-soft); }
 .conv-item__main { flex: 1; min-width: 0; }
 .conv-item__title { font-size: 13px; font-weight: 500; color: var(--foreground); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 车型定制会话角标：conv-item 直接子级（flex align-items:center 整行垂直居中）。
+   主题变量蓝（与故障排查按钮同款用色：主题浅蓝底+蓝字+主蓝 35% 描边），跟随 #277 主题化 */
+.conv-item__badge {
+  flex: none;
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: var(--primary-soft);
+  border: 1px solid color-mix(in oklab, var(--primary) 35%, var(--card));
+  color: var(--sky);
+  font-size: 10.5px;
+  line-height: 1.5;
+  white-space: nowrap;
+}
 .conv-item__time { font-size: 11px; color: var(--muted-foreground); margin-top: 2px; white-space: nowrap; }
 /* 行内操作钮（设计稿：size-7 rounded-md muted，hover background） */
 .conv-item__actions { display: flex; gap: 4px; flex-shrink: 0; }

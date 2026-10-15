@@ -1,6 +1,7 @@
 """ArchiveReport service — 归档报告业务逻辑"""
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from typing import Optional
 
@@ -9,6 +10,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.task import ArchiveReport, Task, TaskStatus
 from app.core.ticket_roles import get_ticket_roles
+
+logger = logging.getLogger(__name__)
 
 
 class ArchiveReportService:
@@ -136,12 +139,23 @@ class ArchiveReportService:
                 content_override=content,
             )
         except Exception as exc:
-            # ArchiveReviewError 与其包装
+            # ArchiveReviewError 与其包装（业务性失败：无人可派、领域配置非法等）
             code = getattr(exc, "code", None)
             message = getattr(exc, "message", None) or str(exc) or "归档派审失败"
             if code:
                 raise HTTPException(status_code=400, detail=message) from exc
-            raise
+            # 非业务异常（依赖缺失/导入失败/配置损坏…）→ 500。
+            # 原来直接 `raise`：前端只看到光秃秃的 500，日志之外无线索，排查只能盲猜
+            # （生产实际踩过：AI 侧模块未随产物部署 → ModuleNotFoundError → 500）。
+            # 现在把异常类型与消息一并带出，并在服务端留完整堆栈。
+            logger.exception(
+                "归档派审失败（非业务异常）report_id=%s task_id=%s: %s: %s",
+                report_id, getattr(task, "id", None), type(exc).__name__, exc,
+            )
+            raise HTTPException(
+                status_code=500,
+                detail=f"归档派审服务异常：{type(exc).__name__}: {message}",
+            ) from exc
 
         chosen = assignment.reviewer_id
         # 兼容旧调用方：若派审未给出人且显式传了 reviewer，才回退（正常不应走到）

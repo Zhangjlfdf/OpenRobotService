@@ -33,7 +33,7 @@ const REMOTE_TYPE_OPTIONS: { value: string; label: string }[] = [
 ];
 import { parseBackendDayjs, formatBackendTime } from '@/shared/utils/time';
 import type { UserItem } from '@/api/users';
-import { createConversation, getConversation, appendMessage, readAiSessionId, updateMessageContent } from '@/api/conversation';
+import { createConversation, getConversation, appendMessage, readAiSessionId, updateMessageContent, updateConversationMeta, readVehicleTag } from '@/api/conversation';
 import { createRequest } from '@/api/client';
 import { kickToLogin, isKickingToLogin } from '@/shared/utils/session';
 import { compressImage } from '@/shared/utils/imageCompress';
@@ -205,10 +205,30 @@ const looksLikeJsonHead = (text: string): boolean => {
 };
 
 /** DB 会话消息 → 前端 Message：附件恢复 + AI 文本清洗 + 空白 AI 气泡过滤（历史异常数据不上屏） */
+/** 存量扫码会话自愈：会话里有车型引导消息（vehicle_confirm）但 metadata 缺
+ *  vehicle 角标（角标功能上线前的老会话）→ 从确认气泡 key-value 行提取车型名
+ *  回填 metadata。fire-and-forget：补写成功后下次拉列表即有角标，无需 SQL。 */
+function selfHealVehicleBadge(
+  full: { id: number; metadata_: string | null; messages?: Array<{ content: string; metadata_?: string | null }> },
+): void {
+  if (readVehicleTag(full)) return;
+  const confirmMsg = (full.messages || []).find((m) => (m.metadata_ || '').includes('vehicle_confirm'));
+  if (!confirmMsg) return;
+  const vehicle = /车型\*\*：(.+)/.exec(confirmMsg.content)?.[1]?.trim();
+  if (!vehicle) return;
+  let meta: Record<string, unknown> = {};
+  try {
+    let obj: unknown = full.metadata_ ? JSON.parse(full.metadata_) : {};
+    if (typeof obj === 'string') obj = JSON.parse(obj);
+    if (obj && typeof obj === 'object') meta = obj as Record<string, unknown>;
+  } catch { /* 空 metadata 兜底 */ }
+  meta.vehicle = vehicle;
+  void updateConversationMeta(full.id, meta);
+}
+
 const mapDbMessages = (
   full: { messages?: Array<{ id: number; role: string; content: string; created_at: string; file_urls?: string | null; message_type?: string; metadata_?: string | null }> },
-): Message[] => {
-  // metadata_ 经后端 safe_json_dumps 二次编码：可能是 对象 或 嵌套字符串，统一解析两次得到对象
+): Message[] => {  // metadata_ 经后端 safe_json_dumps 二次编码：可能是 对象 或 嵌套字符串，统一解析两次得到对象
   const parseMeta = (s?: string | null): Record<string, unknown> | null => {
     if (!s) return null;
     try {
@@ -1491,6 +1511,7 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
       // 未落库消息覆盖丢失。会话消息只增不改，条数相同即一致，无需回滚。
       getConversation(conversationId).then((full) => {
         if (convRef.current !== conversationId) return; // 校正期间又切走了，丢弃
+        selfHealVehicleBadge(full);
         const fresh = mapDbMessages(full);
         // 增量合并（不再整体覆盖）：以本地顺序/身份为基准并入 DB 快照——既同步派单状态
         // （切走期间已派单/重新派单换人 → DB assigned_to_name 为准），又绝不丢未落库的
@@ -1512,6 +1533,7 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
         const full = await getConversation(conversationId);
         if (cancelled) return;
         convRef.current = full.id;
+        selfHealVehicleBadge(full);
         // mapDbMessages 统一做：附件恢复 + AI 文本清洗（带 }/JSON 残留）+ 空白 AI 气泡过滤
         const restored: Message[] = mapDbMessages(full);
         // 增量合并而非整体替换：首轮问答完成触发会话定位（conversationId 从 null
@@ -1599,12 +1621,15 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
 
   // 确认气泡文案模板（渲染与落库共用）：key-value 分行 + 加粗标签——
   // 标签挤在长句里没有标识性（1014 用户反馈「很随意」）
+  // MarkdownRenderer 只挂 remark-gfm（无 remark-breaks）：单 \n 是软换行会被合并
+  // 成一段（实测「项目一行、客户车型挤一行」）。key-value 行尾补两个空格 =
+  // markdown 标准硬换行，三行各占一行——这两个尾随空格是语义，别清理。
   const vehicleConfirmText = (ctx: VehicleContext) =>
-    `**车辆信息已确认**\n\n**项目**：${ctx.projectName || '—'}\n**客户**：${ctx.customerName || '—'}\n**车型**：${ctx.vehicleModel || '—'}\n\n接下来按该车型的引导流程协助你，直接描述现象或点下面的选项即可。`;
+    `**车辆信息已确认**\n\n**项目**：${ctx.projectName || '—'}  \n**客户**：${ctx.customerName || '—'}  \n**车型**：${ctx.vehicleModel || '—'}`;
 
   // ensureConversation 的稳定引用（registerVehicleModeNow 是 useCallback([])，
   // 直接闭包会锁死旧 sessionId；ref 转发与 pickVehicleChoiceRef 同款）
-  const ensureConvRef = useRef<(sid: string, firstContent: string) => Promise<number | null>>(
+  const ensureConvRef = useRef<(sid: string, firstContent: string, vehicle?: string) => Promise<number | null>>(
     async () => null,
   );
 
@@ -1699,11 +1724,24 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
           vehicleOpening: true,
         });
       }
-      if (openingMsgs.length) setMessages((prev) => [...prev, ...openingMsgs]);
+      if (openingMsgs.length) {
+        setMessages((prev) => [...prev, ...openingMsgs]);
+        // 扫码确认后的引导气泡是新会话的第一批消息：沿用「追加即贴底」会把
+        // 「车辆信息已确认」顶出视口上方（开场题+折叠区内容长，实测首屏只剩
+        // 尾部）。引导该从上往下读——强制回顶部。双层 rAF 等批量 setMessages
+        // commit 完成后执行；atBottom 同步置 false，防后续追加 effect 再拉底。
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          const el = messagesContainerRef.current;
+          if (el) {
+            el.scrollTop = 0;
+            atBottomRef.current = false;
+          }
+        }));
+      }
       // 落库（增强路径，失败静默——本地渲染不受影响，只是刷新后引导气泡不再显示）
       void (async () => {
         try {
-          const convId = await ensureConvRef.current(sid, '车型引导');
+          const convId = await ensureConvRef.current(sid, '车型引导', ctx.vehicleModel);
           if (!convId) return;
           await appendMessage(convId, 'assistant', confirmContent, {
             metadata: JSON.stringify({
@@ -1745,13 +1783,15 @@ export default function ChatPanel({ scene, compact = false }: { scene: ChatScene
   }, [sessionId, newSessionId]);
 
   /** 确保 DB 会话存在：首条消息时创建（title 用占位「新会话」，第2轮由 AI 生成后同步），后续复用 convRef */
-  const ensureConversation = async (sid: string, firstContent: string): Promise<number | null> => {
+  const ensureConversation = async (sid: string, firstContent: string, vehicle?: string): Promise<number | null> => {
+    // vehicle 标记只在首次建会话时写入（后续 send 复用 convRef 不会覆盖）
     if (convRef.current) return convRef.current;
     try {
       const conv = await createConversation({
         title: '新会话',
         scene,
         aiSessionId: sid,
+        vehicle,
       });
       convRef.current = conv.id;
       return conv.id;
