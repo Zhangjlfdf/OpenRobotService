@@ -33,6 +33,8 @@ const STATUS_TABS: { key: RewardStatus | ''; label: string }[] = [
 ];
 
 const STATUS_META: Record<RewardStatus, { label: string; color: string; bg: string }> = {
+  pending_audit: { label: '待财务审核', color: '#b76e00', bg: 'rgba(255,167,38,0.16)' },
+  rejected: { label: '已驳回', color: '#8a8f92', bg: 'rgba(138,143,146,0.14)' },
   pending: { label: '待提现', color: '#227197', bg: 'rgba(54,151,195,0.12)' },
   withdrawing: { label: '提现中', color: '#b76e00', bg: 'rgba(255,167,38,0.16)' },
   success: { label: '已到账', color: '#2ba471', bg: 'rgba(43,164,113,0.14)' },
@@ -41,6 +43,8 @@ const STATUS_META: Record<RewardStatus, { label: string; color: string; bg: stri
 
 /** 按钮文案：withdrawing 也允许点击 —— 后端会复用未过期的 package 再拉一次确认页 */
 function actionLabel(status: RewardStatus): string {
+  if (status === 'pending_audit') return '待审核';
+  if (status === 'rejected') return '已驳回';
   if (status === 'pending') return '立即提现';
   if (status === 'withdrawing') return '继续确认';
   if (status === 'success') return '已到账';

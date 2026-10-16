@@ -906,6 +906,13 @@ def step_report():
               + (f"{tw['n_convs']} 会话 {tw['n_segs']} 段，"
                  f"L1 {tw['L1_rate']}" if tw.get("n_segs") else tw.get("note", "")))
 
+    wb = _workbench_snapshot(os.environ.get("DAR_ENV", "test"))
+    if wb:
+        rep["workbench"] = wb
+        print("工作台快照（服务号后台原样透出这三张卡）：")
+        for c in (wb.get("hero") or []):
+            print(f"  {c.get('label')}: {c.get('value')}")
+
     path = os.path.join(OUT, f"weekly_{_dt.now():%Y%m%d}.json")
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(rep, fh, ensure_ascii=False, indent=1)
@@ -917,16 +924,51 @@ def step_report():
     _push_report(rep)
 
 
+def _workbench_snapshot(env: str):
+    """工作台（dar_studio）当轮展示值的原样快照，随周报推给服务号后台。
+
+    调的就是工作台首页那张卡的同一个函数（dar_studio.metrics），后台区块照着
+    渲染——两边同源同数，不在后台侧另算一套口径。此前各自算的结果对不上
+    （1016 实锤：直答率 29.2% vs 23.3%、KB 缺口率 31.3% vs 46.9%），
+    差别来自分母选段不同（周报按人工已标真实组，工作台按漏斗已判定层）。
+    """
+    try:
+        import dar_studio
+        m = dar_studio.metrics(env=env)
+    except Exception as e:
+        print(f"（工作台快照失败，跳过：{e}）")
+        return None
+    if not m or not m.get("found"):
+        return None
+    return {k: m.get(k) for k in ("hero", "small", "dar_rates", "same_base",
+                                  "manual_progress", "export_at", "date", "source_env")}
+
+
+def _push_env():
+    """推送凭据：shell 环境变量优先，其次 ai/.env（override=False，与项目其他配置一致）。
+
+    dar 链路不 import ai.config，ai/.env 不会自动进环境——此前只能每次 export，
+    1016 起显式 load 一次，用户配置处统一到 ai/.env。
+    """
+    try:
+        from dotenv import load_dotenv
+        _env_file = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
+        load_dotenv(_env_file, override=False)
+    except Exception:
+        pass
+    return ((os.getenv("DAR_PUSH_BASE") or "").rstrip("/"),
+            os.getenv("DAR_PUSH_USER") or "",
+            os.getenv("DAR_PUSH_PASS") or "")
+
+
 def _push_report(rep: dict):
     """周报落盘后自动推服务号后台（ORS-#981）：失败只警告不中断 SOP。
 
-    凭据从环境变量读（本地 .env 或 export 前手动 set）：
-      DAR_PUSH_BASE   服务号地址（如 https://usp.ep-zl.com）
+    凭据（shell 环境变量或 ai/.env）：
+      DAR_PUSH_BASE   服务号地址（测试 https://usp.ep-zl.com/t；生产 /p）
       DAR_PUSH_USER / DAR_PUSH_PASS   admin 账号密码
     """
-    base = (os.getenv("DAR_PUSH_BASE") or "").rstrip("/")
-    user = os.getenv("DAR_PUSH_USER") or ""
-    pwd = os.getenv("DAR_PUSH_PASS") or ""
+    base, user, pwd = _push_env()
     if not (base and user and pwd):
         print("（未配 DAR_PUSH_BASE/USER/PASS，跳过推送到服务号后台）")
         return

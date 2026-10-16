@@ -130,8 +130,8 @@ export default function Dashboard() {
   const [projects, setProjects] = useState<ProjectBriefItem[]>(cachedRef.current?.projects_brief ?? []);
   const [syncing, setSyncing] = useState(false);
   const [dataResourceSheetVisible, setDataResourceSheetVisible] = useState(false);
-  // 欢迎区「我的奖励」入口上展示的待提现金额；接口失败/未启用时静默隐藏，不影响看板渲染
-  const [pendingReward, setPendingReward] = useState<{ amount: number; count: number } | null>(null);
+  // 「我的奖励」汇总卡数据：待提现金额/笔数 + 累计已到账；接口失败/未启用时静默降级为 0，不影响看板渲染
+  const [pendingReward, setPendingReward] = useState<{ amount: number; count: number; withdrawn: number } | null>(null);
 
   const loadAll = useCallback(async () => {
     // canViewAll 时不传 projectIds（后端不过滤，返回全部）；否则仅统计当前用户关联项目
@@ -175,17 +175,17 @@ export default function Dashboard() {
 
   useEffect(() => { loadAll(); }, [loadAll]);
 
-  // 待提现金额独立拉取：失败不影响看板，入口仍可点击
+  // 奖励汇总数据独立拉取：失败不影响看板，新 Section 照常渲染（0/暂无）
   useEffect(() => {
     let alive = true;
     fetchRewardStats()
       .then((s) => {
-        if (alive && (s.pending_count > 0 || s.pending_amount > 0)) {
-          setPendingReward({ amount: s.pending_amount, count: s.pending_count });
+        if (alive) {
+          setPendingReward({ amount: s.pending_amount, count: s.pending_count, withdrawn: s.withdrawn_amount ?? 0 });
         }
       })
       .catch(() => {
-        // 微信支付未启用或接口异常：入口照常显示，只是不带金额
+        // 微信支付未启用或接口异常：静默降级为 null
       });
     return () => {
       alive = false;
@@ -230,12 +230,15 @@ export default function Dashboard() {
           <span className="admin-rewards__icon">
             <MacWallet size={18} />
           </span>
-          <span className="admin-rewards__label">我的奖励</span>
-          {pendingReward && (
-            <span className="admin-rewards__amount">
-              ¥{fenToYuan(pendingReward.amount)}
+          <span className="admin-rewards__label">
+            <span>我的奖励</span>
+            <span className="admin-rewards__summary">
+              {pendingReward?.count ?? 0} 笔可提 · 累计已到账 ¥{fenToYuan(pendingReward?.withdrawn ?? 0)}
             </span>
-          )}
+          </span>
+          <span className="admin-rewards__amount">
+            ¥{fenToYuan(pendingReward?.amount ?? 0)}
+          </span>
           <MacChevronRight size={16} />
         </button>
 

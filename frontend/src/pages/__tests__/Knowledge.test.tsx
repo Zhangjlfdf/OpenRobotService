@@ -70,14 +70,16 @@ beforeEach(() => {
 });
 
 describe('知识贡献榜UI', () => {
-  it('首页同时保留知识贡献榜和我的奖励入口，并显示待提现金额', async () => {
-    vi.mocked(fetchRewardStats).mockResolvedValue({ pending_amount: 1250, pending_count: 2, withdrawn_amount: 0 });
+  it('首页只保留一个独立奖励卡片，同时显示待提现、可提笔数和累计到账金额', async () => {
+    vi.mocked(fetchRewardStats).mockResolvedValue({ pending_amount: 1250, pending_count: 2, withdrawn_amount: 3750 });
     render(<MemoryRouter><Routes><Route path="/" element={<Dashboard />} /><Route path="/rewards" element={<p>奖励详情入口</p>} /></Routes></MemoryRouter>);
     expect(await screen.findByRole('region', { name: '知识贡献榜' })).toBeInTheDocument();
     const rewardsEntry = await screen.findByRole('button', { name: /我的奖励.*¥12\.50/ });
     expect(rewardsEntry).toHaveAttribute('type', 'button');
     expect(rewardsEntry).toHaveClass('mac-card', 'admin-rewards');
     expect(rewardsEntry).toHaveAttribute('title', '待提现 ¥12.50（2 笔）');
+    expect(within(rewardsEntry).getByText('2 笔可提 · 累计已到账 ¥37.50')).toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: /^我的奖励/ })).toHaveLength(1);
     fireEvent.click(rewardsEntry);
     expect(await screen.findByText('奖励详情入口')).toBeInTheDocument();
   });
@@ -89,14 +91,17 @@ describe('知识贡献榜UI', () => {
     await waitFor(() => expect(fetchRewardStats).toHaveBeenCalledOnce());
     expect(screen.queryByRole('region', { name: '知识贡献榜' })).not.toBeInTheDocument();
     expect(api.fetchKnowledgeOverview).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole('button', { name: '我的奖励' }));
+    const rewardsEntry = screen.getByRole('button', { name: /^我的奖励/ });
+    expect(within(rewardsEntry).getByText('0 笔可提 · 累计已到账 ¥0.00')).toBeInTheDocument();
+    expect(within(rewardsEntry).getByText('¥0.00')).toBeInTheDocument();
+    fireEvent.click(rewardsEntry);
     expect(await screen.findByText('奖励详情入口')).toBeInTheDocument();
   });
 
   it.each(['{Enter}', ' '])('独立奖励卡片支持通过 %s 键进入奖励详情', async (key) => {
     const user = userEvent.setup();
     render(<MemoryRouter><Routes><Route path="/" element={<Dashboard />} /><Route path="/rewards" element={<p>奖励详情入口</p>} /></Routes></MemoryRouter>);
-    const rewardsEntry = screen.getByRole('button', { name: '我的奖励' });
+    const rewardsEntry = screen.getByRole('button', { name: /^我的奖励/ });
     rewardsEntry.focus();
     await user.keyboard(key);
     expect(await screen.findByText('奖励详情入口')).toBeInTheDocument();
@@ -106,7 +111,7 @@ describe('知识贡献榜UI', () => {
     const rendered = render(<MemoryRouter><Dashboard /></MemoryRouter>);
     await screen.findByText('贡献甲');
     const welcome = rendered.container.querySelector('.admin-welcome');
-    const rewardsEntry = screen.getByRole('button', { name: '我的奖励' });
+    const rewardsEntry = screen.getByRole('button', { name: /^我的奖励/ });
     const knowledgeHeading = screen.getByRole('heading', { name: '知识贡献榜' });
     const knowledgeCard = screen.getByRole('region', { name: '知识贡献榜' });
     const ticketHeading = screen.getByRole('heading', { name: '工单数据看板' });
