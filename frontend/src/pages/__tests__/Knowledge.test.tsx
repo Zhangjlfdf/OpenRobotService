@@ -70,16 +70,17 @@ beforeEach(() => {
 });
 
 describe('知识贡献榜UI', () => {
-  it('首页只保留一个独立奖励卡片，同时显示待提现、可提笔数和累计到账金额', async () => {
-    vi.mocked(fetchRewardStats).mockResolvedValue({ pending_amount: 1250, pending_count: 2, withdrawn_amount: 3750 });
+  it('首页同时保留知识贡献榜和我的奖励入口，并显示待提现金额', async () => {
+    vi.mocked(fetchRewardStats).mockResolvedValue({ pending_amount: 1250, pending_count: 2, withdrawn_amount: 3456 });
     render(<MemoryRouter><Routes><Route path="/" element={<Dashboard />} /><Route path="/rewards" element={<p>奖励详情入口</p>} /></Routes></MemoryRouter>);
     expect(await screen.findByRole('region', { name: '知识贡献榜' })).toBeInTheDocument();
-    const rewardsEntry = await screen.findByRole('button', { name: /我的奖励.*¥12\.50/ });
-    expect(rewardsEntry).toHaveAttribute('type', 'button');
-    expect(rewardsEntry).toHaveClass('mac-card', 'admin-rewards');
-    expect(rewardsEntry).toHaveAttribute('title', '待提现 ¥12.50（2 笔）');
-    expect(within(rewardsEntry).getByText('2 笔可提 · 累计已到账 ¥37.50')).toBeInTheDocument();
-    expect(screen.getAllByRole('button', { name: /^我的奖励/ })).toHaveLength(1);
+    const rewardsEntry = await screen.findByRole('button', { name: /待提现（元）.*2 笔可提.*¥12\.50/ });
+    expect(rewardsEntry.tagName).toBe('SECTION');
+    expect(screen.getAllByRole('button', { name: /待提现（元）/ })).toHaveLength(1);
+    expect(rewardsEntry).toHaveClass('mac-card', 'mac-card--pad');
+    expect(within(rewardsEntry).getByText('¥12.50')).toHaveStyle({ fontSize: '28px', fontWeight: '700', color: '#227197' });
+    expect(within(rewardsEntry).getByText('累计已到账')).toBeInTheDocument();
+    expect(within(rewardsEntry).getByText('¥34.56')).toHaveStyle({ color: '#2ba471' });
     fireEvent.click(rewardsEntry);
     expect(await screen.findByText('奖励详情入口')).toBeInTheDocument();
   });
@@ -91,41 +92,38 @@ describe('知识贡献榜UI', () => {
     await waitFor(() => expect(fetchRewardStats).toHaveBeenCalledOnce());
     expect(screen.queryByRole('region', { name: '知识贡献榜' })).not.toBeInTheDocument();
     expect(api.fetchKnowledgeOverview).not.toHaveBeenCalled();
-    const rewardsEntry = screen.getByRole('button', { name: /^我的奖励/ });
-    expect(within(rewardsEntry).getByText('0 笔可提 · 累计已到账 ¥0.00')).toBeInTheDocument();
-    expect(within(rewardsEntry).getByText('¥0.00')).toBeInTheDocument();
-    fireEvent.click(rewardsEntry);
+    fireEvent.click(screen.getByRole('button', { name: /待提现（元）/ }));
     expect(await screen.findByText('奖励详情入口')).toBeInTheDocument();
   });
 
-  it.each(['{Enter}', ' '])('独立奖励卡片支持通过 %s 键进入奖励详情', async (key) => {
-    const user = userEvent.setup();
-    render(<MemoryRouter><Routes><Route path="/" element={<Dashboard />} /><Route path="/rewards" element={<p>奖励详情入口</p>} /></Routes></MemoryRouter>);
-    const rewardsEntry = screen.getByRole('button', { name: /^我的奖励/ });
-    rewardsEntry.focus();
-    await user.keyboard(key);
-    expect(await screen.findByText('奖励详情入口')).toBeInTheDocument();
-  });
-
-  it('我的奖励独立放在欢迎区下方、知识贡献榜正上方，榜单标题复用看板样式', async () => {
+  it('保持奖励卡片UI不变，仅将奖励标题和卡片放在知识榜上方', async () => {
     const rendered = render(<MemoryRouter><Dashboard /></MemoryRouter>);
     await screen.findByText('贡献甲');
     const welcome = rendered.container.querySelector('.admin-welcome');
-    const rewardsEntry = screen.getByRole('button', { name: /^我的奖励/ });
+    const rewardsHeading = screen.getByRole('heading', { name: '我的奖励' });
+    const rewardsCard = screen.getByRole('button', { name: /待提现（元）/ });
     const knowledgeHeading = screen.getByRole('heading', { name: '知识贡献榜' });
     const knowledgeCard = screen.getByRole('region', { name: '知识贡献榜' });
     const ticketHeading = screen.getByRole('heading', { name: '工单数据看板' });
     expect(welcome).not.toBeNull();
-    expect(welcome).not.toContainElement(rewardsEntry);
-    expect(welcome!.nextElementSibling).toBe(rewardsEntry);
-    expect(rewardsEntry.nextElementSibling).toBe(knowledgeHeading.parentElement);
-    expect(screen.getAllByTestId('rewards-entry')).toHaveLength(1);
+    expect(welcome!.nextElementSibling).toBe(rewardsHeading.parentElement);
+    expect(rewardsHeading.parentElement!.nextElementSibling).toBe(rewardsCard);
+    expect(rewardsCard.nextElementSibling).toBe(knowledgeHeading.parentElement);
     expect(knowledgeHeading.compareDocumentPosition(knowledgeCard) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(knowledgeCard.compareDocumentPosition(ticketHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(knowledgeHeading).toHaveClass('mac-section-title__text');
     expect(knowledgeHeading.parentElement).toHaveClass('mac-section-title');
     expect(knowledgeHeading.className).toBe(ticketHeading.className);
     expect(screen.getAllByText('知识贡献榜')).toHaveLength(1);
+  });
+
+  it.each(['{Enter}', ' '])('原奖励汇总卡片支持通过 %s 键进入奖励详情', async (key) => {
+    const user = userEvent.setup();
+    render(<MemoryRouter><Routes><Route path="/" element={<Dashboard />} /><Route path="/rewards" element={<p>奖励详情入口</p>} /></Routes></MemoryRouter>);
+    const rewardsEntry = screen.getByRole('button', { name: /待提现（元）/ });
+    rewardsEntry.focus();
+    await user.keyboard(key);
+    expect(await screen.findByText('奖励详情入口')).toBeInTheDocument();
   });
 
   it('卡片仍可进入知识中心，且不重复显示主标题', async () => {
