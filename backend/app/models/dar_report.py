@@ -6,7 +6,7 @@ report 步骤落盘后自动 POST 到 /api/admin/dashboard/dar-reports →
 payload 为 dar_weekly 周报原样 JSON（dar_rates/kb_gap/wow/this_week/matrix...），
 展示侧只取摘要字段，fails 明细（含用户对话）不上服务号页面。
 """
-from sqlalchemy import Column, DateTime, func, String, Text, UniqueConstraint
+from sqlalchemy import Column, DateTime, func, Integer, String, Text, UniqueConstraint
 
 from app.models.base import Base
 
