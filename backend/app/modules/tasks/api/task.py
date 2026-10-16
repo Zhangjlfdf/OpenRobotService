@@ -1882,7 +1882,6 @@ async def update_task(
             if kind not in ("misassign", "stage", "other"):
                 kind = ""
             reason = (getattr(ticket_update, "reassign_reason", None) or "").strip()
-            kind_label = {"misassign": "派错了", "stage": "阶段转派", "other": "其它"}.get(kind, "")
             detail = {
                 "new_assignee": new_assignee,
                 "from_assignee": from_assignee,
@@ -1891,9 +1890,9 @@ async def update_task(
                 detail["kind"] = kind
             if reason:
                 detail["reason"] = reason
+            # 不在 description 里再拼（派错了/阶段转派）——工单动态页已经按 detail.kind
+            # 渲染了类型徽章，拼进来是同一件事说两遍。
             desc = f"{_role}{user_name} 将工单重新指派给 {new_assignee_name}" if _role else f"{user_name} 将工单重新指派给 {new_assignee_name}"
-            if kind_label:
-                desc = f"{desc}（{kind_label}）"
             await OperationLogService.log(
                 db=db, task_id=task_id, op_type=OperationType.REASSIGN,
                 operator=username, operator_name=user_name,
