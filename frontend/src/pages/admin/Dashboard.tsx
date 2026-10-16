@@ -19,7 +19,7 @@ import UserAvatarMenu from '@/shared/components/UserAvatarMenu';
 import AvatarImg from '@/shared/components/AvatarImg';
 import SubscriptionReminder from '@/shared/components/SubscriptionReminder';
 import { MacDonut, MacLegend, MacStat } from '@/shared/components/macaronBits';
-import { MacChevronRight, MacRefreshCw } from '@/shared/components/macaronIcons';
+import { MacChevronRight, MacRefreshCw, MacWallet } from '@/shared/components/macaronIcons';
 import { ProjectMonthBars } from '@/shared/components/macaronMonthBars';
 import { currentYearMonth, normalizeSettlementPeriod } from '@/shared/utils/settlement';
 import {
@@ -202,7 +202,6 @@ export default function Dashboard() {
       />
 
       <div style={{ padding: '16px 16px 32px' }}>
-        {/* ============ 顶：欢迎区（左侧头像 + 右侧两排：Hello / 用户名） ============ */}
         <div className="admin-welcome">
           <div className="admin-welcome__avatar">
             <AvatarImg
@@ -217,56 +216,36 @@ export default function Dashboard() {
           </div>
         </div>
 
+        <button
+          type="button"
+          className="mac-card admin-rewards"
+          data-testid="rewards-entry"
+          onClick={() => navigate('/rewards')}
+          title={
+            pendingReward
+              ? `待提现 ¥${fenToYuan(pendingReward.amount)}（${pendingReward.count} 笔）`
+              : '查看奖励记录并提现到微信零钱'
+          }
+        >
+          <span className="admin-rewards__icon">
+            <MacWallet size={18} />
+          </span>
+          <span className="admin-rewards__label">
+            <span>我的奖励</span>
+            <span className="admin-rewards__summary">
+              {pendingReward?.count ?? 0} 笔可提 · 累计已到账 ¥{fenToYuan(pendingReward?.withdrawn ?? 0)}
+            </span>
+          </span>
+          <span className="admin-rewards__amount">
+            ¥{fenToYuan(pendingReward?.amount ?? 0)}
+          </span>
+          <MacChevronRight size={16} />
+        </button>
+
         {canViewKnowledgeContribution && <>
           <SectionTitle title="知识贡献榜" moreText="查看榜单" onMore={() => navigate('/admin/knowledge')} />
           <KnowledgeContributionCard key={username} />
         </>}
-
-        {/* ============ 奖励汇总卡：待提现 / 累计已到账；点击整张卡进入 /rewards ============ */}
-        <SectionTitle title="我的奖励" moreText="奖励记录" onMore={() => navigate('/rewards')} />
-        <section
-          className="mac-card mac-card--pad"
-          style={{ cursor: 'pointer' }}
-          onClick={() => navigate('/rewards')}
-          role="button"
-          tabIndex={0}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' || e.key === ' ') {
-              e.preventDefault();
-              navigate('/rewards');
-            }
-          }}
-        >
-          <div style={{ display: 'flex', alignItems: 'flex-end', gap: 8 }}>
-            <span style={{ fontSize: 12, color: '#8a8f92' }}>待提现（元）</span>
-            <span style={{ fontSize: 12, color: '#8a8f92', marginLeft: 'auto' }}>
-              {pendingReward?.count ?? 0} 笔可提
-            </span>
-          </div>
-          <div style={{ fontSize: 28, fontWeight: 700, color: '#227197', lineHeight: 1.3 }}>
-            ¥{fenToYuan(pendingReward?.amount ?? 0)}
-          </div>
-          <div
-            style={{
-              marginTop: 8,
-              paddingTop: 8,
-              borderTop: '1px dashed var(--border)',
-              display: 'flex',
-              justifyContent: 'space-between',
-              alignItems: 'center',
-              fontSize: 12,
-              color: '#8a8f92',
-            }}
-          >
-            <span>累计已到账</span>
-            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-              <span style={{ color: '#2ba471' }}>
-                ¥{fenToYuan(pendingReward?.withdrawn ?? 0)}
-              </span>
-              <MacChevronRight size={13} />
-            </span>
-          </div>
-        </section>
 
         {/* ============ 上：工单数据看板 ============ */}
         {/* 状态环图 + 图例（点图例下钻工单明细）+ 四指标卡；
