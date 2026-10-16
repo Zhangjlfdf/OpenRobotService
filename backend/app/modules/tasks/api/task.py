@@ -73,6 +73,10 @@ from app.services.redispatch_tip_service import (  # 派单说明：列表/气�
 
 router = APIRouter(tags=["tasks"])
 
+# 转派类型的中文名。转派人只选了类型、没写说明时，用这个当「转派原因」兜底 ——
+# 选类型本身就是他给的原因（前端工单动态另有一套同名映射，用于渲染类型徽章）。
+_REASSIGN_KIND_ZH = {"misassign": "派错了", "stage": "阶段转派", "other": "其它"}
+
 # 模块级 logger（避免每个端点内重复 logging.getLogger(__name__)）
 logger_task = logging.getLogger(__name__)
 
@@ -1124,7 +1128,14 @@ async def get_task(
                         .limit(1)
                     )).scalars().first()
                     if _relog is not None and isinstance(_relog.detail, dict):
-                        _reassign_reason = str(_relog.detail.get("reason") or "").strip() or None
+                        _d = _relog.detail
+                        # 没填文字时用「派错了 / 阶段转派 / 其它」兜底 —— 转派时选了类型
+                        # 但没写说明，那个类型本身就是他给的原因。
+                        _reassign_reason = (
+                            str(_d.get("reason") or "").strip()
+                            or _REASSIGN_KIND_ZH.get(str(_d.get("kind") or ""))
+                            or None
+                        )
                 except Exception as _re:
                     logger.warning(f"读取转派原因失败 task_id={task_id}: {_re}")
 
