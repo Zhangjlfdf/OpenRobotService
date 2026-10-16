@@ -914,6 +914,42 @@ def step_report():
     print(json.dumps(rep, ensure_ascii=False, indent=1))
     print(f"周报: {path}")
     print(f"Markdown: {md_path}")
+    _push_report(rep)
+
+
+def _push_report(rep: dict):
+    """周报落盘后自动推服务号后台（ORS-#981）：失败只警告不中断 SOP。
+
+    凭据从环境变量读（本地 .env 或 export 前手动 set）：
+      DAR_PUSH_BASE   服务号地址（如 https://usp.ep-zl.com）
+      DAR_PUSH_USER / DAR_PUSH_PASS   admin 账号密码
+    """
+    base = (os.getenv("DAR_PUSH_BASE") or "").rstrip("/")
+    user = os.getenv("DAR_PUSH_USER") or ""
+    pwd = os.getenv("DAR_PUSH_PASS") or ""
+    if not (base and user and pwd):
+        print("（未配 DAR_PUSH_BASE/USER/PASS，跳过推送到服务号后台）")
+        return
+    try:
+        import urllib.error
+        import urllib.request
+        env = os.environ.get("DAR_ENV", "prod")
+        body = json.dumps({
+            "week_date": rep.get("date", "").replace("-", ""),
+            "env": env,
+            "payload": rep,
+        }).encode("utf-8")
+        req = urllib.request.Request(f"{base}/api/auth/login",
+                                     json.dumps({"username": user, "password": pwd}).encode(),
+                                     {"Content-Type": "application/json"})
+        tok = json.loads(urllib.request.urlopen(req, timeout=20).read())["access_token"]
+        req = urllib.request.Request(f"{base}/api/admin/dashboard/dar-reports", body,
+                                     {"Content-Type": "application/json",
+                                      "Authorization": f"Bearer {tok}"})
+        urllib.request.urlopen(req, timeout=30)
+        print(f"已推送服务号后台（week={rep.get('date')} env={env}）")
+    except Exception as e:
+        print(f"⚠️ 推送服务号后台失败（周报已正常落盘，可手动重推）: {e}")
 
 
 STEPS = {
