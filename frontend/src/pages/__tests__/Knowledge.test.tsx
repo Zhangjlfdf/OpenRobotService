@@ -70,11 +70,15 @@ beforeEach(() => {
 
 describe('知识贡献榜UI', () => {
   it('首页同时保留知识贡献榜和我的奖励入口，并显示待提现金额', async () => {
-    vi.mocked(fetchRewardStats).mockResolvedValue({ pending_amount: 1250, pending_count: 2, withdrawn_amount: 0 });
+    vi.mocked(fetchRewardStats).mockResolvedValue({ pending_amount: 1250, pending_count: 2, withdrawn_amount: 3456 });
     render(<MemoryRouter><Routes><Route path="/" element={<Dashboard />} /><Route path="/rewards" element={<p>奖励详情入口</p>} /></Routes></MemoryRouter>);
     expect(await screen.findByRole('region', { name: '知识贡献榜' })).toBeInTheDocument();
-    const rewardsEntry = await screen.findByRole('button', { name: /我的奖励.*¥12\.50/ });
-    expect(rewardsEntry).toHaveAttribute('title', '待提现 ¥12.50（2 笔）');
+    const rewardsEntry = await screen.findByRole('button', { name: /待提现（元）.*2 笔可提.*¥12\.50/ });
+    expect(rewardsEntry.tagName).toBe('SECTION');
+    expect(rewardsEntry).toHaveClass('mac-card', 'mac-card--pad');
+    expect(within(rewardsEntry).getByText('¥12.50')).toHaveStyle({ fontSize: '28px', fontWeight: '700', color: '#227197' });
+    expect(within(rewardsEntry).getByText('累计已到账')).toBeInTheDocument();
+    expect(within(rewardsEntry).getByText('¥34.56')).toHaveStyle({ color: '#2ba471' });
     fireEvent.click(rewardsEntry);
     expect(await screen.findByText('奖励详情入口')).toBeInTheDocument();
   });
@@ -86,19 +90,23 @@ describe('知识贡献榜UI', () => {
     await waitFor(() => expect(fetchRewardStats).toHaveBeenCalledOnce());
     expect(screen.queryByRole('region', { name: '知识贡献榜' })).not.toBeInTheDocument();
     expect(api.fetchKnowledgeOverview).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole('button', { name: '我的奖励' }));
+    fireEvent.click(screen.getByRole('button', { name: /待提现（元）/ }));
     expect(await screen.findByText('奖励详情入口')).toBeInTheDocument();
   });
 
-  it('知识榜位于用户欢迎区与工单看板之间，标题复用看板样式', async () => {
+  it('保持奖励卡片UI不变，仅将奖励标题和卡片放在知识榜上方', async () => {
     const rendered = render(<MemoryRouter><Dashboard /></MemoryRouter>);
     await screen.findByText('贡献甲');
     const welcome = rendered.container.querySelector('.admin-welcome');
+    const rewardsHeading = screen.getByRole('heading', { name: '我的奖励' });
+    const rewardsCard = screen.getByRole('button', { name: /待提现（元）/ });
     const knowledgeHeading = screen.getByRole('heading', { name: '知识贡献榜' });
     const knowledgeCard = screen.getByRole('region', { name: '知识贡献榜' });
     const ticketHeading = screen.getByRole('heading', { name: '工单数据看板' });
     expect(welcome).not.toBeNull();
-    expect(welcome!.compareDocumentPosition(knowledgeHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(welcome!.nextElementSibling).toBe(rewardsHeading.parentElement);
+    expect(rewardsHeading.parentElement!.nextElementSibling).toBe(rewardsCard);
+    expect(rewardsCard.nextElementSibling).toBe(knowledgeHeading.parentElement);
     expect(knowledgeHeading.compareDocumentPosition(knowledgeCard) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(knowledgeCard.compareDocumentPosition(ticketHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(knowledgeHeading).toHaveClass('mac-section-title__text');
