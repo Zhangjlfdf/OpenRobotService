@@ -114,6 +114,9 @@ from app.models.usp_env import UspEnv
 # 企业微信表格数据源 + 记录镜像
 from app.models.wecom_sheet import WecomSheetSource, ExternalRecord
 
+# 直答率周报（ORS-#981：AI 直答率上服务号后台）
+from app.models.dar_report import DarWeeklyReport
+
 # 微信支付（奖励记录 + 转账单 + 回调流水）
 from app.models.wxpay import (
     RewardRecord,
@@ -170,6 +173,7 @@ __all__ = [
     "UspEnv",
     # wecom sheet source / mirror
     "WecomSheetSource", "ExternalRecord",
+    "DarWeeklyReport",
     # wxpay
     "RewardRecord", "RewardStatus", "TransferBill", "TransferBillState",
     "WxpayNotifyLog", "derive_reward_status",

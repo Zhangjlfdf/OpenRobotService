@@ -418,3 +418,43 @@ export async function fetchDashboardSummaryAll(projectIds?: string[]): Promise<D
     return EMPTY_SUMMARY_ALL;
   }
 }
+
+// ==================== AI 直答率周报（ORS-#981） ====================
+// 数据链：本地 dar_weekly SOP 生成周报 → report 步自动 POST 到后端
+// （dar_weekly 读 DAR_PUSH_BASE/USER/PASS）→ 本接口给「工单数据看板」页
+// AI 直答率区块展示。摘要不含 fails 明细（含用户对话，不上服务号）。
+
+export interface DarReportSummary {
+  week_date: string;
+  env: string;
+  /** 三口径文本（L1/L2/L3），dar_weekly 原样 */
+  dar_rates: Record<string, string>;
+  /** 环比（同分母）：{ "L2_人工": { prev, curr, delta }, ... } */
+  wow: Record<string, { prev: number; curr: number; delta: number }>;
+  kb_gap: string | null;
+  manual_progress: string | null;
+  this_week: { from?: string; to?: string; n_convs?: number; n_segs?: number; n_ticketed?: number; L1_rate?: string };
+  updated_at: string | null;
+}
+
+export async function fetchDarLatest(env = 'prod'): Promise<DarReportSummary | null> {
+  try {
+    const res = await adminRequest<{ code: number; data: DarReportSummary | null }>(
+      `/dashboard/dar-reports/latest?env=${env}`,
+    );
+    return res.code === 0 ? res.data ?? null : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function fetchDarList(env = 'prod', limit = 12): Promise<DarReportSummary[]> {
+  try {
+    const res = await adminRequest<{ code: number; data: DarReportSummary[] }>(
+      `/dashboard/dar-reports/list?env=${env}&limit=${limit}`,
+    );
+    return res.code === 0 ? res.data ?? [] : [];
+  } catch {
+    return [];
+  }
+}
