@@ -11,7 +11,7 @@ import { Loading, Navbar } from 'tdesign-mobile-react';
 import type { ReactNode } from 'react';
 import {
   MacUsers, MacTags, MacKeyRound, MacUserCog, MacShuffle, MacScrollText, MacClipboardList,
-  MacTable2, MacWallet,
+  MacTable2, MacWallet, MacFileText,
 } from '@/shared/components/macaronIcons';
 import ReactECharts from '@/shared/components/ReactECharts';
 import { fetchBatchUserInfo, fetchUserSummary, USER_SOURCE_LABELS } from '@/api/wechat';
@@ -22,6 +22,7 @@ import { PERM_TASK_POLICY } from '@/pages/admin/TaskPolicyPage';
 // 权限常量放在 api 模块，避免入口页为拿一个字符串把整页拖进本包
 import { PERM_WECOM_SHEETS } from '@/api/wecomSheets';
 import { PERM_WXPAY_ADMIN } from '@/api/wxpay';
+import { PERM_ANNOUNCEMENT } from '@/api/announcement';
 
 interface Entry { path: string; label: string; desc: string; icon: ReactNode; tone: string; }
 
@@ -91,6 +92,7 @@ const adminEntries: Entry[] = [
   { path: '/admin/qrcode-manage', label: '二维码管理', desc: '带参数二维码批量创建、发布、状态流转', icon: <MacScrollText />, tone: 'blue-3' },
   { path: '/admin/operation-logs', label: '操作记录', desc: '操作日志审计与追溯', icon: <MacScrollText />, tone: 'blue-4' },
   { path: '/admin/wecom-sheets', label: '企微表格', desc: '企微智能表格接入、测试连接、定时同步', icon: <MacTable2 />, tone: 'blue-2' },
+  { path: '/admin/announcements', label: '公告管理', desc: '活动中心公告发布、上下线、置顶', icon: <MacFileText />, tone: 'blue-2' },
   { path: '/admin/dispatch-dev', label: '开发者模式', desc: '派单调试、界面图鉴、可达环境、长期记忆', icon: <MacClipboardList />, tone: 'blue-4' },
   { path: '/admin/wxpay-rewards', label: '奖励管理', desc: '转账测试、转账单查单与撤销、奖励记录', icon: <MacWallet />, tone: 'blue-1' },
 ];
@@ -99,6 +101,7 @@ const DEV_ENTRY_PATH = '/admin/dispatch-dev';
 const TASK_POLICY_ENTRY_PATH = '/admin/task-policy';
 const WECOM_SHEETS_ENTRY_PATH = '/admin/wecom-sheets';
 const WXPAY_REWARDS_ENTRY_PATH = '/admin/wxpay-rewards';
+const ANNOUNCEMENT_ENTRY_PATH = '/admin/announcements';
 
 export default function AdminEntries() {
   const navigate = useNavigate();
@@ -107,12 +110,14 @@ export default function AdminEntries() {
   const canShowTaskPolicy = useAuthStore((s) => s.hasPermission(PERM_TASK_POLICY));
   const canShowWecomSheets = useAuthStore((s) => s.hasPermission(PERM_WECOM_SHEETS));
   const canShowWxpayRewards = useAuthStore((s) => s.hasPermission(PERM_WXPAY_ADMIN));
+  const canShowAnnouncement = useAuthStore((s) => s.hasPermission(PERM_ANNOUNCEMENT));
   const visibleEntries = adminEntries.filter(
     (e) =>
       (e.path !== DEV_ENTRY_PATH || canShowDispatchDev) &&
       (e.path !== TASK_POLICY_ENTRY_PATH || canShowTaskPolicy) &&
       (e.path !== WECOM_SHEETS_ENTRY_PATH || canShowWecomSheets) &&
-      (e.path !== WXPAY_REWARDS_ENTRY_PATH || canShowWxpayRewards),
+      (e.path !== WXPAY_REWARDS_ENTRY_PATH || canShowWxpayRewards) &&
+      (e.path !== ANNOUNCEMENT_ENTRY_PATH || canShowAnnouncement),
   );
 
   // ── 用户统计：时间筛选默认最近 5 天（不含当天；微信数据 T+1 延迟，最早可查昨日） ──

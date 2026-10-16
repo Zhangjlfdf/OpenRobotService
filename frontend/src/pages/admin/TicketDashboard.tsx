@@ -2,7 +2,7 @@
 //   ① 工单监测     —— 六种状态环图 + 图例（图例可点，下钻 /admin/dashboard/tickets/:key）
 //   ② 工单类型分布 —— 类型环图（百分比标在扇区上）+ 各类型平均完单耗时条形图 + 颜色图例
 //   ③ 接单人响应时间 —— 响应时间分桶环图（处理人第一次点开工单耗时 - 新建时间）
-//   ④ 提单人角色分布 —— 按提单人主角色归组的工单数量环图（范围 = 当前登录用户关联项目）
+//   ④ 提单人公司/部门分布 —— 按提单人公司/部门归组的工单数量环图（公司下拉：不选=按公司，选=按该公司部门）
 // 入口：后台管理首页「工单数据看板」小节右侧「其他数据统计」→ /admin/ticket-dashboard。
 // 数据走 /dashboard/summary-all 聚合接口，与首页共用 dashboardCache
 // （先渲染上次快照、返回后覆盖刷新）；②③④ 沿用原首页权限（frontend:admin:other:show），① 所有人可见。
@@ -11,9 +11,9 @@ import { Navbar } from 'tdesign-mobile-react';
 import { useNavigate } from 'react-router-dom';
 import { TICKET_STATUS_LIST } from '@/shared/constants/dashboard';
 import {
-  fetchDashboardSummaryAll, fetchDarLatest,
+  fetchDashboardSummaryAll, fetchDarLatest, fetchTicketCreatorOrgAnalysis,
   type TicketSummary, type TicketSourceAnalysis, type TicketResponseTime, type TicketAvgCloseTime,
-  type DarReportSummary,
+  type DarReportSummary, type TicketCreatorOrgAnalysis,
 } from '@/api/dashboard';
 import { TICKET_TYPE_DISPLAY_MAP } from '@/shared/constants/ticket';
 import { MacDonut, MacLegend, macTone } from '@/shared/components/macaronBits';
@@ -42,13 +42,13 @@ const RESPONSE_TONE_MAP: Record<string, string> = {
   other: 'blue-4',
 };
 
-// 提单人角色分布 tone：角色按工单数排序循环取 status 蓝阶（与全页同族蓝、亮度和等距拉开），
-// 「其他/未分配角色」归灰色，与真实角色区分
-const ROLE_TONES = ['status-1', 'status-2', 'status-3', 'status-4', 'status-5', 'status-6'];
-function roleTone(label: string, index: number): string {
-  return label === '其他' || label === '未分配角色'
+// 提单人组织分布 tone：组织按工单数排序循环取 status 蓝阶（与全页同族蓝、亮度等距拉开），
+// 「其他/未分配公司/未分配部门」归灰色，与真实组织区分
+const ORG_TONES = ['status-1', 'status-2', 'status-3', 'status-4', 'status-5', 'status-6'];
+function orgTone(label: string, index: number): string {
+  return label === '其他' || label === '未分配公司' || label === '未分配部门'
     ? 'gray'
-    : ROLE_TONES[index % ROLE_TONES.length];
+    : ORG_TONES[index % ORG_TONES.length];
 }
 
 // 工单类型 → 固定色阶（环图扇区 / 条形图 / 下方颜色图例共用，同类颜色稳定）
@@ -168,6 +168,9 @@ export default function TicketDashboard() {
   const [sourceAnalysis, setSourceAnalysis] = useState<TicketSourceAnalysis | null>(cachedRef.current?.source ?? null);
   const [responseTime, setResponseTime] = useState<TicketResponseTime | null>(cachedRef.current?.response_time ?? null);
   const [avgCloseTime, setAvgCloseTime] = useState<TicketAvgCloseTime | null>(cachedRef.current?.avg_close_time ?? null);
+  // ④ 提单人公司/部门分布：独立于 summary-all 拉取（公司下拉切换维度需单独重拉，不进聚合缓存）
+  const [orgAnalysis, setOrgAnalysis] = useState<TicketCreatorOrgAnalysis | null>(null);
+  const [orgCompanyId, setOrgCompanyId] = useState<string>('');
 
   const loadAll = useCallback(async () => {
     // canViewAll 时不传 projectIds（后端不过滤，返回全部）；否则仅统计当前用户关联项目
@@ -186,6 +189,14 @@ export default function TicketDashboard() {
   }, [projectIds, canViewAll, username]);
 
   useEffect(() => { loadAll(); }, [loadAll]);
+
+  const loadOrg = useCallback(async () => {
+    // 口径与全页一致：canViewAll 时不传 projectIds；orgCompanyId 空=按公司，非空=按该公司部门
+    const filterIds = canViewAll ? undefined : projectIds;
+    fetchTicketCreatorOrgAnalysis(filterIds, orgCompanyId || undefined).then(setOrgAnalysis);
+  }, [projectIds, canViewAll, orgCompanyId]);
+
+  useEffect(() => { loadOrg(); }, [loadOrg]);
 
   // AI 直答率周报（dar_weekly 自动推送到后端，最新一期；无数据时区块整体隐藏）
   const [dar, setDar] = useState<DarReportSummary | null>(null);
@@ -294,17 +305,49 @@ export default function TicketDashboard() {
                 }))}
               />
             </section>
-            {/* ============ ④ 提单人角色分布（按提单人主角色归组统计工单数量，
-                 范围与全页一致 = 当前登录用户关联项目，canViewAll 时为全部项目） ============ */}
+            {/* ============ ④ 提单人公司/部门分布（按提单人公司/部门归组累加工单数量；
+                 下拉不选默认按公司统计，选择公司后按该公司下的部门统计；范围与全页一致） ============ */}
             <section className="mac-card mac-card--pad" style={{ marginTop: 12 }}>
-              <SourceDonut
-                title="提单人角色分布"
-                items={(sourceAnalysis?.by_role ?? []).map((r, i) => ({
-                  label: r.label,
-                  value: r.count,
-                  tone: roleTone(r.label, i),
-                }))}
-              />
+              <div className="mac-source-block__title" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <span>{orgAnalysis?.dimension === 'department' ? '提单人部门分布' : '提单人公司分布'}</span>
+                {/* 公司下拉筛选：不选按公司归组；选中后切换为该公司部门维度 */}
+                <select
+                  value={orgCompanyId}
+                  onChange={(e) => setOrgCompanyId(e.target.value)}
+                  style={{
+                    marginLeft: 'auto', maxWidth: '52%', padding: '4px 8px', fontSize: 12,
+                    color: 'var(--mac-fg)', background: 'var(--mac-secondary)',
+                    border: '1px solid var(--mac-border)', borderRadius: 8,
+                  }}
+                >
+                  <option value="">全部公司</option>
+                  {(orgAnalysis?.companies ?? []).map((c) => (
+                    <option key={c.id} value={c.id}>{c.name}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="mac-source-block__body">
+                <MacDonut
+                  segments={(orgAnalysis?.by_org ?? []).map((o, i) => ({
+                    value: o.count,
+                    tone: orgTone(o.label, i),
+                  }))}
+                  centerValue={(orgAnalysis?.by_org ?? []).reduce((s, o) => s + o.count, 0)}
+                  centerLabel="工单数"
+                />
+                <MacLegend
+                  items={(orgAnalysis?.by_org ?? []).map((o, i) => {
+                    const total = (orgAnalysis?.by_org ?? []).reduce((s, x) => s + x.count, 0);
+                    return {
+                      key: o.label,
+                      label: o.label,
+                      value: o.count,
+                      tone: orgTone(o.label, i),
+                      percent: total > 0 ? Math.round((o.count / total) * 100) : 0,
+                    };
+                  })}
+                />
+              </div>
             </section>
           </>
         )}
