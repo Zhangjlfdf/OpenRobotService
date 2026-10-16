@@ -384,10 +384,6 @@ const OperationTimeline: React.FC<OperationTimelineProps> = ({ logs, loading = f
     const subCls = `op-segment__sub${
       log.operation_type === 'reassign' ? ' op-segment__sub--reassign' : ''
     }${isAgreeLog(log) ? ' op-segment__sub--agreed' : ''}`;
-    // 转派原因：转派人填的正文（落在 detail.reason）。以前只落库没渲染。
-    // 先取值再判类型——`typeof log.detail?.reason` 这种可选链上的窄化 TS 不认。
-    const _rawReason = log.operation_type === 'reassign' ? log.detail?.reason : null;
-    const reassignReasonText = typeof _rawReason === 'string' ? _rawReason.trim() : '';
     return (
       <div className={subCls} key={key}>
         <div className="op-segment__sub-dot" style={{ borderColor: isAgreeLog(log) ? 'var(--sky)' : style.color }}>
@@ -405,9 +401,6 @@ const OperationTimeline: React.FC<OperationTimelineProps> = ({ logs, loading = f
               <span className="op-segment__duration">（停留 {formatDuration(log.duration_seconds)}）</span>
             )}
           </div>
-          {reassignReasonText ? (
-            <div className="op-segment__reason">转派原因：{reassignReasonText}</div>
-          ) : null}
           <div className="op-segment__sub-meta">
             <span className="op-segment__time">{formatTime(log.created_at)}</span>
             {log.operator_name && (

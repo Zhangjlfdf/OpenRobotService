@@ -190,16 +190,6 @@
   flex-wrap: wrap;
 }
 
-/* 转派原因：转派人填的正文。以前只落了库没渲染，这条才补上 */
-.op-segment__reason {
-  margin-top: 4px;
-  font-size: 12px;
-  color: var(--muted-foreground);
-  line-height: 1.6;
-  word-break: break-all;
-  white-space: pre-wrap;
-}
-
 .op-segment__sub-operator {
   font-size: 12px;
   color: var(--muted-foreground);

@@ -1101,6 +1101,33 @@ async def get_task(
                 _viewer_creator = False
                 _viewer_admin = False
                 _viewer_operate = False
+            # 最近一次「人工转派」的原因：**和派单原因放在一起展示**，不进工单动态。
+            # 转派走 operation_log（不写 task_dispatch_log），原因落在 detail.reason。
+            # 权限与派单原因一致：只给接单人 / 提单人 / 管理员 / 有 operate 权限。
+            # ⚠️ 必须算在 `if _log is not None` **之外** —— 下面 else 分支（无派单日志）
+            #    也要用它。（同函数内变量先用后赋值＝UnboundLocalError，本仓踩过一次。）
+            _viewer_ok = _viewer_admin or _viewer_operate
+            # 接单人身份按**工单当前的 assigned_to** 判（与下面 _viewer_assignee 同一口径）。
+            # 这里不能用 _viewer_assignee —— 它依赖 _log，此刻还没查。
+            _viewer_is_assignee = bool(
+                _viewer_user and user_matches(_viewer_user, getattr(ticket, "assigned_to", None))
+            )
+            _reassign_reason = None
+            if _viewer_ok or _viewer_creator or _viewer_is_assignee:
+                try:
+                    from app.models.task import TaskOperationLog, OperationType
+                    _relog = (await db.execute(
+                        _sel(TaskOperationLog)
+                        .where(TaskOperationLog.task_id == task_id,
+                               TaskOperationLog.operation_type == OperationType.REASSIGN)
+                        .order_by(TaskOperationLog.id.desc())
+                        .limit(1)
+                    )).scalars().first()
+                    if _relog is not None and isinstance(_relog.detail, dict):
+                        _reassign_reason = str(_relog.detail.get("reason") or "").strip() or None
+                except Exception as _re:
+                    logger.warning(f"读取转派原因失败 task_id={task_id}: {_re}")
+
             _log = (await db.execute(
                 _sel(TaskDispatchLog)
                 .where(TaskDispatchLog.task_id == task_id)
@@ -1133,6 +1160,7 @@ async def get_task(
                 )
                 setattr(ticket, "redispatch", {
                     "dispatch_round": _log.dispatch_round,
+                    "reassign_reason": _reassign_reason,
                     "candidates": _cands,
                     "result": {
                         "assigned_id": _log.assigned_id,
@@ -1169,6 +1197,8 @@ async def get_task(
                 # 临时：项目对接人打标置顶（无对接人则不改序）。
                 setattr(ticket, "redispatch", {
                     "dispatch_round": 0,
+                    # 没有派单日志也要给转派原因：转派可能发生在「从未自动派单」的工单上
+                    "reassign_reason": _reassign_reason,
                     "candidates": _enrich_candidates_pin_contact(
                         _fallback_redispatch_candidates(), ticket,
                     ),
