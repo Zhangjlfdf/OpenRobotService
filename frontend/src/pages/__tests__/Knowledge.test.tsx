@@ -3,6 +3,7 @@ import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { Toast } from 'tdesign-mobile-react';
 import * as api from '@/api/knowledge';
+import { fetchRewardStats } from '@/api/wxpay';
 import { ApiError } from '@/api/client';
 import { useAuthStore } from '@/stores/auth';
 import KnowledgeContributionCard from '../admin/KnowledgeContributionCard';
@@ -17,6 +18,10 @@ vi.mock('@/shared/components/SubscriptionReminder', () => ({ default: () => null
 vi.mock('@/api/dashboard', () => ({
   fetchDashboardSummaryAll: vi.fn().mockRejectedValue(new Error('看板暂不可用')),
   syncWecomProjects: vi.fn(),
+}));
+vi.mock('@/api/wxpay', async (importOriginal) => ({
+  ...await importOriginal<typeof import('@/api/wxpay')>(),
+  fetchRewardStats: vi.fn(),
 }));
 vi.mock('tdesign-mobile-react', () => ({
   Navbar: ({ title, leftArrow, onLeftClick }: { title: string; leftArrow?: boolean; onLeftClick?: () => void }) => <header>{leftArrow && <button type="button" aria-label="返回" onClick={onLeftClick}>返回</button>}{title}</header>,
@@ -46,6 +51,7 @@ const report: api.KnowledgeReview = { report_id: 9, task_id: 7, version: 2, revi
 
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.mocked(fetchRewardStats).mockResolvedValue({ pending_amount: 0, pending_count: 0, withdrawn_amount: 0 });
   useAuthStore.setState({ username: 'knowledge-test', name: '当前用户', projectIds: [], permissions: [], isAdmin: false, roles: null, canViewKnowledgeContribution: true });
   vi.mocked(api.fetchKnowledgeOverview).mockResolvedValue(overview);
   vi.mocked(api.fetchContributors).mockResolvedValue({ items: [person] });
@@ -63,6 +69,27 @@ beforeEach(() => {
 });
 
 describe('知识贡献榜UI', () => {
+  it('首页同时保留知识贡献榜和我的奖励入口，并显示待提现金额', async () => {
+    vi.mocked(fetchRewardStats).mockResolvedValue({ pending_amount: 1250, pending_count: 2, withdrawn_amount: 0 });
+    render(<MemoryRouter><Routes><Route path="/" element={<Dashboard />} /><Route path="/rewards" element={<p>奖励详情入口</p>} /></Routes></MemoryRouter>);
+    expect(await screen.findByRole('region', { name: '知识贡献榜' })).toBeInTheDocument();
+    const rewardsEntry = await screen.findByRole('button', { name: /我的奖励.*¥12\.50/ });
+    expect(rewardsEntry).toHaveAttribute('title', '待提现 ¥12.50（2 笔）');
+    fireEvent.click(rewardsEntry);
+    expect(await screen.findByText('奖励详情入口')).toBeInTheDocument();
+  });
+
+  it('知识榜隐藏且奖励统计失败时仍保留可用的奖励入口', async () => {
+    useAuthStore.setState({ canViewKnowledgeContribution: false });
+    vi.mocked(fetchRewardStats).mockRejectedValue(new Error('奖励暂不可用'));
+    render(<MemoryRouter><Routes><Route path="/" element={<Dashboard />} /><Route path="/rewards" element={<p>奖励详情入口</p>} /></Routes></MemoryRouter>);
+    await waitFor(() => expect(fetchRewardStats).toHaveBeenCalledOnce());
+    expect(screen.queryByRole('region', { name: '知识贡献榜' })).not.toBeInTheDocument();
+    expect(api.fetchKnowledgeOverview).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: '我的奖励' }));
+    expect(await screen.findByText('奖励详情入口')).toBeInTheDocument();
+  });
+
   it('知识榜位于用户欢迎区与工单看板之间，标题复用看板样式', async () => {
     const rendered = render(<MemoryRouter><Dashboard /></MemoryRouter>);
     await screen.findByText('贡献甲');

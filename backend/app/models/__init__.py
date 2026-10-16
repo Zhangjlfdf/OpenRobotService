@@ -53,7 +53,11 @@ from app.models.task import (
     RelationType,
     SystemConfig,
     ArchiveReport,
+    TaskLike,
 )
+
+# 公告（活动中心：首页公告条 + 抽屉公告全文）
+from app.models.announcement import Announcement, AnnouncementStatus
 
 # 任务派单日志（二次派单感知增强）
 from app.models.task_dispatch_log import TaskDispatchLog
@@ -118,6 +122,9 @@ from app.models.usp_env import UspEnv
 # 企业微信表格数据源 + 记录镜像
 from app.models.wecom_sheet import WecomSheetSource, ExternalRecord
 
+# 直答率周报（ORS-#981：AI 直答率上服务号后台）
+from app.models.dar_report import DarWeeklyReport
+
 # 微信支付（奖励记录 + 转账单 + 回调流水）
 from app.models.wxpay import (
     RewardRecord,
@@ -147,7 +154,9 @@ __all__ = [
     "ProjectBlockingConfig",
     # task
     "Task", "TaskComment", "TaskStatus", "TaskPriority", "TaskType", "TaskUserMapping", "TaskStep",
-    "TaskRelation", "RelationType", "SystemConfig", "ArchiveReport",
+    "TaskRelation", "RelationType", "SystemConfig", "ArchiveReport", "TaskLike",
+    # announcement
+    "Announcement", "AnnouncementStatus",
     # task dispatch log
     "TaskDispatchLog",
     # task proxy relation
@@ -176,6 +185,7 @@ __all__ = [
     "UspEnv",
     # wecom sheet source / mirror
     "WecomSheetSource", "ExternalRecord",
+    "DarWeeklyReport",
     # wxpay
     "RewardRecord", "RewardStatus", "TransferBill", "TransferBillState",
     "WxpayNotifyLog", "derive_reward_status",

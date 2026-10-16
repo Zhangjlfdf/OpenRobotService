@@ -19,7 +19,7 @@ import UserAvatarMenu from '@/shared/components/UserAvatarMenu';
 import AvatarImg from '@/shared/components/AvatarImg';
 import SubscriptionReminder from '@/shared/components/SubscriptionReminder';
 import { MacDonut, MacLegend, MacStat } from '@/shared/components/macaronBits';
-import { MacChevronRight, MacRefreshCw } from '@/shared/components/macaronIcons';
+import { MacChevronRight, MacRefreshCw, MacWallet } from '@/shared/components/macaronIcons';
 import { ProjectMonthBars } from '@/shared/components/macaronMonthBars';
 import { currentYearMonth, normalizeSettlementPeriod } from '@/shared/utils/settlement';
 import {
@@ -32,6 +32,7 @@ import {
 } from '@/stores/dashboardCache';
 import { avatarUrl } from '@/api/profile';
 import KnowledgeContributionCard from './KnowledgeContributionCard';
+import { fetchRewardStats, fenToYuan } from '@/api/wxpay';
 
 interface MoreFunctionEntry { path: string; label: string; kind: MoreEntryIconKind; tone: string; group?: 'data-resource'; }
 
@@ -129,6 +130,8 @@ export default function Dashboard() {
   const [projects, setProjects] = useState<ProjectBriefItem[]>(cachedRef.current?.projects_brief ?? []);
   const [syncing, setSyncing] = useState(false);
   const [dataResourceSheetVisible, setDataResourceSheetVisible] = useState(false);
+  // 欢迎区「我的奖励」入口上展示的待提现金额；接口失败/未启用时静默隐藏，不影响看板渲染
+  const [pendingReward, setPendingReward] = useState<{ amount: number; count: number } | null>(null);
 
   const loadAll = useCallback(async () => {
     // canViewAll 时不传 projectIds（后端不过滤，返回全部）；否则仅统计当前用户关联项目
@@ -172,6 +175,23 @@ export default function Dashboard() {
 
   useEffect(() => { loadAll(); }, [loadAll]);
 
+  // 待提现金额独立拉取：失败不影响看板，入口仍可点击
+  useEffect(() => {
+    let alive = true;
+    fetchRewardStats()
+      .then((s) => {
+        if (alive && (s.pending_count > 0 || s.pending_amount > 0)) {
+          setPendingReward({ amount: s.pending_amount, count: s.pending_count });
+        }
+      })
+      .catch(() => {
+        // 微信支付未启用或接口异常：入口照常显示，只是不带金额
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
   return (
     <div className="dashboard-page">
       <SubscriptionReminder username={username} />
@@ -182,7 +202,7 @@ export default function Dashboard() {
       />
 
       <div style={{ padding: '16px 16px 32px' }}>
-        {/* ============ 顶：欢迎区（左侧头像 + 右侧两排：Hello / 用户名） ============ */}
+        {/* ============ 顶：欢迎区（左侧头像 + 右侧两排：Hello / 用户名 + 最右「我的奖励」入口） ============ */}
         <div className="admin-welcome">
           <div className="admin-welcome__avatar">
             <AvatarImg
@@ -194,6 +214,38 @@ export default function Dashboard() {
           <div className="admin-welcome__text">
             <span className="admin-welcome__hello">Hello</span>
             <span className="admin-welcome__name">{name || username || '用户'}</span>
+          </div>
+          {/* 我的奖励：微信商家转账的用户侧唯一入口（由个人资料页迁移至此），
+              点进去可「立即提现」到微信零钱。有金额时并列展示待提现总额，笔数放
+              title（窄屏放不下，避免挤压用户名区域） */}
+          <div
+            className="admin-welcome__rewards"
+            data-testid="rewards-entry"
+            role="button"
+            tabIndex={0}
+            onClick={() => navigate('/rewards')}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                navigate('/rewards');
+              }
+            }}
+            title={
+              pendingReward
+                ? `待提现 ¥${fenToYuan(pendingReward.amount)}（${pendingReward.count} 笔）`
+                : '查看奖励记录并提现到微信零钱'
+            }
+          >
+            <span className="admin-welcome__rewards-icon">
+              <MacWallet size={13} />
+            </span>
+            <span className="admin-welcome__rewards-label">我的奖励</span>
+            {pendingReward && (
+              <span className="admin-welcome__rewards-amount">
+                ¥{fenToYuan(pendingReward.amount)}
+              </span>
+            )}
+            <MacChevronRight size={13} />
           </div>
         </div>
 

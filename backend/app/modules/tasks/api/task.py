@@ -46,7 +46,10 @@ from app.core.ticket_roles import (
     SIDE_CREATOR,
 )
 from app.modules.tasks.services.operation_log_service import OperationLogService, get_role_prefix
-from app.models.task import OperationType, TaskStep, TaskFollower, TaskParticipant, Task, TaskRelation
+from app.models.task import (
+    OperationType, TaskStep, TaskFollower, TaskParticipant, Task, TaskRelation,
+    TaskLike, TaskStatus,
+)
 from app.modules.tasks.services.task_policy_service import get_all_policies
 from app.modules.tasks.api.ws import (
     ws_broadcast_comment,
@@ -765,6 +768,146 @@ async def unfollow_task(
     await db.commit()
 
     return {"ok": True, "task_id": task_id, "followed": False}
+
+
+async def _count_task_likes(db: AsyncSession, task_id: int) -> int:
+    """工单点赞总数。"""
+    return int((await db.execute(
+        select(func.count(TaskLike.id)).where(TaskLike.task_id == task_id)
+    )).scalar_one() or 0)
+
+
+@router.post("/{task_id}/like", response_model=dict)
+async def like_task(
+    task_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_active_user_from_token),
+):
+    """点赞工单（活动中心「精品工单榜」的计数来源）。
+
+    幂等：重复点赞只通过 ON DUPLICATE KEY 刷新 created_at，不报错；
+    点赞人由服务端从 token 解析，无法替他人点赞。
+    """
+    exists = await db.execute(select(Task.id).where(Task.id == task_id))
+    if exists.scalar_one_or_none() is None:
+        raise HTTPException(status_code=404, detail="任务未找到")
+
+    username = actor_username(current_user)
+    stmt = mysql_insert(TaskLike).values(task_id=task_id, username=username)
+    stmt = stmt.on_duplicate_key_update(created_at=func.now())
+    await db.execute(stmt)
+    await db.commit()
+
+    return {
+        "ok": True,
+        "task_id": task_id,
+        "liked": True,
+        "like_count": await _count_task_likes(db, task_id),
+    }
+
+
+@router.delete("/{task_id}/like", response_model=dict)
+async def unlike_task(
+    task_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_active_user_from_token),
+):
+    """取消点赞。幂等：未点赞时影响 0 行，不报错。"""
+    username = actor_username(current_user)
+    await db.execute(
+        delete(TaskLike).where(
+            TaskLike.task_id == task_id,
+            TaskLike.username == username,
+        )
+    )
+    await db.commit()
+
+    return {
+        "ok": True,
+        "task_id": task_id,
+        "liked": False,
+        "like_count": await _count_task_likes(db, task_id),
+    }
+
+
+@router.get("/{task_id}/like", response_model=dict)
+async def get_task_like(
+    task_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_active_user_from_token),
+):
+    """工单点赞状态（详情页点赞按钮用）：总点赞数 + 我是否已点赞。"""
+    username = actor_username(current_user)
+    mine = (await db.execute(
+        select(TaskLike.id).where(
+            TaskLike.task_id == task_id,
+            TaskLike.username == username,
+        )
+    )).scalar_one_or_none()
+    return {
+        "ok": True,
+        "task_id": task_id,
+        "liked": mine is not None,
+        "like_count": await _count_task_likes(db, task_id),
+    }
+
+
+@router.get("/featured", response_model=dict)
+async def featured_tasks(
+    limit: int = Query(10, ge=1, le=50, description="返回条数"),
+    db: AsyncSession = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_active_user_from_token),
+):
+    """精品工单榜（活动中心）：只统计已归档工单，按点赞数倒序。
+
+    注意：本路由必须定义在 `GET /{task_id}`（贪婪路径参数）之前，
+    否则 "featured" 会被当成 task_id 匹配掉（文件内静态路径统一前置）。
+    """
+    like_cnt = func.count(TaskLike.id).label("like_count")
+    stmt = (
+        select(Task, like_cnt)
+        .join(TaskLike, TaskLike.task_id == Task.id)
+        .where(Task.status == TaskStatus.ARCHIVED)
+        .group_by(Task.id)
+        .order_by(like_cnt.desc(), Task.archived_at.desc(), Task.id.desc())
+        .limit(limit)
+    )
+    rows = (await db.execute(stmt)).all()
+
+    liked_ids = set()
+    if rows:
+        me = actor_username(current_user)
+        res = await db.execute(
+            select(TaskLike.task_id).where(
+                TaskLike.task_id.in_([t.id for t, _ in rows]),
+                TaskLike.username == me,
+            )
+        )
+        liked_ids = {r[0] for r in res.all()}
+
+    items = [
+        {
+            "id": t.id,
+            "title": t.title,
+            "status": t.status.value if hasattr(t.status, "value") else t.status,
+            "like_count": int(cnt or 0),
+            "is_liked": t.id in liked_ids,
+            "project_name": t.project_name,
+            "created_by": t.created_by,
+            "created_at": t.created_at.isoformat() if t.created_at else None,
+            "archived_at": t.archived_at.isoformat() if t.archived_at else None,
+        }
+        for t, cnt in rows
+    ]
+
+    total = (await db.execute(
+        select(func.count(func.distinct(TaskLike.task_id)))
+        .select_from(TaskLike)
+        .join(Task, Task.id == TaskLike.task_id)
+        .where(Task.status == TaskStatus.ARCHIVED)
+    )).scalar_one()
+
+    return {"total": int(total or 0), "items": items}
 
 
 @router.get("/stats/overview", response_model=dict)
