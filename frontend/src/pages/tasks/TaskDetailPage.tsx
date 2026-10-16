@@ -8,6 +8,7 @@ import dayjs from 'dayjs';
 import ClearableInput from '@/shared/components/ClearableInput';
 import TitleEllipsis from '@/shared/components/TitleEllipsis';
 import { setupWechatShare, isPcWechat } from '@/shared/utils/wechatJsSdk';
+import { completeArchiveReportTemplate } from '@/shared/utils/archiveReport';
 import { WECHAT_CONFIG } from '@/config/wechat';
 import { createRequest, getToken, ApiError } from '@/api/client';
 import API_CONFIG from '@/config/api';
@@ -168,6 +169,7 @@ interface Ticket {
     submit_status: 'draft' | 'submitted' | 'approved' | 'rejected';
     reviewer?: string | null;
     reviewer_name?: string | null;
+    can_review?: boolean;
     reviewed_at?: string | null;
     review_comment?: string | null;
     revision: number;
@@ -378,7 +380,14 @@ export default function TaskDetailPage() {
           .then((u) => setAllUsers(u))
           .catch(() => setAllUsers([]));
       })
-      .catch((err) => Toast({ message: `详情加载失败: ${err instanceof Error ? err.message : ''}`, theme: 'error' }))
+      .catch((err) => {
+        const body = err instanceof ApiError ? err.errorBody as { detail?: { code?: string; report_id?: number } } : undefined;
+        if (body?.detail?.code === 'BLIND_REVIEW_REQUIRED' && body.detail.report_id) {
+          navigate(`/admin/knowledge/reviews/${body.detail.report_id}`, { replace: true });
+          return;
+        }
+        Toast({ message: `详情加载失败: ${err instanceof Error ? err.message : ''}`, theme: 'error' });
+      })
       .finally(() => setDetailLoading(false));
   }, [detailId]);
 
@@ -569,10 +578,10 @@ export default function TaskDetailPage() {
         const { isAssignee: isAssignee2 } = getCurrentUserRoles();
         const username = localStorage.getItem('username') || '';
         const reviewerMatch = report?.reviewer && (report.reviewer === username || report.reviewer === localStorage.getItem('user_id'));
-        const isReviewer = Boolean(reviewerMatch);
+        const isReviewer = Boolean(report?.can_review || reviewerMatch);
 
         // 审核人视角：submitted 状态下显示通过/驳回
-        if (report?.submit_status === 'submitted' && (isReviewer || canOperate2)) {
+        if (report?.submit_status === 'submitted' && isReviewer) {
           const BTN_PRIMARY2 = { backgroundColor: 'var(--primary)', color: 'var(--primary-foreground)', borderRadius: '999px', border: 'none' };
           const BTN_DANGER2 = { backgroundColor: 'var(--destructive)', color: 'var(--destructive-foreground)', borderRadius: '999px', border: 'none' };
           return [
@@ -769,21 +778,8 @@ export default function TaskDetailPage() {
 
   // ── 审核通过归档 ──
   const handleArchiveApprove = async () => {
-    if (archiveLoading) return;
     const reportId = detail?.current_archive_report?.id;
-    if (!reportId || !detail) return;
-    setArchiveLoading(true);
-    try {
-      // approve 后端返回 TicketResponse，但 archive report 状态也变了，统一 loadDetail
-      await request(`/archive-report/archive-reports/${reportId}/approve`, { method: 'POST' });
-      setArchiveEditorVisible(false);
-      loadDetail();
-      Toast({ message: '归档审核通过', theme: 'success' });
-    } catch (err) {
-      Toast({ message: `操作失败: ${err instanceof Error ? err.message : ''}`, theme: 'error' });
-    } finally {
-      setArchiveLoading(false);
-    }
+    if (reportId) navigate(`/admin/knowledge/reviews/${reportId}`);
   };
 
   // ── 审核驳回归档 ──
@@ -800,7 +796,7 @@ export default function TaskDetailPage() {
       // reject 后端返回 ArchiveReportResponse（不是 Ticket），不调 setDetail
       await request(`/archive-report/archive-reports/${reportId}/reject`, {
         method: 'POST',
-        body: JSON.stringify({ review_comment: archiveRejectReason }),
+        body: JSON.stringify({ review_comment: archiveRejectReason, revision: detail?.current_archive_report?.revision }),
       });
       setShowArchiveRejectPopup(false);
       setArchiveRejectReason('');
@@ -823,7 +819,8 @@ export default function TaskDetailPage() {
     setArchiveReportContent(report.content || '');
     setArchiveReportRevision(report.revision || 1);
     if (report.submit_status === 'submitted') {
-      setArchiveEditorMode('review');
+      navigate(`/admin/knowledge/reviews/${report.id}`);
+      return;
     } else {
       setArchiveEditorMode('edit');
     }
@@ -2678,7 +2675,7 @@ export default function TaskDetailPage() {
           <h4 style={{ margin: '0 0 12px', fontSize: 15 }}>
             {archiveEditorMode === 'review' ? '归档报告审核' : (detail?.current_archive_report?.submit_status === 'rejected' ? '修改归档报告' : '编写归档报告')}
           </h4>
-          {archiveEditorMode === 'review' && detail?.current_archive_report?.review_comment && (
+          {archiveEditorMode === 'edit' && detail?.current_archive_report?.review_comment && (
             <div style={{ padding: '8px 12px', background: 'var(--destructive)/10%', borderRadius: 6, marginBottom: 12, fontSize: 13 }}>
               <strong style={{ color: 'var(--destructive)' }}>上一次驳回理由：</strong>
               {detail.current_archive_report.review_comment}
@@ -2686,6 +2683,10 @@ export default function TaskDetailPage() {
           )}
           {archiveEditorMode === 'edit' ? (
             <>
+              <div style={{ marginBottom: 12, fontSize: 12, lineHeight: 1.8, color: 'var(--muted-foreground)' }}>
+                活动归档报告须填写问题概述、问题场景、复现条件、原因分析、解决方案、验证结果、适用范围、遗留问题；各章节须有正文，无遗留可写“无”。请勿写入人员姓名及联系方式。
+                <Button size="small" theme="default" disabled={archiveGenerating} onClick={() => setArchiveReportContent(completeArchiveReportTemplate(archiveReportContent))}>补齐报告章节</Button>
+              </div>
               {archiveGenerating ? (
                 /* AI 生成中：只读直播，防止处理人同时手写（服务端 content='' 条件写回兜底） */
                 <div style={{ height: 320, border: '1px dashed var(--border, #d8e0ea)', borderRadius: 6, padding: '12px 16px', overflow: 'auto' }}>

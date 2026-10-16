@@ -71,7 +71,9 @@ from app.services.redispatch_tip_service import (  # 派单说明：列表/气�
     yaorenba_assignee_tip,
 )
 
-router = APIRouter(tags=["tasks"])
+from app.modules.tasks.services.knowledge_review import raw_access_guard, project_task_list
+
+router = APIRouter(tags=["tasks"], dependencies=[Depends(raw_access_guard)])
 
 # 模块级 logger（避免每个端点内重复 logging.getLogger(__name__)）
 logger_task = logging.getLogger(__name__)
@@ -598,7 +600,8 @@ async def get_tasks(
     deadline_at_start: Optional[datetime] = Query(None, description="截止时间起始"),
     deadline_at_end: Optional[datetime] = Query(None, description="截止时间结束"),
     with_relations: bool = Query(False, description="是否同时返回关联工单完整数据（解决父子工单跨页问题）"),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_active_user_from_token),
 ):
     import logging
     logger = logging.getLogger(__name__)
@@ -660,7 +663,7 @@ async def get_tasks(
 
         result = await TicketService.get_tickets(db, query_params, token)
         logger.info(f"获取任务列表成功, total={result.get('total', 0)}, items_count={len(result.get('items', []))}")
-        return result
+        return await project_task_list(db, result, current_user)
     except Exception as e:
         logger.error(f"获取任务列表失败: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"获取任务列表失败: {str(e)}")
@@ -688,7 +691,7 @@ async def filter_tasks(
 
         result = await TicketService.filter_tickets(db, filter_request, token, current_username, current_user_id)
         logger.debug(f"复合过滤查询任务列表成功, total={result.get('total', 0)}")
-        return result
+        return await project_task_list(db, result, current_user)
     except Exception as e:
         logger.error(f"复合过滤查询任务列表失败: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"复合过滤查询任务列表失败: {str(e)}")
@@ -1181,7 +1184,9 @@ async def get_task(
             logger.warning(f"回填项目对接人失败 task_id={task_id}: {contact_err}")
 
         # current_archive_report 已由 TicketService.get_ticket_by_id 填充
-        return ticket
+        response = TicketResponse.model_validate(ticket)
+        response.archived_by = None
+        return response
     except HTTPException:
         raise
     except Exception as e:
@@ -1320,6 +1325,7 @@ async def get_similar_tasks(
         description="相似度阈值：低于该分的相似工单不返回（0=不过滤）。作用于 score（RRF 融合分）"),
     scope: str = Query("remind", description="返回深度：remind=轻量列表；review=附带归档报告与审核人/时间"),
     db: AsyncSession = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_active_user_from_token),
 ):
     """相似工单（供审核页 / 讨论区 @# 用）：单一出口 —— Qdrant 已沉淀卡的向量召回。
 
@@ -1359,10 +1365,20 @@ async def get_similar_tasks(
         cur = await db.get(Task, task_id)
         if not cur:
             raise HTTPException(status_code=404, detail="任务未找到")
+        from app.modules.tasks.services.knowledge_review import review_detail
+        from app.modules.admin.services.knowledge_service import anonymous_text
+        if scope_norm == "review":
+            from app.models.task import ArchiveReport
+            review = (await db.execute(select(ArchiveReport).where(ArchiveReport.task_id == task_id)
+                .order_by(ArchiveReport.version.desc()).limit(1))).scalar_one_or_none()
+            if not review or review.submit_status != "submitted":
+                raise HTTPException(403, "当前工单没有待审报告")
+            await review_detail(db, current_user, review.id)
         cap = max(1, min(int(limit or 10), 30))
         floor = float(min_score or 0) or None
 
         items: list = []
+        retrieval_available = False
         try:
             url = f"{settings.AI_SERVICE_URL.rstrip('/')}/api/ai/task/tickets/similar"
             async with httpx.AsyncClient(timeout=12.0) as client:
@@ -1370,6 +1386,7 @@ async def get_similar_tasks(
             if resp.status_code == 200:
                 payload = resp.json() if resp.content else {}
                 if int(payload.get("code") or 0) == 0:
+                    retrieval_available = True
                     data = payload.get("data") or {}
                     items = await _hydrate_similar_from_db(
                         db, data.get("similar") or [], task_id, cap, min_score=floor)
@@ -1378,8 +1395,17 @@ async def get_similar_tasks(
 
         if scope_norm == "review":
             await _attach_reports(db, items)
+        for item in items:
+            similar_task = await db.get(Task, item["task_id"])
+            item.pop("project_name", None)
+            item["title"] = await anonymous_text(db, similar_task, item.get("title"))
+            if item.get("report"):
+                item["report"].pop("reviewer", None)
+                item["report"].pop("reviewer_name", None)
+                item["report"]["content"] = await anonymous_text(db, similar_task, item["report"].get("content"))
 
-        return {"task_id": task_id, "scope": scope_norm, "similar": items[:cap]}
+        return {"task_id": task_id, "scope": scope_norm, "similar": items[:cap],
+                "retrieval_status": "ok" if retrieval_available else "unavailable"}
     except HTTPException:
         raise
     except Exception as e:

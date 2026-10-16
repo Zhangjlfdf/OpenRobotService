@@ -24,6 +24,7 @@ from sqlalchemy.dialects import mysql
 from app.core.auth_routes import get_current_active_user_from_token
 from app.models.task import TaskStatus
 from app.modules.tasks.api.task import get_db, router
+from app.modules.tasks.services import knowledge_review
 
 USER = {"id": "u-bob", "username": "bob"}
 
@@ -90,8 +91,34 @@ def client(db):
 
     app.dependency_overrides[get_db] = override_db
     app.dependency_overrides[get_current_active_user_from_token] = lambda: USER
+    app.dependency_overrides[knowledge_review.raw_access_guard] = lambda: None
     with TestClient(app) as test_client:
         yield test_client
+
+
+@pytest.mark.parametrize("method", ["GET", "POST", "DELETE"])
+def test_task_likes_preserve_blind_review_guard(method, db, monkeypatch):
+    reviewer = {"id": "u-reviewer", "username": "reviewer"}
+    report = SimpleNamespace(id=9, submit_status="submitted", reviewer="u-reviewer")
+    db.execute = AsyncMock(return_value=_Res(one=report))
+    monkeypatch.setattr(knowledge_review, "actor_identities", AsyncMock(return_value={"u-reviewer"}))
+    app = FastAPI()
+    app.include_router(router, prefix="/api/tasks")
+
+    async def override_db():
+        yield db
+
+    app.dependency_overrides[get_db] = override_db
+    app.dependency_overrides[get_current_active_user_from_token] = lambda: reviewer
+    app.dependency_overrides[knowledge_review.blind_review_actor] = lambda: reviewer
+    with TestClient(app) as test_client:
+        response = test_client.request(method, f"/api/tasks/{TASK_ID}/like")
+
+    assert response.status_code == 403
+    assert response.json()["detail"]["code"] == "BLIND_REVIEW_REQUIRED"
+    assert response.json()["detail"]["report_id"] == report.id
+    assert db.execute.await_count == 1
+    db.commit.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------
