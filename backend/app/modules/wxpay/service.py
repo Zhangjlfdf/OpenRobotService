@@ -928,12 +928,13 @@ class AuditDecisionEngine:
         force_daily = int(policy.get("force_audit_user_daily_fen", 0) or 0)
         if force_daily > 0:
             today_start = _now().date()
-            # SQLite / MySQL 兼容写法：DATE(created_at)
+            # func.DATE 在 MySQL / SQLite 下都正确渲染为 DATE(created_at)，
+            # func.func("DATE", ...) 会被渲染成 helpdesk_724.DATE(...) 导致 MySQL 报 "FUNCTION ... does not exist"
             daily_sum = (
                 await db.execute(
                     select(func.coalesce(func.sum(RewardRecord.amount), 0)).where(
                         RewardRecord.user_id == user_id,
-                        func.func("DATE", RewardRecord.created_at) == str(today_start),
+                        func.DATE(RewardRecord.created_at) == str(today_start),
                     )
                 )
             ).scalar() or 0
