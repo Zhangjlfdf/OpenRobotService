@@ -183,11 +183,10 @@ export default function MyRewards() {
   const hasMore = items.length < total;
 
   return (
-    <div
-      className="rewards-page"
-      style={{ background: 'var(--gradient-surface)', flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}
-    >
-      <Navbar title="我的历史奖励" leftArrow onLeftClick={() => navigate(-1)} />
+    // 布局见 global.css 的 .rewards-page：Navbar 带 fixed 后脱离文档流，
+    // 容器需自己让出顶栏高度，否则「待提现」汇总卡会被压在顶栏下
+    <div className="rewards-page">
+      <Navbar title="我的奖励" fixed leftArrow onLeftClick={() => navigate(-1)} />
 
       <div className="page-container" style={{ paddingTop: 16, paddingBottom: 24 }}>
         {/* 汇总：待提现 / 累计已到账 */}

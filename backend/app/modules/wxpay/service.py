@@ -267,7 +267,12 @@ class WithdrawService:
 
         min_fen = int(getattr(settings, "WXPAY_MIN_WITHDRAW_FEN", 100) or 0)
         if reward.amount < min_fen:
-            return WithdrawOut(action="rejected", message=f"未满 {min_fen // 100} 元，暂不可提现")
+            # 用 /100 + :g 而非 //100：整数除法在阈值非整百时会显示错误金额
+            # （150 分 → "未满 1 元"，50 分 → "未满 0 元"）。
+            return WithdrawOut(
+                action="rejected",
+                message=f"未满 {min_fen / 100:g} 元，暂不可提现",
+            )
         max_fen = int(getattr(settings, "WXPAY_MAX_TRANSFER_FEN", 0) or 0)
         if max_fen and reward.amount > max_fen:
             return WithdrawOut(action="rejected", message="单笔金额超过上限，请联系客服")
@@ -489,6 +494,14 @@ class WithdrawService:
                     return WithdrawOut(
                         action="need_real_name",
                         message="收款人姓名与微信实名信息不一致，请填写真实姓名",
+                    )
+                # 微信原提示为"充值后可以原单号发起重试，请勿更换商户单号"，但本分支
+                # 已在上面删除占位单，重试时会生成新的 out_bill_no，原单号实际已不存在；
+                # 直接透传会让用户/运营以为要去记一串 RP... 单号，故换成可操作的提示。
+                if e.code == "NOT_ENOUGH":
+                    return WithdrawOut(
+                        action="rejected",
+                        message="运营账户余额不足，请通知运营方充值后重新发起提现",
                     )
                 return WithdrawOut(action="rejected", message=e.message or "发起转账失败")
             # 其余（网络异常/系统错误）保留占位，等兜底查单刷新，绝不换单重试
