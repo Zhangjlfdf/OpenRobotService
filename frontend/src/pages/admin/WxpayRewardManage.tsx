@@ -1481,7 +1481,7 @@ function ConfigCard({
       >
         <div style={CARD_TITLE}>{title}</div>
         <Switch
-          checked={enabled}
+          value={enabled}
           onChange={(v) => onEnabledChange(!!v)}
         />
       </div>
@@ -1515,14 +1515,14 @@ function ConfigNumField({
 }) {
   return (
     <div style={FIELD_ROW}>
-      <div style={FIELD_LABEL}>{label}{unit ? `（${unit}）` : ''}</div>
-      <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-        <Input
-          value={value}
-          placeholder="0"
-          onChange={onChange}
-          type="number"
-        />
+        <div style={FIELD_LABEL}>{label}{unit ? `（${unit}）` : ''}</div>
+        <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+          <Input
+            value={value}
+            placeholder="0"
+            onChange={(v) => onChange(String(v))}
+            type="number"
+          />
         {unit ? <span style={{ fontSize: 12, color: '#999', minWidth: 32 }}>{unit}</span> : null}
       </div>
       {hint ? <div style={{ ...FIELD_LABEL, color: '#aaa', marginTop: 2 }}>{hint}</div> : null}
