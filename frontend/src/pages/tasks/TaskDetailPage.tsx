@@ -1807,17 +1807,20 @@ export default function TaskDetailPage() {
               接单人可同时看「接单提醒」与「派单原因」。
               转派原因放这一块（**不放工单动态**）——两者都是「为什么派给这个人」的说明。 */}
           {(() => {
-            if (!dispatchReason && !lastReassignReason) return null;
             const { isAssignee, isReporter } = getCurrentUserRoles();
             const canOperate = isAdmin || hasPermission('backend:tasks:operate');
             if (!isAssignee && !isReporter && !canOperate) return null;
-            if (redispatchTipDetail && isReporter) return null;
+            // 「有 tip 就不重复展示」只针对**派单原因** —— tip 讲的是这次派单。
+            // 转派 tip 里根本没有，不能被连坐挡掉（否则提单人永远看不到转派原因）。
+            const showDispatch = !!dispatchReason && !(redispatchTipDetail && isReporter);
+            const showReassign = !!lastReassignReason;
+            if (!showDispatch && !showReassign) return null;
             return (
               <>
-                {dispatchReason ? (
+                {showDispatch ? (
                   <DispatchFold label="派单原因" text={dispatchReason} variant="reason" />
                 ) : null}
-                {lastReassignReason ? (
+                {showReassign ? (
                   <DispatchFold label="转派原因" text={lastReassignReason} variant="reason" />
                 ) : null}
               </>
