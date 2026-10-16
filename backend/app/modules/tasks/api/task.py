@@ -10,7 +10,7 @@ import logging
 
 from fastapi import APIRouter, HTTPException, Depends, Query, Request, UploadFile, File, Form, Body
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, delete
+from sqlalchemy import select, func, delete, update
 from sqlalchemy.dialects.mysql import insert as mysql_insert
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timedelta
@@ -48,7 +48,7 @@ from app.core.ticket_roles import (
 from app.modules.tasks.services.operation_log_service import OperationLogService, get_role_prefix
 from app.models.task import (
     OperationType, TaskStep, TaskFollower, TaskParticipant, Task, TaskRelation,
-    TaskLike, TaskStatus,
+    TaskLike, TaskStatus, LIKE_RISK_NORMAL,
 )
 from app.modules.tasks.services.task_policy_service import get_all_policies
 from app.modules.tasks.api.ws import (
@@ -775,9 +775,13 @@ async def unfollow_task(
 
 
 async def _count_task_likes(db: AsyncSession, task_id: int) -> int:
-    """工单点赞总数。"""
+    """工单有效点赞总数：is_active=1 且未被风控判无效（需求 §8.3.1）。"""
     return int((await db.execute(
-        select(func.count(TaskLike.id)).where(TaskLike.task_id == task_id)
+        select(func.count(TaskLike.id)).where(
+            TaskLike.task_id == task_id,
+            TaskLike.is_active.is_(True),
+            TaskLike.risk_status == LIKE_RISK_NORMAL,
+        )
     )).scalar_one() or 0)
 
 
@@ -789,7 +793,9 @@ async def like_task(
 ):
     """点赞工单（活动中心「精品工单榜」的计数来源）。
 
-    幂等：重复点赞只通过 ON DUPLICATE KEY 刷新 created_at，不报错；
+    幂等：重复点赞（含取消后重新点赞）通过 ON DUPLICATE KEY 把同一行
+    恢复为有效状态，不新增行、不重复累计；created_at 保留首次点赞时间。
+    风控状态不在这里改写：已被核验为无效的点赞不会因再次点击而洗白。
     点赞人由服务端从 token 解析，无法替他人点赞。
     """
     exists = await db.execute(select(Task.id).where(Task.id == task_id))
@@ -798,7 +804,7 @@ async def like_task(
 
     username = actor_username(current_user)
     stmt = mysql_insert(TaskLike).values(task_id=task_id, username=username)
-    stmt = stmt.on_duplicate_key_update(created_at=func.now())
+    stmt = stmt.on_duplicate_key_update(is_active=True, updated_at=func.now())
     await db.execute(stmt)
     await db.commit()
 
@@ -816,13 +822,19 @@ async def unlike_task(
     db: AsyncSession = Depends(get_db),
     current_user: Dict[str, Any] = Depends(get_current_active_user_from_token),
 ):
-    """取消点赞。幂等：未点赞时影响 0 行，不报错。"""
+    """取消点赞（软删除）：is_active 置 0 并保留记录，供期末核验追溯。
+
+    幂等：未点赞/已取消时影响 0 行，不报错；取消后重新点赞复用同一行
+    （唯一键 task_id + username），不会重复累计。
+    """
     username = actor_username(current_user)
     await db.execute(
-        delete(TaskLike).where(
+        update(TaskLike)
+        .where(
             TaskLike.task_id == task_id,
             TaskLike.username == username,
         )
+        .values(is_active=False, updated_at=func.now())
     )
     await db.commit()
 
@@ -840,12 +852,18 @@ async def get_task_like(
     db: AsyncSession = Depends(get_db),
     current_user: Dict[str, Any] = Depends(get_current_active_user_from_token),
 ):
-    """工单点赞状态（详情页点赞按钮用）：总点赞数 + 我是否已点赞。"""
+    """工单点赞状态（详情页点赞按钮用）：有效点赞数 + 我是否处于点赞状态。
+
+    口径：like_count 只计有效点赞（is_active=1 且 risk_status=normal）；
+    liked 只看我自己的 is_active（若我的点赞被风控判无效，仍显示已点赞，
+    便于我自行取消，不出现「按钮点不动」的死状态）。
+    """
     username = actor_username(current_user)
     mine = (await db.execute(
         select(TaskLike.id).where(
             TaskLike.task_id == task_id,
             TaskLike.username == username,
+            TaskLike.is_active.is_(True),
         )
     )).scalar_one_or_none()
     return {
@@ -862,7 +880,12 @@ async def featured_tasks(
     db: AsyncSession = Depends(get_db),
     current_user: Dict[str, Any] = Depends(get_current_active_user_from_token),
 ):
-    """精品工单榜（活动中心）：只统计已归档工单，按点赞数倒序。
+    """精品工单榜（活动中心）：只统计已归档工单，按有效点赞数倒序。
+
+    计数口径 = 有效点赞（is_active=1 且 risk_status='normal'），
+    已取消点赞与风控判无效的点赞不计入；只有失效点赞的工单不再上榜。
+    本榜即「优质问题」榜的数据源：精品榜点赞排名靠前者为优质问题
+    （2026-10-15 决策，两者共用同一份点赞记录）。
 
     注意：本路由必须定义在 `GET /{task_id}`（贪婪路径参数）之前，
     否则 "featured" 会被当成 task_id 匹配掉（文件内静态路径统一前置）。
@@ -871,7 +894,11 @@ async def featured_tasks(
     stmt = (
         select(Task, like_cnt)
         .join(TaskLike, TaskLike.task_id == Task.id)
-        .where(Task.status == TaskStatus.ARCHIVED)
+        .where(
+            Task.status == TaskStatus.ARCHIVED,
+            TaskLike.is_active.is_(True),
+            TaskLike.risk_status == LIKE_RISK_NORMAL,
+        )
         .group_by(Task.id)
         .order_by(like_cnt.desc(), Task.archived_at.desc(), Task.id.desc())
         .limit(limit)
@@ -885,6 +912,7 @@ async def featured_tasks(
             select(TaskLike.task_id).where(
                 TaskLike.task_id.in_([t.id for t, _ in rows]),
                 TaskLike.username == me,
+                TaskLike.is_active.is_(True),
             )
         )
         liked_ids = {r[0] for r in res.all()}
@@ -908,7 +936,11 @@ async def featured_tasks(
         select(func.count(func.distinct(TaskLike.task_id)))
         .select_from(TaskLike)
         .join(Task, Task.id == TaskLike.task_id)
-        .where(Task.status == TaskStatus.ARCHIVED)
+        .where(
+            Task.status == TaskStatus.ARCHIVED,
+            TaskLike.is_active.is_(True),
+            TaskLike.risk_status == LIKE_RISK_NORMAL,
+        )
     )).scalar_one()
 
     return {"total": int(total or 0), "items": items}
