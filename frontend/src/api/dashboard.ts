@@ -473,7 +473,25 @@ export interface DarReportSummary {
   kb_gap: string | null;
   manual_progress: string | null;
   this_week: { from?: string; to?: string; n_convs?: number; n_segs?: number; n_ticketed?: number; L1_rate?: string };
+  /**
+   * 工作台展示值快照（推送时 dar_studio.metrics 原样取）——区块按这份渲染，
+   * 与工作台首页那张卡同数。老周报没有这个字段，退回上面的周报口径字段。
+   */
+  workbench?: {
+    hero?: DarWorkbenchCard[];
+    small?: DarWorkbenchCard[];
+    manual_progress?: string | null;
+    export_at?: string | null;
+    date?: string | null;
+  } | null;
   updated_at: string | null;
+}
+
+/** 工作台指标卡（label/value/sub 三元组，与 dar_studio hero/small 同构） */
+export interface DarWorkbenchCard {
+  label: string;
+  value: string;
+  sub?: string;
 }
 
 export async function fetchDarLatest(env = 'prod'): Promise<DarReportSummary | null> {
