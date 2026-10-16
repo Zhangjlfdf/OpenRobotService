@@ -1,4 +1,5 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { Toast } from 'tdesign-mobile-react';
@@ -75,6 +76,7 @@ describe('知识贡献榜UI', () => {
     expect(await screen.findByRole('region', { name: '知识贡献榜' })).toBeInTheDocument();
     const rewardsEntry = await screen.findByRole('button', { name: /待提现（元）.*2 笔可提.*¥12\.50/ });
     expect(rewardsEntry.tagName).toBe('SECTION');
+    expect(screen.getAllByRole('button', { name: /待提现（元）/ })).toHaveLength(1);
     expect(rewardsEntry).toHaveClass('mac-card', 'mac-card--pad');
     expect(within(rewardsEntry).getByText('¥12.50')).toHaveStyle({ fontSize: '28px', fontWeight: '700', color: '#227197' });
     expect(within(rewardsEntry).getByText('累计已到账')).toBeInTheDocument();
@@ -113,6 +115,15 @@ describe('知识贡献榜UI', () => {
     expect(knowledgeHeading.parentElement).toHaveClass('mac-section-title');
     expect(knowledgeHeading.className).toBe(ticketHeading.className);
     expect(screen.getAllByText('知识贡献榜')).toHaveLength(1);
+  });
+
+  it.each(['{Enter}', ' '])('原奖励汇总卡片支持通过 %s 键进入奖励详情', async (key) => {
+    const user = userEvent.setup();
+    render(<MemoryRouter><Routes><Route path="/" element={<Dashboard />} /><Route path="/rewards" element={<p>奖励详情入口</p>} /></Routes></MemoryRouter>);
+    const rewardsEntry = screen.getByRole('button', { name: /待提现（元）/ });
+    rewardsEntry.focus();
+    await user.keyboard(key);
+    expect(await screen.findByText('奖励详情入口')).toBeInTheDocument();
   });
 
   it('卡片仍可进入知识中心，且不重复显示主标题', async () => {
