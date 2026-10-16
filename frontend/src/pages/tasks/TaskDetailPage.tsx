@@ -131,7 +131,11 @@ interface Ticket {
   deadline_at?: string | null;
   // 二次派单感知增强（M3）：未派到指定人时的完整话术（详情页 redispatch.result.tip_detail）
   // 二次派单感知增强：派单理由（为什么派给接单人；接单人/提单人/管理员可见 → redispatch.result.reasoning）
-  redispatch?: { result?: { tip_detail?: string | null; reasoning?: string | null } } | null;
+  redispatch?: {
+    dispatch_round?: number;
+    reassign_reason?: string | null;
+    result?: { tip_detail?: string | null; reasoning?: string | null };
+  } | null;
   // 工单阶段性处理（协商节点）：当前节点 ID/名称/结束时间（naive UTC）
   curr_step_id?: number | null;
   curr_step_name?: string | null;
