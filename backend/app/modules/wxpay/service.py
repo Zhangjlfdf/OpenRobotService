@@ -573,6 +573,12 @@ class WithdrawService:
         auto_commit: bool = True,
     ) -> WithdrawOut:
         """发起转账（必须先落占位单，保证回调到达时能定位到 reward）。"""
+        # 前置校验：reward.openid 为空 → 用户未绑微信，不能提现
+        if not (reward.openid or "").strip():
+            return WithdrawOut(
+                action="rejected",
+                message="请先绑定微信账户，再发起提现",
+            )
         now = _now()
 
         user_name = ""
