@@ -550,6 +550,7 @@ class ArchiveReport(Base):
                       comment="审核人 users.id（submit 时指定，approve/reject 后保留最后审核人）")
     reviewed_at = Column(DateTime, nullable=True, comment="审核时间")
     review_comment = Column(Text, nullable=True, comment="驳回理由（rejected 时填）")
+    value_point = Column(Text, nullable=True, comment="审核通过的知识价值点")
     revision = Column(Integer, nullable=False, server_default="1", default=1,
                       comment="乐观锁（保存草稿时比对，不一致返回 409）")
 

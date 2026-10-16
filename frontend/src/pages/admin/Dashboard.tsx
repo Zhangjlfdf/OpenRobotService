@@ -31,6 +31,7 @@ import {
   buildDashboardFilterKey, loadDashboardCache, saveDashboardCache,
 } from '@/stores/dashboardCache';
 import { avatarUrl } from '@/api/profile';
+import KnowledgeContributionCard from './KnowledgeContributionCard';
 
 interface MoreFunctionEntry { path: string; label: string; kind: MoreEntryIconKind; tone: string; group?: 'data-resource'; }
 
@@ -107,7 +108,7 @@ const SORTED_TICKET_STATUS_LIST = [...TICKET_STATUS_LIST].sort(
 
 export default function Dashboard() {
   const navigate = useNavigate();
-  const { hasPermission, projectIds, username, name, avatarResourceId } = useAuthStore();
+  const { hasPermission, projectIds, username, name, avatarResourceId, canViewKnowledgeContribution } = useAuthStore();
   const canAccessAdminEntries = hasPermission('frontend:admin:other:show');
   // 拥有此权限的用户不受「仅看自己关联项目」限制，可查看全部项目和工单
   const canViewAll = hasPermission(PERMISSION_VIEW_ALL);
@@ -195,6 +196,11 @@ export default function Dashboard() {
             <span className="admin-welcome__name">{name || username || '用户'}</span>
           </div>
         </div>
+
+        {canViewKnowledgeContribution && <>
+          <SectionTitle title="知识贡献榜" moreText="查看榜单" onMore={() => navigate('/admin/knowledge')} />
+          <KnowledgeContributionCard key={username} />
+        </>}
 
         {/* ============ 上：工单数据看板 ============ */}
         {/* 状态环图 + 图例（点图例下钻工单明细）+ 四指标卡；
