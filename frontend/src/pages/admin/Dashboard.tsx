@@ -8,7 +8,7 @@
 // 数据接口见 src/api/dashboard.ts；接口未就绪时一律优雅降级为「0/暂无数据」，不阻塞页面渲染。
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { Navbar, Toast, Popup } from 'tdesign-mobile-react';
-import { UserCircleIcon } from 'tdesign-icons-react';
+import { ChevronRightIcon, UserCircleIcon } from 'tdesign-icons-react';
 import { useNavigate } from 'react-router-dom';
 import { TICKET_STATUS_LIST, URGENCY_LIST } from '@/shared/constants/dashboard';
 import {
@@ -31,6 +31,8 @@ import {
   buildDashboardFilterKey, loadDashboardCache, saveDashboardCache,
 } from '@/stores/dashboardCache';
 import { avatarUrl } from '@/api/profile';
+// 欢迎区「我的历史奖励」入口的待提现金额（该入口由个人资料页迁移至此）
+import { fetchRewardStats, fenToYuan } from '@/api/wxpay';
 
 interface MoreFunctionEntry { path: string; label: string; kind: MoreEntryIconKind; tone: string; group?: 'data-resource'; }
 
@@ -128,6 +130,8 @@ export default function Dashboard() {
   const [projects, setProjects] = useState<ProjectBriefItem[]>(cachedRef.current?.projects_brief ?? []);
   const [syncing, setSyncing] = useState(false);
   const [dataResourceSheetVisible, setDataResourceSheetVisible] = useState(false);
+  // 欢迎区「我的历史奖励」入口上展示的待提现金额；接口失败/未启用时静默隐藏，不影响看板渲染
+  const [pendingReward, setPendingReward] = useState<{ amount: number; count: number } | null>(null);
 
   const loadAll = useCallback(async () => {
     // canViewAll 时不传 projectIds（后端不过滤，返回全部）；否则仅统计当前用户关联项目
@@ -171,6 +175,23 @@ export default function Dashboard() {
 
   useEffect(() => { loadAll(); }, [loadAll]);
 
+  // 待提现金额独立拉取：失败不影响看板，入口仍可点击
+  useEffect(() => {
+    let alive = true;
+    fetchRewardStats()
+      .then((s) => {
+        if (alive && (s.pending_count > 0 || s.pending_amount > 0)) {
+          setPendingReward({ amount: s.pending_amount, count: s.pending_count });
+        }
+      })
+      .catch(() => {
+        // 微信支付未启用或接口异常：入口照常显示，只是不带金额
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
   return (
     <div className="dashboard-page">
       <SubscriptionReminder username={username} />
@@ -181,7 +202,7 @@ export default function Dashboard() {
       />
 
       <div style={{ padding: '16px 16px 32px' }}>
-        {/* ============ 顶：欢迎区（左侧头像 + 右侧两排：Hello / 用户名） ============ */}
+        {/* ============ 顶：欢迎区（左侧头像 + 右侧两排：Hello / 用户名 + 最右「我的历史奖励」入口） ============ */}
         <div className="admin-welcome">
           <div className="admin-welcome__avatar">
             <AvatarImg
@@ -193,6 +214,23 @@ export default function Dashboard() {
           <div className="admin-welcome__text">
             <span className="admin-welcome__hello">Hello</span>
             <span className="admin-welcome__name">{name || username || '用户'}</span>
+          </div>
+          {/* 我的历史奖励：微信商家转账的用户侧唯一入口（由个人资料页迁移至此），
+              点进去可「立即提现」到微信零钱 */}
+          <div
+            className="admin-welcome__rewards"
+            data-testid="rewards-entry"
+            onClick={() => navigate('/rewards')}
+          >
+            <div className="admin-welcome__rewards-text">
+              <span className="admin-welcome__rewards-title">我的历史奖励</span>
+              <span className="admin-welcome__rewards-sub">
+                {pendingReward
+                  ? `待提现 ¥${fenToYuan(pendingReward.amount)}（${pendingReward.count} 笔）`
+                  : '查看并提现'}
+              </span>
+            </div>
+            <ChevronRightIcon size="16px" />
           </div>
         </div>
 

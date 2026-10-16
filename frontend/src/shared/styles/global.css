@@ -3103,6 +3103,38 @@ html, body, #root {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* 欢迎区右侧「我的历史奖励」入口（由个人资料页迁移而来）：
+   margin-left:auto 把它顶到最右；flex-shrink:0 保证用户名过长时入口不被压扁，
+   让 .admin-welcome__text 通过自身的省略号收缩。 */
+.admin-welcome__rewards {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  flex-shrink: 0;
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  cursor: pointer;
+}
+.admin-welcome__rewards-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+.admin-welcome__rewards-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--mac-fg);
+  white-space: nowrap;
+}
+.admin-welcome__rewards-sub {
+  font-size: 11px;
+  color: var(--mac-muted-fg);
+  white-space: nowrap;
+}
 
 /* 工单数据来源分析：类型分布 / 提单人角色分布各占一张卡片（上下排列），
    卡片内环图在左、图例在右占满剩余宽度，保证角色名/数值完整展示 */
