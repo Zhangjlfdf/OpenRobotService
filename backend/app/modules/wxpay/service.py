@@ -98,9 +98,7 @@ class RewardService:
             if existed:
                 return existed, True
 
-        openid = payload.openid
-        if not openid:
-            openid = await RewardService._resolve_openid(db, payload.user_id)
+        openid = payload.openid or payload.user_id  # user_id 本身就是微信 openid，无需额外查询
 
         days = payload.expire_days or int(settings.WXPAY_REWARD_EXPIRE_DAYS or 30)
         record = RewardRecord(
@@ -139,15 +137,6 @@ class RewardService:
         if auto_commit:
             await db.refresh(record)
         return record, False
-
-    @staticmethod
-    async def _resolve_openid(db: AsyncSession, user_id: str) -> Optional[str]:
-        from app.models.identity import UserDB
-
-        row = (
-            await db.execute(select(UserDB.wechat_openid).where(UserDB.id == user_id))
-        ).scalar_one_or_none()
-        return row
 
     @staticmethod
     async def resolve_config(
@@ -208,7 +197,7 @@ class RewardService:
             if existed:
                 continue
 
-            openid = payload.openid or await RewardService._resolve_openid(db, payload.user_id)
+            openid = payload.openid or payload.user_id  # user_id 本身就是微信 openid
 
             reason = None
             if audit_policy:
