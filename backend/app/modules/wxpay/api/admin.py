@@ -560,22 +560,20 @@ async def reward_stats(
     )
 
 
-@router.post("/rewards/batch-audit", response_model=BatchAuditOut, summary="批量审核通过（自动发起转账）")
+@router.post("/rewards/batch-audit", response_model=BatchAuditOut, summary="批量审核通过")
 async def batch_audit(
     payload: BatchAuditIn,
     db: AsyncSession = Depends(get_db),
     current_user=require_permission(PERM_AUDIT),
 ):
-    """将一批 pending_audit 奖励审核通过 → 立即自动发起微信转账。
+    """将一批 pending_audit 奖励审核通过 → 状态置为 pending（可提现）。
 
-    仅 pending_audit 状态可处理，其它状态（pending/withdrawing/success/rejected/expired）跳过。
-    同事务：audit_by/audit_at 写入 + WithdrawService 建单。
+    仅 pending_audit 状态可处理，其它状态跳过。
+    到账发起由 wxpay 定时任务 `_flush_pending_rewards_to_withdraw` 统一扫事务外执行，
+    不在审核事务内调微信转账 API（规范 §5.2）。
     """
-    from sqlalchemy.sql import func as sql_func
-
     ensure_permission()
     ids = list(dict.fromkeys(payload.ids))  # 去重
-    now = sql_func.now()
 
     rewards = (
         (
@@ -592,30 +590,21 @@ async def batch_audit(
     valid_ids = {r.id for r in rewards}
     skipped = [i for i in ids if i not in valid_ids]
 
+    now = func.now()
     for r in rewards:
         r.status = RewardStatus.PENDING
         r.audit_by = current_user
         r.audit_at = now
-
-    await db.flush()
-
-    # 立即发起转账（同事务，auto_commit=False）
-    for r in rewards:
-        try:
-            await WithdrawService.withdraw(
-                db, r.id, r.user_id, auto_commit=False
-            )
-        except Exception as e:
-            logger.error(
-                f"[reward] 审核通过后自动发起转账失败: reward_id={r.id} err={e}"
-            )
 
     await db.commit()
 
     return BatchAuditOut(
         ok_count=len(rewards),
         skipped_ids=skipped,
-        message=f"审核通过 {len(rewards)} 条，跳过 {len(skipped)} 条非待审核",
+        message=(
+            f"审核通过 {len(rewards)} 条，跳过 {len(skipped)} 条非待审核。"
+            f"转账将由系统定时任务异步发起。"
+        ),
     )
 
 
@@ -695,24 +684,16 @@ async def run_auto_pass(
             r.audit_at = func.now()
             auto_passed.append(r)
 
-    await db.flush()
-
-    for r in auto_passed:
-        try:
-            await WithdrawService.withdraw(
-                db, r.id, r.user_id, auto_commit=False
-            )
-        except Exception as e:
-            logger.error(
-                f"[reward] run-auto-pass 发起转账失败: reward_id={r.id} err={e}"
-            )
-
     await db.commit()
 
     return BatchAuditOut(
         ok_count=len(auto_passed),
         skipped_ids=[r.id for r in pending_audit if r not in auto_passed],
-        message=f"自动通过 {len(auto_passed)} 条（其余 {len(pending_audit) - len(auto_passed)} 条仍需人工审核）",
+        message=(
+            f"自动通过 {len(auto_passed)} 条"
+            f"（其余 {len(pending_audit) - len(auto_passed)} 条仍需人工审核）。"
+            f"转账将由系统定时任务异步发起。"
+        ),
     )
 
 

@@ -170,27 +170,26 @@ class RewardService:
         audit_policy: Optional[dict] = None,
         auto_commit: bool = True,
     ) -> Tuple[int, List[RewardRecord]]:
-        """批量记账 + 审核决策 + 自动发起 withdraw（同事务）。
+        """批量记账 + 审核决策。**只记账，不调微信转账**（规范 §5.2）。
 
         返回 (新建条数, 所有 RewardRecord 列表)。
         - 逐条查重 (source_type, source_id, role)；已存在则跳过
-        - 新建后立即调 AuditDecisionEngine.evaluate() 分流
-        - 自动通过的：status=pending + audit_by='AUTO' + audit_at
-        - 强制审核的：status=pending_audit
-        - flush 后，自动通过的那批循环调 WithdrawService.withdraw(auto_commit=False)
+        - 新建后立即调 AuditDecisionEngine.evaluate() 分流：
+          自动通过 → status=pending + audit_by='AUTO' + audit_at
+          强制审核 → status=pending_audit + audit_remark 写风控原因
+        - flush + commit 即可，status=pending 的奖励由 wxpay 定时任务
+          `_flush_pending_rewards_to_withdraw` 统一扫出来发起 withdraw（事务外）
         """
         now = _now()
         created: List[RewardRecord] = []
-        # 收集需要自动发起转账的 reward（status=pending 且由 AUTO 通过）
-        auto_withdraw: List[RewardRecord] = []
 
         for payload in items:
             if not payload.source_id:
-                # 无 source_id 无法查重，跳过（调用方必须提供）
-                logger.warning(f"[reward] grant_batch 跳过无 source_id 的条目: user_id={payload.user_id}")
+                logger.warning(
+                    f"[reward] grant_batch 跳过无 source_id 的条目: user_id={payload.user_id}"
+                )
                 continue
 
-            # 查重
             existed = (
                 await db.execute(
                     select(RewardRecord).where(
@@ -203,12 +202,9 @@ class RewardService:
             if existed:
                 continue
 
-            openid = payload.openid
-            if not openid:
-                openid = await RewardService._resolve_openid(db, payload.user_id)
+            openid = payload.openid or await RewardService._resolve_openid(db, payload.user_id)
 
-            # 决策：自动通过 or 强制审核
-            reason = None  # 风控原因（强制审核时记录）
+            reason = None
             if audit_policy:
                 auto_pass = await AuditDecisionEngine.evaluate(
                     db, payload.user_id, payload.amount, audit_policy
@@ -222,13 +218,11 @@ class RewardService:
                     status = RewardStatus.PENDING_AUDIT
                     audit_by = None
                     audit_at = None
-                    # 记录触发了哪条规则（用于前端展示风控标记）
                     reason = await AuditDecisionEngine.reason(
                         db, payload.user_id, payload.amount, audit_policy
                     )
                     audit_remark = reason
             else:
-                # 无策略 → 全部 pending_audit（保守）
                 status = RewardStatus.PENDING_AUDIT
                 audit_by = None
                 audit_at = None
@@ -254,26 +248,11 @@ class RewardService:
             )
             db.add(record)
             created.append(record)
-            if status == RewardStatus.PENDING:
-                auto_withdraw.append(record)
 
         if not created:
             return 0, []
 
         await db.flush()
-
-        # 自动发起转账（同事务，auto_commit=False 让外层统一提交）
-        for record in auto_withdraw:
-            try:
-                await WithdrawService.withdraw(
-                    db, record.id, record.user_id, auto_commit=False
-                )
-            except Exception as e:
-                logger.error(
-                    f"[reward] 自动发起转账失败: reward_id={record.id} err={e}"
-                )
-                # 自动转账失败不阻断主事务，reward 仍为 pending 状态，后续可手动发起
-
         if auto_commit:
             await db.commit()
 
