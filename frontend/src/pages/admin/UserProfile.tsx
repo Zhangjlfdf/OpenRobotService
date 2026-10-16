@@ -431,7 +431,7 @@ export default function UserProfile() {
         <div style={{ fontSize: 12, color: '#999', marginTop: 8 }}>点击编辑</div>
       </div>
 
-      {/* 「我的历史奖励」入口已迁移至后台管理首页欢迎区（头像与用户名右侧），见 Dashboard.tsx */}
+      {/* 「我的奖励」入口已迁移至后台管理首页欢迎区（头像与用户名右侧），见 Dashboard.tsx */}
 
       <div style={{ background: '#fff', borderRadius: 12, padding: 16 }}>
         <div style={{ fontSize: 14, fontWeight: 600, color: '#333', marginBottom: 12 }}>
