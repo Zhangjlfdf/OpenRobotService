@@ -1,4 +1,5 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { Toast } from 'tdesign-mobile-react';
@@ -74,6 +75,8 @@ describe('知识贡献榜UI', () => {
     render(<MemoryRouter><Routes><Route path="/" element={<Dashboard />} /><Route path="/rewards" element={<p>奖励详情入口</p>} /></Routes></MemoryRouter>);
     expect(await screen.findByRole('region', { name: '知识贡献榜' })).toBeInTheDocument();
     const rewardsEntry = await screen.findByRole('button', { name: /我的奖励.*¥12\.50/ });
+    expect(rewardsEntry).toHaveAttribute('type', 'button');
+    expect(rewardsEntry).toHaveClass('mac-card', 'admin-rewards');
     expect(rewardsEntry).toHaveAttribute('title', '待提现 ¥12.50（2 笔）');
     fireEvent.click(rewardsEntry);
     expect(await screen.findByText('奖励详情入口')).toBeInTheDocument();
@@ -90,15 +93,28 @@ describe('知识贡献榜UI', () => {
     expect(await screen.findByText('奖励详情入口')).toBeInTheDocument();
   });
 
-  it('知识榜位于用户欢迎区与工单看板之间，标题复用看板样式', async () => {
+  it.each(['{Enter}', ' '])('独立奖励卡片支持通过 %s 键进入奖励详情', async (key) => {
+    const user = userEvent.setup();
+    render(<MemoryRouter><Routes><Route path="/" element={<Dashboard />} /><Route path="/rewards" element={<p>奖励详情入口</p>} /></Routes></MemoryRouter>);
+    const rewardsEntry = screen.getByRole('button', { name: '我的奖励' });
+    rewardsEntry.focus();
+    await user.keyboard(key);
+    expect(await screen.findByText('奖励详情入口')).toBeInTheDocument();
+  });
+
+  it('我的奖励独立放在欢迎区下方、知识贡献榜正上方，榜单标题复用看板样式', async () => {
     const rendered = render(<MemoryRouter><Dashboard /></MemoryRouter>);
     await screen.findByText('贡献甲');
     const welcome = rendered.container.querySelector('.admin-welcome');
+    const rewardsEntry = screen.getByRole('button', { name: '我的奖励' });
     const knowledgeHeading = screen.getByRole('heading', { name: '知识贡献榜' });
     const knowledgeCard = screen.getByRole('region', { name: '知识贡献榜' });
     const ticketHeading = screen.getByRole('heading', { name: '工单数据看板' });
     expect(welcome).not.toBeNull();
-    expect(welcome!.compareDocumentPosition(knowledgeHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(welcome).not.toContainElement(rewardsEntry);
+    expect(welcome!.nextElementSibling).toBe(rewardsEntry);
+    expect(rewardsEntry.nextElementSibling).toBe(knowledgeHeading.parentElement);
+    expect(screen.getAllByTestId('rewards-entry')).toHaveLength(1);
     expect(knowledgeHeading.compareDocumentPosition(knowledgeCard) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(knowledgeCard.compareDocumentPosition(ticketHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(knowledgeHeading).toHaveClass('mac-section-title__text');

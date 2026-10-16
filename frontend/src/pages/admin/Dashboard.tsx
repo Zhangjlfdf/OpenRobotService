@@ -202,7 +202,6 @@ export default function Dashboard() {
       />
 
       <div style={{ padding: '16px 16px 32px' }}>
-        {/* ============ 顶：欢迎区（左侧头像 + 右侧两排：Hello / 用户名 + 最右「我的奖励」入口） ============ */}
         <div className="admin-welcome">
           <div className="admin-welcome__avatar">
             <AvatarImg
@@ -215,39 +214,30 @@ export default function Dashboard() {
             <span className="admin-welcome__hello">Hello</span>
             <span className="admin-welcome__name">{name || username || '用户'}</span>
           </div>
-          {/* 我的奖励：微信商家转账的用户侧唯一入口（由个人资料页迁移至此），
-              点进去可「立即提现」到微信零钱。有金额时并列展示待提现总额，笔数放
-              title（窄屏放不下，避免挤压用户名区域） */}
-          <div
-            className="admin-welcome__rewards"
-            data-testid="rewards-entry"
-            role="button"
-            tabIndex={0}
-            onClick={() => navigate('/rewards')}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' || e.key === ' ') {
-                e.preventDefault();
-                navigate('/rewards');
-              }
-            }}
-            title={
-              pendingReward
-                ? `待提现 ¥${fenToYuan(pendingReward.amount)}（${pendingReward.count} 笔）`
-                : '查看奖励记录并提现到微信零钱'
-            }
-          >
-            <span className="admin-welcome__rewards-icon">
-              <MacWallet size={13} />
-            </span>
-            <span className="admin-welcome__rewards-label">我的奖励</span>
-            {pendingReward && (
-              <span className="admin-welcome__rewards-amount">
-                ¥{fenToYuan(pendingReward.amount)}
-              </span>
-            )}
-            <MacChevronRight size={13} />
-          </div>
         </div>
+
+        <button
+          type="button"
+          className="mac-card admin-rewards"
+          data-testid="rewards-entry"
+          onClick={() => navigate('/rewards')}
+          title={
+            pendingReward
+              ? `待提现 ¥${fenToYuan(pendingReward.amount)}（${pendingReward.count} 笔）`
+              : '查看奖励记录并提现到微信零钱'
+          }
+        >
+          <span className="admin-rewards__icon">
+            <MacWallet size={18} />
+          </span>
+          <span className="admin-rewards__label">我的奖励</span>
+          {pendingReward && (
+            <span className="admin-rewards__amount">
+              ¥{fenToYuan(pendingReward.amount)}
+            </span>
+          )}
+          <MacChevronRight size={16} />
+        </button>
 
         {canViewKnowledgeContribution && <>
           <SectionTitle title="知识贡献榜" moreText="查看榜单" onMore={() => navigate('/admin/knowledge')} />
