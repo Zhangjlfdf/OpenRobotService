@@ -14,6 +14,7 @@
    因此这里撤销后立刻回查一次并把最新状态返回（见 `cancel_bill`）。
 """
 
+import json
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -717,7 +718,7 @@ async def list_reward_config(
         RewardConfigOut(
             config_key=r.config_key,
             enabled=r.enabled,
-            config=r.config or {},
+            config=json.loads(r.config) if r.config else {},
             updated_by=r.updated_by,
             updated_at=r.updated_at,
         )
@@ -748,7 +749,7 @@ async def update_reward_config(
     if payload.enabled is not None:
         row.enabled = payload.enabled
     if payload.config is not None:
-        row.config = payload.config
+        row.config = json.dumps(payload.config, ensure_ascii=False)
     row.updated_by = current_user
     await db.commit()
     await db.refresh(row)
@@ -756,7 +757,7 @@ async def update_reward_config(
     return RewardConfigOut(
         config_key=row.config_key,
         enabled=row.enabled,
-        config=row.config or {},
+        config=json.loads(row.config) if row.config else {},
         updated_by=row.updated_by,
         updated_at=row.updated_at,
     )

@@ -10,6 +10,7 @@
    并发由 reward_record 行锁（SELECT ... FOR UPDATE）串行化。
 """
 
+import json
 import secrets
 import string
 import uuid
@@ -160,7 +161,12 @@ class RewardService:
         ).scalar_one_or_none()
         if row is None or not row.enabled:
             return None
-        return row.config or {}
+        # config 列是 Text，手动 loads（ORM 层已从 JSON 改为 Text，避开 asyncmy 的 escape_dict bug）
+        raw = row.config or "{}"
+        try:
+            return json.loads(raw) if isinstance(raw, str) else raw
+        except (json.JSONDecodeError, TypeError):
+            return {}
 
     @staticmethod
     async def grant_batch(
