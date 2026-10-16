@@ -210,6 +210,9 @@ export default function TaskDetailPage() {
   const [redispatchTipDetail, setRedispatchTipDetail] = useState<string>('');
   // 二次派单感知增强：派单理由（为什么派给接单人；接单人/提单人/管理员可看到）
   const [dispatchReason, setDispatchReason] = useState<string>('');
+  // 最近一次人工转派的原因（展示用）——和派单原因放一起展示；后端已按角色过滤。
+  // 注意别和下面 `reassignReason`（转派弹窗输入框）撞名。
+  const [lastReassignReason, setLastReassignReason] = useState<string>('');
   const [editing, setEditing] = useState(false);
   const [editForm, setEditForm] = useState<{ title: string; description: string; priority: string; ticket_type: string; curr_step_endtime?: string }>({ title: '', description: '', priority: 'medium', ticket_type: 'problem' });
   // 当前阶段截止时间区间：基准 = 工单创建时间（detail.created_at），而非用户操作时刻
@@ -350,6 +353,7 @@ export default function TaskDetailPage() {
         setRedispatchTipDetail(t.redispatch?.result?.tip_detail || '');
         // 二次派单感知增强：派单理由（后端对接单人/提单人/管理员返回 reasoning，非空即展示）
         setDispatchReason(t.redispatch?.result?.reasoning || '');
+        setLastReassignReason(t.redispatch?.reassign_reason || '');
         // 代理关系（代他人提单）：独立接口，失败不阻断详情渲染（横幅缺失而已）
         getProxyRelations(detailId)
           .then((list) => setProxyRelation(list?.[0] || null))
@@ -1565,6 +1569,7 @@ export default function TaskDetailPage() {
         setRedispatchTipDetail(t.redispatch?.result?.tip_detail || '');
         // 二次派单感知增强：派单理由（后端对接单人/提单人/管理员返回 reasoning，非空即展示）
         setDispatchReason(t.redispatch?.result?.reasoning || '');
+        setLastReassignReason(t.redispatch?.reassign_reason || '');
       })
       .catch(() => {});
   };
@@ -1794,17 +1799,28 @@ export default function TaskDetailPage() {
             return <DispatchFold label={tipLabel} text={redispatchTipDetail} variant="tip" />;
           })()}
 
-          {/* 派单原因：接单人 / 提单人 / 管理员 / 工单操作权限 可见。
+          {/* 派单原因 / 转派原因：接单人 / 提单人 / 管理员 / 工单操作权限 可见。
               提单人侧有 tip 时 tip 常已含说明，不重复展示 reason；
-              接单人可同时看「接单提醒」与「派单原因」。 */}
+              接单人可同时看「接单提醒」与「派单原因」。
+              转派原因放这一块（**不放工单动态**）——两者都是「为什么派给这个人」的说明。 */}
           {(() => {
-            if (!dispatchReason) return null;
             const { isAssignee, isReporter } = getCurrentUserRoles();
             const canOperate = isAdmin || hasPermission('backend:tasks:operate');
             if (!isAssignee && !isReporter && !canOperate) return null;
-            if (redispatchTipDetail && isReporter) return null;
+            // 「有 tip 就不重复展示」只针对**派单原因** —— tip 讲的是这次派单。
+            // 转派 tip 里根本没有，不能被连坐挡掉（否则提单人永远看不到转派原因）。
+            const showDispatch = !!dispatchReason && !(redispatchTipDetail && isReporter);
+            const showReassign = !!lastReassignReason;
+            if (!showDispatch && !showReassign) return null;
             return (
-              <DispatchFold label="派单原因" text={dispatchReason} variant="reason" />
+              <>
+                {showDispatch ? (
+                  <DispatchFold label="派单原因" text={dispatchReason} variant="reason" />
+                ) : null}
+                {showReassign ? (
+                  <DispatchFold label="转派原因" text={lastReassignReason} variant="reason" />
+                ) : null}
+              </>
             );
           })()}
         </div>

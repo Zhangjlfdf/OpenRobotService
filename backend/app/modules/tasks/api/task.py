@@ -75,6 +75,10 @@ from app.modules.tasks.services.knowledge_review import raw_access_guard, projec
 
 router = APIRouter(tags=["tasks"], dependencies=[Depends(raw_access_guard)])
 
+# 转派类型的中文名。转派人只选了类型、没写说明时，用这个当「转派原因」兜底 ——
+# 选类型本身就是他给的原因（前端工单动态另有一套同名映射，用于渲染类型徽章）。
+_REASSIGN_KIND_ZH = {"misassign": "派错了", "stage": "阶段转派", "other": "其它"}
+
 # 模块级 logger（避免每个端点内重复 logging.getLogger(__name__)）
 logger_task = logging.getLogger(__name__)
 
@@ -1104,6 +1108,40 @@ async def get_task(
                 _viewer_creator = False
                 _viewer_admin = False
                 _viewer_operate = False
+            # 最近一次「人工转派」的原因：**和派单原因放在一起展示**，不进工单动态。
+            # 转派走 operation_log（不写 task_dispatch_log），原因落在 detail.reason。
+            # 权限与派单原因一致：只给接单人 / 提单人 / 管理员 / 有 operate 权限。
+            # ⚠️ 必须算在 `if _log is not None` **之外** —— 下面 else 分支（无派单日志）
+            #    也要用它。（同函数内变量先用后赋值＝UnboundLocalError，本仓踩过一次。）
+            _viewer_ok = _viewer_admin or _viewer_operate
+            # 接单人身份按**工单当前的 assigned_to** 判（与下面 _viewer_assignee 同一口径）。
+            # 这里不能用 _viewer_assignee —— 它依赖 _log，此刻还没查。
+            _viewer_is_assignee = bool(
+                _viewer_user and user_matches(_viewer_user, getattr(ticket, "assigned_to", None))
+            )
+            _reassign_reason = None
+            if _viewer_ok or _viewer_creator or _viewer_is_assignee:
+                try:
+                    from app.models.task import TaskOperationLog, OperationType
+                    _relog = (await db.execute(
+                        _sel(TaskOperationLog)
+                        .where(TaskOperationLog.task_id == task_id,
+                               TaskOperationLog.operation_type == OperationType.REASSIGN)
+                        .order_by(TaskOperationLog.id.desc())
+                        .limit(1)
+                    )).scalars().first()
+                    if _relog is not None and isinstance(_relog.detail, dict):
+                        _d = _relog.detail
+                        # 没填文字时用「派错了 / 阶段转派 / 其它」兜底 —— 转派时选了类型
+                        # 但没写说明，那个类型本身就是他给的原因。
+                        _reassign_reason = (
+                            str(_d.get("reason") or "").strip()
+                            or _REASSIGN_KIND_ZH.get(str(_d.get("kind") or ""))
+                            or None
+                        )
+                except Exception as _re:
+                    logger.warning(f"读取转派原因失败 task_id={task_id}: {_re}")
+
             _log = (await db.execute(
                 _sel(TaskDispatchLog)
                 .where(TaskDispatchLog.task_id == task_id)
@@ -1115,8 +1153,13 @@ async def get_task(
                 prof = dict(_log.profile or {})
                 assigned_name = user_map.get(_log.assigned_id, _log.assigned_id)
                 pref_name = user_map.get(_log.preferred_id) if _log.preferred_id else None
-                # 接单人身份：当前登录者 == 本轮真正被派单对象（_log.assigned_id）时可看「派单理由」
-                _viewer_assignee = bool(_viewer_user and user_matches(_viewer_user, _log.assigned_id))
+                # 接单人身份：以**工单当前的 assigned_to** 为准。
+                # 为什么不能只看 `_log.assigned_id`：人工转派走的是 operation_log，
+                # **不写 TaskDispatchLog** —— 转派后这张表的最后一轮仍是"原来那次派单"，
+                # assigned_id 还是旧接单人，于是新接单人被判成"不是接单人"、看不到派单原因。
+                # 兜底：工单没有 assigned_to 时（老数据）仍按本轮派单对象判。
+                _assignee_ref = getattr(ticket, "assigned_to", None) or _log.assigned_id
+                _viewer_assignee = bool(_viewer_user and user_matches(_viewer_user, _assignee_ref))
                 # 面向用户展示的派单理由：把 reasoning 里可能残留的 users.id 替换为姓名
                 # （供 tip_detail 话术与接单人/提单人/管理员的「派单原因」共用）
                 reasoning_display = clean_reasoning_for_display(_log.reasoning, _log, user_map)
@@ -1131,6 +1174,7 @@ async def get_task(
                 )
                 setattr(ticket, "redispatch", {
                     "dispatch_round": _log.dispatch_round,
+                    "reassign_reason": _reassign_reason,
                     "candidates": _cands,
                     "result": {
                         "assigned_id": _log.assigned_id,
@@ -1167,6 +1211,8 @@ async def get_task(
                 # 临时：项目对接人打标置顶（无对接人则不改序）。
                 setattr(ticket, "redispatch", {
                     "dispatch_round": 0,
+                    # 没有派单日志也要给转派原因：转派可能发生在「从未自动派单」的工单上
+                    "reassign_reason": _reassign_reason,
                     "candidates": _enrich_candidates_pin_contact(
                         _fallback_redispatch_candidates(), ticket,
                     ),
@@ -1873,7 +1919,6 @@ async def update_task(
             if kind not in ("misassign", "stage", "other"):
                 kind = ""
             reason = (getattr(ticket_update, "reassign_reason", None) or "").strip()
-            kind_label = {"misassign": "派错了", "stage": "阶段转派", "other": "其它"}.get(kind, "")
             detail = {
                 "new_assignee": new_assignee,
                 "from_assignee": from_assignee,
@@ -1882,9 +1927,9 @@ async def update_task(
                 detail["kind"] = kind
             if reason:
                 detail["reason"] = reason
+            # 不在 description 里再拼（派错了/阶段转派）——工单动态页已经按 detail.kind
+            # 渲染了类型徽章，拼进来是同一件事说两遍。
             desc = f"{_role}{user_name} 将工单重新指派给 {new_assignee_name}" if _role else f"{user_name} 将工单重新指派给 {new_assignee_name}"
-            if kind_label:
-                desc = f"{desc}（{kind_label}）"
             await OperationLogService.log(
                 db=db, task_id=task_id, op_type=OperationType.REASSIGN,
                 operator=username, operator_name=user_name,
