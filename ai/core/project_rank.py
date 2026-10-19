@@ -31,15 +31,30 @@ _RANK_TOP_N = 5            # 返回给弹窗/选题环的推荐数
 _LLM_TIMEOUT = 8.0         # 信号提取/精排共用硬超时：弹窗打开路径不能慢
 _LLM_RERANK_THRESHOLD = 30 # 机械最高分低于此值 → LLM 语义精排兜底
 
-# 生命周期阶段权重（真实数据在 project.status 列——正在实施 36/验收运营 20/
-# 项目中止 4/实施暂停 10 等；expected_trend 几乎全空只作兜底）
-_STAGE_WEIGHTS = {
-    "正在实施": 10, "实施运行": 10, "试运行中": 10, "内部运维": 10,
-    "即将进场": 6, "延期进场": 4, "出厂测试": 4, "已签合同": 4, "项目变更": 4,
-    "售前方案": 0, "签单洽谈": 0, "投标阶段": 0, "active": 0,
-    "验收运营": -15, "项目结束": -15,
-    "实施暂停": -30, "项目中止": -30,
+# 生命周期阶段分层（真实数据在 project.status 列——正在实施 36/验收运营 20/
+# 项目中止 4/实施暂停 10 等；expected_trend 几乎全空只作兜底）。
+# 阶段是「层」不是「分」：同一个项目不会因为车型+40 就把已验收的顶到前面。
+#   tier 0 进行中（最高优先级）/ tier 1 未启动（售前、签约、待进场）
+#   tier 2 终态（验收运营、项目结束）——不参与推荐，弹窗里沉底
+#   tier 3 异常终态（中止、暂停）——同上，且比正常终态更靠后
+_STAGE_TIER = {
+    "正在实施": 0, "实施运行": 0, "试运行中": 0, "内部运维": 0,
+    "即将进场": 1, "延期进场": 1, "出厂测试": 1, "已签合同": 1, "项目变更": 1,
+    "售前方案": 1, "签单洽谈": 1, "投标阶段": 1, "active": 1,
+    "验收运营": 2, "项目结束": 2,
+    "实施暂停": 3, "项目中止": 3,
 }
+_TERMINAL_TIERS = (2, 3)
+
+
+def _stage_tier(stage: str) -> int:
+    """未知/空阶段按 tier 1 处理（宁可正常参与，不误沉底）。"""
+    return _STAGE_TIER.get((stage or "").strip(), 1)
+
+
+def is_terminal_stage(stage: str) -> bool:
+    """终态项目（已验收/已结束/中止/暂停）：不参与推荐，列表里沉底。"""
+    return _stage_tier(stage) in _TERMINAL_TIERS
 
 # 机械评分：信号类型 → 分值（同一类型多处命中只计一次，多类型累加）
 _SCORES = {
@@ -116,7 +131,7 @@ class _Profiles:
                 # 阶段真身在 status 列（中文生命周期值）；expected_trend 几乎
                 # 全空，只作 status 缺失时的兜底
                 "stage": (str(status or "").strip()
-                          if str(status or "").strip() in _STAGE_WEIGHTS
+                          if str(status or "").strip() in _STAGE_TIER
                           else (str(trend or "").strip() or str(status or "").strip())),
                 "region": str(region or "").strip(),
                 # ext_info 递归 JSON：通用捞「车型样」的字符串值，结构不约定
@@ -375,9 +390,9 @@ async def llm_rerank(turns: List[Dict[str, str]],
 # ============================================================
 
 def _score_project(signals: Dict[str, Any], p: Dict[str, Any]) -> int:
+    """纯信号分（不含阶段）——阶段是分层，见 _stage_tier / rank_for_session。"""
     if p["code"] in signals.get("project_codes", []):
-        # 扫码自带项目是身份事实而非推测：不叠加阶段权重——中止项目的扫码
-        # 用户提单仍指向该项目，阶段沉底只作用于推测型命中
+        # 扫码自带项目是身份事实而非推测
         return _SCORES["qrcode_project"]
     score = 0
     for v in signals.get("vehicles", []):
@@ -400,10 +415,6 @@ def _score_project(signals: Dict[str, Any], p: Dict[str, Any]) -> int:
         if nm and (nm in p["name"] or p["name"] and p["name"] in nm):
             score += _SCORES["name_hint"]
             break
-    # 阶段权重只在有信号命中时叠加（调序用）：零命中项目不因「正在实施」
-    # 拿正分被误推荐——推荐必须有对话依据
-    if score > 0:
-        score += _STAGE_WEIGHTS.get(p.get("stage") or "", 0)
     return score
 
 
@@ -431,12 +442,25 @@ async def rank_for_session(memory, turns: List[Dict[str, str]] = None) -> List[D
                     if v not in signals[k]:
                         signals[k].append(v)
 
-    scored = []
+    scanned = []
     for p in _PROFILES.by_code.values():
         s = _score_project(signals, p)
-        if s > 0:
-            scored.append((s, p))
-    scored.sort(key=lambda x: (-x[0], x[1]["name"]))
+        if s <= 0:
+            continue
+        # 阶段分层：终态项目（验收运营/项目结束/中止/暂停）不进推荐——已验收
+        # 的项目对现场问题没有参考价值，且用户实测「XNA 不动了」时被顶到前排
+        # 的正是已结束的展会项目。唯一例外：扫码自带项目（身份事实，扫的就
+        # 是这台车所属项目，哪怕项目已结束用户提单仍指向它）。
+        _is_self = p["code"] in signals.get("project_codes", [])
+        if is_terminal_stage(p.get("stage")) and not _is_self:
+            continue
+        # 扫码自带项目强制置顶（tier -1）：它是身份事实不是候选项，哪怕项目
+        # 已结束，用户扫的就是这台车所属项目
+        _tier = -1 if _is_self else _stage_tier(p.get("stage"))
+        scanned.append((_tier, -s, p["name"], p))
+    # 先按阶段层（进行中 > 未启动 > 终态），层内按信号分降序、同分按名称
+    scanned.sort(key=lambda x: (x[0], x[1], x[2]))
+    scored = [(-neg, p) for _tier, neg, _nm, p in scanned]
 
     # 机械零分 = 对话里连可匹配信号都没有：不推（误推成本高——排最前+高亮；
     # 弹窗用户自己会看票史），LLM 精排也不做（无信号无候选依据，全量取前 N

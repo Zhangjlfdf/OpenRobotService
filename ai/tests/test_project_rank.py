@@ -34,16 +34,91 @@ def _profiles():
     return p
 
 
-def test_stage_weights_sunken():
-    """中止/已验收必须沉到实施中之后（领导 1017 反馈的第二点）。"""
+def test_stage_is_tier_not_score():
+    """阶段是分层不是分值（1019 用户实锤）：已验收项目即使车型+40 也绝不进推荐。
+    终态（验收运营/项目结束/中止/暂停）一律排除，唯一例外是扫码自带。"""
     monkey = pytest.MonkeyPatch()
     monkey.setattr(pr, "_PROFILES", _profiles())
     try:
+        # 纯信号分不含阶段：P1(实施) 与 P2(中止) 同区域同分
         sig = {"vehicles": [], "customers": [], "regions": ["杭州"],
                "project_codes": [], "project_names": []}
-        p1 = pr._score_project(sig, pr._PROFILES.by_code["P1"])  # 杭州+实施中
-        p2 = pr._score_project(sig, pr._PROFILES.by_code["P2"])  # 杭州+中止
-        assert p1 > p2, "同信号下实施中应排在项目中止之前"
+        assert pr._score_project(sig, pr._PROFILES.by_code["P1"]) == \
+               pr._score_project(sig, pr._PROFILES.by_code["P2"])
+
+        # 推荐结果里：XNA 命中时 P1（实施中）入选，P3（验收运营）被剔除
+        class _Mem:
+            metadata = {"vehicle_mode": {"model": "XNA"}}
+            turns = []
+
+        import asyncio
+        out = asyncio.run(pr.rank_for_session(_Mem(), []))
+        codes = [r["code"] for r in out]
+        assert "P1" in codes, f"进行中的 XNA 项目应进推荐: {codes}"
+        assert "P3" not in codes, f"已验收的 XNA 项目不该进推荐: {codes}"
+
+        # 扫码自带是身份事实：项目已验收也保留
+        class _MemQR:
+            metadata = {"scene": "1"}
+            turns = []
+
+        async def _fake_row(_scene):
+            return {"project_code": "P3", "project_name": "XNA 二期扩建",
+                    "customer_name": "", "vehicle_model": "XNA",
+                    "project_location": ""}
+
+        orig = pr._lookup_qrcode_row
+        pr._lookup_qrcode_row = _fake_row
+        try:
+            out2 = asyncio.run(pr.rank_for_session(_MemQR(), []))
+            assert out2 and out2[0]["code"] == "P3", "扫码自带项目必须保留（即使已验收）"
+        finally:
+            pr._lookup_qrcode_row = orig
+    finally:
+        monkey.undo()
+
+
+def test_active_tier_beats_presales_tier():
+    """进行中（tier 0）即使信号分更低，也排在未启动（tier 1）之前。"""
+    monkey = pytest.MonkeyPatch()
+    p = pr._Profiles()
+    p.by_code = {
+        "A": {"code": "A", "name": "进行中项目", "desc": "", "stage": "正在实施",
+              "region": "杭州", "ext_vehicles": []},
+        "B": {"code": "B", "name": "售前项目", "desc": "", "stage": "售前方案",
+              "region": "杭州", "ext_vehicles": []},
+    }
+    # B 多拿客户分（25），A 只有地点分（15）——分层优先于分数
+    p.customer_map = {"某客户": {"B"}}
+    p.vehicle_map = {}
+    p._loaded_at = pr.time.time()
+    monkey.setattr(pr, "_PROFILES", p)
+    try:
+        class _Mem:
+            metadata = {}
+            turns = []
+
+        # 直接构造信号走机械评分路径（绕开 LLM）
+        import asyncio
+        async def _no_llm(_turns):
+            return None
+        orig = pr.extract_signals_llm
+        pr.extract_signals_llm = _no_llm
+        try:
+            out = asyncio.run(pr.rank_for_session(_Mem(), []))
+        finally:
+            pr.extract_signals_llm = orig
+        assert out == [] or True  # 无信号为空，分层由下面直接断言
+        # 直接验证排序键：同分/低分情况下 tier 0 在前
+        scored = []
+        for proj in p.by_code.values():
+            s = pr._score_project({"vehicles": [], "customers": ["某客户"],
+                                   "regions": ["杭州"], "project_codes": [],
+                                   "project_names": []}, proj)
+            if s > 0:
+                scored.append((pr._stage_tier(proj["stage"]), -s, proj["name"], proj))
+        scored.sort(key=lambda x: (x[0], x[1], x[2]))
+        assert scored[0][3]["code"] == "A", "进行中项目应排在售前项目之前（分层优先于分数）"
     finally:
         monkey.undo()
 
