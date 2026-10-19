@@ -3,10 +3,13 @@
 // 支持按 AI 项目名预填匹配。复用 UserSelect 的浮层结构与样式（user-select__*）。
 // 相关性排序（0907 需求）：提过单的项目 > 名下项目 > 其他，前两类带小字标注，
 // 搜索过滤后排序仍生效。
+// ORS-713 智能匹配：调用方传入 matched（会话信号→AI 推荐项目）时，
+// 推荐组排在票史之前并标注「与当前问题最相关」；matched 为空=退化原排序。
 import { useEffect, useMemo, useState } from 'react';
 import { Toast } from 'tdesign-mobile-react';
 import { getProjects, getMyProjectRelevance } from '@/api/projects';
 import type { ProjectItem, ProjectRelevance } from '@/api/projects';
+import type { ProjectMatchItem } from '@/api/ai';
 
 interface Props {
   value?: string | null; // project_code
@@ -17,6 +20,8 @@ interface Props {
   nameHint?: string | null;
   /** 外部项目列表：传入时不再拉取全量项目，只在传入列表内搜索/选择（如“仅用户关联项目”场景） */
   projects?: ProjectItem[] | null;
+  /** ORS-713 智能匹配推荐（按会话信号排序）：命中项排最前并带「与当前问题最相关」标注 */
+  matched?: ProjectMatchItem[] | null;
 }
 
 // 库里遗留的英文状态（列默认值）映射为中文；中文生命周期状态原样透传
@@ -36,6 +41,7 @@ export default function ProjectSelect({
   title = '选择项目',
   nameHint = null,
   projects: externalProjects = null,
+  matched = null,
 }: Props) {
   const [visible, setVisible] = useState(false);
   const [projects, setProjects] = useState<ProjectItem[]>(projectCache || []);
@@ -112,8 +118,9 @@ export default function ProjectSelect({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [candidateProjects, value, nameHint]);
 
-  // 相关性排序：搜索过滤后按 提过单 > 名下 > 其他 排列，
-  // 同一项目两属性兼有时归入「提过单」组；提单组内按提单数降序（同数保持原序）
+  // 相关性排序（ORS-713）：智能匹配推荐 > 提过单 > 名下 > 其他，
+  // 推荐组按 AI 返回顺序（相关度降序）；票史组内按提单数降序（同数保持原序）。
+  // 搜索过滤后排序仍生效——搜出来的结果里推荐/票史标记照常显示。
   const filtered = useMemo(() => {
     const kw = keyword.trim().toLowerCase();
     const base = kw
@@ -123,22 +130,34 @@ export default function ProjectSelect({
             (p.project_code || '').toLowerCase().includes(kw),
         )
       : candidateProjects;
-    if (relevance.ticketed.length === 0 && relevance.owned.length === 0) return base;
+    const matchedOrder = new Map((matched || []).map((m, i) => [m.code, i]));
+    const hasMatched = matchedOrder.size > 0;
+    if (!hasMatched && relevance.ticketed.length === 0 && relevance.owned.length === 0)
+      return base;
     const ticketed = new Set(relevance.ticketed.map((t) => t.code));
     const ticketedCount = new Map(relevance.ticketed.map((t) => [t.code, t.count]));
     const owned = new Set(relevance.owned);
+    const g0 = base
+      .filter((p) => matchedOrder.has(p.project_code))
+      .sort((a, b) => (matchedOrder.get(a.project_code) ?? 0) - (matchedOrder.get(b.project_code) ?? 0));
     const g1 = base
-      .filter((p) => ticketed.has(p.project_code))
+      .filter((p) => !matchedOrder.has(p.project_code) && ticketed.has(p.project_code))
       .sort(
         (a, b) =>
           (ticketedCount.get(b.project_code) || 0) - (ticketedCount.get(a.project_code) || 0),
       );
-    const g2 = base.filter((p) => !ticketed.has(p.project_code) && owned.has(p.project_code));
-    const rest = base.filter((p) => !ticketed.has(p.project_code) && !owned.has(p.project_code));
-    return g1.length || g2.length ? [...g1, ...g2, ...rest] : base;
-  }, [candidateProjects, keyword, relevance]);
+    const g2 = base.filter(
+      (p) => !matchedOrder.has(p.project_code) && !ticketed.has(p.project_code) && owned.has(p.project_code),
+    );
+    const rest = base.filter(
+      (p) => !matchedOrder.has(p.project_code) && !ticketed.has(p.project_code) && !owned.has(p.project_code),
+    );
+    return g0.length || g1.length || g2.length ? [...g0, ...g1, ...g2, ...rest] : base;
+  }, [candidateProjects, keyword, relevance, matched]);
 
   const relLabel = (code: string): { text: string; cls: string } | null => {
+    if ((matched || []).some((m) => m.code === code))
+      return { text: '与当前问题最相关', cls: 'user-select__status--matched' };
     if (relevance.ticketed.some((t) => t.code === code)) return { text: '你提过单的项目', cls: 'user-select__status--ticketed' };
     if (relevance.owned.includes(code)) return { text: '你名下的项目', cls: 'user-select__status--owned' };
     return null;
